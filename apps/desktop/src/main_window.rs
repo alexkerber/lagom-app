@@ -183,6 +183,9 @@ pub struct MainWindow {
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     scroll: ScrollHandle,
+    // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
+    // keep the list where it was, including the drift before the direction locked.
+    scroll_hold: (Pixels, bool),
     glide: Option<Glide>,
     // `LAGOM_SCREEN=hover`: paints this row as hovered, as a screenshot cannot move the pointer.
     shown_hover: Option<usize>,
@@ -216,6 +219,7 @@ impl MainWindow {
             compose: None,
             all_folders: false,
             scroll: ScrollHandle::new(),
+            scroll_hold: (Pixels::ZERO, false),
             glide: None,
             shown_hover: None,
             _appearance: appearance,
@@ -384,6 +388,8 @@ impl MainWindow {
         let before = self.swipe;
         match e.touch_phase {
             TouchPhase::Started => {
+                // The list's own scroll listener runs first and already applied d.y.
+                self.scroll_hold = (self.scroll.offset().y - d.y, false);
                 // A new swipe starts neutral, not with the fade the last acted swipe never showed.
                 self.tint = (None, None, self.tint.2);
                 self.swipe = under.map_or(Swipe::Idle, Swipe::start);
@@ -393,11 +399,12 @@ impl MainWindow {
             TouchPhase::Moved => self.swipe.moved(d.x.into(), d.y.into()),
             TouchPhase::Ended => self.release(true, cx),
         }
-        // The list's own scroll listener already moved it by d.y; a row under the fingers
-        // keeps the list still, as in native lists.
+        // A row under the fingers keeps the list still, as in native lists, until the next gesture.
         if matches!(self.swipe, Swipe::Row { .. }) {
-            let o = self.scroll.offset();
-            self.scroll.set_offset(gpui::point(o.x, o.y - d.y));
+            self.scroll_hold.1 = true;
+        }
+        if self.scroll_hold.1 {
+            self.scroll.set_offset(gpui::point(self.scroll.offset().x, self.scroll_hold.0));
         }
         self.retint();
         if self.swipe != before {
@@ -470,6 +477,12 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// Finished ghosts paint nothing; drop them, so the next render and `select` agree on the rows.
+    fn prune(&mut self) {
+        self.ghosts.retain(|g| g.at.elapsed() < MOTION * 2);
+        self.entering.retain(|g| g.at.elapsed() < MOTION * 2);
+    }
+
     fn select(&mut self, f: impl FnOnce(&mut Inbox), cx: &mut Context<Self>) {
         let before = self.inbox.selected;
         f(&mut self.inbox);
@@ -477,9 +490,13 @@ impl MainWindow {
         if ix == before {
             return;
         }
-        let from = self.glide.map_or(row_y(before), |g| g.y());
-        self.seq += 1;
-        self.glide = Some(Glide { from, to: row_y(ix), at: Instant::now(), seq: self.seq });
+        self.prune();
+        // While rows leave or come back, the rows paint the selection; a glide would start late.
+        self.glide = (self.ghosts.is_empty() && self.entering.is_empty()).then(|| {
+            let from = self.glide.map_or(row_y(before), |g| g.y());
+            self.seq += 1;
+            Glide { from, to: row_y(ix), at: Instant::now(), seq: self.seq }
+        });
         // Child 0 is the highlight; ghosts at or before `ix` sit in front of the row.
         let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
         self.scroll.scroll_to_item(1 + ix + ghosts);
@@ -650,7 +667,7 @@ impl MainWindow {
                 .child(div().flex_1().child(label))
         };
         let nav = |path: &'static str, label: &'static str, count: Option<SharedString>, active: bool| {
-            pressable(div().id(label), t, active)
+            pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
                 .flex()
                 .items_center()
                 .gap(px(10.))
@@ -690,7 +707,7 @@ impl MainWindow {
                 })
         };
         let account = |name: &'static str, address: &'static str, active: bool| {
-            pressable(div().id(name), t, false)
+            pressable(div().id(SharedString::from(format!("account-{name}"))), t, false)
                 .flex()
                 .items_center()
                 .gap(px(10.))
@@ -1244,9 +1261,7 @@ impl MainWindow {
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        // Finished ghosts paint nothing; drop them on the next render.
-        self.ghosts.retain(|g| g.at.elapsed() < MOTION * 2);
-        self.entering.retain(|g| g.at.elapsed() < MOTION * 2);
+        self.prune();
         // The sidebar shows the blurred window background through a translucent tint.
         // 0.9 keeps ink2 above 4.5:1 even over a black or white desktop.
         let tint = Rgba { a: 0.9, ..t.subtle };
