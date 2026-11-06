@@ -126,6 +126,10 @@ impl Compose {
 
     /// `LAGOM_SCREEN=compose-cc`: Cc shown and focused, for its focus ring.
     pub fn add_cc(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A sent sheet is off screen: focus there would take ⌘Z away from Undo send.
+        if matches!(self.phase, Phase::Sent | Phase::Gone) {
+            return;
+        }
         self.show_cc = true;
         window.focus(&self.cc.focus_handle(cx));
         cx.notify();
@@ -198,7 +202,8 @@ impl Compose {
         self.problem = None;
         self.phase = Phase::Sent;
         self.keep = false;
-        // Off the fading fields: ⌘Z now undoes the send, and typing goes nowhere.
+        // Off the fading fields. The main window takes focus on `Sending`, so inbox keys work
+        // during the Undo window and its ⌘Z undoes this send first.
         window.focus(&self.focus);
         // Replacing the task cancels an older timer.
         self.slid_out = false;
@@ -220,13 +225,20 @@ impl Compose {
         cx.notify();
     }
 
-    fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.phase == Phase::Sent {
-            self._dismiss = None;
-            self.set(Phase::Restored, cx);
-            cx.emit(ComposeEvent::Restored);
-            window.focus(&self.body.focus_handle(cx));
+    pub fn undoable(&self) -> bool {
+        self.phase == Phase::Sent
+    }
+
+    /// Undo send. False once the window has passed.
+    pub fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.phase != Phase::Sent {
+            return false;
         }
+        self._dismiss = None;
+        self.set(Phase::Restored, cx);
+        cx.emit(ComposeEvent::Restored);
+        window.focus(&self.body.focus_handle(cx));
+        true
     }
 
     /// The sheet blocks the inbox. After Send it only shows the Undo toast.
@@ -411,7 +423,7 @@ impl Compose {
             t,
             // Nothing has left yet: it goes when the Undo window ends.
             "Sending",
-            Some(key_button(t, "Undo", "⌘Z", None).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))).into_any_element()),
+            Some(key_button(t, "Undo", "⌘Z", None).on_click(cx.listener(|this, _, window, cx| { this.undo(window, cx); })).into_any_element()),
         )
     }
 }
@@ -486,8 +498,10 @@ impl Render for Compose {
             .inset_0()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
-            // A focused field takes ⌘Z first; after Send the sheet holds focus, so Undo lands here.
-            .on_action(cx.listener(|this, _: &crate::main_window::Undo, window, cx| this.undo(window, cx)))
+            // A focused field takes ⌘Z first. After Send the inbox has focus and routes ⌘Z here.
+            .on_action(cx.listener(|this, _: &crate::main_window::Undo, window, cx| {
+                this.undo(window, cx);
+            }))
             // Block clicks to the inbox while the sheet is up; after Send the inbox is usable again.
             .when(self.phase != Phase::Sent, |d| d.occlude())
             .text_color(t.ink)

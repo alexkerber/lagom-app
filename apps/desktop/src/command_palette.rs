@@ -10,7 +10,7 @@ use std::{rc::Rc, time::Duration};
 use gpui::{
     div, ease_out_quint, prelude::*, px, Animation, AnimationExt, App, Context, Div, DismissEvent,
     Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
-    MouseButton, Rgba, SharedString, StyledText, Subscription, Window,
+    MouseButton, Rgba, ScrollHandle, SharedString, StyledText, Subscription, Window,
 };
 
 use crate::mail::LaterWhen;
@@ -157,7 +157,18 @@ pub struct CommandPalette {
     search: Option<Search>,
     /// Search results for the current query, found once per edit, not per frame.
     hits: Vec<(i64, String)>,
+    /// The list scrolls past `LIST_MAX`; the arrow keys keep the selection in view.
+    scroll: ScrollHandle,
     _input: Subscription,
+}
+
+/// The list's height cap: about seven rows, so a long folder list never pushes the footer off.
+const LIST_MAX: f32 = 360.;
+
+/// The scroll child of item `i`: section headers are children too, one before each section.
+fn child_index(items: &[Item], i: usize) -> usize {
+    let headers = items[..=i.min(items.len().saturating_sub(1))].iter().enumerate().filter(|(j, it)| *j == 0 || items[j - 1].section != it.section).count();
+    i + headers
 }
 
 impl EventEmitter<DismissEvent> for CommandPalette {}
@@ -183,13 +194,14 @@ impl CommandPalette {
         let sub = cx.subscribe(&input, |this, _, e: &TextInputEvent, cx| match e {
             TextInputEvent::Changed => {
                 this.selected = 0;
+                this.scroll.set_offset(gpui::point(px(0.), px(0.)));
                 this.find_hits(cx);
                 cx.notify();
             }
             TextInputEvent::Enter => this.run(this.matches(cx), cx),
             TextInputEvent::Escape => cx.emit(DismissEvent),
         });
-        let mut this = Self { input, selected: 0, folders, subject, search, hits: Vec::new(), _input: sub };
+        let mut this = Self { input, selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
         this.find_hits(cx);
         this
     }
@@ -227,11 +239,14 @@ impl CommandPalette {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.matches(cx).len();
+        let matches = self.matches(cx);
         match event.keystroke.key.as_str() {
             "up" => self.selected = self.selected.saturating_sub(1),
-            "down" => self.selected = (self.selected + 1).min(count.saturating_sub(1)),
+            "down" => self.selected = (self.selected + 1).min(matches.len().saturating_sub(1)),
             _ => return,
+        }
+        if !matches.is_empty() {
+            self.scroll.scroll_to_item(child_index(&matches, self.selected));
         }
         cx.stop_propagation();
         cx.notify();
@@ -258,7 +273,7 @@ impl Render for CommandPalette {
         let moving = move_query(self.input.read(cx).text()).is_some();
         let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
 
-        let mut list = div().flex().flex_col().p(px(8.));
+        let mut list = div().id("palette-list").track_scroll(&self.scroll).max_h(px(LIST_MAX)).overflow_y_scroll().flex().flex_col().p(px(8.));
         let mut section = "";
         for (i, item) in matches.iter().enumerate() {
             if item.section != section {
@@ -434,5 +449,20 @@ mod tests {
         assert_eq!(matches("move", &folders, &[]).len(), 3);
         // Other queries stay commands.
         assert!(matches("done", &folders, &[]).iter().all(|i| matches!(i.action, Action::Run(_))));
+    }
+
+    #[test]
+    fn scroll_target_counts_section_headers() {
+        // All commands: one section per group, so the row index shifts by each header above it.
+        let items = matches("", &[], &[]);
+        let sections: Vec<_> = items.iter().map(|i| i.section).collect();
+        for i in 0..items.len() {
+            let headers = 1 + (1..=i).filter(|&j| sections[j] != sections[j - 1]).count();
+            assert_eq!(child_index(&items, i), i + headers);
+        }
+        // Many folders: one header, so the last row is its index plus one.
+        let folders: Vec<_> = (0..40).map(|i| (i, format!("Folder {i}"))).collect();
+        let items = matches("move", &folders, &[]);
+        assert_eq!(child_index(&items, items.len() - 1), items.len());
     }
 }

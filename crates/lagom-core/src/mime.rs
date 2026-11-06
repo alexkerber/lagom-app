@@ -5,6 +5,18 @@ use crate::{
 use mail_parser::{AddressList, MessageParser};
 
 pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
+/// The stored body of a message whose text is over `MAX_MIME_BYTES`: the headers are kept, the
+/// text is not downloaded. Readers compare against this to show why the body is missing.
+pub const BODY_UNAVAILABLE: &str = "The text of this message is larger than 4 MiB and was not downloaded.";
+
+/// Headers only, with the body marked unavailable, so one huge message never stops a sync.
+pub fn metadata_only(header: &[u8]) -> Result<Message> {
+    let mut message = parse(header)?;
+    message.body_text = BODY_UNAVAILABLE.into();
+    message.body_html = None;
+    message.summary.snippet = String::new();
+    Ok(message)
+}
 fn addresses(list: Option<AddressList<'_>>) -> String {
     list.map(|l| {
         l.mailboxes()
@@ -97,5 +109,7 @@ mod tests {
     fn rejects_empty_and_oversized() {
         assert!(parse(b"").is_err());
         assert!(parse(&vec![0; MAX_MIME_BYTES + 1]).is_err());
+        let m = metadata_only(b"From: Big <big@example.com>\r\nSubject: Huge\r\nMessage-ID: <big@x>\r\n\r\n").unwrap();
+        assert_eq!((m.summary.subject.as_str(), m.summary.from_address.as_str(), m.body_text.as_str()), ("Huge", "big@example.com", BODY_UNAVAILABLE));
     }
 }

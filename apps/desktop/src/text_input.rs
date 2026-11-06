@@ -384,6 +384,8 @@ pub struct TextInput {
     autoscroll: bool,
     /// The x that ↑ and ↓ keep, so the caret returns to its column past short lines.
     goal_x: Option<Pixels>,
+    /// Caret affinity at a wrap boundary: (offset, row start) after ⌘← on a wrapped row.
+    row_start: Option<(usize, Point<Pixels>)>,
     selecting: bool,
     focused: bool,
     caret_on: bool,
@@ -426,6 +428,7 @@ impl TextInput {
             scroll: px(0.),
             autoscroll: true,
             goal_x: None,
+            row_start: None,
             selecting: false,
             caret_on: true,
             shown: None,
@@ -517,6 +520,7 @@ impl TextInput {
     }
 
     fn moved(&mut self, cx: &mut Context<Self>) {
+        self.row_start = None;
         self.autoscroll = true;
         self.wake(cx);
     }
@@ -541,7 +545,7 @@ impl TextInput {
     /// ↑ ↓ by visual line, keeping the column. Past the first or last line, to the start or end.
     fn vertical(&mut self, down: bool, select: bool, cx: &mut Context<Self>) {
         let Some(l) = &self.layout else { return };
-        let p = l.position(self.display(self.buffer.caret()));
+        let p = self.caret_at(l);
         let x = *self.goal_x.get_or_insert(p.x);
         let y = p.y + l.line_height * if down { 1.5 } else { -0.5 };
         let target = if y < px(0.) {
@@ -560,12 +564,27 @@ impl TextInput {
         let Some(l) = self.layout.as_ref().filter(|_| self.multiline) else {
             return self.go(if end { Motion::LineEnd } else { Motion::LineStart }, select, cx);
         };
-        let p = l.position(self.display(self.buffer.caret()));
+        let p = self.caret_at(l);
         let x = if end { px(f32::MAX / 2.) } else { px(0.) };
         let target = self.offset(l.index(point(x, p.y + l.line_height * 0.5)));
+        let row = point(px(0.), p.y);
         self.go_to(target, select);
         self.goal_x = None;
         self.moved(cx);
+        // The start of a wrapped row is the same offset as the end of the row above, where
+        // `position` puts it. Keep the caret on the row it moved along.
+        if !end {
+            self.row_start = Some((target, row));
+        }
+    }
+
+    /// Where the caret paints: the row start after ⌘←, else the layout position of its offset.
+    fn caret_at(&self, l: &Layout) -> Point<Pixels> {
+        let caret = self.buffer.caret();
+        match self.row_start {
+            Some((at, p)) if at == caret => p,
+            _ => l.position(self.display(caret)),
+        }
     }
 
     fn delete(&mut self, m: Motion, cx: &mut Context<Self>) {
@@ -889,7 +908,7 @@ impl Element for TextElement {
 
         // Keep the caret in view: sideways for one line, up and down for many.
         let sel = input.buffer.selection();
-        let caret = layout.position(input.display(input.buffer.caret()));
+        let caret = input.caret_at(&layout);
         let mut scroll = input.scroll;
         if input.multiline {
             if input.autoscroll {

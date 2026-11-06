@@ -295,3 +295,36 @@ async fn copy_uid_expunge_fallback_preserves_other_deleted_messages() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+#[cfg_attr(not(lagom_greenmail), ignore = "set LAGOM_GREENMAIL=1; see README")]
+async fn oversized_body_is_stored_as_metadata_and_sync_goes_on() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+    let account = account();
+    store.save_account(&account).unwrap();
+    let mut external = raw(&account).await;
+    let line = "x".repeat(76) + "\r\n";
+    let huge = format!(
+        "From: Big <big@example.com>\r\nTo: {}\r\nSubject: Huge\r\n\r\n{}",
+        account.email,
+        line.repeat(5 * 1024 * 1024 / line.len())
+    );
+    external.append("INBOX", None, None, huge).await.unwrap();
+    external
+        .append("INBOX", None, None, b"Subject: After\r\n\r\nSmall body")
+        .await
+        .unwrap();
+    let mut imap = ImapSync::login(&account, "test").await.unwrap();
+    imap.sync(&mut store, DEFAULT_LIMIT).await.unwrap();
+    let inbox = folder(&store, &account, FolderRole::Inbox);
+    let messages = store.list_messages(inbox, now(), 20, 0).unwrap();
+    let huge = messages.iter().find(|m| m.subject == "Huge").unwrap();
+    assert_eq!(store.message(huge.id).unwrap().body_text, lagom_core::mime::BODY_UNAVAILABLE);
+    assert!(messages.iter().any(|m| m.subject == "After"));
+    // The checkpoint moved past both: a second sync keeps the two rows and adds none.
+    imap.sync(&mut store, DEFAULT_LIMIT).await.unwrap();
+    assert_eq!(store.list_messages(inbox, now(), 20, 0).unwrap().len(), 2);
+    external.logout().await.unwrap();
+    imap.logout().await.unwrap();
+}

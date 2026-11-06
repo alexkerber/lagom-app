@@ -8,6 +8,18 @@ use std::path::Path;
 pub struct Store {
     pub(crate) db: Connection,
 }
+
+#[cfg(unix)]
+fn owner_only(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+// shortcut: no ACL change on Windows; the per-user data directory is the only protection there.
+#[cfg(not(unix))]
+fn owner_only(_: &Path, _: u32) -> Result<()> {
+    Ok(())
+}
 impl Store {
     pub fn open_default() -> Result<Self> {
         Self::open(Self::default_path()?)
@@ -21,12 +33,29 @@ impl Store {
                 .join("lagom"),
         };
         std::fs::create_dir_all(&dir)?;
+        owner_only(&dir, 0o700)?;
         Ok(dir.join("lagom.sqlite3"))
     }
+    /// Mail and account rows are private: the file and its WAL and SHM are owner-only (0600),
+    /// also for stores created before this rule. SQLite gives WAL and SHM the database's mode.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+        }
+        owner_only(path, 0o600)?;
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.pragma_update(None, "journal_mode", "WAL")?;
+        for side in ["-wal", "-shm"] {
+            let mut p = path.as_os_str().to_owned();
+            p.push(side);
+            if Path::new(&p).exists() {
+                owner_only(Path::new(&p), 0o600)?;
+            }
+        }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > 2 {
@@ -99,6 +128,28 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn store_files_are_owner_only_also_when_they_existed() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("old.sqlite3");
+        drop(Store::open(&path).unwrap());
+        // A store from before the rule: world-readable.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = Store::open(&path).unwrap();
+        store.save_account(&Account::new("a@gmail.com".into(), crate::presets::servers("a@gmail.com").unwrap().0, crate::presets::servers("a@gmail.com").unwrap().1).unwrap()).unwrap();
+        let mode = |p: &str| std::fs::metadata(temp.path().join(p)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("old.sqlite3"), 0o600);
+        assert_eq!(mode("old.sqlite3-wal"), 0o600);
+        assert_eq!(mode("old.sqlite3-shm"), 0o600);
+        let dir = temp.path().join("data");
+        std::env::set_var("LAGOM_DATA_DIR", &dir);
+        let default = Store::default_path().unwrap();
+        std::env::remove_var("LAGOM_DATA_DIR");
+        assert_eq!(default, dir.join("lagom.sqlite3"));
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    }
     #[test]
     fn account_roundtrip_and_reopen() {
         let temp = tempfile::tempdir().unwrap();

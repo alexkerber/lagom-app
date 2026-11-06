@@ -3,7 +3,7 @@
 use crate::{
     account::{Account, Security, ServerConfig},
     mime, presets,
-    store::{Folder, FolderRole, Store},
+    store::{Folder, FolderRole, Message, Store},
     Error, Result,
 };
 use async_imap::{
@@ -307,7 +307,7 @@ impl ImapSync {
         parts.sort_by_key(|p| p.1);
         if let Some((path, _, size)) = parts.first() {
             if *size as usize > mime::MAX_MIME_BYTES {
-                return Err(Error::Invalid("MIME text part exceeds size limit"));
+                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, attachments);
             }
             let section = path
                 .iter()
@@ -342,7 +342,7 @@ impl ImapSync {
                 }
                 .ok_or(Error::Network("MIME text part missing"))?;
                 if headers.len() >= 65536 || headers.len() + text.len() > mime::MAX_MIME_BYTES {
-                    return Err(Error::Invalid("MIME text part exceeds size limit"));
+                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, attachments);
                 }
                 let mut raw = headers.to_vec();
                 if !raw.ends_with(b"\r\n") {
@@ -367,6 +367,10 @@ impl ImapSync {
         } else {
             message = mime::parse(header)?;
         }
+        self.save(store, folder, uid, fetch, message, attachments)
+    }
+    /// Fills the IMAP-side fields of a parsed message and stores it.
+    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: bool) -> Result<()> {
         let (seen, flagged) = flags(fetch);
         let m = &mut message.summary;
         m.account = self.account.id.clone();

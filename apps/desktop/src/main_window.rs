@@ -378,23 +378,28 @@ impl MainWindow {
             cx.notify();
         })
         .detach();
-        cx.subscribe(compose, |this, compose, e: &ComposeEvent, cx| {
+        cx.subscribe_in(compose, window, |this, compose, e: &ComposeEvent, window, cx| {
             match e {
-                // The sheet leaves the modal slot but stays alive for its Undo window.
+                // The sheet leaves the modal slot but stays alive for its Undo window. The inbox
+                // takes the keys meanwhile.
                 ComposeEvent::Sending => {
-                    if this.compose.as_ref() == Some(&compose) {
+                    if this.compose.as_ref() == Some(compose) {
                         this.compose = None;
                     }
-                    this.sending.push(compose);
+                    this.sending.push(compose.clone());
+                    if this.compose.is_none() && this.palette.is_none() {
+                        window.focus(&this.focus);
+                    }
                 }
                 ComposeEvent::Restored => {
+                    let compose = compose.clone();
                     this.sending.retain(|c| *c != compose);
                     // A sheet opened meanwhile becomes the kept draft.
                     if let Some(other) = this.compose.replace(compose) {
                         this.draft = Some(other);
                     }
                 }
-                ComposeEvent::Send(mail) => this.send_mail(compose, (**mail).clone(), cx),
+                ComposeEvent::Send(mail) => this.send_mail(compose.clone(), (**mail).clone(), cx),
             }
             cx.notify();
         })
@@ -443,6 +448,8 @@ impl MainWindow {
         self.clear_motion();
         self.page = Page::Mail;
         self.inbox.open(f);
+        // Selection is row 0 of the new list; the old list's offset would hide it.
+        self.scroll.set_offset(Point::default());
         self.reload(cx);
         cx.notify();
     }
@@ -481,6 +488,11 @@ impl MainWindow {
             }
         }
         self.entering.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx: 0. });
+        // The row comes back where it was, which may be scrolled off, or in another list.
+        if self.inbox.selected == ix {
+            let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
+            self.scroll.scroll_to_item(1 + ix + ghosts);
+        }
         cx.notify();
     }
 
@@ -1429,7 +1441,16 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &Later, _, cx| if !this.overlay_open(cx) { this.act(Move::Later, cx) }))
             // The guard hands ⌫ to the palette, where it edits the query.
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| if !this.overlay_open(cx) { this.act(Move::Delete, cx) }))
-            .on_action(cx.listener(|this, _: &Undo, _, cx| if !this.overlay_open(cx) { this.undo(cx) }))
+            .on_action(cx.listener(|this, _: &Undo, window, cx| {
+                if this.overlay_open(cx) {
+                    return;
+                }
+                // The newest send in its Undo window goes first: its toast is the one on top.
+                let sent = this.sending.iter().rev().find(|c| c.read(cx).undoable()).cloned();
+                if !sent.is_some_and(|c| c.update(cx, |c, cx| c.undo(window, cx))) {
+                    this.undo(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| if !this.overlay_open(cx) { this.open_palette("", window, cx) }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
@@ -2139,6 +2160,34 @@ mod dispatch {
         assert_eq!(inbox_len(&view, cx), n);
         cx.simulate_keystrokes("r");
         assert_eq!(body(&view, cx), "");
+    }
+
+    #[gpui::test]
+    fn inbox_keys_work_while_a_send_can_be_undone(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let n = inbox_len(&view, cx);
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("ana@example.com");
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.sending.len() == 1));
+        // The inbox has the keys during the Undo window.
+        cx.simulate_keystrokes("e");
+        assert_eq!(inbox_len(&view, cx), n - 1);
+        // ⌘Z undoes the send first: the sheet comes back.
+        cx.simulate_keystrokes("cmd-z");
+        assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.sending.is_empty()));
+        assert_eq!(inbox_len(&view, cx), n - 1);
+    }
+
+    #[gpui::test]
+    fn c_writes_from_the_empty_inbox(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        for _ in 0..inbox_len(&view, cx) {
+            cx.simulate_keystrokes("e");
+        }
+        assert_eq!(inbox_len(&view, cx), 0);
+        cx.simulate_keystrokes("c");
+        assert!(view.read_with(cx, |v, _| v.compose.is_some()));
     }
 
     #[gpui::test]
