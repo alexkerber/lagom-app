@@ -6,6 +6,7 @@ mod main_window;
 mod motion;
 #[cfg(target_os = "macos")]
 mod menus;
+mod text_input;
 mod theme;
 
 use std::borrow::Cow;
@@ -56,6 +57,7 @@ fn main() {
             .expect("load bundled fonts");
 
         main_window::bind_keys(cx);
+        text_input::bind_keys(cx);
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
         #[cfg(target_os = "macos")]
         menus::init(cx);
