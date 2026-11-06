@@ -25,7 +25,7 @@
 
 - [x] Main window, Concept D, light and dark (static sample data).
 - [x] Native macOS menu bar: lagom, File, View, Window, Help.
-- [ ] Edit menu (Cut, Copy, Paste, Select All) once compose has real text fields.
+- [x] Edit menu: Undo, Redo, Cut, Copy, Paste, Select All. A focused text field handles them; Undo falls back to the inbox (`feat/text-input`).
 - [ ] Command palette, compose and empty inbox: structure from B, dressed in D tokens.
 - [ ] Typeface trial: Hauora Sans against Inter (Alex 2026-11-06).
 - [ ] Performance: CI that measures the budgets in `docs/performance.md` (Alex 2026-11-06: "the most optimised mail app").
@@ -42,7 +42,11 @@
 - [ ] Trash: a sidebar entry to open it and empty it. Delete only moves to an in-memory Trash now.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
 - [x] Swipe: drag a row with the mouse, same stages as the trackpad (Alex 2026-11-06: "ska kunna dra med musen också"). Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
-- [ ] Compose: Esc keeps the draft once fields are editable (now it discards static sample text).
+- [x] Compose: Esc keeps the draft in memory and R brings it back; Send and ⌘⌫ end it (`feat/text-input`).
+- [x] Text input: `TextInput` (single and multi-line, selection, word and line keys, clipboard, undo, IME, password mode) in compose and the palette (`feat/text-input`).
+- [ ] Text input: try by hand. Typing, an IME (Japanese, Pinyin), dead keys, mouse and double-click selection, drag past the edge, scrolling a long body, the Edit menu. Tests cover the editing model and GPUI key dispatch only.
+- [ ] Text input: caret, accent selection and focus ring are not in a screenshot yet. GPUI blurs fields in an inactive window, and the capture window was inactive.
+- [ ] Compose: save the draft to Drafts via `lagom-core`; it lives in memory now and is lost on quit.
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 - [x] Feel (Alex 2026-11-06: "de känns så kalla"): hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).
 - [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.

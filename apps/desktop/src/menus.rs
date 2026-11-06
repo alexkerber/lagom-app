@@ -1,7 +1,9 @@
 //! The native macOS menu bar with standard shortcuts. Only items that work today.
 //! macOS only: GPUI's `hide_other_apps` panics on Windows.
 
-use gpui::{actions, App, KeyBinding, Menu, MenuItem, SystemMenuType, Window};
+use gpui::{actions, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
+
+use crate::text_input;
 
 actions!(
     lagom,
@@ -47,7 +49,17 @@ pub fn init(cx: &mut App) {
         // Done and Later stay off the menu: a key equivalent without cmd could catch typed letters.
         Menu {
             name: "Edit".into(),
-            items: vec![MenuItem::action("Undo", crate::main_window::Undo)],
+            // The focused text field handles these. With none focused, Undo undoes in the inbox and
+            // the rest are greyed out. OsAction gives the standard selectors, so system panels work.
+            items: vec![
+                MenuItem::os_action("Undo", crate::main_window::Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", text_input::Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", text_input::Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", text_input::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", text_input::Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", text_input::SelectAll, OsAction::SelectAll),
+            ],
         },
         Menu {
             name: "Message".into(),

@@ -87,25 +87,29 @@ actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo,
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
+    // Plain keys type into a focused text field instead. The cmd keys stay: the overlay guard
+    // hands them on, and a field handles ⌘Z itself because it sits deeper in the dispatch path.
+    let keys = Some("MainWindow && !TextInput");
     cx.bind_keys([
-        KeyBinding::new("j", SelectNext, ctx),
-        KeyBinding::new("down", SelectNext, ctx),
-        KeyBinding::new("k", SelectPrev, ctx),
-        KeyBinding::new("up", SelectPrev, ctx),
-        KeyBinding::new("e", Done, ctx),
+        KeyBinding::new("j", SelectNext, keys),
+        KeyBinding::new("down", SelectNext, keys),
+        KeyBinding::new("k", SelectPrev, keys),
+        KeyBinding::new("up", SelectPrev, keys),
+        KeyBinding::new("e", Done, keys),
         // Arrows mirror the swipe directions: right is Done, left is Later.
-        KeyBinding::new("right", Done, ctx),
-        KeyBinding::new("l", Later, ctx),
-        KeyBinding::new("left", Later, ctx),
+        KeyBinding::new("right", Done, keys),
+        KeyBinding::new("l", Later, keys),
+        KeyBinding::new("left", Later, keys),
         // The macOS menu shows an action's first binding, so the cmd variants come first.
-        KeyBinding::new("secondary-backspace", DeleteMessage, ctx),
-        KeyBinding::new("backspace", DeleteMessage, ctx),
-        KeyBinding::new("delete", DeleteMessage, ctx),
+        // ⌘⌫ in a field reaches Compose, which discards with it.
+        KeyBinding::new("secondary-backspace", DeleteMessage, keys),
+        KeyBinding::new("backspace", DeleteMessage, keys),
+        KeyBinding::new("delete", DeleteMessage, keys),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-k", OpenPalette, ctx),
         KeyBinding::new("secondary-r", Reply, ctx),
-        KeyBinding::new("r", Reply, ctx),
-        KeyBinding::new("escape", Cancel, ctx),
+        KeyBinding::new("r", Reply, keys),
+        KeyBinding::new("escape", Cancel, keys),
     ]);
 }
 
@@ -186,6 +190,8 @@ pub struct MainWindow {
     toast: Option<Task<()>>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
+    // A reply that Esc closed. Send and Discard end it.
+    draft: Option<gpui::Entity<Compose>>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     scroll: ScrollHandle,
@@ -223,6 +229,7 @@ impl MainWindow {
             toast: None,
             palette: None,
             compose: None,
+            draft: None,
             all_folders: false,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
@@ -235,6 +242,13 @@ impl MainWindow {
             "folders" => this.inbox.open(Some(0)),
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(window, cx),
+            // A written reply with a word selected, and Cc open with its focus ring.
+            "compose-text" | "compose-cc" => {
+                this.open_compose(window, cx);
+                if let Some(c) = this.compose.clone() {
+                    c.update(cx, |c, cx| if screen == "compose-text" { c.sample(cx) } else { c.add_cc(window, cx) });
+                }
+            }
             "hover" => this.shown_hover = Some(2),
             // Selects the last inbox row once the list has a layout, as J would; the list scrolls to it
             // in a short window.
@@ -277,7 +291,7 @@ impl MainWindow {
             .map(|(f, _)| (f, folders::path(&self.inbox.folders, f)))
             .collect();
         let subject = self.inbox.current().map(|id| MESSAGES[id].subject.to_string());
-        let palette = cx.new(|cx| CommandPalette::new(query, targets, subject, cx));
+        let palette = cx.new(|cx| CommandPalette::new(query, targets, subject, window, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
             this.palette = None;
             window.focus(&this.focus);
@@ -300,13 +314,27 @@ impl MainWindow {
     fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.toast = None;
-        let compose = cx.new(|cx| Compose::new(window, cx));
-        cx.subscribe_in(&compose, window, |this, _, _: &gpui::DismissEvent, window, cx| {
-            this.compose = None;
-            window.focus(&this.focus);
-            cx.notify();
-        })
-        .detach();
+        // One draft at a time: R brings back a draft that Esc closed, whichever message is selected.
+        let compose = match self.draft.take() {
+            Some(compose) => {
+                compose.update(cx, |c, cx| c.reopen(window, cx));
+                compose
+            }
+            None => {
+                let m = self.inbox.current().map(|id| &MESSAGES[id]);
+                let to = m.map_or("", |m| m.from);
+                let subject = m.map_or(String::new(), |m| format!("Re: {}", m.subject));
+                let compose = cx.new(|cx| Compose::new(to, &subject, window, cx));
+                cx.subscribe_in(&compose, window, |this, compose, _: &gpui::DismissEvent, window, cx| {
+                    this.compose = None;
+                    this.draft = compose.read(cx).keeps_draft().then(|| compose.clone());
+                    window.focus(&this.focus);
+                    cx.notify();
+                })
+                .detach();
+                compose
+            }
+        };
         self.compose = Some(compose);
         cx.notify();
     }

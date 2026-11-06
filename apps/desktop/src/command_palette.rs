@@ -1,16 +1,18 @@
 //! Command palette (⌘K), concept B structure in Concept D tokens.
 //! Source: CommandPalette on the Claude design canvas. Commands do not run yet: Enter only closes.
+//! The query is a `TextInput`; ↑ and ↓ reach the palette because a single-line field leaves them.
 //! "move <query>" lists folders (Figma "Lagom · Folders", frame 6). Enter there emits `MoveTo`.
 
 use std::time::Duration;
 
 use gpui::{
-    div, ease_out_quint, prelude::*, px, Animation, AnimationExt, Context, Div, DismissEvent,
-    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent, MouseButton,
-    Rgba, SharedString, StyledText, Window,
+    div, ease_out_quint, prelude::*, px, Animation, AnimationExt, App, Context, Div, DismissEvent,
+    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
+    MouseButton, Rgba, SharedString, StyledText, Subscription, Window,
 };
 
 use crate::motion::spring;
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 enum Hint {
@@ -106,30 +108,50 @@ fn find(label: &str, query: &str) -> Option<Option<std::ops::Range<usize>>> {
 }
 
 pub struct CommandPalette {
-    query: String,
+    input: Entity<TextInput>,
     selected: usize,
-    focus: FocusHandle,
     folders: Vec<(usize, String)>,
     // Subject of the message a move would take.
     subject: Option<String>,
+    _input: Subscription,
 }
 
 impl EventEmitter<DismissEvent> for CommandPalette {}
 impl EventEmitter<MoveTo> for CommandPalette {}
 
 impl Focusable for CommandPalette {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
     }
 }
 
 impl CommandPalette {
-    pub fn new(query: &str, folders: Vec<(usize, String)>, subject: Option<String>, cx: &mut Context<Self>) -> Self {
-        Self { query: query.into(), selected: 0, focus: cx.focus_handle(), folders, subject }
+    pub fn new(
+        query: &str,
+        folders: Vec<(usize, String)>,
+        subject: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| TextInput::new(window, cx).placeholder("Type a command").with_text(query));
+        let sub = cx.subscribe(&input, |this, _, e: &TextInputEvent, cx| match e {
+            TextInputEvent::Changed => {
+                this.selected = 0;
+                cx.notify();
+            }
+            TextInputEvent::Enter => this.run(this.matches(cx), cx),
+            TextInputEvent::Escape => cx.emit(DismissEvent),
+        });
+        Self { input, selected: 0, folders, subject, _input: sub }
     }
 
-    fn matches(&self) -> Vec<Item> {
-        matches(&self.query, &self.folders)
+    #[cfg(test)]
+    pub(crate) fn query(&self, cx: &App) -> String {
+        self.input.read(cx).text().to_string()
+    }
+
+    fn matches(&self, cx: &App) -> Vec<Item> {
+        matches(self.input.read(cx).text(), &self.folders)
     }
 
     /// Enter or a click: the selected item runs and the palette closes.
@@ -141,25 +163,11 @@ impl CommandPalette {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let ks = &event.keystroke;
-        let matches = self.matches();
-        let count = matches.len();
-        match ks.key.as_str() {
-            "enter" => self.run(matches, cx),
-            "escape" => cx.emit(DismissEvent),
+        let count = self.matches(cx).len();
+        match event.keystroke.key.as_str() {
             "up" => self.selected = self.selected.saturating_sub(1),
             "down" => self.selected = (self.selected + 1).min(count.saturating_sub(1)),
-            "backspace" => {
-                self.query.pop();
-                self.selected = 0;
-            }
-            _ => match &ks.key_char {
-                Some(text) if !ks.modifiers.platform && !ks.modifiers.control => {
-                    self.query.extend(text.chars().filter(|c| !c.is_control()));
-                    self.selected = 0;
-                }
-                _ => return,
-            },
+            _ => return,
         }
         cx.stop_propagation();
         cx.notify();
@@ -182,8 +190,8 @@ fn key_cap(t: &Theme, key: &'static str, selected: bool) -> Div {
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
-        let matches = self.matches();
-        let moving = move_query(&self.query).is_some();
+        let matches = self.matches(cx);
+        let moving = move_query(self.input.read(cx).text()).is_some();
         let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
 
         let mut list = div().flex().flex_col().p(px(8.));
@@ -215,7 +223,7 @@ impl Render for CommandPalette {
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = i;
-                        this.run(this.matches(), cx);
+                        this.run(this.matches(cx), cx);
                     }))
                     .cursor_pointer()
                     .active(|s| s.bg(t.press))
@@ -259,10 +267,7 @@ impl Render for CommandPalette {
                     .items_center()
                     .text_size(px(size::TITLE))
                     .font_weight(FontWeight::MEDIUM)
-                    .when(!self.query.is_empty(), |d| d.child(self.query.clone()))
-                    // Static caret: idle means idle, so no blink timer.
-                    .child(div().w(px(2.)).h(px(22.)).ml(px(1.)).bg(t.accent))
-                    .when(self.query.is_empty(), |d| d.child(div().text_color(t.ink2).child("Type a command"))),
+                    .child(self.input.clone()),
             )
             .child(key_cap(&t, "esc", false));
 
@@ -306,7 +311,6 @@ impl Render for CommandPalette {
 
         div()
             .id("command-palette")
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
