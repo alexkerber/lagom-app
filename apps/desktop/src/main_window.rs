@@ -93,11 +93,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("k", SelectPrev, ctx),
         KeyBinding::new("up", SelectPrev, ctx),
         KeyBinding::new("e", Done, ctx),
+        // Arrows mirror the swipe directions: right is Done, left is Later.
+        KeyBinding::new("right", Done, ctx),
         KeyBinding::new("l", Later, ctx),
+        KeyBinding::new("left", Later, ctx),
+        // The macOS menu shows an action's first binding, so the cmd variants come first.
+        KeyBinding::new("secondary-backspace", DeleteMessage, ctx),
         KeyBinding::new("backspace", DeleteMessage, ctx),
         KeyBinding::new("delete", DeleteMessage, ctx),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-k", OpenPalette, ctx),
+        KeyBinding::new("secondary-r", Reply, ctx),
         KeyBinding::new("r", Reply, ctx),
         KeyBinding::new("escape", Cancel, ctx),
     ]);

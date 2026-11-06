@@ -46,8 +46,6 @@ impl AssetSource for Assets {
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
-        #[cfg(target_os = "macos")]
-        menus::init(cx);
         // Inter Tight is bundled. Inter and Geist Mono come from the system for now.
         // shortcut: relies on installed Inter and Geist Mono, bundle them before the first release.
         cx.text_system()
@@ -58,6 +56,9 @@ fn main() {
             .expect("load bundled fonts");
 
         main_window::bind_keys(cx);
+        // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
+        #[cfg(target_os = "macos")]
+        menus::init(cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         cx.open_window(
             WindowOptions {

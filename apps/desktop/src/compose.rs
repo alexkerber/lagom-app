@@ -291,6 +291,8 @@ impl Render for Compose {
             .inset_0()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            // Edit > Undo in the menu arrives as an action, not as a key press.
+            .on_action(cx.listener(|this, _: &crate::main_window::Undo, _, cx| this.undo(cx)))
             // Block clicks to the inbox while the sheet is up; after Send the inbox is usable again.
             .when(self.phase != Phase::Sent, |d| d.occlude())
             .text_color(t.ink)

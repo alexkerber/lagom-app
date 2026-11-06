@@ -44,6 +44,20 @@ pub fn init(cx: &mut App) {
             ],
         },
         Menu { name: "File".into(), items: vec![MenuItem::action("Close Window", CloseWindow)] },
+        // Done and Later stay off the menu: a key equivalent without cmd could catch typed letters.
+        Menu {
+            name: "Edit".into(),
+            items: vec![MenuItem::action("Undo", crate::main_window::Undo)],
+        },
+        Menu {
+            name: "Message".into(),
+            items: vec![
+                MenuItem::action("Reply", crate::main_window::Reply),
+                MenuItem::action("Delete", crate::main_window::DeleteMessage),
+                MenuItem::separator(),
+                MenuItem::action("Command Palette", crate::main_window::OpenPalette),
+            ],
+        },
         Menu { name: "View".into(), items: vec![MenuItem::action("Enter Full Screen", ToggleFullScreen)] },
         Menu {
             name: "Window".into(),
