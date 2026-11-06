@@ -1,4 +1,6 @@
 mod main_window;
+#[cfg(target_os = "macos")]
+mod menus;
 mod theme;
 
 use std::borrow::Cow;
@@ -34,6 +36,8 @@ impl AssetSource for Assets {
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        menus::init(cx);
         // Inter Tight is bundled. Inter and Geist Mono come from the system for now.
         // shortcut: relies on installed Inter and Geist Mono, bundle them before the first release.
         cx.text_system()
