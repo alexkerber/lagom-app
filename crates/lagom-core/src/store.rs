@@ -10,11 +10,18 @@ pub struct Store {
 }
 impl Store {
     pub fn open_default() -> Result<Self> {
-        let dir = dirs::data_dir()
-            .ok_or(Error::Invalid("platform data directory unavailable"))?
-            .join("lagom");
+        Self::open(Self::default_path()?)
+    }
+    /// `LAGOM_DATA_DIR` isolates test runs from the owner's real store.
+    pub fn default_path() -> Result<std::path::PathBuf> {
+        let dir = match std::env::var_os("LAGOM_DATA_DIR") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => dirs::data_dir()
+                .ok_or(Error::Invalid("platform data directory unavailable"))?
+                .join("lagom"),
+        };
         std::fs::create_dir_all(&dir)?;
-        Self::open(dir.join("lagom.sqlite3"))
+        Ok(dir.join("lagom.sqlite3"))
     }
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Connection::open(path)?;
@@ -40,6 +47,11 @@ impl Store {
             imap_host=excluded.imap_host,imap_port=excluded.imap_port,imap_security=excluded.imap_security,imap_username=excluded.imap_username,
             smtp_host=excluded.smtp_host,smtp_port=excluded.smtp_port,smtp_security=excluded.smtp_security,smtp_username=excluded.smtp_username",
             params![account.id,account.display_name,account.email,account.imap.host,account.imap.port,account.imap.security.as_str(),account.imap.username,account.smtp.host,account.smtp.port,account.smtp.security.as_str(),account.smtp.username])?;
+        Ok(())
+    }
+    /// Removes the account and, by cascade, its folders, messages and search rows.
+    pub fn delete_account(&self, id: &str) -> Result<()> {
+        self.db.execute("DELETE FROM accounts WHERE id=?1", [id])?;
         Ok(())
     }
     pub fn accounts(&self) -> Result<Vec<Account>> {
@@ -336,6 +348,17 @@ impl Store {
         self.db.execute("DELETE FROM messages WHERE id=?1", [id])?;
         Ok(())
     }
+    /// The newest local row in `folder` with this Message-ID: where a moved message landed.
+    pub fn find_message(&self, folder: i64, message_id: &str) -> Result<Option<i64>> {
+        if message_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(self.db.query_row(
+            "SELECT max(id) FROM messages WHERE folder=?1 AND message_id=?2",
+            params![folder, message_id],
+            |r| r.get(0),
+        )?)
+    }
     pub fn known_uids(&self, folder: i64) -> Result<Vec<u32>> {
         let mut stmt = self
             .db
@@ -492,6 +515,20 @@ mod mail_tests {
         assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
         let new_id = s.save_message(&mail(&a, kept, 1)).unwrap();
         assert!(new_id > id);
+    }
+    #[test]
+    fn delete_account_cascades_and_find_message() {
+        let (_t, s, a, f) = setup();
+        let mut m = mail(&a, f, 1);
+        m.summary.message_id = "x@test".into();
+        let id = s.save_message(&m).unwrap();
+        assert_eq!(s.find_message(f, "x@test").unwrap(), Some(id));
+        assert_eq!(s.find_message(f, "").unwrap(), None);
+        s.delete_account(&a.id).unwrap();
+        assert!(s.accounts().unwrap().is_empty());
+        assert!(s.message(id).is_err());
+        assert!(s.folder(f).is_err());
+        assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
     }
     #[test]
     fn rejects_cross_account_message() {

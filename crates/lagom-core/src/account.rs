@@ -91,7 +91,9 @@ impl Account {
         self.smtp.validate()
     }
     fn secret_entry(&self) -> Result<keyring::Entry> {
-        keyring::Entry::new("lagom", &self.id).map_err(|_| Error::Secret)
+        // A separate service name keeps test runs away from the owner's real keychain entries.
+        let service = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
+        keyring::Entry::new(&service, &self.id).map_err(|_| Error::Secret)
     }
     pub fn set_password(&self, password: &str) -> Result<()> {
         self.secret_entry()?

@@ -84,6 +84,32 @@ pub async fn send(
     store: &mut Store,
 ) -> Result<()> {
     let message = compose(account, outgoing)?;
+    let transport = transport(account, password)?;
+    let raw = message.formatted();
+    transport
+        .send_raw(message.envelope(), &raw)
+        .await
+        .map_err(|_| Error::Network("SMTP submission failed"))?;
+    if !presets::is_gmail(account) {
+        let mut imap = ImapSync::login(account, password)
+            .await
+            .map_err(|_| Error::SentCopy)?;
+        imap.append_sent(store, &raw)
+            .await
+            .map_err(|_| Error::SentCopy)?;
+        // A failed LOGOUT cannot turn an already submitted and saved message into a send failure.
+        let _ = imap.logout().await;
+    }
+    Ok(())
+}
+/// Connects and authenticates to SMTP, then quits. Sends nothing.
+pub async fn verify(account: &Account, password: &str) -> Result<()> {
+    match transport(account, password)?.test_connection().await {
+        Ok(true) => Ok(()),
+        _ => Err(Error::Network("SMTP login failed")),
+    }
+}
+fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     let config = &account.smtp;
     config.validate()?;
     let tls = match config.security {
@@ -103,31 +129,17 @@ pub async fn send(
         } else {
             &config.host
         };
-    let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
-        .port(config.port)
-        .tls(tls)
-        .credentials(Credentials::new(
-            config.username.clone(),
-            password.to_owned(),
-        ))
-        .timeout(Some(Duration::from_secs(60)))
-        .build();
-    let raw = message.formatted();
-    transport
-        .send_raw(message.envelope(), &raw)
-        .await
-        .map_err(|_| Error::Network("SMTP submission failed"))?;
-    if !presets::is_gmail(account) {
-        let mut imap = ImapSync::login(account, password)
-            .await
-            .map_err(|_| Error::SentCopy)?;
-        imap.append_sent(store, &raw)
-            .await
-            .map_err(|_| Error::SentCopy)?;
-        // A failed LOGOUT cannot turn an already submitted and saved message into a send failure.
-        let _ = imap.logout().await;
-    }
-    Ok(())
+    Ok(
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+            .port(config.port)
+            .tls(tls)
+            .credentials(Credentials::new(
+                config.username.clone(),
+                password.to_owned(),
+            ))
+            .timeout(Some(Duration::from_secs(60)))
+            .build(),
+    )
 }
 #[cfg(test)]
 mod tests {
