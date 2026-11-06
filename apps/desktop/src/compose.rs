@@ -83,6 +83,9 @@ impl Compose {
 
     fn set(&mut self, phase: Phase, cx: &mut Context<Self>) {
         self.phase = phase;
+        if phase == Phase::Gone {
+            cx.emit(gpui::DismissEvent);
+        }
         cx.notify();
     }
 
@@ -246,6 +249,8 @@ impl Compose {
             })
     }
 }
+
+impl gpui::EventEmitter<gpui::DismissEvent> for Compose {}
 
 impl Render for Compose {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

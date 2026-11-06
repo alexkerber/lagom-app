@@ -34,7 +34,7 @@ const INBOX: &[Message] = &[
 // Messages already snoozed in the sample data.
 const LATER_SAMPLE: usize = 2;
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, Undo]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, Undo, OpenPalette, Reply]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
@@ -46,6 +46,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", Done, ctx),
         KeyBinding::new("l", Later, ctx),
         KeyBinding::new("secondary-z", Undo, ctx),
+        KeyBinding::new("secondary-k", OpenPalette, ctx),
+        KeyBinding::new("r", Reply, ctx),
     ]);
 }
 
@@ -80,8 +82,6 @@ pub struct MainWindow {
     seq: usize,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
-    /// `LAGOM_SCREEN=empty` shows the empty inbox until real mail can reach zero.
-    empty: bool,
     _appearance: gpui::Subscription,
 }
 
@@ -93,31 +93,59 @@ impl MainWindow {
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
-        // `LAGOM_SCREEN=palette` opens the palette with the query from the design.
-        let palette = (std::env::var("LAGOM_SCREEN").as_deref() == Ok("palette")).then(|| {
-            let palette = cx.new(|cx| CommandPalette::new("done", cx));
-            cx.subscribe(&palette, |this, _, _: &gpui::DismissEvent, cx| {
-                this.palette = None;
-                cx.notify();
-            })
-            .detach();
-            window.focus(&gpui::Focusable::focus_handle(&palette, cx));
-            palette
-        });
-        Self {
+        // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
+        let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
+        let mut this = Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
-            inbox: Inbox::new(INBOX.len(), LATER_SAMPLE),
+            inbox: Inbox::new(if screen == "empty" { 0 } else { INBOX.len() }, LATER_SAMPLE),
             focus,
             ghosts: Vec::new(),
             entering: Vec::new(),
             seq: 0,
-            palette,
-            // Another change wires the compose key. Until then `LAGOM_SCREEN=compose` opens it.
-            compose: (std::env::var("LAGOM_SCREEN").as_deref() == Ok("compose"))
-                .then(|| cx.new(|cx| Compose::new(window, cx))),
-            empty: std::env::var("LAGOM_SCREEN").as_deref() == Ok("empty"),
+            palette: None,
+            compose: None,
             _appearance: appearance,
+        };
+        match screen.as_str() {
+            "palette" => this.open_palette("done", window, cx),
+            "compose" => this.open_compose(window, cx),
+            _ => {}
         }
+        this
+    }
+
+    // Overlays sit inside this key context, so its bindings fire first: hand the key on to them.
+    fn overlay_open(&self, cx: &mut Context<Self>) -> bool {
+        let open = self.palette.is_some() || self.compose.is_some();
+        if open {
+            cx.propagate();
+        }
+        open
+    }
+
+    fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let palette = cx.new(|cx| CommandPalette::new(query, cx));
+        cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
+            this.palette = None;
+            window.focus(&this.focus);
+            cx.notify();
+        })
+        .detach();
+        window.focus(&gpui::Focusable::focus_handle(&palette, cx));
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compose = cx.new(|cx| Compose::new(window, cx));
+        cx.subscribe_in(&compose, window, |this, _, _: &gpui::DismissEvent, window, cx| {
+            this.compose = None;
+            window.focus(&this.focus);
+            cx.notify();
+        })
+        .detach();
+        self.compose = Some(compose);
+        cx.notify();
     }
 
     fn act(&mut self, what: Move, cx: &mut Context<Self>) {
@@ -180,7 +208,6 @@ fn roll(el: Div, id: String) -> AnyElement {
     .into_any_element()
 }
 
-pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
 pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     div().font_family(font::MONO).text_size(px(size::MONO)).text_color(color).child(text.into())
 }
@@ -252,7 +279,6 @@ impl MainWindow {
                         let el = mono(c.clone(), color);
                         if numeric { roll(el, id.clone()) } else { el.into_any_element() }
                     };
-                    if active {
                     // A zero count is calm: no accent badge.
                     if active && c != "0" {
                         d.child(
@@ -350,7 +376,6 @@ impl MainWindow {
                     .gap(px(2.))
                     .child(nav("icons/inbox.svg", "Inbox", Some(self.inbox.items.len().to_string().into()), true))
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later.to_string().into()), false))
-                    .child(nav("icons/inbox.svg", "Inbox", Some(if self.empty { "0" } else { "7" }), true))
                     .child(nav("icons/sent.svg", "Sent", None, false))
                     .child(nav("icons/done.svg", "Done", Some("G D".into()), false)),
             )
@@ -452,10 +477,6 @@ impl MainWindow {
             });
         }
         rows.extend(ghosts_at(self.inbox.items.len()));
-        if self.inbox.items.is_empty() {
-            // Placeholder until the empty-inbox screen (empty_inbox.rs) lands.
-            rows.push(div().p(px(12.)).text_color(t.ink2).child("Nothing left.").into_any_element());
-        }
 
         let filter = div()
             .flex()
@@ -683,11 +704,13 @@ impl Render for MainWindow {
         div()
             .key_context("MainWindow")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.select(Inbox::next, cx)))
-            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.select(Inbox::prev, cx)))
-            .on_action(cx.listener(|this, _: &Done, _, cx| this.act(Move::Done, cx)))
-            .on_action(cx.listener(|this, _: &Later, _, cx| this.act(Move::Later, cx)))
-            .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
+            .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
+            .on_action(cx.listener(|this, _: &Done, _, cx| if !this.overlay_open(cx) { this.act(Move::Done, cx) }))
+            .on_action(cx.listener(|this, _: &Later, _, cx| if !this.overlay_open(cx) { this.act(Move::Later, cx) }))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| if !this.overlay_open(cx) { this.undo(cx) }))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| if !this.overlay_open(cx) { this.open_palette("", window, cx) }))
+            .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(window, cx) }))
             .size_full()
             .flex()
             .bg(tint)
@@ -707,12 +730,12 @@ impl Render for MainWindow {
                     .border_color(t.line)
                     .rounded(px(radius::PANEL))
                     .overflow_hidden()
-                    .child(self.message_list(cx))
-                    .child(self.reading_pane(cx)),
-                    .when(self.empty, |d| d.child(crate::empty_inbox::view(&t)))
-                    .when(!self.empty, |d| d.child(self.message_list()).child(self.reading_pane())),
+                    // Undo from the empty screen brings the list back.
+                    .when(self.inbox.items.is_empty(), |d| d.child(crate::empty_inbox::view(&t)))
+                    .when(!self.inbox.items.is_empty(), |d| d.child(self.message_list(cx)).child(self.reading_pane(cx))),
             )
             .children(self.palette.clone())
+            .children(self.compose.clone())
     }
 }
 
@@ -844,6 +867,5 @@ mod tests {
         inbox.prev();
         assert_eq!(inbox.undo(), Some((Move::Later, 1, 0)));
         assert_eq!(inbox.current(), Some(1));
-            .children(self.compose.clone())
     }
 }
