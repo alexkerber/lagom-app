@@ -24,6 +24,8 @@
 ## Mail (v1)
 
 - [x] Main window, Concept D, light and dark (static sample data).
+- [x] Native macOS menu bar: lagom, File, View, Window, Help.
+- [ ] Edit menu (Cut, Copy, Paste, Select All) once compose has real text fields.
 - [ ] Command palette, compose and empty inbox: structure from B, dressed in D tokens.
 - [ ] Typeface trial: Hauora Sans against Inter (Alex 2026-11-06).
 - [ ] Performance: CI that measures the budgets in `docs/performance.md` (Alex 2026-11-06: "the most optimised mail app").
