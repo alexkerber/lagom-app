@@ -73,8 +73,8 @@ pub struct MainWindow {
     inbox: Inbox,
     focus: FocusHandle,
     ghosts: Vec<Ghost>,
-    // The row that undo put back: (message id, what was undone, animation seq).
-    entering: Option<(usize, Move, usize)>,
+    // Rows that undo put back, still playing the reverse motion.
+    entering: Vec<Ghost>,
     seq: usize,
     _appearance: gpui::Subscription,
 }
@@ -92,7 +92,7 @@ impl MainWindow {
             inbox: Inbox::new(INBOX.len(), LATER_SAMPLE),
             focus,
             ghosts: Vec::new(),
-            entering: None,
+            entering: Vec::new(),
             seq: 0,
             _appearance: appearance,
         }
@@ -106,6 +106,7 @@ impl MainWindow {
                 g.ix -= 1;
             }
         }
+        self.entering.retain(|g| g.id != id);
         self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now() });
         cx.notify();
     }
@@ -119,7 +120,7 @@ impl MainWindow {
                 g.ix += 1;
             }
         }
-        self.entering = Some((id, what, self.seq));
+        self.entering.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now() });
         cx.notify();
     }
 
@@ -131,9 +132,17 @@ impl MainWindow {
 
 /// p = 0 is a resting row, p = 1 is fully gone. Undo plays the same curve backwards.
 fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32) -> E {
-    // Slide first, then close the gap.
+    if p <= 0. {
+        return row; // At rest: keep the selection background.
+    }
+    // Slide first, then close the gap. Padding shrinks too, or the row keeps 20 px.
     let collapse = ((p - 0.3) / 0.7).clamp(0., 1.);
-    let row = row.relative().h(px(ROW_H * (1. - collapse))).overflow_hidden().opacity(1. - p);
+    let row = row
+        .relative()
+        .h(px(ROW_H * (1. - collapse)))
+        .py(px(10. * (1. - collapse)))
+        .overflow_hidden()
+        .opacity(1. - p);
     match what {
         Move::Done => row.left(px(p * 200.)).bg(Rgba { a: 0.2 * (p * 3.).min(1.), ..t.accent }),
         // Towards Later in the sidebar: lift (shadow), shrink and move left.
@@ -407,11 +416,13 @@ impl MainWindow {
             let el = row(&INBOX[id], i == self.inbox.selected)
                 .id(("row", id))
                 .on_click(cx.listener(move |this, _, _, cx| this.select(|inbox| inbox.select(i), cx)));
-            rows.push(match self.entering {
-                Some((eid, what, seq)) if eid == id => el
-                    .with_animation(("enter", seq), motion(), move |el, d| away(el, theme, what, 1. - d))
-                    .into_any_element(),
-                _ => el.into_any_element(),
+            rows.push(match self.entering.iter().find(|g| g.id == id) {
+                Some(g) => {
+                    let what = g.what;
+                    el.with_animation(("enter", g.seq), motion(), move |el, d| away(el, theme, what, 1. - d))
+                        .into_any_element()
+                }
+                None => el.into_any_element(),
             });
         }
         rows.extend(ghosts_at(self.inbox.items.len()));
@@ -639,6 +650,7 @@ impl Render for MainWindow {
         let t = self.theme;
         // Finished ghosts paint nothing; drop them on the next render.
         self.ghosts.retain(|g| g.at.elapsed() < MOTION * 2);
+        self.entering.retain(|g| g.at.elapsed() < MOTION * 2);
         // The sidebar shows the blurred window background through a translucent tint.
         // 0.9 keeps ink2 above 4.5:1 even over a black or white desktop.
         let tint = Rgba { a: 0.9, ..t.subtle };
