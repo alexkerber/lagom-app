@@ -26,8 +26,16 @@ const INBOX: &[Message] = &[
     Message { from: "Lagom releases", time: "Mon", subject: "Version 0.4 is out", snippet: "Faster threads, fewer settings. Changelog inside.", unread: false },
 ];
 
+// Light glass over a dark desktop measured #9A9A9A; 0.7 keeps ink2 at 4.6:1 there.
+// shortcut: measured on one dark desktop only, re-measure over black and busy wallpapers.
+const GLASS_TINT: f32 = 0.7;
+
+pub const SIDEBAR_WIDTH: f32 = 248.;
+
 pub struct MainWindow {
     theme: Theme,
+    /// Liquid Glass sits under the sidebar (macOS 26+).
+    glass: bool,
     selected: usize,
     _appearance: gpui::Subscription,
 }
@@ -41,6 +49,7 @@ impl MainWindow {
         Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             selected: 0,
+            glass: crate::glass::install(window, SIDEBAR_WIDTH as f64),
             _appearance: appearance,
         }
     }
@@ -154,7 +163,7 @@ impl MainWindow {
         };
 
         div()
-            .w(px(248.))
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -487,7 +496,8 @@ impl Render for MainWindow {
         let t = self.theme;
         // The sidebar shows the blurred window background through a translucent tint.
         // 0.9 keeps ink2 above 4.5:1 even over a black or white desktop.
-        let tint = Rgba { a: 0.9, ..t.subtle };
+        // With Liquid Glass the tint drops so the glass shows through GPUI's Metal layer.
+        let tint = Rgba { a: if self.glass { GLASS_TINT } else { 0.9 }, ..t.subtle };
         div()
             .size_full()
             .flex()
