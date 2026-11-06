@@ -2,7 +2,7 @@ use crate::{
     account::{Account, Security, ServerConfig},
     Error, Result,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 pub struct Store {
@@ -22,15 +22,14 @@ impl Store {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
-            db.execute_batch("BEGIN IMMEDIATE;
-                CREATE TABLE accounts (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, email TEXT NOT NULL,
-                imap_host TEXT NOT NULL, imap_port INTEGER NOT NULL, imap_security TEXT NOT NULL, imap_username TEXT NOT NULL,
-                smtp_host TEXT NOT NULL, smtp_port INTEGER NOT NULL, smtp_security TEXT NOT NULL, smtp_username TEXT NOT NULL);
-                PRAGMA user_version = 1; COMMIT;")?;
+            db.execute_batch(include_str!("schema_v1.sql"))?;
+        }
+        if version < 2 {
+            db.execute_batch(include_str!("schema_v2.sql"))?;
         }
         Ok(Self { db })
     }
@@ -109,5 +108,367 @@ mod tests {
                 .unwrap(),
             "wal"
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderRole {
+    Inbox,
+    Sent,
+    Drafts,
+    Trash,
+    Archive,
+    Junk,
+    Other,
+}
+impl FolderRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Sent => "sent",
+            Self::Drafts => "drafts",
+            Self::Trash => "trash",
+            Self::Archive => "archive",
+            Self::Junk => "junk",
+            Self::Other => "other",
+        }
+    }
+    pub fn from_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "inbox" => Self::Inbox,
+            "sent" | "sent mail" | "sent messages" => Self::Sent,
+            "drafts" => Self::Drafts,
+            "trash" | "deleted items" | "deleted messages" => Self::Trash,
+            "archive" | "all mail" | "[gmail]/all mail" => Self::Archive,
+            "junk" | "spam" => Self::Junk,
+            _ => Self::Other,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folder {
+    pub id: i64,
+    pub account: String,
+    pub name: String,
+    pub delimiter: Option<String>,
+    pub role: FolderRole,
+    pub uidvalidity: Option<u32>,
+    pub uidnext: Option<u32>,
+    pub last_uid: u32,
+    pub highest_modseq: Option<u64>,
+    pub unread: u64,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageSummary {
+    pub id: i64,
+    pub account: String,
+    pub folder: i64,
+    pub uid: u32,
+    pub message_id: String,
+    pub thread_key: String,
+    pub from_name: String,
+    pub from_address: String,
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub date: i64,
+    pub snippet: String,
+    pub seen: bool,
+    pub flagged: bool,
+    pub has_attachments: bool,
+    pub size: u32,
+    pub snoozed_until: Option<i64>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Message {
+    pub summary: MessageSummary,
+    pub body_text: String,
+    pub body_html: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub inbox: u64,
+    pub later: u64,
+}
+
+const SUMMARY_COLUMNS: &str = "m.id,m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to_addresses,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,m.snoozed_until";
+fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
+    Ok(MessageSummary {
+        id: r.get(0)?,
+        account: r.get(1)?,
+        folder: r.get(2)?,
+        uid: r.get(3)?,
+        message_id: r.get(4)?,
+        thread_key: r.get(5)?,
+        from_name: r.get(6)?,
+        from_address: r.get(7)?,
+        to: r.get(8)?,
+        cc: r.get(9)?,
+        subject: r.get(10)?,
+        date: r.get(11)?,
+        snippet: r.get(12)?,
+        seen: r.get(13)?,
+        flagged: r.get(14)?,
+        has_attachments: r.get(15)?,
+        size: r.get(16)?,
+        snoozed_until: r.get(17)?,
+    })
+}
+fn folder_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
+    let role: String = r.get(4)?;
+    Ok(Folder {
+        id: r.get(0)?,
+        account: r.get(1)?,
+        name: r.get(2)?,
+        delimiter: r.get(3)?,
+        role: FolderRole::from_name(&role),
+        uidvalidity: r.get(5)?,
+        uidnext: r.get(6)?,
+        last_uid: r.get(7)?,
+        highest_modseq: r.get(8)?,
+        unread: r.get(9)?,
+    })
+}
+impl Store {
+    pub fn save_folder(
+        &self,
+        account: &str,
+        name: &str,
+        delimiter: Option<&str>,
+        role: FolderRole,
+    ) -> Result<i64> {
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Err(Error::Invalid("invalid folder name"));
+        }
+        Ok(self.db.query_row("INSERT INTO folders(account,name,delimiter,role) VALUES(?1,?2,?3,?4) ON CONFLICT(account,name) DO UPDATE SET delimiter=excluded.delimiter,role=excluded.role RETURNING id",params![account,name,delimiter,role.as_str()],|r|r.get(0))?)
+    }
+    pub fn folders(&self, account: &str, now: i64) -> Result<Vec<Folder>> {
+        let mut stmt = self.db.prepare("SELECT f.id,f.account,f.name,f.delimiter,f.role,f.uidvalidity,f.uidnext,f.last_uid,f.highest_modseq,(SELECT count(*) FROM messages m WHERE m.folder=f.id AND NOT m.seen AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2)) FROM folders f WHERE f.account=?1 ORDER BY f.name")?;
+        let rows = stmt.query_map(params![account, now], folder_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn folder(&self, id: i64) -> Result<Folder> {
+        self.db.query_row("SELECT id,account,name,delimiter,role,uidvalidity,uidnext,last_uid,highest_modseq,0 FROM folders WHERE id=?1",[id],folder_row).optional()?.ok_or(Error::NotFound)
+    }
+    pub fn save_message(&self, message: &Message) -> Result<i64> {
+        let m = &message.summary;
+        Ok(self.db.query_row("INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,body_html)
+        SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18 FROM folders WHERE id=?2 AND account=?1
+        ON CONFLICT(folder,uid) DO UPDATE SET message_id=excluded.message_id,thread_key=excluded.thread_key,from_name=excluded.from_name,from_address=excluded.from_address,to_addresses=excluded.to_addresses,cc=excluded.cc,subject=excluded.subject,date=excluded.date,snippet=excluded.snippet,seen=excluded.seen,flagged=excluded.flagged,has_attachments=excluded.has_attachments,size=excluded.size,body_text=excluded.body_text,body_html=excluded.body_html RETURNING id",
+        params![m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,message.body_text,message.body_html],|r|r.get(0))?)
+    }
+    pub fn message(&self, id: i64) -> Result<Message> {
+        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(18)?,body_html:r.get(19)? })).optional()?.ok_or(Error::NotFound)
+    }
+    pub fn list_messages(
+        &self,
+        folder: i64,
+        now: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MessageSummary>> {
+        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.folder=?1 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) ORDER BY m.date DESC,m.id DESC LIMIT ?3 OFFSET ?4"))?;
+        let rows = stmt.query_map(params![folder, now, limit, offset], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn search(
+        &self,
+        account: &str,
+        query: &str,
+        now: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MessageSummary>> {
+        if query.len() > 4096 {
+            return Err(Error::Invalid("search query too long"));
+        }
+        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND m.account=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY rank LIMIT ?4 OFFSET ?5"))?;
+        let rows = stmt.query_map(params![query, account, now, limit, offset], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn snooze(&self, id: i64, until: Option<i64>) -> Result<()> {
+        if self.db.execute(
+            "UPDATE messages SET snoozed_until=?2 WHERE id=?1",
+            params![id, until],
+        )? == 0
+        {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+    pub fn later(
+        &self,
+        account: &str,
+        now: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MessageSummary>> {
+        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.account=?1 AND m.snoozed_until>?2 ORDER BY m.snoozed_until,m.id LIMIT ?3 OFFSET ?4"))?;
+        let rows = stmt.query_map(params![account, now, limit, offset], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn counts(&self, account: &str, now: i64) -> Result<Counts> {
+        Ok(self.db.query_row("SELECT count(CASE WHEN f.role='inbox' AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) THEN 1 END),count(CASE WHEN m.snoozed_until>?2 THEN 1 END) FROM messages m JOIN folders f ON f.id=m.folder WHERE m.account=?1",params![account,now],|r|Ok(Counts { inbox:r.get(0)?,later:r.get(1)? }))?)
+    }
+    pub fn set_flags(&self, folder: i64, uid: u32, seen: bool, flagged: bool) -> Result<()> {
+        self.db.execute(
+            "UPDATE messages SET seen=?3,flagged=?4 WHERE folder=?1 AND uid=?2",
+            params![folder, uid, seen, flagged],
+        )?;
+        Ok(())
+    }
+    pub fn delete_message(&self, id: i64) -> Result<()> {
+        self.db.execute("DELETE FROM messages WHERE id=?1", [id])?;
+        Ok(())
+    }
+    pub fn known_uids(&self, folder: i64) -> Result<Vec<u32>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT uid FROM messages WHERE folder=?1 ORDER BY uid")?;
+        let rows = stmt.query_map([folder], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn reset_uidvalidity(&mut self, folder: i64, validity: u32) -> Result<bool> {
+        let old = self.folder(folder)?.uidvalidity;
+        if old == Some(validity) {
+            return Ok(false);
+        }
+        let tx = self.db.transaction()?;
+        tx.execute("DELETE FROM messages WHERE folder=?1", [folder])?;
+        tx.execute("UPDATE folders SET uidvalidity=?2,uidnext=NULL,last_uid=0,highest_modseq=NULL WHERE id=?1",params![folder,validity])?;
+        tx.commit()?;
+        Ok(true)
+    }
+    pub fn finish_sync(
+        &mut self,
+        folder: i64,
+        present: &std::collections::HashSet<u32>,
+        last_uid: u32,
+        uidnext: Option<u32>,
+        highest_modseq: Option<u64>,
+    ) -> Result<()> {
+        let known = self.known_uids(folder)?;
+        let tx = self.db.transaction()?;
+        for uid in known {
+            if !present.contains(&uid) {
+                tx.execute(
+                    "DELETE FROM messages WHERE folder=?1 AND uid=?2",
+                    params![folder, uid],
+                )?;
+            }
+        }
+        tx.execute(
+            "UPDATE folders SET last_uid=?2,uidnext=?3,highest_modseq=?4 WHERE id=?1",
+            params![folder, last_uid, uidnext, highest_modseq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mail_tests {
+    use super::*;
+    fn setup() -> (tempfile::TempDir, Store, Account, i64) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("mail.db")).unwrap();
+        let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
+        let a = Account::new("a@gmail.com".into(), i, s).unwrap();
+        store.save_account(&a).unwrap();
+        let f = store
+            .save_folder(&a.id, "INBOX", Some("/"), FolderRole::Inbox)
+            .unwrap();
+        (temp, store, a, f)
+    }
+    fn mail(a: &Account, f: i64, uid: u32) -> Message {
+        Message {
+            summary: MessageSummary {
+                account: a.id.clone(),
+                folder: f,
+                uid,
+                subject: format!("Hello {uid}"),
+                from_name: "Alice".into(),
+                from_address: "alice@example.com".into(),
+                date: uid as i64,
+                ..Default::default()
+            },
+            body_text: "rust sqlite search".into(),
+            body_html: None,
+        }
+    }
+    #[test]
+    fn insert_page_fts_and_snooze() {
+        let (_temp, s, a, f) = setup();
+        let mut m = mail(&a, f, 1);
+        let id = s.save_message(&m).unwrap();
+        s.save_message(&mail(&a, f, 2)).unwrap();
+        assert_eq!(s.message(id).unwrap().body_text, m.body_text);
+        assert_eq!(s.list_messages(f, 100, 1, 0).unwrap()[0].uid, 2);
+        assert_eq!(s.list_messages(f, 100, 1, 1).unwrap()[0].uid, 1);
+        for q in ["Hello", "Alice", "from_address:alice", "sqlite"] {
+            assert_eq!(s.search(&a.id, q, 100, 10, 0).unwrap().len(), 2);
+        }
+        s.snooze(id, Some(200)).unwrap();
+        assert_eq!(s.list_messages(f, 100, 10, 0).unwrap().len(), 1);
+        assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().len(), 1);
+        assert_eq!(s.counts(&a.id, 100).unwrap(), Counts { inbox: 1, later: 1 });
+        assert_eq!(s.later(&a.id, 100, 10, 0).unwrap().len(), 1);
+        assert_eq!(s.folders(&a.id, 100).unwrap()[0].unread, 1);
+        m.body_text = "replacement".into();
+        assert_eq!(s.save_message(&m).unwrap(), id);
+        assert_eq!(s.message(id).unwrap().summary.snoozed_until, Some(200));
+        assert_eq!(s.list_messages(f, 200, 10, 0).unwrap().len(), 2);
+        assert_eq!(s.search(&a.id, "replacement", 200, 10, 0).unwrap().len(), 1);
+        s.delete_message(id).unwrap();
+        assert!(s
+            .search(&a.id, "replacement", 200, 10, 0)
+            .unwrap()
+            .is_empty());
+        assert!(s.search(&a.id, "\"", 100, 10, 0).is_err());
+    }
+    #[test]
+    fn uid_reset_and_expunge() {
+        let (_t, mut s, a, f) = setup();
+        s.reset_uidvalidity(f, 10).unwrap();
+        let id = s.save_message(&mail(&a, f, 1)).unwrap();
+        s.save_message(&mail(&a, f, 2)).unwrap();
+        assert!(!s.reset_uidvalidity(f, 10).unwrap());
+        s.finish_sync(f, &[2].into_iter().collect(), 2, Some(3), None)
+            .unwrap();
+        assert!(s.message(id).is_err());
+        assert_eq!(s.known_uids(f).unwrap(), vec![2]);
+        assert!(s.reset_uidvalidity(f, 11).unwrap());
+        assert!(s.known_uids(f).unwrap().is_empty());
+        assert_eq!(s.folder(f).unwrap().last_uid, 0);
+        assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
+    }
+    #[test]
+    fn migration_from_v1_and_future_rejected() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("v1.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(include_str!("schema_v1.sql")).unwrap();
+        let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
+        let a = Account::new("a@gmail.com".into(), i, s).unwrap();
+        let s = Store { db };
+        s.save_account(&a).unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.accounts().unwrap(), vec![a]);
+        assert_eq!(
+            s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            2
+        );
+        s.db.pragma_update(None, "user_version", 99).unwrap();
+        drop(s);
+        assert!(Store::open(path).is_err());
+    }
+    #[test]
+    fn rejects_cross_account_message() {
+        let (_t, s, mut a, f) = setup();
+        a.id = "other".into();
+        s.save_account(&a).unwrap();
+        assert!(s.save_message(&mail(&a, f, 1)).is_err());
     }
 }
