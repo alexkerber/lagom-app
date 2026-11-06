@@ -29,6 +29,8 @@ const INBOX: &[Message] = &[
 pub struct MainWindow {
     theme: Theme,
     selected: usize,
+    /// `LAGOM_SCREEN=empty` shows the empty inbox until real mail can reach zero.
+    empty: bool,
     _appearance: gpui::Subscription,
 }
 
@@ -41,12 +43,13 @@ impl MainWindow {
         Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             selected: 0,
+            empty: std::env::var("LAGOM_SCREEN").as_deref() == Ok("empty"),
             _appearance: appearance,
         }
     }
 }
 
-fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
+pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     div().font_family(font::MONO).text_size(px(size::MONO)).text_color(color).child(text.into())
 }
 
@@ -111,7 +114,8 @@ impl MainWindow {
                 .child(icon(path, if active { t.ink } else { t.ink2 }, 16.))
                 .child(div().flex_1().child(label))
                 .when_some(count, |d, c| {
-                    if active {
+                    // A zero count is calm: no accent badge.
+                    if active && c != "0" {
                         d.child(
                             div()
                                 .min_w(px(20.))
@@ -203,7 +207,7 @@ impl MainWindow {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(nav("icons/inbox.svg", "Inbox", Some("7"), true))
+                    .child(nav("icons/inbox.svg", "Inbox", Some(if self.empty { "0" } else { "7" }), true))
                     .child(nav("icons/later.svg", "Later", Some("2"), false))
                     .child(nav("icons/sent.svg", "Sent", None, false))
                     .child(nav("icons/done.svg", "Done", Some("G D"), false)),
@@ -508,8 +512,8 @@ impl Render for MainWindow {
                     .border_color(t.line)
                     .rounded(px(radius::PANEL))
                     .overflow_hidden()
-                    .child(self.message_list())
-                    .child(self.reading_pane()),
+                    .when(self.empty, |d| d.child(crate::empty_inbox::view(&t)))
+                    .when(!self.empty, |d| d.child(self.message_list()).child(self.reading_pane())),
             )
     }
 }

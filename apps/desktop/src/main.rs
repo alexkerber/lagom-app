@@ -1,3 +1,4 @@
+mod empty_inbox;
 mod main_window;
 mod theme;
 
@@ -22,6 +23,7 @@ impl AssetSource for Assets {
             "icons/done.svg" => include_bytes!("../assets/icons/done.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
             "icons/chevron.svg" => include_bytes!("../assets/icons/chevron.svg"),
+            "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(bytes)))
