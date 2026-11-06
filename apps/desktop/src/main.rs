@@ -1,39 +1,59 @@
+mod main_window;
+mod theme;
+
+use std::borrow::Cow;
+
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Window, WindowBounds,
+    prelude::*, px, size, App, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
 
-// Placeholder palette until the brand concept from Claude design is picked.
-const PAPER: u32 = 0xf4efe4;
-const INK: u32 = 0x1c1b19;
+use main_window::MainWindow;
 
-struct Lagom;
+/// Icons and fonts compiled into the binary.
+struct Assets;
 
-impl Render for Lagom {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .justify_center()
-            .items_center()
-            .gap_2()
-            .bg(rgb(PAPER))
-            .text_color(rgb(INK))
-            .child(div().text_3xl().child("lagom"))
-            .child(div().text_sm().child("Not too much. Not too little. Just right."))
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let bytes: &'static [u8] = match path {
+            "icons/inbox.svg" => include_bytes!("../assets/icons/inbox.svg"),
+            "icons/later.svg" => include_bytes!("../assets/icons/later.svg"),
+            "icons/sent.svg" => include_bytes!("../assets/icons/sent.svg"),
+            "icons/done.svg" => include_bytes!("../assets/icons/done.svg"),
+            "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
+            "icons/chevron.svg" => include_bytes!("../assets/icons/chevron.svg"),
+            _ => return Ok(None),
+        };
+        Ok(Some(Cow::Borrowed(bytes)))
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(Vec::new())
     }
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(960.), px(640.)), cx);
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
+        // Inter Tight is bundled. Inter and Geist Mono come from the system for now.
+        // shortcut: relies on installed Inter and Geist Mono, bundle them before the first release.
+        cx.text_system()
+            .add_fonts(vec![
+                Cow::Borrowed(include_bytes!("../assets/fonts/InterTight-Bold.ttf")),
+                Cow::Borrowed(include_bytes!("../assets/fonts/InterTight-ExtraBold.ttf")),
+            ])
+            .expect("load bundled fonts");
+
+        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("lagom".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| Lagom),
+            |window, cx| cx.new(|cx| MainWindow::new(window, cx)),
         )
         .expect("open main window");
         cx.activate(true);

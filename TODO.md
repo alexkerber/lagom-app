@@ -6,7 +6,8 @@
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42.
 - [x] Brand concept: Concept D "Butik" from Claude design.
-- [ ] Exact colour tokens from Claude design (current hex values are read from a screenshot).
+- [x] Exact colour tokens from Claude design, in `apps/desktop/src/theme.rs` (from ConceptD and MainWindowD).
+- [ ] Website: switch `site/` to the exact tokens and drop the parts Alex rejected (0 kr cards, info strip, pill buttons).
 - [x] Website in `site/`, Concept D, deployed with GitHub Pages.
 - [ ] Website: point the domain at GitHub Pages.
 
@@ -21,6 +22,10 @@
 - [ ] UniFFI bindings from `lagom-core` for both mobile apps.
 
 ## Mail (v1)
+
+- [x] Main window, Concept D, light and dark (static sample data).
+- [ ] Command palette, compose and empty inbox: structure from B, dressed in D tokens.
+- [ ] Typeface trial: Hauora Sans against Inter (Alex 2026-11-06).
 
 - [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features).
 - [ ] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature).
