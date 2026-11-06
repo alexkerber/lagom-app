@@ -104,13 +104,14 @@ pub mod font {
     pub const DISPLAY: &str = "Inter Tight"; // 700–800, bundled
     pub const MONO: &str = "Geist Mono"; // keys and counts
 
-    /// UI text, 400–600: Inter. `LAGOM_UI_FONT=system` tries the system font (SF Pro on macOS)
-    /// for a side-by-side trial; GPUI resolves ".SystemUIFont" to ".AppleSystemUIFont".
+    /// UI text, 400–600: the platform's system font (SF Pro on macOS), chosen by the owner
+    /// 2026-11-06 because it feels native. GPUI maps ".SystemUIFont" per platform.
+    /// `LAGOM_UI_FONT=inter` switches back to Inter for comparison.
     pub fn ui() -> &'static str {
         static UI: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
         UI.get_or_init(|| match std::env::var("LAGOM_UI_FONT").as_deref() {
-            Ok("system") => ".SystemUIFont",
-            _ => "Inter",
+            Ok("inter") => "Inter",
+            _ => ".SystemUIFont",
         })
     }
 }
