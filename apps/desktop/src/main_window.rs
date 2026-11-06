@@ -161,7 +161,9 @@ impl MainWindow {
             .flex_col()
             .gap(px(20.))
             .px(px(12.))
-            .py(px(14.))
+            .pb(px(14.))
+            // Room for the macOS traffic lights.
+            .when(cfg!(target_os = "macos"), |d| d.child(div().h(px(16.)).flex_shrink_0()))
             .child(
                 div()
                     .flex()
@@ -483,10 +485,13 @@ impl MainWindow {
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        // The sidebar shows the blurred window background through a translucent tint.
+        // 0.9 keeps ink2 above 4.5:1 even over a black or white desktop.
+        let tint = Rgba { a: 0.9, ..t.subtle };
         div()
             .size_full()
             .flex()
-            .bg(t.subtle)
+            .bg(tint)
             .text_color(t.ink)
             .font_family(font::UI)
             .text_size(px(size::BASE))

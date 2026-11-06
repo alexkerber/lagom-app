@@ -4,8 +4,8 @@ mod theme;
 use std::borrow::Cow;
 
 use gpui::{
-    prelude::*, px, size, App, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
-    WindowOptions,
+    point, prelude::*, px, size, App, Application, AssetSource, Bounds, SharedString,
+    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 
 use main_window::MainWindow;
@@ -47,10 +47,14 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // macOS: no visible title bar, traffic lights inside the sidebar. The invisible
+                // system title bar still moves the window. Windows and Linux keep their native bar.
                 titlebar: Some(TitlebarOptions {
                     title: Some("lagom".into()),
-                    ..Default::default()
+                    appears_transparent: cfg!(target_os = "macos"),
+                    traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(18.))),
                 }),
+                window_background: WindowBackgroundAppearance::Blurred,
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| MainWindow::new(window, cx)),
