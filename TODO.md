@@ -33,8 +33,8 @@
 - [x] Window drags by its top edge on macOS (Alex verified by hand, 2026-11-06).
 
 - [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features). Sidebar group and ⌘K "move <folder>" work on sample data (`feat/folders`); real IMAP/Gmail sync is still open.
-- [ ] Folders: the "+" in the heading and the "New folder" row do nothing yet. Wire them to an inline name field once the app has text inputs; ⌘K "move <name>" creates a folder today.
-- [ ] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature).
+- [ ] Folders: the "+" in the heading and the "New folder" row do nothing yet. Wire them to an inline name field; ⌘K "move <name>" creates the folder on the server today.
+- [x] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature). Local only: L/← until tomorrow 08:00; ⌘K offers 18:00, tomorrow 08:00 and Monday 08:00; due mail returns to Inbox (`feat/real-mail`).
 - [x] Swipe a row with two fingers (trackpad, Magic Mouse) to Done or Later; Esc springs it back (Alex 2026-11-06).
 - [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (Alex 2026-11-06, `feat/folders`).
 - [ ] Swipe: try it by hand on a trackpad, a Magic Mouse and a mouse drag (incl. release outside the window), including the 245 px delete stage and the colour fade; tests cover only the state logic.
@@ -87,5 +87,11 @@ Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
 - [ ] HTML rendering (HTML is cached as untrusted content only).
 - [ ] Attachment download.
 - [ ] Threading UI.
-- [ ] Connect desktop UI to the core on workers; desktop remains on sample data in this branch.
+- [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
+- [ ] Desktop: try by hand with a real account. Only GreenMail, tests and screenshots cover it; nobody has clicked or typed in the live window.
+- [ ] Notifications for new mail.
+- [ ] Outlook preset: password login will fail until OAuth2 lands; the form says so in its note only.
+- [ ] Bodies over 4 MiB are stored as headers with a "not downloaded" body; fetch on demand.
+- [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).
+- [ ] Message list virtualisation: the list reads 200 rows per page and renders them all.
 - [ ] Real-provider TLS/STARTTLS and native keychain acceptance testing, Linux/Windows builds, remaining performance budgets.
