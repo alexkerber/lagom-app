@@ -82,7 +82,7 @@ impl Account {
                 .email
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control())
-            || !self.email.contains('@')
+            || self.email.parse::<lettre::Address>().is_err()
             || self.display_name.chars().any(char::is_control)
         {
             return Err(Error::Invalid("invalid account"));
@@ -134,6 +134,18 @@ mod tests {
             }
             .validate()
             .is_err());
+        }
+    }
+    #[test]
+    fn invalid_account_addresses_are_rejected() {
+        let (imap, smtp) = crate::presets::servers("a@gmail.com").unwrap();
+        for email in [
+            "@gmail.com",
+            "a@",
+            "bad address@example.com",
+            "a@example.com\r\n",
+        ] {
+            assert!(Account::new(email.into(), imap.clone(), smtp.clone()).is_err());
         }
     }
     #[test]

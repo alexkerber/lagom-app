@@ -42,6 +42,7 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
         .map(|v| v.into_owned());
     let snippet = body_text
         .split_whitespace()
+        .take(200)
         .collect::<Vec<_>>()
         .join(" ")
         .chars()

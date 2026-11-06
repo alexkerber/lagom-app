@@ -217,14 +217,20 @@ impl ImapSync {
             } else {
                 "(UID FLAGS)".into()
             };
-        let refresh: Vec<_> = if mailbox.highest_modseq.is_some() && folder.highest_modseq.is_some()
-        {
-            store.known_uids(id)?
+        let sets = if mailbox.highest_modseq.is_some() && folder.highest_modseq.is_some() {
+            vec!["1:*".to_owned()]
         } else {
-            sorted.iter().rev().take(limit).copied().collect()
+            sorted
+                .iter()
+                .rev()
+                .take(limit)
+                .copied()
+                .collect::<Vec<_>>()
+                .chunks(100)
+                .map(uid_set)
+                .collect()
         };
-        for chunk in refresh.chunks(100) {
-            let set = uid_set(chunk);
+        for set in sets {
             let updates = net(async {
                 self.session
                     .uid_fetch(set, &query)
@@ -271,7 +277,7 @@ impl ImapSync {
         if header.len() >= 262144 {
             return Err(Error::Invalid("message header exceeds 256 KiB"));
         }
-        let mut message = mime::parse(header)?;
+        let mut message;
         let body = fetch
             .bodystructure()
             .ok_or(Error::Network("IMAP BODYSTRUCTURE missing"))?;
@@ -328,18 +334,32 @@ impl ImapSync {
                 }
                 raw.extend_from_slice(text);
                 let parsed = mime::parse(&raw)?;
-                message.body_text = parsed.body_text;
-                message.body_html = parsed.body_html;
-                message.summary.snippet = parsed.summary.snippet;
+                if path.is_empty() {
+                    message = parsed;
+                } else {
+                    message = mime::parse(header)?;
+                    message.body_text = parsed.body_text;
+                    message.body_html = parsed.body_html;
+                    message.summary.snippet = parsed.summary.snippet;
+                }
             } else {
                 return Ok(());
             }
+        } else {
+            message = mime::parse(header)?;
         }
         let (seen, flagged) = flags(fetch);
         let m = &mut message.summary;
         m.account = self.account.id.clone();
         m.folder = folder.id;
         m.uid = uid;
+        if m.thread_key.is_empty() {
+            m.thread_key = format!(
+                "{}:{}:{uid}",
+                folder.id,
+                folder.uidvalidity.unwrap_or_default()
+            );
+        }
         m.seen = seen;
         m.flagged = flagged;
         m.has_attachments = attachments;
@@ -448,6 +468,9 @@ impl ImapSync {
         self.create_folder(store, fallback).await
     }
     pub async fn archive(&mut self, store: &mut Store, id: i64) -> Result<()> {
+        if store.message(id)?.summary.account != self.account.id {
+            return Err(Error::Invalid("message belongs to another account"));
+        }
         let fallback = if presets::is_gmail(&self.account) {
             "[Gmail]/All Mail"
         } else {
@@ -459,6 +482,9 @@ impl ImapSync {
         self.move_message(store, id, target).await
     }
     pub async fn trash(&mut self, store: &mut Store, id: i64) -> Result<()> {
+        if store.message(id)?.summary.account != self.account.id {
+            return Err(Error::Invalid("message belongs to another account"));
+        }
         let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
         self.move_message(store, id, target).await
     }
@@ -582,5 +608,104 @@ mod tests {
         assert_eq!(role("Archive", &[]), FolderRole::Archive);
         assert!(validate_folder("bad\r\nDELETE").is_err());
         assert_eq!(uid_set(&[1, 5, 9]), "1,5,9");
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[tokio::test]
+    async fn condstore_special_use_and_uidvalidity_guard() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (r, mut w) = socket.into_split();
+            let mut read = BufReader::new(r);
+            w.write_all(b"* OK Test server\r\n").await.unwrap();
+            let mut selections = 0;
+            loop {
+                let mut line = String::new();
+                if read.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                let response = if command.starts_with("LOGIN ") {
+                    format!("{tag} OK Logged in\r\n")
+                } else if command == "CAPABILITY" {
+                    format!(
+                        "* CAPABILITY IMAP4rev1 CONDSTORE SPECIAL-USE\r\n{tag} OK capabilities\r\n"
+                    )
+                } else if command == "LIST \"\" \"*\" RETURN (SPECIAL-USE)" {
+                    format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\Archive) \"/\" \"Localized\"\r\n{tag} OK folders\r\n")
+                } else if command == "SELECT \"INBOX\" (CONDSTORE)" {
+                    selections += 1;
+                    let validity = if selections == 1 { 7 } else { 8 };
+                    format!("* 1 EXISTS\r\n* OK [UIDVALIDITY {validity}] valid\r\n* OK [UIDNEXT 2] next\r\n* OK [HIGHESTMODSEQ 11] highest\r\n{tag} OK selected\r\n")
+                } else if command == "UID SEARCH ALL" {
+                    format!("* SEARCH 1\r\n{tag} OK search\r\n")
+                } else if command == "UID FETCH 1:* (UID FLAGS MODSEQ) (CHANGEDSINCE 10)" {
+                    format!("* 1 FETCH (UID 1 FLAGS (\\Seen \\Flagged) MODSEQ (11))\r\n{tag} OK fetch\r\n")
+                } else if command == "LOGOUT" {
+                    w.write_all(format!("* BYE bye\r\n{tag} OK logout\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                    break;
+                } else {
+                    panic!("unexpected command (credentials omitted)");
+                };
+                w.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let config = ServerConfig {
+            host: "127.0.0.1".into(),
+            port,
+            security: Security::Plain,
+            username: "unit".into(),
+        };
+        let account = Account::new("unit@test.local".into(), config.clone(), config).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("protocol.db")).unwrap();
+        store.save_account(&account).unwrap();
+        let inbox = store
+            .save_folder(&account.id, "INBOX", Some("/"), FolderRole::Inbox)
+            .unwrap();
+        store.reset_uidvalidity(inbox, 7).unwrap();
+        let id = store
+            .save_message(&crate::store::Message {
+                summary: crate::store::MessageSummary {
+                    account: account.id.clone(),
+                    folder: inbox,
+                    uid: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .finish_sync(inbox, &[1].into_iter().collect(), 1, Some(2), Some(10))
+            .unwrap();
+        let mut imap = ImapSync::login(&account, "test").await.unwrap();
+        let folders = imap.list_folders(&store).await.unwrap();
+        assert!(folders
+            .iter()
+            .any(|f| f.name == "Localized" && f.role == FolderRole::Archive));
+        imap.sync_folder(&mut store, inbox, DEFAULT_LIMIT)
+            .await
+            .unwrap();
+        let message = store.message(id).unwrap();
+        assert!(message.summary.seen && message.summary.flagged);
+        assert_eq!(store.folder(inbox).unwrap().highest_modseq, Some(11));
+        assert!(matches!(
+            imap.mark_seen(&mut store, id, false).await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(store.message(id).is_err());
+        imap.logout().await.unwrap();
+        server.await.unwrap();
+        assert!(log::STATIC_MAX_LEVEL < log::LevelFilter::Trace);
     }
 }

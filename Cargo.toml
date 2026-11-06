@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lagom-core", "apps/desktop"]
+members = ["crates/lagom-core", "crates/lagom-cli", "apps/desktop"]
 
 [workspace.package]
 edition = "2021"

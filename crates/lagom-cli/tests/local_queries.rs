@@ -1,0 +1,53 @@
+use lagom_core::{
+    account::Account,
+    presets,
+    store::{FolderRole, Message, MessageSummary, Store},
+};
+fn run(db: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database")
+        .arg(db)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+#[test]
+fn cli_reads_saved_mail_without_network_or_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("cli.db");
+    let store = Store::open(&db).unwrap();
+    let (i, s) = presets::servers("cli@gmail.com").unwrap();
+    let a = Account::new("cli@gmail.com".into(), i, s).unwrap();
+    store.save_account(&a).unwrap();
+    let f = store
+        .save_folder(&a.id, "INBOX", Some("/"), FolderRole::Inbox)
+        .unwrap();
+    let id = store
+        .save_message(&Message {
+            summary: MessageSummary {
+                account: a.id,
+                folder: f,
+                uid: 1,
+                subject: "CLI fixture".into(),
+                from_address: "alice@example.com".into(),
+                ..Default::default()
+            },
+            body_text: "Searchable mail body".into(),
+            body_html: None,
+        })
+        .unwrap();
+    drop(store);
+    assert!(run(&db, &["accounts"]).contains("cli@gmail.com"));
+    assert!(run(&db, &["folders"]).contains("INBOX"));
+    assert!(run(&db, &["list", "--limit", "1"]).contains("CLI fixture"));
+    assert!(run(&db, &["show", &id.to_string()]).contains("Searchable mail body"));
+    assert!(run(&db, &["search", "Searchable"]).contains("CLI fixture"));
+    assert!(run(&db, &["--help"]).contains("add-account"));
+    assert!(run(&db, &["sync", "--help"]).contains("ACCOUNT"));
+}

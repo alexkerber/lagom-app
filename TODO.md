@@ -69,3 +69,19 @@ Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
 - [ ] Task list on the start screen. Lists "Work" and "Private", plus custom lists.
 - [ ] Turn a mail into a task in one key press. The task links back to the mail.
 - [ ] Sync tasks with the mail account (for example Google Tasks, Microsoft To Do).
+
+## Mail core
+
+- [x] Accounts, OS keychain app passwords and configurable provider presets.
+- [x] Migrated SQLite/WAL store, FTS5 search, paged metadata and local Later/snooze queries.
+- [x] IMAP folder discovery, bounded initial and incremental sync, flags, expunges, IDLE and mail operations.
+- [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.
+- [x] `lagom-cli` and disposable GreenMail integration coverage.
+- [ ] Gmail/Microsoft OAuth2 (XOAUTH2). Outlook.com requires OAuth2; the preset alone does not enable password login.
+- [ ] JMAP.
+- [ ] Push beyond IMAP IDLE.
+- [ ] HTML rendering (HTML is cached as untrusted content only).
+- [ ] Attachment download.
+- [ ] Threading UI.
+- [ ] Connect desktop UI to the core on workers; desktop remains on sample data in this branch.
+- [ ] Real-provider TLS/STARTTLS and native keychain acceptance testing, Linux/Windows builds, remaining performance budgets.

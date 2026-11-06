@@ -188,6 +188,7 @@ async fn bounded_initial_sync_multipart_and_idle() {
     let inbox = folder(&store, &account, FolderRole::Inbox);
     let messages = store.list_messages(inbox, now(), 20, 0).unwrap();
     assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| !m.thread_key.is_empty()));
     let mime = messages.iter().find(|m| m.subject == "Multipart").unwrap();
     assert!(mime.has_attachments);
     let body = store.message(mime.id).unwrap();
@@ -214,4 +215,83 @@ async fn bounded_initial_sync_multipart_and_idle() {
     assert_eq!(store.list_messages(inbox, now(), 20, 0).unwrap().len(), 3);
     external.logout().await.unwrap();
     imap.logout().await.unwrap();
+}
+
+#[tokio::test]
+#[cfg_attr(not(lagom_greenmail), ignore = "set LAGOM_GREENMAIL=1; see README")]
+async fn copy_uid_expunge_fallback_preserves_other_deleted_messages() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // GreenMail supports MOVE. Hide only that capability to exercise its real UIDPLUS fallback.
+    let proxy = tokio::spawn(async move {
+        let (client, _) = listener.accept().await.unwrap();
+        let server = TcpStream::connect(("127.0.0.1", 3143)).await.unwrap();
+        let (mut cr, mut cw) = client.into_split();
+        let (sr, mut sw) = server.into_split();
+        let upstream = async {
+            tokio::io::copy(&mut cr, &mut sw).await?;
+            sw.shutdown().await
+        };
+        let downstream = async {
+            let mut read = BufReader::new(sr);
+            loop {
+                let mut line = Vec::new();
+                if read.read_until(b'\n', &mut line).await? == 0 {
+                    break;
+                }
+                if line.starts_with(b"* CAPABILITY ") {
+                    line = String::from_utf8_lossy(&line)
+                        .replace(" MOVE", "")
+                        .into_bytes();
+                }
+                cw.write_all(&line).await?;
+            }
+            cw.shutdown().await
+        };
+        tokio::try_join!(upstream, downstream).unwrap();
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("fallback.db")).unwrap();
+    let mut account = account();
+    let mut external = raw(&account).await;
+    for subject in ["Move me", "Keep deleted"] {
+        let raw = format!("Subject: {subject}\r\n\r\nBody");
+        external.append("INBOX", None, None, raw).await.unwrap();
+    }
+    account.imap.port = port;
+    store.save_account(&account).unwrap();
+    let mut imap = ImapSync::login(&account, "test").await.unwrap();
+    imap.sync(&mut store, DEFAULT_LIMIT).await.unwrap();
+    let inbox = folder(&store, &account, FolderRole::Inbox);
+    let messages = store.list_messages(inbox, now(), 20, 0).unwrap();
+    let moved = messages.iter().find(|m| m.subject == "Move me").unwrap();
+    let kept = messages
+        .iter()
+        .find(|m| m.subject == "Keep deleted")
+        .unwrap();
+    external.select("INBOX").await.unwrap();
+    external
+        .uid_store(kept.uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let target = imap.create_folder(&store, "Fallback").await.unwrap();
+    imap.move_message(&mut store, moved.id, target)
+        .await
+        .unwrap();
+    let present = external.uid_search("ALL").await.unwrap();
+    assert!(present.contains(&kept.uid));
+    assert!(!present.contains(&moved.uid));
+    assert_eq!(store.list_messages(target, now(), 20, 0).unwrap().len(), 1);
+    imap.logout().await.unwrap();
+    external.logout().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), proxy)
+        .await
+        .unwrap()
+        .unwrap();
 }
