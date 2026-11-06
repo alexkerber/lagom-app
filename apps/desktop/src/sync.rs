@@ -60,6 +60,8 @@ pub enum Event {
     Op { op: u64, error: Option<String> },
     /// The new account's id, or why it could not connect.
     Added(Result<String, String>),
+    /// A MarkSeen finished, done or not.
+    Seen(i64),
     /// `delivered`: SMTP took the message, even if `error` says the Sent copy failed.
     Sent { op: u64, delivered: bool, error: Option<String> },
 }
@@ -127,7 +129,8 @@ struct Worker {
     /// One logged-in session per account, reused between commands. Dropped after any error.
     sessions: HashMap<String, ImapSync>,
     idle: HashMap<String, tokio::task::JoinHandle<()>>,
-    /// Store id before a move to (target folder, Message-ID), so undo finds the message again.
+    /// Every store id a moved message had, to (its folder now, Message-ID), so undo and later
+    /// actions that carry an old id still find it.
     moved: HashMap<i64, (i64, String)>,
     /// Commands that arrived during a sync and wait for it to finish.
     deferred: VecDeque<Cmd>,
@@ -159,10 +162,10 @@ impl Worker {
                 self.emit(Event::Changed);
             }
             Cmd::MarkSeen(id) => {
-                // A failure is corrected by the next sync; the UI already shows it read.
-                if self.mark_seen(id).await.is_ok() {
-                    self.emit(Event::Changed);
-                }
+                // Either way the UI drops its override: the store says what the server has.
+                let _ = self.mark_seen(id).await;
+                self.emit(Event::Seen(id));
+                self.emit(Event::Changed);
             }
             Cmd::Send { op, account, mail } => {
                 let (delivered, error) = match self.send(&account, &mail).await {
@@ -227,8 +230,12 @@ impl Worker {
         }
         self.sessions.remove(id);
         if let Ok(account) = self.account(id) {
-            // Gone already is fine; the local data goes either way.
-            let _ = account.delete_password();
+            // Keep the row while the secret stays: without it nobody could find the secret again.
+            if account.delete_password().is_err() {
+                self.emit(Event::Sync(id.to_string(), SyncState::Failed("could not remove the saved password; try Remove again".into())));
+                self.emit(Event::Changed);
+                return;
+            }
         }
         let _ = self.store.delete_account(id);
         self.emit(Event::Changed);
@@ -305,7 +312,10 @@ impl Worker {
         }
         .await;
         self.give(&account.id, session, &result);
-        if let Some(target) = result? {
+        if let Some(target) = result?.filter(|_| !message.message_id.is_empty()) {
+            for place in self.moved.values_mut().filter(|p| p.1 == message.message_id) {
+                place.0 = target;
+            }
             self.moved.insert(id, (target, message.message_id));
         }
         Ok(())
@@ -314,19 +324,16 @@ impl Worker {
     /// The current store id of a message the UI knew as `id`. The core drops a moved row; the
     /// target folder's next sync brings it back, so undo syncs that one folder first.
     // shortcut: a message without Message-ID cannot be found after a move, so its undo fails with a toast; match on headers when that shows up.
-    async fn resolve(&mut self, mut id: i64) -> lagom_core::Result<i64> {
-        while let Some((folder, message_id)) = self.moved.get(&id).cloned() {
-            if self.store.find_message(folder, &message_id)?.is_none() {
-                let account = self.account(&self.store.folder(folder)?.account)?;
-                let mut session = self.take(&account).await?;
-                let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
-                self.give(&account.id, session, &result);
-                result?;
-            }
-            self.moved.remove(&id);
-            id = self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)?;
+    async fn resolve(&mut self, id: i64) -> lagom_core::Result<i64> {
+        let Some((folder, message_id)) = self.moved.get(&id).cloned() else { return Ok(id) };
+        if self.store.find_message(folder, &message_id)?.is_none() {
+            let account = self.account(&self.store.folder(folder)?.account)?;
+            let mut session = self.take(&account).await?;
+            let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
+            self.give(&account.id, session, &result);
+            result?;
         }
-        Ok(id)
+        self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
     }
 
     async fn mark_seen(&mut self, id: i64) -> lagom_core::Result<()> {
@@ -494,6 +501,10 @@ mod greenmail {
         bridge.send(Cmd::Op { op: 14, id: archive, act: Act::Move(inbox) });
         op_ok(&mut events, 14).await;
         assert_eq!(server(&account).await["INBOX"], ["Archive me"]);
+        // And again, with the id the UI first saw: the alias still leads to the message.
+        bridge.send(Cmd::Op { op: 15, id: archive, act: Act::Archive });
+        op_ok(&mut events, 15).await;
+        assert_eq!(server(&account).await["Archive"], ["Archive me"]);
 
         bridge.send(Cmd::RemoveAccount(account.id.clone()));
         // Earlier Changed events may still be queued: wait for the store itself.

@@ -144,8 +144,8 @@ pub struct MainWindow {
     toast: Option<(SharedString, bool, Task<()>)>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
-    // A reply that Esc closed. Send and Discard end it.
-    draft: Option<gpui::Entity<Compose>>,
+    // Sheets Esc closed or a failed send returned, newest last. R and C reopen the newest.
+    drafts: Vec<gpui::Entity<Compose>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
@@ -200,7 +200,7 @@ impl MainWindow {
             toast: None,
             palette: None,
             compose: None,
-            draft: None,
+            drafts: Vec::new(),
             sending: Vec::new(),
             live,
             page: Page::Mail,
@@ -342,7 +342,7 @@ impl MainWindow {
     fn open_compose(&mut self, reply: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.toast = None;
-        let compose = match self.draft.take() {
+        let compose = match self.drafts.pop() {
             Some(compose) => {
                 compose.update(cx, |c, cx| c.reopen(window, cx));
                 compose
@@ -369,7 +369,9 @@ impl MainWindow {
         cx.subscribe_in(compose, window, |this, compose, _: &gpui::DismissEvent, window, cx| {
             if this.compose.as_ref() == Some(compose) {
                 this.compose = None;
-                this.draft = compose.read(cx).keeps_draft().then(|| compose.clone());
+                if compose.read(cx).keeps_draft() {
+                    this.drafts.push(compose.clone());
+                }
             }
             this.sending.retain(|c| c != compose);
             if this.compose.is_none() && this.palette.is_none() {
@@ -396,7 +398,7 @@ impl MainWindow {
                     this.sending.retain(|c| *c != compose);
                     // A sheet opened meanwhile becomes the kept draft.
                     if let Some(other) = this.compose.replace(compose) {
-                        this.draft = Some(other);
+                        this.drafts.push(other);
                     }
                 }
                 ComposeEvent::Send(mail) => this.send_mail(compose.clone(), (**mail).clone(), cx),
@@ -2151,12 +2153,12 @@ mod dispatch {
         cx.simulate_keystrokes("enter");
         cx.simulate_input("Alex");
         cx.simulate_keystrokes("escape");
-        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.draft.is_some()));
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.drafts.len() == 1));
         cx.simulate_keystrokes("r");
         assert_eq!(body(&view, cx), "Hello\nAlex");
         // ⌘⌫ in the body discards the draft, not a message.
         cx.simulate_keystrokes("cmd-backspace");
-        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.draft.is_none()));
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.drafts.is_empty()));
         assert_eq!(inbox_len(&view, cx), n);
         cx.simulate_keystrokes("r");
         assert_eq!(body(&view, cx), "");

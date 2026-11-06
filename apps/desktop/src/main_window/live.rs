@@ -168,6 +168,11 @@ impl MainWindow {
         for event in events {
             match event {
                 Event::Changed => read = true,
+                Event::Seen(id) => {
+                    if let Some(live) = &mut self.live {
+                        live.seen.remove(&id);
+                    }
+                }
                 Event::Sync(account, state) => {
                     if let Some(live) = &mut self.live {
                         live.sync.insert(account, state);
@@ -216,9 +221,7 @@ impl MainWindow {
                         (true, Some(e)) => self.notify(format!("Sent. {e}"), cx),
                         (false, e) => {
                             // The text is not lost: R or C opens it again.
-                            if self.draft.is_none() {
-                                self.draft = compose;
-                            }
+                            self.drafts.extend(compose);
                             self.notify(format!("Not sent: {}. C opens the draft.", e.unwrap_or_default()), cx);
                         }
                     }
@@ -354,8 +357,11 @@ impl MainWindow {
 
     pub(super) fn send_mail(&mut self, compose: Entity<Compose>, mail: lagom_core::smtp::Outgoing, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
-        let Some(account) = live.account().map(|a| a.id.clone()) else {
-            self.notify("Not sent: no account", cx);
+        // The account the sheet shows, not the one on screen now: the user may switch during Undo.
+        let from = compose.read(cx).from().to_string();
+        let Some(account) = live.accounts.iter().find(|a| a.email == from).map(|a| a.id.clone()) else {
+            self.drafts.push(compose);
+            self.notify("Not sent: its account is gone. C opens the draft.", cx);
             return;
         };
         let op = live.op(Op::Send(compose));

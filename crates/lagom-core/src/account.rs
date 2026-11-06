@@ -106,10 +106,12 @@ impl Account {
             .map(Zeroizing::new)
             .map_err(|_| Error::Secret)
     }
+    /// Ok when the secret is gone, also when it was never there.
     pub fn delete_password(&self) -> Result<()> {
-        self.secret_entry()?
-            .delete_credential()
-            .map_err(|_| Error::Secret)
+        match self.secret_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(Error::Secret),
+        }
     }
 }
 #[cfg(test)]

@@ -225,6 +225,11 @@ impl Compose {
         cx.notify();
     }
 
+    /// The sender address the sheet shows.
+    pub fn from(&self) -> &str {
+        &self.from
+    }
+
     pub fn undoable(&self) -> bool {
         self.phase == Phase::Sent
     }
