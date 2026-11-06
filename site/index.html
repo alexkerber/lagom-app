@@ -4,97 +4,105 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>lagom</title>
-  <meta name="description" content="A fast, keyboard-first email client with one job: getting you back to an empty inbox. Made in Sweden. Open source.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23983A2E'/%3E%3Crect x='14' y='27' width='36' height='10' rx='5' fill='%23fff'/%3E%3C/svg%3E">
+  <meta name="description" content="A fast, keyboard-first email client with one job: getting you back to an empty inbox. Open source. Early work, no release yet.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Crect width='1024' height='1024' rx='228' fill='%23B03A2E'/%3E%3Crect x='192' y='424' width='640' height='176' rx='88' fill='%23fff'/%3E%3Ccircle cx='512' cy='512' r='56' fill='%23B03A2E'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@800&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@800&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    /* Concept D "Butik". Hex values read from a screenshot of the Claude design board; replace with the exact tokens. */
+    /* Concept D "Butik" tokens. */
     :root {
-      --bg: #ffffff; --surface: #f5f5f3; --ink: #111110; --muted: #5f5f5a;
-      --line: #e6e6e2; --accent: #983a2e; --on-accent: #ffffff;
+      --bg: #FFFFFF; --subtle: #F5F5F3; --raised: #FFFFFF; --ink: #111110; --ink2: #5F5F5A;
+      --line: #E6E6E2; --sel: #EFEFEC; --accent: #B03A2E; --accent-ink: #FFFFFF;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0b0b0a; --surface: #151514; --ink: #f2f2ee; --muted: #989896;
-        --line: #262624; --accent: #e86a55; --on-accent: #111110;
+        --bg: #0B0B0A; --subtle: #0B0B0A; --raised: #151514; --ink: #F2F2EE; --ink2: #9B9B95;
+        --line: #262624; --sel: #1F1F1D; --accent: #EB6A55; --accent-ink: #0B0B0A;
       }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 Inter, system-ui, sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
     a { color: inherit; }
-    .wrap { max-width: 72rem; margin: 0 auto; padding: 0 16px; }
-    .strip { text-align: center; font-size: 12px; color: var(--muted); padding: 8px 16px; border-bottom: 1px solid var(--line); }
-    .strip span + span::before { content: "·"; margin: 0 0.6em; }
-    nav { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
-    .brand { display: flex; align-items: center; gap: 10px; font: 800 22px/1 "Inter Tight", Inter, sans-serif; letter-spacing: -0.03em; text-decoration: none; }
-    .links { display: flex; align-items: center; gap: 20px; font-size: 14px; }
-    .links a { text-decoration: none; }
-    .btn { display: inline-block; padding: 9px 16px; border-radius: 999px; font: 500 14px/1 Inter, sans-serif; text-decoration: none; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
-    .btn.dark { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-    .btn.accent { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-    .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; padding: 56px 0 48px; }
-    h1 { font: 800 clamp(4rem, 11vw, 7.5rem)/0.9 "Inter Tight", Inter, sans-serif; letter-spacing: -0.06em; margin: 0 0 16px; }
-    .entry { font-size: 15px; margin: 0 0 8px; }
-    .ipa { font-family: "Geist Mono", ui-monospace, monospace; }
-    .entry em { color: var(--muted); }
-    h2 { font: 800 clamp(2rem, 4vw, 2.75rem)/1.05 "Inter Tight", Inter, sans-serif; letter-spacing: -0.04em; margin: 0 0 20px; max-width: 20ch; }
-    .lede { color: var(--muted); max-width: 32rem; margin: 0 0 24px; }
-    .ctas { display: flex; gap: 10px; flex-wrap: wrap; }
-    .shot { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; aspect-ratio: 16 / 11; padding: 14px; display: grid; grid-template-columns: 22% 34% 1fr; gap: 10px; }
-    .shot div { background: var(--bg); border-radius: 8px; }
-    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-bottom: 48px; }
-    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
-    .card h3 { font: 600 15px/1.3 Inter, sans-serif; margin: 0 0 4px; }
-    .card p { font-size: 13px; color: var(--muted); margin: 0 0 24px; }
-    .row { display: flex; align-items: center; justify-content: space-between; }
-    .price { font: 800 32px/1 "Inter Tight", Inter, sans-serif; letter-spacing: -0.04em; }
-    footer { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; border-top: 1px solid var(--line); padding: 20px 0 40px; font: 400 12px/1.5 "Geist Mono", ui-monospace, monospace; color: var(--muted); }
+    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .display { font-family: "Inter Tight", Inter, sans-serif; font-weight: 800; }
+    .mono { font-family: "Geist Mono", ui-monospace, monospace; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px); }
+
+    nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 80px; }
+    .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-size: 28px; letter-spacing: -0.06em; }
+    .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
+    .links a { display: flex; align-items: center; height: 40px; padding: 0 12px; border-radius: 8px; text-decoration: none; }
+    .links a:hover { background: var(--sel); }
+
+    .hero { display: grid; grid-template-columns: 1fr; gap: 48px; align-items: center; padding: clamp(32px, 5vw, 64px) 0 64px; }
+    .hero > * { min-width: 0; }
+    @media (min-width: 1000px) { .hero { grid-template-columns: 5fr 7fr; } }
+    .copy { display: flex; flex-direction: column; gap: 28px; }
+    .entry { display: flex; flex-direction: column; gap: 14px; }
+    h1 { margin: 0; font-size: clamp(84px, 11vw, 168px); line-height: 0.82; letter-spacing: -0.065em; padding-bottom: 0.1em; }
+    .pron { margin: 0; font-size: clamp(17px, 1.8vw, 21px); line-height: 1.4; color: var(--ink2); }
+    .pron .mono { font-size: 0.85em; color: var(--ink); }
+    .def { margin: 0; font-size: clamp(30px, 3.4vw, 44px); line-height: 1.08; letter-spacing: -0.03em; text-wrap: balance; }
+    .lede { margin: 0; max-width: 32em; font-size: 18px; line-height: 1.55; color: var(--ink2); }
+    .lede strong { color: var(--ink); font-weight: 500; }
+    .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+    .btn { display: flex; align-items: center; height: 48px; padding: 0 22px; border-radius: 8px; border: 1px solid var(--line); text-decoration: none; font-size: 16px; font-weight: 500; }
+    .btn:hover { background: var(--sel); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+    .btn.primary:hover { filter: brightness(1.08); }
+    .status { margin: 0; font-size: 13px; color: var(--ink2); }
+
+    .shot { padding: clamp(12px, 2vw, 24px); border-radius: 16px; background: var(--subtle); border: 1px solid var(--line); }
+    .shot img { display: block; width: 100%; height: auto; }
+
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 20px 0 40px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
     footer span { overflow-wrap: anywhere; }
-    @media (max-width: 760px) {
-      .hero, .cards { grid-template-columns: 1fr; }
-      .links a:not(.btn) { display: none; }
-    }
   </style>
 </head>
 <body>
-  <div class="strip"><span>Made in Sweden</span><span>Open source</span><span>No account. No sign-up.</span></div>
   <div class="wrap">
-    <nav>
-      <a class="brand" href="./">
-        <svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="var(--accent)"/><rect x="14" y="27" width="36" height="10" rx="5" fill="var(--on-accent)"/></svg>
+    <nav aria-label="Site">
+      <a class="brand display" href="./">
+        <svg viewBox="0 0 1024 1024" width="34" height="34" aria-hidden="true">
+          <rect width="1024" height="1024" rx="228" fill="var(--accent)"/>
+          <rect x="192" y="424" width="640" height="176" rx="88" fill="#FFFFFF"/>
+          <circle cx="512" cy="512" r="56" fill="var(--accent)"/>
+        </svg>
         lagom
       </a>
       <div class="links">
         <a href="https://github.com/alexkerber/lagom-app">Source</a>
         <a href="https://github.com/alexkerber/lagom-app/blob/main/LICENSE">Licence</a>
         <a href="https://github.com/alexkerber/lagom-app/commits/main">Changelog</a>
-        <a class="btn dark" href="#download">Download</a>
       </div>
     </nav>
 
-    <section class="hero">
-      <div>
-        <h1>lagom</h1>
-        <p class="entry"><span class="ipa">/ˈlɑːɡɔm/</span> ("LAH-gom") <em>adv., adj.</em> Swedish.</p>
-        <h2>Not too much. Not too little. Just right.</h2>
-        <p class="lede">A fast, keyboard-first email client with one job: getting you back to an empty inbox.</p>
-        <div class="ctas">
-          <a class="btn accent" href="#download">Download for macOS</a>
-          <a class="btn" href="https://github.com/alexkerber/lagom-app">View source</a>
+    <main class="hero">
+      <div class="copy">
+        <div class="entry">
+          <h1 class="display">lagom</h1>
+          <p class="pron"><span class="mono">/ˈlɑːɡɔm/</span> ("LAH-gom") <em>adv., adj.</em> Swedish.</p>
+          <p class="def display">Not too much. Not too little. Just right.</p>
         </div>
+        <p class="lede">A fast, keyboard-first email client with one job: getting you back to an empty inbox. <strong>Written in Rust for macOS, Linux and Windows. Local-first.</strong></p>
+        <div class="ctas">
+          <a class="btn primary" href="https://github.com/alexkerber/lagom-app">View source</a>
+          <a class="btn" href="https://github.com/alexkerber/lagom-app/commits/main">Changelog</a>
+        </div>
+        <p class="status mono">Early work. No release to download yet.</p>
       </div>
-      <div class="shot" role="img" aria-label="The Lagom main window: accounts, message list and reading pane."><div></div><div></div><div></div></div>
-    </section>
 
-    <section class="cards" id="download">
-      <div class="card"><h3>lagom for macOS</h3><p>Same app. Same shortcuts.</p><div class="row"><span class="price">0 kr</span><span class="btn">Soon</span></div></div>
-      <div class="card"><h3>lagom for Windows</h3><p>Same app. Same shortcuts.</p><div class="row"><span class="price">0 kr</span><span class="btn">Soon</span></div></div>
-      <div class="card"><h3>lagom for Linux</h3><p>Same app. Same shortcuts.</p><div class="row"><span class="price">0 kr</span><span class="btn">Soon</span></div></div>
-    </section>
+      <div class="shot">
+        <picture>
+          <source srcset="lagom-dark.webp" media="(prefers-color-scheme: dark)">
+          <img src="lagom-light.webp" width="1600" height="1000" alt="The Lagom main window: a sidebar with Inbox, Later, Sent and Done, a message list, and an open email with Done, Reply, Later and Forward buttons, each labelled with its shortcut key.">
+        </picture>
+      </div>
+    </main>
 
-    <footer>
+    <footer class="mono">
       <span>Not included: AI features, team features, a sign-up wall.</span>
       <span>Open source · MIT · github.com/alexkerber/lagom-app</span>
     </footer>
