@@ -5,6 +5,7 @@ use gpui::{
     div, prelude::*, px, relative, svg, Context, Div, FontWeight, Rgba, SharedString, Window,
 };
 
+use crate::command_palette::CommandPalette;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 struct Message {
@@ -29,6 +30,7 @@ const INBOX: &[Message] = &[
 pub struct MainWindow {
     theme: Theme,
     selected: usize,
+    palette: Option<gpui::Entity<CommandPalette>>,
     _appearance: gpui::Subscription,
 }
 
@@ -38,9 +40,21 @@ impl MainWindow {
             this.theme = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
             cx.notify();
         });
+        // `LAGOM_SCREEN=palette` opens the palette with the query from the design.
+        let palette = (std::env::var("LAGOM_SCREEN").as_deref() == Ok("palette")).then(|| {
+            let palette = cx.new(|cx| CommandPalette::new("done", cx));
+            cx.subscribe(&palette, |this, _, _: &gpui::DismissEvent, cx| {
+                this.palette = None;
+                cx.notify();
+            })
+            .detach();
+            window.focus(&gpui::Focusable::focus_handle(&palette, cx));
+            palette
+        });
         Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             selected: 0,
+            palette,
             _appearance: appearance,
         }
     }
@@ -511,5 +525,6 @@ impl Render for MainWindow {
                     .child(self.message_list())
                     .child(self.reading_pane()),
             )
+            .children(self.palette.clone())
     }
 }

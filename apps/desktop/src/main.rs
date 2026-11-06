@@ -1,3 +1,4 @@
+mod command_palette;
 mod main_window;
 mod theme;
 
