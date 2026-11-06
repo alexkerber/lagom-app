@@ -3,6 +3,7 @@ mod compose;
 mod empty_inbox;
 mod folders;
 mod main_window;
+mod motion;
 #[cfg(target_os = "macos")]
 mod menus;
 mod theme;
