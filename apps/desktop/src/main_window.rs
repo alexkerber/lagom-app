@@ -80,6 +80,8 @@ pub struct MainWindow {
     seq: usize,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
+    /// `LAGOM_SCREEN=empty` shows the empty inbox until real mail can reach zero.
+    empty: bool,
     _appearance: gpui::Subscription,
 }
 
@@ -113,6 +115,7 @@ impl MainWindow {
             // Another change wires the compose key. Until then `LAGOM_SCREEN=compose` opens it.
             compose: (std::env::var("LAGOM_SCREEN").as_deref() == Ok("compose"))
                 .then(|| cx.new(|cx| Compose::new(window, cx))),
+            empty: std::env::var("LAGOM_SCREEN").as_deref() == Ok("empty"),
             _appearance: appearance,
         }
     }
@@ -177,6 +180,7 @@ fn roll(el: Div, id: String) -> AnyElement {
     .into_any_element()
 }
 
+pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
 pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     div().font_family(font::MONO).text_size(px(size::MONO)).text_color(color).child(text.into())
 }
@@ -249,6 +253,8 @@ impl MainWindow {
                         if numeric { roll(el, id.clone()) } else { el.into_any_element() }
                     };
                     if active {
+                    // A zero count is calm: no accent badge.
+                    if active && c != "0" {
                         d.child(
                             div()
                                 .min_w(px(20.))
@@ -344,6 +350,7 @@ impl MainWindow {
                     .gap(px(2.))
                     .child(nav("icons/inbox.svg", "Inbox", Some(self.inbox.items.len().to_string().into()), true))
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later.to_string().into()), false))
+                    .child(nav("icons/inbox.svg", "Inbox", Some(if self.empty { "0" } else { "7" }), true))
                     .child(nav("icons/sent.svg", "Sent", None, false))
                     .child(nav("icons/done.svg", "Done", Some("G D".into()), false)),
             )
@@ -702,6 +709,8 @@ impl Render for MainWindow {
                     .overflow_hidden()
                     .child(self.message_list(cx))
                     .child(self.reading_pane(cx)),
+                    .when(self.empty, |d| d.child(crate::empty_inbox::view(&t)))
+                    .when(!self.empty, |d| d.child(self.message_list()).child(self.reading_pane())),
             )
             .children(self.palette.clone())
     }
