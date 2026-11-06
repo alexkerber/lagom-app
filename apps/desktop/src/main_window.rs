@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
-    App, Context, Div, ElementId, FocusHandle, FontWeight, KeyBinding, Rgba, ScrollDelta,
+    App, Context, CursorStyle, Div, ElementId, FocusHandle, FontWeight, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta,
     ScrollWheelEvent, SharedString, Task, TouchPhase, Window,
 };
 
@@ -104,6 +105,8 @@ pub struct MainWindow {
     swipe: Swipe,
     // The row under the pointer for the current scroll event. Rows set it before the list reads it.
     under: Option<usize>,
+    // Last pointer position while the left button is down on a row: a click, or a mouse swipe.
+    drag: Option<Point<Pixels>>,
     // (message id, offset it springs back from, seq) for a swipe that did not reach the threshold.
     spring: Option<(usize, f32, usize)>,
     // (move it was, move it is, seq) for the colour behind a swiped row. See `retint`.
@@ -136,6 +139,7 @@ impl MainWindow {
             seq: 0,
             swipe: Swipe::Idle,
             under: None,
+            drag: None,
             spring: None,
             tint: (None, None, 0),
             toast: None,
@@ -288,7 +292,8 @@ impl MainWindow {
         let under = self.under.take();
         // Line deltas come from a classic wheel: no phases and no horizontal gesture to follow.
         let ScrollDelta::Pixels(d) = e.delta else { return };
-        if self.overlay_open(cx) {
+        // A mouse press owns the swipe; trackpad momentum must not move or release it.
+        if self.drag.is_some() || self.overlay_open(cx) {
             return;
         }
         let before = self.swipe;
@@ -309,6 +314,40 @@ impl MainWindow {
         }
     }
 
+    /// Mouse down on a row: maybe a click, maybe the start of a mouse swipe.
+    fn press(&mut self, id: usize, at: Point<Pixels>) {
+        self.tint = (None, None, self.tint.2);
+        self.swipe = Swipe::start(id);
+        self.drag = Some(at);
+    }
+
+    /// Pointer moves with the button down: the same state machine as a trackpad swipe.
+    fn drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(last) = self.drag else { return };
+        // The button came up where we did not see it: end the drag as a release.
+        if e.pressed_button != Some(MouseButton::Left) {
+            return self.drop_drag(cx);
+        }
+        self.drag = Some(e.position);
+        let before = self.swipe;
+        self.swipe.moved_with((e.position.x - last.x).into(), (e.position.y - last.y).into(), MOUSE_SLOP);
+        self.retint();
+        if self.swipe != before {
+            cx.notify();
+        }
+    }
+
+    fn mouse_swiping(&self) -> bool {
+        self.drag.is_some() && matches!(self.swipe, Swipe::Row { .. })
+    }
+
+    /// Mouse up, inside the window or out: the same decision as lifting the fingers.
+    fn drop_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.is_some() {
+            self.release(true, cx);
+        }
+    }
+
     /// Starts a short cross-fade when the move a release would make changes.
     // shortcut: no trackpad haptic at the thresholds; GPUI 0.2.2 has no API for
     // NSHapticFeedbackManager. Add one with a small objc call or a GPUI patch.
@@ -325,6 +364,8 @@ impl MainWindow {
 
     /// Fingers lift (`act`) or Esc (not `act`): past the threshold the row goes, else it springs back.
     fn release(&mut self, act: bool, cx: &mut Context<Self>) {
+        // Esc mid-drag ends the drag too; the later mouse up then does nothing.
+        self.drag = None;
         let Some((id, dx, what)) = self.swipe.end() else { return };
         self.retint();
         let ix = self.inbox.list().iter().position(|&i| i == id);
@@ -752,12 +793,21 @@ impl MainWindow {
         // shortcut: renders every row, fine for the sample inbox. Switch to uniform_list (visible
         // rows only, docs/performance.md rule 3) when real mail arrives.
         let mut rows: Vec<AnyElement> = Vec::new();
+        let dragging = self.mouse_swiping();
         for (i, &id) in self.inbox.list().iter().enumerate() {
             rows.extend(ghosts_at(i));
             let selected = i == self.inbox.selected;
             let el = row(&MESSAGES[id], selected)
                 .id(("row", id))
-                .on_click(cx.listener(move |this, _, _, cx| this.select(|inbox| inbox.select(i), cx)))
+                // Every row, not only the dragged one: the topmost hovered row's cursor wins.
+                .cursor(if dragging { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, _| this.press(id, e.position)))
+                // Runs before the window's mouse up ends the drag: a dragged row is not a click.
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.swipe.offset(id).is_none() {
+                        this.select(|inbox| inbox.select(i), cx)
+                    }
+                }))
                 .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
             // Under the fingers the row follows dx; after a short swipe it springs back from it.
             let spring = self.spring.filter(|s| s.0 == id).map(|(_, dx, seq)| (dx, Some(seq)));
@@ -1037,6 +1087,13 @@ impl Render for MainWindow {
         let tint = Rgba { a: 0.9, ..t.subtle };
         div()
             .key_context("MainWindow")
+            // Mouse swipe: the root sees every move inside the window; `on_mouse_up_out` catches a
+            // release outside it. shortcut: moves outside the window are not followed (the row waits
+            // at the edge); a window-level listener via `window.on_mouse_event` would follow them.
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag_to(e, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
+            .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
@@ -1098,6 +1155,8 @@ enum Move {
 
 /// Finger travel before the swipe locks to one direction.
 const SLOP: f32 = 8.;
+/// Pointer travel before a mouse press on a row becomes a drag. Below it, the press is a click.
+const MOUSE_SLOP: f32 = 6.;
 /// docs/motion.md: about 35 % of the 408 px row, or 120 px, whichever is less.
 const THRESHOLD: f32 = 120.;
 /// A long left swipe deletes: about 60 % of the 408 px row (the list is a fixed 420 px wide).
@@ -1131,10 +1190,15 @@ impl Swipe {
     }
 
     fn moved(&mut self, x: f32, y: f32) {
+        self.moved_with(x, y, SLOP);
+    }
+
+    /// `slop`: travel before the direction locks. A mouse drag uses `MOUSE_SLOP`.
+    fn moved_with(&mut self, x: f32, y: f32, slop: f32) {
         *self = match *self {
             Swipe::Undecided { id, dx, dy } => {
                 let (dx, dy) = (dx + x, dy + y);
-                if dx.abs().max(dy.abs()) < SLOP {
+                if dx.abs().max(dy.abs()) < slop {
                     Swipe::Undecided { id, dx, dy }
                 } else if dx.abs() > dy.abs() {
                     Swipe::Row { id, dx }
@@ -1384,6 +1448,28 @@ mod tests {
         assert_eq!(inbox.items, [0, 1, 2]);
         assert!(inbox.trash.is_empty());
         assert_eq!((inbox.current(), inbox.later), (Some(1), 0));
+    }
+
+    #[test]
+    fn mouse_click_versus_drag() {
+        let drag = |moves: &[(f32, f32)]| {
+            let mut s = Swipe::start(7);
+            for &(x, y) in moves {
+                s.moved_with(x, y, MOUSE_SLOP);
+            }
+            s
+        };
+        // A press that moves less than 6 px is a click: nothing to end, the row stays put.
+        let mut click = drag(&[(2., 1.), (3., -2.)]);
+        assert_eq!(click.offset(7), None);
+        assert_eq!(click.end(), None);
+        // 6 px, mostly horizontal: a swipe that follows the pointer, decided like the trackpad.
+        assert_eq!(drag(&[(6., 2.)]), Swipe::Row { id: 7, dx: 6. });
+        assert_eq!(drag(&[(-6., 0.), (-300., 0.)]).end(), Some((7, -306., Some(Move::Delete))));
+        // Mostly vertical: nothing happens, even when it later goes sideways.
+        assert_eq!(drag(&[(1., 6.), (200., 0.)]).end(), None);
+        // The same 6 px is still inside the trackpad slop.
+        assert!(matches!(swipe(&[(6., 0.)]), Swipe::Undecided { .. }));
     }
 
     #[test]

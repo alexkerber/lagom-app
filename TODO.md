@@ -37,11 +37,11 @@
 - [ ] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature).
 - [x] Swipe a row with two fingers (trackpad, Magic Mouse) to Done or Later; Esc springs it back (Alex 2026-11-06).
 - [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (Alex 2026-11-06, `feat/folders`).
-- [ ] Swipe: try it by hand on a trackpad and a Magic Mouse, including the 245 px delete stage and the colour fade; tests cover only the state logic.
+- [ ] Swipe: try it by hand on a trackpad, a Magic Mouse and a mouse drag (incl. release outside the window), including the 245 px delete stage and the colour fade; tests cover only the state logic.
 - [ ] Swipe: haptic tick at each threshold. GPUI 0.2.2 has no API for `NSHapticFeedbackManager`.
 - [ ] Trash: a sidebar entry to open it and empty it. Delete only moves to an in-memory Trash now.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
-- [ ] Swipe: a classic wheel mouse cannot swipe (no horizontal phases). Decide whether click-drag swipe is worth it.
+- [x] Swipe: drag a row with the mouse, same stages as the trackpad (Alex 2026-11-06: "ska kunna dra med musen också"). Open hand over rows, closed hand while dragging.
 - [ ] Compose: Esc keeps the draft once fields are editable (now it discards static sample text).
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 
