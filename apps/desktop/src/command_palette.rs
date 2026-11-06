@@ -10,6 +10,7 @@ use gpui::{
     Rgba, SharedString, StyledText, Window,
 };
 
+use crate::motion::spring;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 enum Hint {
@@ -131,17 +132,20 @@ impl CommandPalette {
         matches(&self.query, &self.folders)
     }
 
+    /// Enter or a click: the selected item runs and the palette closes.
+    fn run(&mut self, matches: Vec<Item>, cx: &mut Context<Self>) {
+        if let Some(target) = matches.into_iter().nth(self.selected).and_then(|i| i.target) {
+            cx.emit(target);
+        }
+        cx.emit(DismissEvent);
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
         let matches = self.matches();
         let count = matches.len();
         match ks.key.as_str() {
-            "enter" => {
-                if let Some(target) = matches.into_iter().nth(self.selected).and_then(|i| i.target) {
-                    cx.emit(target);
-                }
-                cx.emit(DismissEvent);
-            }
+            "enter" => self.run(matches, cx),
             "escape" => cx.emit(DismissEvent),
             "up" => self.selected = self.selected.saturating_sub(1),
             "down" => self.selected = (self.selected + 1).min(count.saturating_sub(1)),
@@ -201,6 +205,20 @@ impl Render for CommandPalette {
             let selected = i == self.selected;
             list = list.child(
                 div()
+                    .id(("item", i))
+                    // The pointer moves the selection, as the arrow keys do, so the highlight is the hover.
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.selected != i {
+                            this.selected = i;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected = i;
+                        this.run(this.matches(), cx);
+                    }))
+                    .cursor_pointer()
+                    .active(|s| s.bg(t.press))
                     .flex()
                     .items_center()
                     .gap(px(12.))
@@ -278,7 +296,7 @@ impl Render for CommandPalette {
             .shadow_xl()
             .overflow_hidden()
             .text_color(t.ink)
-            .font_family(font::UI)
+            .font_family(font::ui())
             .child(input)
             .when_some(self.subject.clone().filter(|_| moving), |d, s| {
                 d.child(mono(format!("1 message · {s}"), t.ink2).truncate().px(px(20.)).pt(px(10.)))
@@ -300,12 +318,11 @@ impl Render for CommandPalette {
             .pt(px(112.))
             .bg(gpui::black().opacity(if t.dark { 0.5 } else { 0.18 }))
             .child(dialog)
-            // docs/motion.md asks for scale 0.98 → 1 as well, but GPUI divs have no scale transform.
-            .with_animation(
-                "command-palette-in",
-                Animation::new(Duration::from_millis(120)).with_easing(ease_out_quint()),
-                |el, delta| el.opacity(delta),
-            )
+            // docs/motion.md asks for scale 0.98 → 1, but GPUI divs have no scale transform:
+            // the dialog drops 8 px into place on a spring instead, and fades in.
+            .with_animation("command-palette-in", Animation::new(Duration::from_millis(120)), |el, d| {
+                el.opacity(ease_out_quint()(d)).pt(px(104. + 8. * spring(d)))
+            })
     }
 }
 

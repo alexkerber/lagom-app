@@ -9,7 +9,8 @@ use gpui::{
     FocusHandle, FontWeight, KeyDownEvent, Rgba, Task, Window,
 };
 
-use crate::main_window::{key_button, mono};
+use crate::main_window::{key_button, mono, pressable};
+use crate::motion::spring;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 const SUBJECT: &str = "Re: Board meeting moved to Thursday";
@@ -145,8 +146,7 @@ impl Compose {
                     .border_color(t.line)
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Reply"))
                     .child(
-                        div()
-                            .id("discard")
+                        pressable(div().id("discard"), t, false)
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -154,8 +154,6 @@ impl Compose {
                             .px(px(10.))
                             .rounded(px(radius::CONTROL))
                             .text_color(t.ink2)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(t.sel))
                             .on_click(cx.listener(|this, _, _, cx| this.discard(cx)))
                             .child("Discard")
                             .child(mono("⌘⌫", t.ink2)),
@@ -205,13 +203,11 @@ impl Compose {
                     .border_t_1()
                     .border_color(t.line)
                     .child(
-                        key_button(t, "Send", "⌘↵", true)
-                            .id("send")
-                            .cursor_pointer()
+                        key_button(t, "Send", "⌘↵", Some(t.accent))
                             .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
                     )
-                    .child(key_button(t, "Attach", "⌘⇧A", false))
-                    .child(key_button(t, "Send later", "⌘L", false))
+                    .child(key_button(t, "Attach", "⌘⇧A", None))
+                    .child(key_button(t, "Send later", "⌘L", None))
                     .child(div().flex_1())
                     .child(mono(format!("{words} words · saved 09:51"), t.ink2)),
             )
@@ -222,9 +218,7 @@ impl Compose {
         toast(
             t,
             "Sent",
-            key_button(t, "Undo", "⌘Z", false)
-                .id("undo")
-                .cursor_pointer()
+            key_button(t, "Undo", "⌘Z", None)
                 .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
         )
     }
@@ -256,8 +250,8 @@ pub(crate) fn toast(t: &Theme, label: &'static str, undo: impl IntoElement) -> i
                 .child(label)
                 .child(undo),
         )
-        .with_animation("toast-in", Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), |d, v| {
-            d.opacity(v).bottom(px(16. + 8. * v))
+        .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
+            d.opacity(ease_out_quint()(v)).bottom(px(16. + 8. * spring(v)))
         })
 }
 
@@ -278,13 +272,18 @@ impl Render for Compose {
             .justify_center()
             .bg(scrim)
             .child(self.sheet(cx));
-        let slide = Animation::new(SLIDE).with_easing(ease_out_quint());
         // Bottom padding shifts the centred sheet up by half its value.
         let out = |d: Div, v: f32| d.opacity(1. - v).pb(px(160. * v));
         let layer = match self.phase {
-            Phase::Sent => layer.with_animation("compose-out", slide, out).into_any_element(),
-            Phase::Restored => layer.with_animation("compose-in", slide, move |d, v| out(d, 1. - v)).into_any_element(),
-            _ => layer.into_any_element(),
+            // Leaving: ease-out, as a spring would bounce a sheet that is on its way off screen.
+            Phase::Sent => layer.with_animation("compose-out", Animation::new(SLIDE).with_easing(ease_out_quint()), out).into_any_element(),
+            // Arriving (open, or back after Undo): rises 12 px into place on a spring and fades in.
+            Phase::Open | Phase::Restored => layer
+                .with_animation(if self.phase == Phase::Open { "compose-open" } else { "compose-in" }, Animation::new(SLIDE), |d, v| {
+                    d.opacity(ease_out_quint()(v)).pt(px(24. * (1. - spring(v))))
+                })
+                .into_any_element(),
+            Phase::Gone => layer.into_any_element(),
         };
 
         div()
@@ -295,7 +294,7 @@ impl Render for Compose {
             // Block clicks to the inbox while the sheet is up; after Send the inbox is usable again.
             .when(self.phase != Phase::Sent, |d| d.occlude())
             .text_color(t.ink)
-            .font_family(font::UI)
+            .font_family(font::ui())
             .text_size(px(size::BASE))
             .child(layer)
             .when(self.phase == Phase::Sent, |d| d.child(self.toast(cx)))

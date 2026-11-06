@@ -6,44 +6,78 @@ use std::time::{Duration, Instant};
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
     App, Context, CursorStyle, Div, ElementId, FocusHandle, FontWeight, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, Task, TouchPhase, Window,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, Task, TouchPhase, Window,
 };
 
 use crate::command_palette::{CommandPalette, MoveTo};
 use crate::compose::Compose;
 use crate::folders::{self, Folder};
+use crate::motion::spring;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 struct Message {
     from: &'static str,
+    address: &'static str,
     time: &'static str,
     subject: &'static str,
     snippet: &'static str,
+    body: &'static [&'static str],
+    // (file name, size) of one attachment.
+    attachment: Option<(&'static str, &'static str)>,
     unread: bool,
+}
+
+macro_rules! m {
+    ($from:literal, $address:literal, $time:literal, $subject:literal, $snippet:literal, [$($p:literal),*], $attachment:expr, $unread:literal) => {
+        Message { from: $from, address: $address, time: $time, subject: $subject, snippet: $snippet, body: &[$($p),*], attachment: $attachment, unread: $unread }
+    };
 }
 
 // Sample mail: the inbox from MainWindowD (ids 0..INBOX_LEN), then the folder contents in `folders::sample`.
 const INBOX_LEN: usize = 7;
 const MESSAGES: &[Message] = &[
-    Message { from: "Ingrid Holm", time: "09:42", subject: "Board meeting moved to Thursday", snippet: "Thursday at 16:00 works for everyone except the projector.", unread: true },
-    Message { from: "Johan Ek", time: "08:57", subject: "Invoice 2026-114", snippet: "Attached. Same as last month, minus the coffee machine.", unread: true },
-    Message { from: "Build bot", time: "08:15", subject: "Nightly build passed", snippet: "All tests green. Nothing to see here.", unread: false },
-    Message { from: "Maja Lind", time: "Yesterday", subject: "Lunch Thursday?", snippet: "Somewhere with a lunch special. You choose, I will complain.", unread: true },
-    Message { from: "Housing co-op", time: "Yesterday", subject: "Laundry room schedule, December", snippet: "The new schedule is on the door. It is also attached.", unread: false },
-    Message { from: "Tickets", time: "Tue", subject: "Stockholm C → Göteborg C, 14 Nov", snippet: "Coach 3, seat 41. Quiet carriage.", unread: false },
-    Message { from: "Lagom releases", time: "Mon", subject: "Version 0.4 is out", snippet: "Faster threads, fewer settings. Changelog inside.", unread: false },
-    Message { from: "Coffee roastery", time: "Mon", subject: "Order 4411 has shipped", snippet: "Two bags of the Ethiopian, ground for filter.", unread: true },
-    Message { from: "Bike shop", time: "3 Nov", subject: "Service receipt", snippet: "New chain, new brake pads, same squeak.", unread: true },
-    Message { from: "Hardware store", time: "1 Nov", subject: "Your receipt", snippet: "One ladder, one ladder hook.", unread: true },
-    Message { from: "Maja Lind", time: "Oct", subject: "Photos from Lisbon", snippet: "Mostly tiles. A few of us, in front of tiles.", unread: false },
-    Message { from: "Ryokan Hanaya", time: "Oct", subject: "Booking confirmed, 3–6 April", snippet: "Dinner is served at 18:30. Slippers are provided.", unread: false },
-    Message { from: "Tickets", time: "Sun", subject: "Göteborg C → Stockholm C, 16 Nov", snippet: "Coach 5, seat 12. Quiet carriage again.", unread: true },
-    Message { from: "Johan Ek", time: "Sep", subject: "Folder icons", snippet: "Stroke 1.5, like the rest. Sketches attached.", unread: false },
-    Message { from: "Seed shop", time: "Aug", subject: "Spring catalogue", snippet: "Forty kinds of tomato. You need two.", unread: false },
-    Message { from: "Housing co-op", time: "Oct", subject: "Annual meeting minutes", snippet: "The bike room stays. The sauna gets a new door.", unread: true },
-    Message { from: "This Week in Rust", time: "Thu", subject: "Issue 571", snippet: "Crate of the week, a few RFCs and a lot of PRs.", unread: true },
-    Message { from: "Kitchen notes", time: "Wed", subject: "Soup season", snippet: "Six soups that freeze well, and one that does not.", unread: true },
+    m!("Ingrid Holm", "ingrid@holm.example", "09:42", "Board meeting moved to Thursday", "Thursday at 16:00 works for everyone except the projector.",
+        ["Hi,", "Thursday at 16:00 works for everyone except the projector, which has asked to be replaced. I will bring a laptop instead.", "The minutes from last time are attached. Please read them before the meeting, not during it.", "Ingrid"],
+        Some(("minutes-oct.pdf", "212 KB")), true),
+    m!("Johan Ek", "johan@ek.example", "08:57", "Invoice 2026-114", "Attached. Same as last month, minus the coffee machine.",
+        ["Hi,", "Invoice 2026-114 is attached. Same as last month, minus the coffee machine, which we now own.", "Thirty days, as usual.", "Johan"],
+        Some(("invoice-2026-114.pdf", "48 KB")), true),
+    m!("Build bot", "ci@lagom.example", "08:15", "Nightly build passed", "All tests green. Nothing to see here.",
+        ["Nightly build 1147 passed on macOS, Linux and Windows.", "All tests green. Nothing to see here."], None, false),
+    m!("Maja Lind", "maja@lind.example", "Yesterday", "Lunch Thursday?", "Somewhere with a lunch special. You choose, I will complain.",
+        ["Lunch on Thursday? Somewhere with a lunch special.", "You choose, I will complain. It is tradition.", "Maja"], None, true),
+    m!("Housing co-op", "board@coop.example", "Yesterday", "Laundry room schedule, December", "The new schedule is on the door. It is also attached.",
+        ["Hello neighbours,", "The December laundry schedule is on the door. It is also attached, for those who never pass the door.", "The board"],
+        Some(("laundry-december.pdf", "96 KB")), false),
+    m!("Tickets", "no-reply@tickets.example", "Tue", "Stockholm C → Göteborg C, 14 Nov", "Coach 3, seat 41. Quiet carriage.",
+        ["Your journey on 14 November: Stockholm C 07:10, Göteborg C 10:05.", "Coach 3, seat 41. Quiet carriage."], None, false),
+    m!("Lagom releases", "releases@lagom.example", "Mon", "Version 0.4 is out", "Faster threads, fewer settings. Changelog inside.",
+        ["Version 0.4 is out.", "Threads open faster and there are fewer settings. The full changelog is on the site."], None, false),
+    m!("Coffee roastery", "orders@roastery.example", "Mon", "Order 4411 has shipped", "Two bags of the Ethiopian, ground for filter.",
+        ["Order 4411 has shipped: two bags of the Ethiopian, ground for filter.", "It should arrive on Thursday."], None, true),
+    m!("Bike shop", "service@bikeshop.example", "3 Nov", "Service receipt", "New chain, new brake pads, same squeak.",
+        ["Thanks for your visit.", "New chain and new brake pads. We could not find the squeak."], Some(("receipt-881.pdf", "31 KB")), true),
+    m!("Hardware store", "receipts@hardware.example", "1 Nov", "Your receipt", "One ladder, one ladder hook.",
+        ["Your receipt: one ladder, one ladder hook.", "Keep it for the three-year warranty."], None, true),
+    m!("Maja Lind", "maja@lind.example", "Oct", "Photos from Lisbon", "Mostly tiles. A few of us, in front of tiles.",
+        ["The Lisbon photos are in the shared album.", "Mostly tiles. A few of us, in front of tiles.", "Maja"], None, false),
+    m!("Ryokan Hanaya", "stay@hanaya.example", "Oct", "Booking confirmed, 3–6 April", "Dinner is served at 18:30. Slippers are provided.",
+        ["Your stay from 3 to 6 April is confirmed. Two guests, garden room.", "Dinner is served at 18:30. Slippers are provided."], None, false),
+    m!("Tickets", "no-reply@tickets.example", "Sun", "Göteborg C → Stockholm C, 16 Nov", "Coach 5, seat 12. Quiet carriage again.",
+        ["Your journey on 16 November: Göteborg C 17:05, Stockholm C 20:00.", "Coach 5, seat 12. Quiet carriage again."], None, true),
+    m!("Johan Ek", "johan@ek.example", "Sep", "Folder icons", "Stroke 1.5, like the rest. Sketches attached.",
+        ["Folder icons, stroke 1.5 like the rest of the set.", "Sketches attached. The open folder is the hard one.", "Johan"],
+        Some(("folder-icons.png", "640 KB")), false),
+    m!("Seed shop", "hello@seeds.example", "Aug", "Spring catalogue", "Forty kinds of tomato. You need two.",
+        ["The spring catalogue is here.", "Forty kinds of tomato. You need two."], None, false),
+    m!("Housing co-op", "board@coop.example", "Oct", "Annual meeting minutes", "The bike room stays. The sauna gets a new door.",
+        ["Hello neighbours,", "The minutes from the annual meeting are attached. The bike room stays. The sauna gets a new door.", "The board"],
+        Some(("annual-meeting.pdf", "180 KB")), true),
+    m!("This Week in Rust", "twir@rust.example", "Thu", "Issue 571", "Crate of the week, a few RFCs and a lot of PRs.",
+        ["Issue 571: crate of the week, a few RFCs and a lot of merged PRs.", "Read it on the web, or not at all."], None, true),
+    m!("Kitchen notes", "notes@kitchen.example", "Wed", "Soup season", "Six soups that freeze well, and one that does not.",
+        ["Soup season. Six soups that freeze well, and one that does not.", "Start with the lentil one."], None, true),
 ];
 
 // Messages already snoozed in the sample data.
@@ -79,8 +113,39 @@ const TINT_FADE: Duration = Duration::from_millis(100);
 // GPUI line height is phi x font size. A row is two BASE lines, one SNIPPET line, gaps and padding.
 const ROW_H: f32 = 2. * 10. + 2. * 3. + (2. * size::BASE + size::SNIPPET) * 1.618_034;
 
+/// Selection highlight moving to the row J, K or a click selected.
+const GLIDE: Duration = Duration::from_millis(140);
+/// Padding around the rows in the list.
+const LIST_PAD: f32 = 6.;
+
 fn motion() -> Animation {
     Animation::new(MOTION).with_easing(ease_out_quint())
+}
+
+/// Linear progress for animators that apply `spring` themselves (GPUI's easing must stay in 0..=1).
+fn springy() -> Animation {
+    Animation::new(MOTION)
+}
+
+/// The selection highlight on its way between rows: y positions inside the list.
+#[derive(Clone, Copy)]
+struct Glide {
+    from: f32,
+    to: f32,
+    at: Instant,
+    seq: usize,
+}
+
+impl Glide {
+    /// Where the highlight is now, so a new key press starts from there and never jumps.
+    fn y(&self) -> f32 {
+        let d = (self.at.elapsed().as_secs_f32() / GLIDE.as_secs_f32()).min(1.);
+        self.from + (self.to - self.from) * ease_out_quint()(d)
+    }
+}
+
+fn row_y(ix: usize) -> f32 {
+    LIST_PAD + ix as f32 * ROW_H
 }
 
 /// A removed row that still paints its exit motion. It is not in the inbox any more.
@@ -117,6 +182,10 @@ pub struct MainWindow {
     compose: Option<gpui::Entity<Compose>>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
+    scroll: ScrollHandle,
+    glide: Option<Glide>,
+    // `LAGOM_SCREEN=hover`: paints this row as hovered, as a screenshot cannot move the pointer.
+    shown_hover: Option<usize>,
     _appearance: gpui::Subscription,
 }
 
@@ -146,6 +215,9 @@ impl MainWindow {
             palette: None,
             compose: None,
             all_folders: false,
+            scroll: ScrollHandle::new(),
+            glide: None,
+            shown_hover: None,
             _appearance: appearance,
         };
         match screen.as_str() {
@@ -153,6 +225,15 @@ impl MainWindow {
             "folders" => this.inbox.open(Some(0)),
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(window, cx),
+            "hover" => this.shown_hover = Some(2),
+            // Selects the last inbox row once the list has a layout, as J would; the list scrolls to it
+            // in a short window.
+            "glide" => cx
+                .spawn(async |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    this.update(cx, |this, cx| this.select(|inbox| inbox.select(INBOX_LEN - 1), cx)).ok();
+                })
+                .detach(),
             // A row held mid-swipe in each state, for screenshots.
             "swipe-neutral" => this.swipe = Swipe::Row { id: 1, dx: 70. },
             "swipe" => this.swipe = Swipe::Row { id: 1, dx: 150. },
@@ -226,6 +307,8 @@ impl MainWindow {
 
     fn act_at(&mut self, ix: usize, what: Move, dx: f32, cx: &mut Context<Self>) {
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
+        // The list changes height under the highlight; rows paint the selection until it settles.
+        self.glide = None;
         self.seq += 1;
         for g in &mut self.ghosts {
             if g.ix > ix {
@@ -259,6 +342,7 @@ impl MainWindow {
 
     // Ghosts and springs sit at indices in the list on screen, so they go when the list changes.
     fn clear_motion(&mut self) {
+        self.glide = None;
         self.ghosts.clear();
         self.entering.clear();
         self.spring = None;
@@ -268,6 +352,7 @@ impl MainWindow {
         let open = self.inbox.open;
         let Some((what, id, ix)) = self.inbox.undo() else { return };
         self.toast = None;
+        self.glide = None;
         // Undo goes back to the list the message left, as the reverse motion needs it on screen.
         if self.inbox.open != open {
             self.swipe = Swipe::Idle;
@@ -307,6 +392,12 @@ impl MainWindow {
             // Momentum events after Ended also arrive as Moved; Idle ignores them, so none re-acts.
             TouchPhase::Moved => self.swipe.moved(d.x.into(), d.y.into()),
             TouchPhase::Ended => self.release(true, cx),
+        }
+        // The list's own scroll listener already moved it by d.y; a row under the fingers
+        // keeps the list still, as in native lists.
+        if matches!(self.swipe, Swipe::Row { .. }) {
+            let o = self.scroll.offset();
+            self.scroll.set_offset(gpui::point(o.x, o.y - d.y));
         }
         self.retint();
         if self.swipe != before {
@@ -380,14 +471,25 @@ impl MainWindow {
     }
 
     fn select(&mut self, f: impl FnOnce(&mut Inbox), cx: &mut Context<Self>) {
+        let before = self.inbox.selected;
         f(&mut self.inbox);
+        let ix = self.inbox.selected;
+        if ix == before {
+            return;
+        }
+        let from = self.glide.map_or(row_y(before), |g| g.y());
+        self.seq += 1;
+        self.glide = Some(Glide { from, to: row_y(ix), at: Instant::now(), seq: self.seq });
+        // Child 0 is the highlight; ghosts at or before `ix` sit in front of the row.
+        let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
+        self.scroll.scroll_to_item(1 + ix + ghosts);
         cx.notify();
     }
 }
 
 /// p = 0 is a resting row, p = 1 is fully gone. Undo plays the same curve backwards.
 fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
-    if p <= 0. && dx == 0. {
+    if p == 0. && dx == 0. {
         return row; // At rest: keep the selection background.
     }
     // Slide first, then close the gap. Padding shrinks too, or the row keeps 20 px.
@@ -397,7 +499,8 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
         .h(px(ROW_H * (1. - collapse)))
         .py(px(10. * (1. - collapse)))
         .overflow_hidden()
-        .opacity(1. - p);
+        // The spring overshoots a little past 0 and 1; position follows it, opacity stops at the ends.
+        .opacity((1. - p).clamp(0., 1.));
     // Opaque, so the colour of the move shows only where the row has left (see `with_behind`).
     let row = row.bg(t.raised);
     match what {
@@ -448,11 +551,12 @@ fn with_behind(row: AnyElement, t: Theme, what: Move, seq: usize, p: impl Fn(f32
     let right = !matches!(what, Move::Later | Move::Delete);
     div()
         .relative()
+        .flex_shrink_0()
         .overflow_hidden()
         .rounded(px(radius::CONTROL))
-        .child(behind(t, Some(what), right).with_animation(("behind", seq), motion(), move |el, d| {
+        .child(behind(t, Some(what), right).with_animation(("behind", seq), springy(), move |el, d| {
             let p = p(d);
-            el.opacity(if p > 0. { 1. - p } else { 0. })
+            el.opacity(if p > 0. { (1. - p).max(0.) } else { 0. })
         }))
         .child(row)
         .into_any_element()
@@ -497,8 +601,18 @@ fn app_mark(t: &Theme) -> Div {
         )
 }
 
-pub(crate) fn key_button(t: &Theme, label: &'static str, key: &'static str, primary: bool) -> Div {
+/// Hover and press feedback, and the pointer, for anything clickable. Instant, as in native
+/// macOS controls: GPUI has no style transitions, and a fade would make the click feel late.
+/// `selected` rows keep their `sel` background under the pointer; hover would replace it.
+pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Stateful<Div> {
+    let (hover, press) = (t.hover, t.press);
+    el.cursor_pointer().when(!selected, |el| el.hover(move |s| s.bg(hover))).active(move |s| s.bg(press))
+}
+
+/// A button with its key. `fill`: the colour of a primary button; `None` is a bordered one.
+pub(crate) fn key_button(t: &Theme, label: &'static str, key: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
     let base = div()
+        .id(label)
         .flex()
         .items_center()
         .gap(px(8.))
@@ -506,12 +620,18 @@ pub(crate) fn key_button(t: &Theme, label: &'static str, key: &'static str, prim
         .px(px(14.))
         .rounded(px(radius::CONTROL))
         .text_size(px(13.))
-        .font_weight(if primary { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+        .font_weight(if fill.is_some() { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
         .child(label);
-    if primary {
-        base.bg(t.accent).text_color(t.accent_ink).child(mono(key, t.accent_ink))
-    } else {
-        base.border_1().border_color(t.line).text_color(t.ink).child(mono(key, t.ink2))
+    match fill {
+        // A translucent tint would replace the fill, so a filled button fades a little instead.
+        Some(bg) => base
+            .bg(bg)
+            .text_color(t.accent_ink)
+            .child(mono(key, t.accent_ink))
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.92))
+            .active(|s| s.opacity(0.8)),
+        None => pressable(base.border_1().border_color(t.line).text_color(t.ink).child(mono(key, t.ink2)), t, false),
     }
 }
 
@@ -530,7 +650,7 @@ impl MainWindow {
                 .child(div().flex_1().child(label))
         };
         let nav = |path: &'static str, label: &'static str, count: Option<SharedString>, active: bool| {
-            div()
+            pressable(div().id(label), t, active)
                 .flex()
                 .items_center()
                 .gap(px(10.))
@@ -570,7 +690,7 @@ impl MainWindow {
                 })
         };
         let account = |name: &'static str, address: &'static str, active: bool| {
-            div()
+            pressable(div().id(name), t, false)
                 .flex()
                 .items_center()
                 .gap(px(10.))
@@ -605,12 +725,13 @@ impl MainWindow {
             // Room for the macOS traffic lights.
             .when(cfg!(target_os = "macos"), |d| d.child(div().h(px(16.)).flex_shrink_0()))
             .child(
-                div()
+                pressable(div().id("account-switcher"), t, false)
                     .flex()
                     .items_center()
                     .gap(px(10.))
                     .h(px(40.))
                     .px(px(8.))
+                    .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(app_mark(t))
                     .child(div().flex_1().child("Home"))
@@ -618,6 +739,7 @@ impl MainWindow {
             )
             .child(
                 div()
+                    .id("search")
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -628,6 +750,10 @@ impl MainWindow {
                     .border_color(t.line)
                     .bg(t.raised)
                     .text_color(t.ink2)
+                    // An opaque field: the pointer deepens its border instead of tinting it.
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(t.ink2))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))
                     .child(icon("icons/search.svg", t.ink2, 15.))
                     .child(div().flex_1().child("Search or run"))
                     .child(
@@ -645,7 +771,6 @@ impl MainWindow {
                     .gap(px(2.))
                     .child(
                         nav("icons/inbox.svg", "Inbox", Some(self.inbox.items.len().to_string().into()), self.inbox.open.is_none())
-                            .id("nav-inbox")
                             .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
                     )
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later.to_string().into()), false))
@@ -664,12 +789,13 @@ impl MainWindow {
             )
             .child(div().flex_1())
             .child(
-                div()
+                pressable(div().id("settings"), t, false)
                     .flex()
                     .items_center()
                     .justify_between()
                     .h(px(34.))
                     .px(px(10.))
+                    .rounded(px(radius::CONTROL))
                     .text_color(t.ink2)
                     .child("Settings")
                     .child(mono("⌘,", t.ink2)),
@@ -680,12 +806,14 @@ impl MainWindow {
     fn folder_group(&self, heading: Div, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let all = &self.inbox.folders;
-        let row = || div().flex().items_center().gap(px(10.)).h(px(34.)).px(px(10.)).rounded(px(radius::CONTROL));
+        let row = |id: ElementId, active: bool| {
+            pressable(div().id(id), t, active).flex().items_center().gap(px(10.)).h(px(34.)).px(px(10.)).rounded(px(radius::CONTROL))
+        };
         // shortcut: "+" and "New folder" do nothing yet; ⌘K "move <name>" creates a folder. Wire
         // them to an inline name field once the app has text inputs.
         let group = div().flex().flex_col().gap(px(2.)).child(heading.child(icon("icons/plus.svg", t.ink2, 14.)));
         if all.is_empty() {
-            return group.child(row().text_color(t.ink2).child(icon("icons/plus.svg", t.ink2, 16.)).child("New folder"));
+            return group.child(row("new-folder".into(), false).text_color(t.ink2).child(icon("icons/plus.svg", t.ink2, 16.)).child("New folder"));
         }
         // Once any folder has subfolders, every row keeps a chevron slot, so the icons line up.
         let nested = all.iter().any(|f| f.parent.is_some());
@@ -699,15 +827,14 @@ impl MainWindow {
             let color = if active || unread > 0 { t.ink } else { t.ink2 };
             let chevron = folders::has_children(all, f).then(|| {
                 let path = if all[f].open { "icons/chevron.svg" } else { "icons/chevron-right.svg" };
-                slot().id(("chevron", f)).child(icon(path, t.ink2, 12.)).on_click(cx.listener(move |this, _, _, cx| {
+                pressable(slot().id(("chevron", f)), t, false).rounded(px(radius::KEY)).child(icon(path, t.ink2, 12.)).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.inbox.folders[f].open ^= true;
                     cx.notify();
                 }))
             });
             group = group.child(
-                row()
-                    .id(("folder", f))
+                row(("folder", f).into(), active)
                     .pl(px(10. + 22. * depth as f32))
                     .text_color(color)
                     .when(unread > 0, |d| d.font_weight(FontWeight::MEDIUM))
@@ -725,8 +852,7 @@ impl MainWindow {
         }
         if shown < rows.len() {
             group = group.child(
-                row()
-                    .id("folders-more")
+                row("folders-more".into(), false)
                     .text_color(t.ink2)
                     .when(nested, |d| d.child(slot()))
                     .child(icon("icons/chevron.svg", t.ink2, 16.))
@@ -746,6 +872,8 @@ impl MainWindow {
             div()
                 .flex()
                 .flex_col()
+                .flex_shrink_0()
+                .h(px(ROW_H))
                 .gap(px(3.))
                 .px(px(12.))
                 .py(px(10.))
@@ -785,22 +913,40 @@ impl MainWindow {
             self.ghosts.iter().filter(move |g| g.ix == ix).map(move |g| {
                 let (what, dx) = (g.what, g.dx);
                 let el = row(&MESSAGES[g.id], false)
-                    .with_animation(("ghost", g.seq), motion(), move |el, d| away(el, theme, what, d, dx))
+                    .with_animation(("ghost", g.seq), springy(), move |el, d| away(el, theme, what, spring(d), dx))
                     .into_any_element();
-                with_behind(el, theme, what, g.seq, |d| d)
+                with_behind(el, theme, what, g.seq, spring)
             })
         };
-        // shortcut: renders every row, fine for the sample inbox. Switch to uniform_list (visible
-        // rows only, docs/performance.md rule 3) when real mail arrives.
-        let mut rows: Vec<AnyElement> = Vec::new();
+        // The selection highlight glides between rows while nothing else moves the list.
+        let gliding = self.glide.filter(|_| self.ghosts.is_empty() && self.entering.is_empty());
+        // shortcut: renders every row, fine for the sample inbox. Virtualise (uniform_list or
+        // gpui::list, docs/performance.md rule 3) when real mail arrives; rows leaving and
+        // coming back change height, which uniform_list cannot lay out.
+        let mut rows: Vec<AnyElement> = vec![match gliding {
+            // First child, so it paints under the rows. `child_ix` counts it.
+            Some(g) => div()
+                .absolute()
+                .left(px(LIST_PAD))
+                .right(px(LIST_PAD))
+                .h(px(ROW_H))
+                .rounded(px(radius::CONTROL))
+                .bg(t.sel)
+                .with_animation(("glide", g.seq), Animation::new(GLIDE).with_easing(ease_out_quint()), move |el, d| {
+                    el.top(px(g.from + (g.to - g.from) * d))
+                })
+                .into_any_element(),
+            None => div().into_any_element(),
+        }];
         let dragging = self.mouse_swiping();
         for (i, &id) in self.inbox.list().iter().enumerate() {
             rows.extend(ghosts_at(i));
             let selected = i == self.inbox.selected;
-            let el = row(&MESSAGES[id], selected)
+            let el = row(&MESSAGES[id], selected && gliding.is_none())
                 .id(("row", id))
+                // Arrow at rest, as in native lists; the hover tint shows the row responds.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.
-                .cursor(if dragging { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
+                .when(dragging, |d| d.cursor(CursorStyle::ClosedHand))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, _| this.press(id, e.position)))
                 // Runs before the window's mouse up ends the drag: a dragged row is not a click.
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -810,14 +956,14 @@ impl MainWindow {
                 }))
                 .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
             // Under the fingers the row follows dx; after a short swipe it springs back from it.
-            let spring = self.spring.filter(|s| s.0 == id).map(|(_, dx, seq)| (dx, Some(seq)));
-            if let Some((dx, seq)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring) {
+            let spring_back = self.spring.filter(|s| s.0 == id).map(|(_, dx, seq)| (dx, Some(seq)));
+            if let Some((dx, seq)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring_back) {
                 // Opaque, so the action behind shows only where the row has moved away.
-                let el = el.relative().when(!selected, |d| d.bg(t.raised));
+                let el = el.relative().bg(if selected { t.sel } else { t.raised });
                 let el = match seq {
                     None => el.left(px(dx)).into_any_element(),
                     Some(seq) => el
-                        .with_animation(("spring", seq), motion(), move |el, d| el.left(px(dx * (1. - d))))
+                        .with_animation(("spring", seq), springy(), move |el, d| el.left(px(dx * (1. - spring(d)))))
                         .into_any_element(),
                 };
                 // The colour of the move the row would make, cross-faded from the last one so a
@@ -826,6 +972,7 @@ impl MainWindow {
                 rows.push(
                     div()
                         .relative()
+                        .flex_shrink_0()
                         .overflow_hidden()
                         .rounded(px(radius::CONTROL))
                         .child(behind(theme, from, dx >= 0.))
@@ -843,11 +990,18 @@ impl MainWindow {
                 Some(g) => {
                     let what = g.what;
                     let el = el
-                        .with_animation(("enter", g.seq), motion(), move |el, d| away(el, theme, what, 1. - d, 0.))
+                        .with_animation(("enter", g.seq), springy(), move |el, d| away(el, theme, what, 1. - spring(d), 0.))
                         .into_any_element();
-                    with_behind(el, theme, what, g.seq, |d| 1. - d)
+                    with_behind(el, theme, what, g.seq, |d| 1. - spring(d))
                 }
-                None => el.into_any_element(),
+                // At rest: hover between bg and sel, press past sel. The selected row keeps sel.
+                None => {
+                    let (hover, press) = (t.hover, t.press);
+                    el.when(!selected, |el| el.hover(move |s| s.bg(hover)))
+                        .when(self.shown_hover == Some(i), |el| el.bg(hover))
+                        .active(move |s| s.bg(press))
+                        .into_any_element()
+                }
             });
         }
         rows.extend(ghosts_at(self.inbox.list().len()));
@@ -871,7 +1025,16 @@ impl MainWindow {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("All"),
             )
-            .child(div().h(px(26.)).px(px(12.)).flex().items_center().text_color(t.ink2).child("Unread"));
+            .child(
+                pressable(div().id("filter-unread"), t, false)
+                    .h(px(26.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .text_color(t.ink2)
+                    .child("Unread"),
+            );
 
         div()
             .w(px(420.))
@@ -900,15 +1063,21 @@ impl MainWindow {
                     .child(filter),
             )
             .child(
-                div()
-                    .id("rows")
-                    .flex_1()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .p(px(6.))
-                    .on_scroll_wheel(cx.listener(|this, e, _, cx| this.on_scroll(e, cx)))
-                    .children(rows),
+                {
+                    let mut list = div()
+                        .id("rows")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .flex()
+                        .flex_col()
+                        .p(px(LIST_PAD))
+                        .on_scroll_wheel(cx.listener(|this, e, _, cx| this.on_scroll(e, cx)))
+                        .children(rows);
+                    // A sideways swipe must never scroll the list vertically by its x delta.
+                    list.style().restrict_scroll_to_axis = Some(true);
+                    list
+                },
             )
             .child(
                 div()
@@ -932,7 +1101,7 @@ impl MainWindow {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
         let m = &MESSAGES[id];
-        let para = |text: &'static str| div().child(text);
+        let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
 
         div()
             .flex_1()
@@ -951,17 +1120,16 @@ impl MainWindow {
                     .border_b_1()
                     .border_color(t.line)
                     .child(
-                        key_button(t, "Done", "E", true)
-                            .id("done")
+                        // Pine green, like the Done swipe.
+                        key_button(t, "Done", "E", Some(t.swipe_done))
                             .on_click(cx.listener(|this, _, _, cx| this.act(Move::Done, cx))),
                     )
-                    .child(key_button(t, "Reply", "R", false))
+                    .child(key_button(t, "Reply", "R", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(window, cx))))
                     .child(
-                        key_button(t, "Later", "L", false)
-                            .id("later")
+                        key_button(t, "Later", "L", None)
                             .on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     )
-                    .child(key_button(t, "Forward", "F", false))
+                    .child(key_button(t, "Forward", "F", None))
                     .child(div().flex_1())
                     .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.list().len()), t.ink2)),
             )
@@ -1005,7 +1173,7 @@ impl MainWindow {
                                             .border_color(t.line)
                                             .text_size(px(size::SMALL))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .child("IH"),
+                                            .child(initials.to_uppercase()),
                                     )
                                     .child(
                                         div()
@@ -1018,10 +1186,10 @@ impl MainWindow {
                                                 div()
                                                     .text_size(px(size::SMALL))
                                                     .text_color(t.ink2)
-                                                    .child("ingrid@holm.example → you"),
+                                                    .child(format!("{} → you", m.address)),
                                             ),
                                     )
-                                    .child(mono("Fri 6 Nov · 09:42", t.ink2)),
+                                    .child(mono(m.time, t.ink2)),
                             ),
                     )
                     .child(
@@ -1031,11 +1199,8 @@ impl MainWindow {
                             .gap(px(14.))
                             .text_size(px(size::BODY))
                             .line_height(relative(1.6))
-                            .child(para("Hi,"))
-                            .child(para("Thursday at 16:00 works for everyone except the projector, which has asked to be replaced. I will bring a laptop instead."))
-                            .child(para("The minutes from last time are attached. Please read them before the meeting, not during it."))
-                            .child(para("Ingrid"))
-                            .child(
+                            .children(m.body.iter().map(|&p| div().child(p)))
+                            .children(m.attachment.map(|(name, kb)| {
                                 div()
                                     .flex()
                                     .child(
@@ -1051,10 +1216,10 @@ impl MainWindow {
                                             .bg(t.subtle)
                                             .text_size(px(size::SNIPPET))
                                             .line_height(relative(1.3))
-                                            .child(div().font_weight(FontWeight::SEMIBOLD).child("minutes-oct.pdf"))
-                                            .child(mono("212 KB", t.ink2)),
-                                    ),
-                            ),
+                                            .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+                                            .child(mono(kb, t.ink2)),
+                                    )
+                            })),
                     )
                     .child(div().flex_1())
                     .child(
@@ -1069,7 +1234,7 @@ impl MainWindow {
                             .border_color(t.line)
                             .bg(t.subtle)
                             .text_color(t.ink2)
-                            .child("Reply to Ingrid")
+                            .child(format!("Reply to {}", m.from))
                             .child(mono("R", t.ink2)),
                     ),
             )
@@ -1109,7 +1274,7 @@ impl Render for MainWindow {
             .flex()
             .bg(tint)
             .text_color(t.ink)
-            .font_family(font::UI)
+            .font_family(font::ui())
             .text_size(px(size::BASE))
             .child(self.sidebar(cx))
             .child(
@@ -1133,9 +1298,7 @@ impl Render for MainWindow {
                 d.child(crate::compose::toast(
                     &t,
                     "Deleted",
-                    key_button(&t, "Undo", "⌘Z", false)
-                        .id("undo-delete")
-                        .cursor_pointer()
+                    key_button(&t, "Undo", "⌘Z", None)
                         .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
                 ))
             })

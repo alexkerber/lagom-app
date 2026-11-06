@@ -40,6 +40,10 @@ pub struct Theme {
     pub swipe_later: Rgba,
     /// Delete. A purer red than Falu red, so Delete never reads as the accent.
     pub danger: Rgba,
+    /// Under the pointer, and while pressed. Translucent ink, so one token works on every surface
+    /// and stacks (a chevron inside a hovered row). Hover sits between `raised` and `sel`, press past `sel`.
+    pub hover: Rgba,
+    pub press: Rgba,
 }
 
 impl Theme {
@@ -58,6 +62,8 @@ impl Theme {
             swipe_done: rgb(Accent::PineGreen.hex().0),
             swipe_later: rgb(Accent::CatalogueBlue.hex().0),
             danger: rgb(0xC62828),
+            hover: Rgba { a: 0.03, ..rgb(0x111110) },
+            press: Rgba { a: 0.075, ..rgb(0x111110) },
         }
     }
 
@@ -76,6 +82,8 @@ impl Theme {
             swipe_done: rgb(Accent::PineGreen.hex().1),
             swipe_later: rgb(Accent::CatalogueBlue.hex().1),
             danger: rgb(0xF87171),
+            hover: Rgba { a: 0.035, ..rgb(0xF2F2EE) },
+            press: Rgba { a: 0.08, ..rgb(0xF2F2EE) },
         }
     }
 
@@ -94,8 +102,17 @@ pub const DEFAULT_ACCENT: Accent = Accent::FaluRed;
 
 pub mod font {
     pub const DISPLAY: &str = "Inter Tight"; // 700–800, bundled
-    pub const UI: &str = "Inter"; // 400–600
     pub const MONO: &str = "Geist Mono"; // keys and counts
+
+    /// UI text, 400–600: Inter. `LAGOM_UI_FONT=system` tries the system font (SF Pro on macOS)
+    /// for a side-by-side trial; GPUI resolves ".SystemUIFont" to ".AppleSystemUIFont".
+    pub fn ui() -> &'static str {
+        static UI: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+        UI.get_or_init(|| match std::env::var("LAGOM_UI_FONT").as_deref() {
+            Ok("system") => ".SystemUIFont",
+            _ => "Inter",
+        })
+    }
 }
 
 /// Type scale in px, as used in ConceptD and MainWindowD.
