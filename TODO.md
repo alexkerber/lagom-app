@@ -11,6 +11,8 @@
 - [ ] Native iPhone and iPad app (SwiftUI) in `apps/mobile/apple`. Planned for the night run 2026-11-06.
 - [ ] Native Android phone and tablet app (Jetpack Compose) in `apps/mobile/android`. Planned for the night run 2026-11-06.
 - [ ] UniFFI bindings from `lagom-core` for both mobile apps.
+- [ ] Feature: sort mail into custom folders (Alex 2026-11-06: one of the two features he needs).
+- [ ] Feature: snooze, shown as "Later" in the UI (Alex 2026-11-06: the other feature he needs).
 - [ ] Motion: implement the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 - [x] Website placeholder in `site/` (static HTML).
 - [x] Website: Concept D "Butik" landing page (hex values read from a screenshot, not exact).
