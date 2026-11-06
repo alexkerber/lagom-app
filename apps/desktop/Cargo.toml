@@ -13,3 +13,7 @@ gpui = "0.2.2"
 lagom-core = { path = "../../crates/lagom-core" }
 # Grapheme clusters for the caret and backspace (emoji, combining marks). Already in Cargo.lock.
 unicode-segmentation = "1.13"
+
+[dev-dependencies]
+# GPUI's TestAppContext, to drive key dispatch in tests.
+gpui = { version = "0.2.2", features = ["test-support"] }

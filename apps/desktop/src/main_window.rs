@@ -1764,3 +1764,89 @@ mod tests {
         assert_eq!(inbox.current(), Some(1));
     }
 }
+
+/// Key dispatch through GPUI's test window: real bindings, contexts and focus, no key presses.
+#[cfg(test)]
+mod dispatch {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::*;
+
+    fn open(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            crate::text_input::bind_keys(cx);
+        });
+        cx.add_window_view(MainWindow::new)
+    }
+
+    fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
+        view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    #[gpui::test]
+    fn palette_takes_letters_backspace_and_undo(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let n = inbox_len(&view, cx);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("elrj");
+        cx.simulate_keystrokes("backspace left right");
+        let palette = view.read_with(cx, |v, _| v.palette.clone()).expect("palette open");
+        assert_eq!(palette.read_with(cx, |p, cx| p.query(cx)), "elr");
+        // None of e, l, r, j, ⌫, ←, → reached the inbox.
+        assert_eq!(inbox_len(&view, cx), n);
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(palette.read_with(cx, |p, cx| p.query(cx)), "");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.palette.is_none()));
+        // Without a field, the same keys act on the inbox again.
+        cx.simulate_keystrokes("e");
+        assert_eq!(inbox_len(&view, cx), n - 1);
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(inbox_len(&view, cx), n);
+    }
+
+    #[gpui::test]
+    fn compose_keeps_the_draft_on_escape(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let n = inbox_len(&view, cx);
+        let body = |view: &Entity<MainWindow>, cx: &mut VisualTestContext| {
+            let c = view.read_with(cx, |v, _| v.compose.clone()).expect("compose open");
+            c.read_with(cx, |c, cx| c.body_text(cx))
+        };
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Hi there");
+        assert_eq!(body(&view, cx), "Hi there");
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(body(&view, cx), "");
+        cx.simulate_input("Hello");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("Alex");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.draft.is_some()));
+        cx.simulate_keystrokes("r");
+        assert_eq!(body(&view, cx), "Hello\nAlex");
+        // ⌘⌫ in the body discards the draft, not a message.
+        cx.simulate_keystrokes("cmd-backspace");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.draft.is_none()));
+        assert_eq!(inbox_len(&view, cx), n);
+        cx.simulate_keystrokes("r");
+        assert_eq!(body(&view, cx), "");
+    }
+
+    #[gpui::test]
+    fn tab_cycles_compose_fields(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("r");
+        let c = view.read_with(cx, |v, _| v.compose.clone()).unwrap();
+        // Body is last, so Tab wraps to To; Shift-Tab goes back.
+        cx.simulate_keystrokes("tab");
+        assert_eq!(cx.update(|window, cx| c.read(cx).focused_field(window, cx)), Some(0));
+        cx.simulate_keystrokes("tab");
+        assert_eq!(cx.update(|window, cx| c.read(cx).focused_field(window, cx)), Some(2));
+        cx.simulate_keystrokes("shift-tab shift-tab");
+        assert_eq!(cx.update(|window, cx| c.read(cx).focused_field(window, cx)), Some(3));
+        cx.simulate_keystrokes("cmd-shift-c");
+        assert_eq!(cx.update(|window, cx| c.read(cx).focused_field(window, cx)), Some(1));
+    }
+}
