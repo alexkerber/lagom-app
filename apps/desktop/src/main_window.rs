@@ -450,6 +450,9 @@ impl MainWindow {
         self.clear_motion();
         self.page = Page::Mail;
         self.inbox.open(f);
+        if let Some(live) = &mut self.live {
+            live.pin = None;
+        }
         // Selection is row 0 of the new list; the old list's offset would hide it.
         self.scroll.set_offset(Point::default());
         self.reload(cx);

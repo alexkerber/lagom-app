@@ -25,6 +25,10 @@ pub struct Live {
     stale: bool,
     /// Rows per list read. Grows when the selection nears the end.
     limit: u32,
+    /// The ⌘K hit on screen: loaded even past `limit`, until another list opens.
+    pub(super) pin: Option<i64>,
+    /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
+    want: Option<i64>,
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
     _events: Task<()>,
@@ -74,6 +78,8 @@ impl Live {
             next_op: 0,
             stale: false,
             limit: PAGE,
+            pin: None,
+            want: None,
             seen: HashSet::new(),
             _events: task,
             due: None,
@@ -128,11 +134,15 @@ impl MainWindow {
             // A folder ⌘K just created: nothing on the server yet.
             Some((_, None)) => mail::View::Inbox,
         };
-        match mail::load(&live.store, &account, view, live.limit, now()) {
+        match mail::load(&live.store, &account, view, live.limit, now(), live.pin) {
             Ok(snap) => {
                 let due = snap.next_due;
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
+                let want = live.want.take();
                 self.wake_at(due, cx);
+                if let Some(want) = want {
+                    self.select_found(want, cx);
+                }
             }
             Err(e) => self.notify(format!("Could not read mail: {e}"), cx),
         }
@@ -310,6 +320,7 @@ impl MainWindow {
         }
         live.current = ix;
         live.limit = PAGE;
+        live.pin = None;
         // Folder indices belong to one account; history does too.
         self.inbox = Inbox::live();
         self.clear_motion();
@@ -344,14 +355,28 @@ impl MainWindow {
         Some(state.into())
     }
 
-    /// ⌘K search hit: open its list, select it.
+    /// ⌘K search hit: open its list (Later when snoozed) and select it. The hit is pinned into
+    /// that list, so the selection never lands on another row that Delete or Reply would hit.
     pub(super) fn open_found(&mut self, store: i64, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
-        let Ok(m) = live.store.message(store) else { return };
-        let folder = self.inbox.folders.iter().position(|f| f.store == Some(m.summary.folder) && !f.gone);
-        self.open_box(folder, cx);
-        if let Some(ix) = self.inbox.list().iter().position(|&id| self.inbox.mail[id].store == Some(store)) {
-            self.select(|inbox| inbox.select(ix), cx);
+        let Ok(m) = live.store.message(store) else { return self.notify("That message is gone", cx) };
+        let list = if m.summary.snoozed_until.is_some_and(|t| t > now()) {
+            self.inbox.find_kind(Kind::Later)
+        } else {
+            // INBOX is not in `folders`: no match means the inbox.
+            self.inbox.folders.iter().position(|f| f.store == Some(m.summary.folder) && !f.gone)
+        };
+        self.open_box(list, cx);
+        if let Some(live) = &mut self.live {
+            (live.pin, live.want) = (Some(store), Some(store));
+        }
+        self.reload(cx);
+    }
+
+    fn select_found(&mut self, store: i64, cx: &mut Context<Self>) {
+        match self.inbox.list().iter().position(|&id| self.inbox.mail[id].store == Some(store)) {
+            Some(ix) => self.select(|inbox| inbox.select(ix), cx),
+            None => self.notify("That message is not in this list any more", cx),
         }
     }
 

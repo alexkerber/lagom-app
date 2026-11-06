@@ -167,18 +167,34 @@ pub struct Snapshot {
 
 /// Bounded queries on indexed columns: a few ms for a 100 000-message store. Runs when the
 /// worker reports a change, never per key press.
-pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64) -> lagom_core::Result<Snapshot> {
+/// `pin`: a store id that must be in the list on screen if it belongs there, even past
+/// `limit` (a ⌘K hit), so the selection lands on it and not on another row.
+pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64, pin: Option<i64>) -> lagom_core::Result<Snapshot> {
     let folders = store.folders(account, now)?;
     let counts = store.counts(account, now)?;
-    let inbox = match folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox) {
-        Some(f) => store.list_messages(f.id, now, limit, 0)?,
+    let inbox_id = folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox).map(|f| f.id);
+    let mut inbox = match inbox_id {
+        Some(id) => store.list_messages(id, now, limit, 0)?,
         None => Vec::new(),
     };
-    let open = match view {
+    let mut open = match view {
         View::Inbox => Vec::new(),
         View::Folder(id) => store.list_messages(id, now, limit, 0)?,
         View::Later => store.later(account, now, limit, 0)?,
     };
+    if let Some(m) = pin.and_then(|id| store.message(id).ok()).map(|m| m.summary) {
+        let snoozed = m.snoozed_until.is_some_and(|t| t > now);
+        let list = match view {
+            View::Inbox if Some(m.folder) == inbox_id && !snoozed => Some(&mut inbox),
+            View::Folder(id) if m.folder == id && !snoozed => Some(&mut open),
+            View::Later if snoozed => Some(&mut open),
+            _ => None,
+        };
+        // Past the page means older than every loaded row: it goes last.
+        if let Some(list) = list.filter(|l| !l.iter().any(|r| r.id == m.id)) {
+            list.push(m);
+        }
+    }
     let next_due = store.later(account, now, 1, 0)?.first().and_then(|m| m.snoozed_until);
     Ok(Snapshot { inbox, inbox_total: counts.inbox, later_total: counts.later, folders, open, next_due })
 }
@@ -331,5 +347,35 @@ mod tests {
     fn body_paragraphs() {
         assert_eq!(paragraphs("Hi,\r\n\r\nLine one\nline two\n\n\n"), ["Hi,", "Line one\nline two"]);
         assert_eq!(paragraphs(""), ["(no text)"]);
+    }
+
+    #[test]
+    fn a_search_hit_past_the_page_is_loaded_into_its_list() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-pin-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("pin.sqlite3")).unwrap();
+        let (imap, smtp) = lagom_core::presets::servers("a@fastmail.com").unwrap();
+        let account = lagom_core::account::Account::new("a@fastmail.com".into(), imap, smtp).unwrap();
+        store.save_account(&account).unwrap();
+        let inbox = store.save_folder(&account.id, "INBOX", Some("/"), FolderRole::Inbox).unwrap();
+        let ids: Vec<i64> = (1..=6)
+            .map(|uid| {
+                let summary = MessageSummary { account: account.id.clone(), folder: inbox, uid, subject: format!("m{uid}"), date: uid as i64, ..Default::default() };
+                store.save_message(&Message { summary, body_text: String::new(), body_html: None }).unwrap()
+            })
+            .collect();
+        let oldest = ids[0];
+        let rows = |pin, view| load(&store, &account.id, view, 3, 100, pin).unwrap();
+        let list = |s: Snapshot| s.inbox.iter().chain(&s.open).map(|m| m.id).collect::<Vec<_>>();
+        // Page of 3: the oldest is not loaded, unless pinned; then it comes last, once.
+        assert!(!list(rows(None, View::Inbox)).contains(&oldest));
+        assert_eq!(list(rows(Some(oldest), View::Inbox)).last(), Some(&oldest));
+        assert_eq!(list(rows(Some(ids[5]), View::Inbox)).iter().filter(|&&i| i == ids[5]).count(), 1);
+        // Snoozed: it belongs on Later, not in the inbox.
+        store.snooze(oldest, Some(1_000)).unwrap();
+        assert!(!list(rows(Some(oldest), View::Inbox)).contains(&oldest));
+        assert!(list(rows(Some(oldest), View::Later)).contains(&oldest));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
