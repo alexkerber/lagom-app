@@ -238,6 +238,8 @@ impl Compose {
             .rounded(px(radius::CARD))
             .shadow_lg()
             .overflow_hidden()
+            // The fading sheet keeps its hitboxes: a click must not refocus a field and take ⌘Z.
+            .when(self.phase == Phase::Sent, |d| d.capture_any_mouse_down(|_, _, cx| cx.stop_propagation()))
             .child(
                 div()
                     .h(px(44.))

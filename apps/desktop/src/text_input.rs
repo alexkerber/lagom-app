@@ -387,6 +387,8 @@ pub struct TextInput {
     selecting: bool,
     focused: bool,
     caret_on: bool,
+    /// The text as painted (bullets in password mode), rebuilt only after an edit, not per frame.
+    shown: Option<SharedString>,
     _blink: Option<Task<()>>,
     _focus: [Subscription; 2],
 }
@@ -426,6 +428,7 @@ impl TextInput {
             goal_x: None,
             selecting: false,
             caret_on: true,
+            shown: None,
             _blink: None,
             _focus: [on, off],
         }
@@ -520,6 +523,7 @@ impl TextInput {
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
+        self.shown = None;
         self.goal_x = None;
         self.moved(cx);
         cx.emit(TextInputEvent::Changed);
@@ -710,6 +714,14 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
         let focused = self.focused;
+        let shown = match &self.shown {
+            Some(s) => s.clone(),
+            None => {
+                let t = self.buffer.text();
+                let s: SharedString = if self.masked { mask(t).into() } else { t.to_string().into() };
+                self.shown.insert(s).clone()
+            }
+        };
         div()
             .key_context(if self.multiline { "TextInput multiline" } else { "TextInput" })
             .track_focus(&self.focus)
@@ -783,6 +795,7 @@ impl Render for TextInput {
             })
             .child(TextElement {
                 input: cx.entity(),
+                shown,
                 placeholder: t.ink2.into(),
                 caret: t.accent.into(),
                 // Native fields grey the selection of an unfocused field.
@@ -793,6 +806,7 @@ impl Render for TextInput {
 
 struct TextElement {
     input: Entity<TextInput>,
+    shown: SharedString,
     placeholder: Hsla,
     caret: Hsla,
     selection: Hsla,
@@ -838,12 +852,10 @@ impl Element for TextElement {
         let line_height = window.line_height();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let text = input.text();
-        let (shown, color): (SharedString, Hsla) = if text.is_empty() {
+        let (shown, color) = if text.is_empty() {
             (input.placeholder.clone(), self.placeholder)
-        } else if input.masked {
-            (mask(text).into(), style.color)
         } else {
-            (text.to_string().into(), style.color)
+            (self.shown.clone(), style.color)
         };
 
         let run = TextRun { len: shown.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
