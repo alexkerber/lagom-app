@@ -41,9 +41,14 @@
 - [ ] Swipe: haptic tick at each threshold. GPUI 0.2.2 has no API for `NSHapticFeedbackManager`.
 - [ ] Trash: a sidebar entry to open it and empty it. Delete only moves to an in-memory Trash now.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
-- [x] Swipe: drag a row with the mouse, same stages as the trackpad (Alex 2026-11-06: "ska kunna dra med musen också"). Open hand over rows, closed hand while dragging.
+- [x] Swipe: drag a row with the mouse, same stages as the trackpad (Alex 2026-11-06: "ska kunna dra med musen också"). Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
 - [ ] Compose: Esc keeps the draft once fields are editable (now it discards static sample text).
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
+- [x] Feel (Alex 2026-11-06: "de känns så kalla"): hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).
+- [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.
+- [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
+- [ ] Typeface: Inter or the system font (SF Pro) for UI text. `LAGOM_UI_FONT=system` switches; screenshots `feel-font-inter.png` and `feel-font-system.png`.
+- [ ] Message list: virtualise (visible rows only) when real mail arrives; it renders every row now.
 
 ## Folders: open questions
 
