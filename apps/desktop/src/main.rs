@@ -43,6 +43,7 @@ fn main() {
             ])
             .expect("load bundled fonts");
 
+        main_window::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         cx.open_window(
             WindowOptions {
