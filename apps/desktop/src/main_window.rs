@@ -159,10 +159,9 @@ impl MainWindow {
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
-        // The open folder is not a target: the message is already there.
+        // The open folder stays listed, so its name never offers "New folder". Moving there is a no-op.
         let targets = folders::tree(&self.inbox.folders, true)
             .into_iter()
-            .filter(|&(f, _)| Some(f) != self.inbox.open)
             .map(|(f, _)| (f, folders::path(&self.inbox.folders, f)))
             .collect();
         let subject = self.inbox.current().map(|id| MESSAGES[id].subject.to_string());
