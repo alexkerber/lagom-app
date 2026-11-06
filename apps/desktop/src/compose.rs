@@ -281,6 +281,8 @@ impl Render for Compose {
             .inset_0()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            // Block clicks to the inbox while the sheet is up; after Send the inbox is usable again.
+            .when(self.phase != Phase::Sent, |d| d.occlude())
             .text_color(t.ink)
             .font_family(font::UI)
             .text_size(px(size::BASE))
