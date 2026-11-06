@@ -1,6 +1,7 @@
 mod command_palette;
 mod compose;
 mod empty_inbox;
+mod folders;
 mod main_window;
 #[cfg(target_os = "macos")]
 mod menus;
@@ -27,6 +28,9 @@ impl AssetSource for Assets {
             "icons/done.svg" => include_bytes!("../assets/icons/done.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
             "icons/chevron.svg" => include_bytes!("../assets/icons/chevron.svg"),
+            "icons/chevron-right.svg" => include_bytes!("../assets/icons/chevron-right.svg"),
+            "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
+            "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
             _ => return Ok(None),
         };

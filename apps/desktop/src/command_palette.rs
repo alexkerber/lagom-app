@@ -1,5 +1,6 @@
 //! Command palette (⌘K), concept B structure in Concept D tokens.
 //! Source: CommandPalette on the Claude design canvas. Commands do not run yet: Enter only closes.
+//! "move <query>" lists folders (Figma "Lagom · Folders", frame 6). Enter there emits `MoveTo`.
 
 use std::time::Duration;
 
@@ -31,6 +32,69 @@ const COMMANDS: &[Command] = &[
     Command { section: "Go to", label: "Done mailbox", hint: Hint::Key("G D") },
 ];
 
+/// Where "Move to" sends the selected message.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MoveTo {
+    Folder(usize),
+    New(String),
+}
+
+/// One row in the list: a command, or a folder target in "move" mode.
+struct Item {
+    section: &'static str,
+    label: String,
+    hint: Option<&'static Hint>,
+    range: Option<std::ops::Range<usize>>,
+    target: Option<MoveTo>,
+}
+
+const MOVE_TO: &str = "Move to ";
+
+/// The folder query when `query` starts with "move", in any case.
+fn move_query(query: &str) -> Option<&str> {
+    query.get(..4).filter(|p| p.eq_ignore_ascii_case("move")).map(|_| query[4..].trim_start())
+}
+
+/// `folders` is (folder index, "Travel / Trains").
+fn matches(query: &str, folders: &[(usize, String)]) -> Vec<Item> {
+    let Some(q) = move_query(query) else {
+        return COMMANDS
+            .iter()
+            .filter_map(|c| {
+                find(c.label, query).map(|range| Item {
+                    section: c.section,
+                    label: c.label.into(),
+                    hint: Some(&c.hint),
+                    range,
+                    target: None,
+                })
+            })
+            .collect();
+    };
+    let mut items: Vec<Item> = folders
+        .iter()
+        .filter_map(|(f, path)| {
+            find(path, q).map(|r| Item {
+                section: "Move to",
+                label: format!("{MOVE_TO}{path}"),
+                hint: None,
+                range: r.map(|r| r.start + MOVE_TO.len()..r.end + MOVE_TO.len()),
+                target: Some(MoveTo::Folder(*f)),
+            })
+        })
+        .collect();
+    if !q.is_empty() && !folders.iter().any(|(_, p)| p.eq_ignore_ascii_case(q)) {
+        items.push(Item {
+            section: "Create",
+            label: format!("New folder “{q}”"),
+            hint: None,
+            range: None,
+            target: Some(MoveTo::New(q.into())),
+        });
+    }
+    items
+}
+
 /// Byte range of `query` in `label`, ignoring ASCII case. An empty query matches with no range.
 fn find(label: &str, query: &str) -> Option<Option<std::ops::Range<usize>>> {
     if query.is_empty() {
@@ -44,9 +108,13 @@ pub struct CommandPalette {
     query: String,
     selected: usize,
     focus: FocusHandle,
+    folders: Vec<(usize, String)>,
+    // Subject of the message a move would take.
+    subject: Option<String>,
 }
 
 impl EventEmitter<DismissEvent> for CommandPalette {}
+impl EventEmitter<MoveTo> for CommandPalette {}
 
 impl Focusable for CommandPalette {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
@@ -55,19 +123,26 @@ impl Focusable for CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn new(query: &str, cx: &mut Context<Self>) -> Self {
-        Self { query: query.into(), selected: 0, focus: cx.focus_handle() }
+    pub fn new(query: &str, folders: Vec<(usize, String)>, subject: Option<String>, cx: &mut Context<Self>) -> Self {
+        Self { query: query.into(), selected: 0, focus: cx.focus_handle(), folders, subject }
     }
 
-    fn matches(&self) -> Vec<(&'static Command, Option<std::ops::Range<usize>>)> {
-        COMMANDS.iter().filter_map(|c| find(c.label, &self.query).map(|r| (c, r))).collect()
+    fn matches(&self) -> Vec<Item> {
+        matches(&self.query, &self.folders)
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
-        let count = self.matches().len();
+        let matches = self.matches();
+        let count = matches.len();
         match ks.key.as_str() {
-            "escape" | "enter" => cx.emit(DismissEvent),
+            "enter" => {
+                if let Some(target) = matches.into_iter().nth(self.selected).and_then(|i| i.target) {
+                    cx.emit(target);
+                }
+                cx.emit(DismissEvent);
+            }
+            "escape" => cx.emit(DismissEvent),
             "up" => self.selected = self.selected.saturating_sub(1),
             "down" => self.selected = (self.selected + 1).min(count.saturating_sub(1)),
             "backspace" => {
@@ -104,13 +179,14 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
         let matches = self.matches();
+        let moving = move_query(&self.query).is_some();
         let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
 
         let mut list = div().flex().flex_col().p(px(8.));
         let mut section = "";
-        for (i, (command, range)) in matches.iter().enumerate() {
-            if command.section != section {
-                section = command.section;
+        for (i, item) in matches.iter().enumerate() {
+            if item.section != section {
+                section = item.section;
                 list = list.child(
                     div()
                         .px(px(12.))
@@ -137,11 +213,13 @@ impl Render for CommandPalette {
                     .child(
                         div()
                             .flex_1()
-                            .child(StyledText::new(command.label).with_highlights(range.clone().map(|r| (r, bold)))),
+                            .child(StyledText::new(item.label.clone()).with_highlights(item.range.clone().map(|r| (r, bold)))),
                     )
-                    .child(match command.hint {
-                        Hint::Key(key) => key_cap(&t, key, selected),
-                        Hint::Note(note) => mono(note, t.ink2),
+                    .children(match item.hint {
+                        Some(Hint::Key(key)) => Some(key_cap(&t, key, selected)),
+                        Some(Hint::Note(note)) => Some(mono(*note, t.ink2)),
+                        // Folder targets show ↵ on the selected row only.
+                        None => selected.then(|| key_cap(&t, "↵", true)),
                     }),
             );
         }
@@ -179,7 +257,7 @@ impl Render for CommandPalette {
             .border_t_1()
             .border_color(t.line)
             .bg(t.subtle)
-            .child(mono("↑ ↓ move · ↵ run · esc close", t.ink2))
+            .child(mono(if moving { "↑ ↓ move · ↵ move to · esc close" } else { "↑ ↓ move · ↵ run · esc close" }, t.ink2))
             .child(mono(
                 match matches.len() {
                     1 => "1 result".to_string(),
@@ -202,6 +280,9 @@ impl Render for CommandPalette {
             .text_color(t.ink)
             .font_family(font::UI)
             .child(input)
+            .when_some(self.subject.clone().filter(|_| moving), |d, s| {
+                d.child(mono(format!("1 message · {s}"), t.ink2).truncate().px(px(20.)).pt(px(10.)))
+            })
             .child(list)
             .child(footer);
 
@@ -242,5 +323,22 @@ mod tests {
     #[test]
     fn design_query_shows_all_five() {
         assert_eq!(COMMANDS.iter().filter(|c| find(c.label, "done").is_some()).count(), 5);
+    }
+
+    #[test]
+    fn move_lists_matching_folders_then_create() {
+        let folders = vec![(0, "Receipts".into()), (1, "Travel".into()), (2, "Travel / Trains".into())];
+        let items = matches("Move tr", &folders);
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Move to Travel", "Move to Travel / Trains", "New folder “tr”"]);
+        // The highlight covers the query inside the folder path, not "Move to".
+        assert_eq!(items[0].range, Some(8..10));
+        assert_eq!(items[1].target, Some(MoveTo::Folder(2)));
+        assert_eq!(items[2].target, Some(MoveTo::New("tr".into())));
+        // An exact name offers no duplicate folder; bare "move" lists all folders.
+        assert!(matches("move travel", &folders).iter().all(|i| i.section == "Move to"));
+        assert_eq!(matches("move", &folders).len(), 3);
+        // Other queries stay commands.
+        assert!(matches("done", &folders).iter().all(|i| i.target.is_none()));
     }
 }

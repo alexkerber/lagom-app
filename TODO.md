@@ -32,7 +32,8 @@
 - [ ] Liquid Glass spike: native `NSGlassEffectView` behind the GPUI sidebar on macOS 26+, blur fallback.
 - [x] Window drags by its top edge on macOS (Alex verified by hand, 2026-11-06).
 
-- [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features).
+- [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features). Sidebar group and ⌘K "move <folder>" work on sample data (`feat/folders`); real IMAP/Gmail sync is still open.
+- [ ] Folders: the "+" in the heading and the "New folder" row do nothing yet. Wire them to an inline name field once the app has text inputs; ⌘K "move <name>" creates a folder today.
 - [ ] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature).
 - [x] Swipe a row with two fingers (trackpad, Magic Mouse) to Done or Later; Esc springs it back (Alex 2026-11-06).
 - [ ] Swipe: try it by hand on a trackpad and a Magic Mouse; tests cover only the state logic.
@@ -40,6 +41,15 @@
 - [ ] Swipe: a classic wheel mouse cannot swipe (no horizontal phases). Decide whether click-drag swipe is worth it.
 - [ ] Compose: Esc keeps the draft once fields are editable (now it discards static sample text).
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
+
+## Folders: open questions
+
+Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
+
+- [ ] Gmail labels and IMAP folders: shown the same way for now. A Gmail message can have several labels.
+- [ ] Folders per account (default) or merged across accounts.
+- [ ] Shortcuts: only ⌘K for now, no G + letter per folder.
+- [ ] Drag a message onto a folder, and a swipe to "Move to": not yet.
 
 ## Calendar (Alex 2026-11-06)
 

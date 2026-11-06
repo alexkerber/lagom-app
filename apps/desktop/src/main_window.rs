@@ -9,8 +9,9 @@ use gpui::{
     ScrollWheelEvent, SharedString, TouchPhase, Window,
 };
 
-use crate::command_palette::CommandPalette;
+use crate::command_palette::{CommandPalette, MoveTo};
 use crate::compose::Compose;
+use crate::folders::{self, Folder};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 struct Message {
@@ -21,8 +22,9 @@ struct Message {
     unread: bool,
 }
 
-// Sample inbox from MainWindowD.
-const INBOX: &[Message] = &[
+// Sample mail: the inbox from MainWindowD (ids 0..INBOX_LEN), then the folder contents in `folders::sample`.
+const INBOX_LEN: usize = 7;
+const MESSAGES: &[Message] = &[
     Message { from: "Ingrid Holm", time: "09:42", subject: "Board meeting moved to Thursday", snippet: "Thursday at 16:00 works for everyone except the projector.", unread: true },
     Message { from: "Johan Ek", time: "08:57", subject: "Invoice 2026-114", snippet: "Attached. Same as last month, minus the coffee machine.", unread: true },
     Message { from: "Build bot", time: "08:15", subject: "Nightly build passed", snippet: "All tests green. Nothing to see here.", unread: false },
@@ -30,6 +32,17 @@ const INBOX: &[Message] = &[
     Message { from: "Housing co-op", time: "Yesterday", subject: "Laundry room schedule, December", snippet: "The new schedule is on the door. It is also attached.", unread: false },
     Message { from: "Tickets", time: "Tue", subject: "Stockholm C → Göteborg C, 14 Nov", snippet: "Coach 3, seat 41. Quiet carriage.", unread: false },
     Message { from: "Lagom releases", time: "Mon", subject: "Version 0.4 is out", snippet: "Faster threads, fewer settings. Changelog inside.", unread: false },
+    Message { from: "Coffee roastery", time: "Mon", subject: "Order 4411 has shipped", snippet: "Two bags of the Ethiopian, ground for filter.", unread: true },
+    Message { from: "Bike shop", time: "3 Nov", subject: "Service receipt", snippet: "New chain, new brake pads, same squeak.", unread: true },
+    Message { from: "Hardware store", time: "1 Nov", subject: "Your receipt", snippet: "One ladder, one ladder hook.", unread: true },
+    Message { from: "Maja Lind", time: "Oct", subject: "Photos from Lisbon", snippet: "Mostly tiles. A few of us, in front of tiles.", unread: false },
+    Message { from: "Ryokan Hanaya", time: "Oct", subject: "Booking confirmed, 3–6 April", snippet: "Dinner is served at 18:30. Slippers are provided.", unread: false },
+    Message { from: "Tickets", time: "Sun", subject: "Göteborg C → Stockholm C, 16 Nov", snippet: "Coach 5, seat 12. Quiet carriage again.", unread: true },
+    Message { from: "Johan Ek", time: "Sep", subject: "Folder icons", snippet: "Stroke 1.5, like the rest. Sketches attached.", unread: false },
+    Message { from: "Seed shop", time: "Aug", subject: "Spring catalogue", snippet: "Forty kinds of tomato. You need two.", unread: false },
+    Message { from: "Housing co-op", time: "Oct", subject: "Annual meeting minutes", snippet: "The bike room stays. The sauna gets a new door.", unread: true },
+    Message { from: "This Week in Rust", time: "Thu", subject: "Issue 571", snippet: "Crate of the week, a few RFCs and a lot of PRs.", unread: true },
+    Message { from: "Kitchen notes", time: "Wed", subject: "Soup season", snippet: "Six soups that freeze well, and one that does not.", unread: true },
 ];
 
 // Messages already snoozed in the sample data.
@@ -91,6 +104,8 @@ pub struct MainWindow {
     spring: Option<(usize, f32, usize)>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
+    // "N more" was clicked, so every folder row shows.
+    all_folders: bool,
     _appearance: gpui::Subscription,
 }
 
@@ -106,7 +121,7 @@ impl MainWindow {
         let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let mut this = Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
-            inbox: Inbox::new(if screen == "empty" { 0 } else { INBOX.len() }, LATER_SAMPLE),
+            inbox: Inbox { folders: folders::sample(), ..Inbox::new(if screen == "empty" { 0 } else { INBOX_LEN }, LATER_SAMPLE) },
             focus,
             ghosts: Vec::new(),
             entering: Vec::new(),
@@ -116,10 +131,13 @@ impl MainWindow {
             spring: None,
             palette: None,
             compose: None,
+            all_folders: false,
             _appearance: appearance,
         };
         match screen.as_str() {
             "palette" => this.open_palette("done", window, cx),
+            "folders" => this.inbox.open(Some(0)),
+            "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(window, cx),
             // A row held mid-swipe, past the Done threshold, for screenshots.
             "swipe" => this.swipe = Swipe::Row { id: 1, dx: 150. },
@@ -141,11 +159,26 @@ impl MainWindow {
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
-        let palette = cx.new(|cx| CommandPalette::new(query, cx));
+        // The open folder is not a target: the message is already there.
+        let targets = folders::tree(&self.inbox.folders, true)
+            .into_iter()
+            .filter(|&(f, _)| Some(f) != self.inbox.open)
+            .map(|(f, _)| (f, folders::path(&self.inbox.folders, f)))
+            .collect();
+        let subject = self.inbox.current().map(|id| MESSAGES[id].subject.to_string());
+        let palette = cx.new(|cx| CommandPalette::new(query, targets, subject, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
             this.palette = None;
             window.focus(&this.focus);
             cx.notify();
+        })
+        .detach();
+        cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
+            let f = match target {
+                MoveTo::Folder(f) => *f,
+                MoveTo::New(name) => this.inbox.create_folder(name),
+            };
+            this.act(Move::Folder(f), cx);
         })
         .detach();
         window.focus(&gpui::Focusable::focus_handle(&palette, cx));
@@ -184,8 +217,29 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// Shows the inbox (`None`) or a folder in the list.
+    fn open_box(&mut self, f: Option<usize>, cx: &mut Context<Self>) {
+        self.release(false, cx);
+        self.clear_motion();
+        self.inbox.open(f);
+        cx.notify();
+    }
+
+    // Ghosts and springs sit at indices in the list on screen, so they go when the list changes.
+    fn clear_motion(&mut self) {
+        self.ghosts.clear();
+        self.entering.clear();
+        self.spring = None;
+    }
+
     fn undo(&mut self, cx: &mut Context<Self>) {
+        let open = self.inbox.open;
         let Some((what, id, ix)) = self.inbox.undo() else { return };
+        // Undo goes back to the list the message left, as the reverse motion needs it on screen.
+        if self.inbox.open != open {
+            self.swipe = Swipe::Idle;
+            self.clear_motion();
+        }
         self.seq += 1;
         self.ghosts.retain(|g| g.id != id);
         // Otherwise a finished spring on this row would hide the undo motion.
@@ -226,7 +280,7 @@ impl MainWindow {
     /// Fingers lift (`act`) or Esc (not `act`): past the threshold the row goes, else it springs back.
     fn release(&mut self, act: bool, cx: &mut Context<Self>) {
         let Some((id, dx, what)) = self.swipe.end() else { return };
-        let ix = self.inbox.items.iter().position(|&i| i == id);
+        let ix = self.inbox.list().iter().position(|&i| i == id);
         match (what.filter(|_| act), ix) {
             (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
             _ => {
@@ -258,7 +312,8 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
         .opacity(1. - p);
     match what {
         // A swiped row already shows the full tint behind it, so it keeps it.
-        Move::Done => row.left(px(dx + p * 200.)).bg(Rgba { a: 0.2 * if dx > 0. { 1. } else { (p * 3.).min(1.) }, ..t.accent }),
+        // A move to a folder leaves like Done.
+        Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)).bg(Rgba { a: 0.2 * if dx > 0. { 1. } else { (p * 3.).min(1.) }, ..t.accent }),
         // Towards Later in the sidebar: lift (shadow), shrink and move left.
         Move::Later => row.left(px(dx - p * 80.)).w(relative(1. - 0.3 * p)).bg(t.raised).shadow_md(),
     }
@@ -340,8 +395,19 @@ pub(crate) fn key_button(t: &Theme, label: &'static str, key: &'static str, prim
 }
 
 impl MainWindow {
-    fn sidebar(&self) -> Div {
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
+        let heading = |label: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .px(px(10.))
+                .pb(px(6.))
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(t.ink2)
+                .child(div().flex_1().child(label))
+        };
         let nav = |path: &'static str, label: &'static str, count: Option<SharedString>, active: bool| {
             div()
                 .flex()
@@ -456,25 +522,22 @@ impl MainWindow {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(nav("icons/inbox.svg", "Inbox", Some(self.inbox.items.len().to_string().into()), true))
+                    .child(
+                        nav("icons/inbox.svg", "Inbox", Some(self.inbox.items.len().to_string().into()), self.inbox.open.is_none())
+                            .id("nav-inbox")
+                            .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
+                    )
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later.to_string().into()), false))
                     .child(nav("icons/sent.svg", "Sent", None, false))
                     .child(nav("icons/done.svg", "Done", Some("G D".into()), false)),
             )
+            .child(self.folder_group(heading("Folders"), cx))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(
-                        div()
-                            .px(px(10.))
-                            .pb(px(6.))
-                            .text_size(px(size::SMALL))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.ink2)
-                            .child("Accounts"),
-                    )
+                    .child(heading("Accounts"))
                     .child(account("Home", "you@home.example", true))
                     .child(account("Work", "you@work.example", false)),
             )
@@ -490,6 +553,70 @@ impl MainWindow {
                     .child("Settings")
                     .child(mono("⌘,", t.ink2)),
             )
+    }
+
+    /// The "Folders" group: the nav row style, subfolders indented, "N more" past six rows.
+    fn folder_group(&self, heading: Div, cx: &mut Context<Self>) -> Div {
+        let t = &self.theme;
+        let all = &self.inbox.folders;
+        let row = || div().flex().items_center().gap(px(10.)).h(px(34.)).px(px(10.)).rounded(px(radius::CONTROL));
+        // shortcut: "+" and "New folder" do nothing yet; ⌘K "move <name>" creates a folder. Wire
+        // them to an inline name field once the app has text inputs.
+        let group = div().flex().flex_col().gap(px(2.)).child(heading.child(icon("icons/plus.svg", t.ink2, 14.)));
+        if all.is_empty() {
+            return group.child(row().text_color(t.ink2).child(icon("icons/plus.svg", t.ink2, 16.)).child("New folder"));
+        }
+        // Once any folder has subfolders, every row keeps a chevron slot, so the icons line up.
+        let nested = all.iter().any(|f| f.parent.is_some());
+        let rows = folders::tree(all, false);
+        let shown = folders::shown(rows.len(), self.all_folders);
+        let slot = || div().size(px(12.)).flex_shrink_0();
+        let mut group = group;
+        for &(f, depth) in &rows[..shown] {
+            let unread = self.inbox.unread(f);
+            let active = self.inbox.open == Some(f);
+            let color = if active || unread > 0 { t.ink } else { t.ink2 };
+            let chevron = folders::has_children(all, f).then(|| {
+                let path = if all[f].open { "icons/chevron.svg" } else { "icons/chevron-right.svg" };
+                slot().id(("chevron", f)).child(icon(path, t.ink2, 12.)).on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.inbox.folders[f].open ^= true;
+                    cx.notify();
+                }))
+            });
+            group = group.child(
+                row()
+                    .id(("folder", f))
+                    .pl(px(10. + 22. * depth as f32))
+                    .text_color(color)
+                    .when(unread > 0, |d| d.font_weight(FontWeight::MEDIUM))
+                    .when(active, |d| d.bg(t.sel).font_weight(FontWeight::SEMIBOLD))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_box(Some(f), cx)))
+                    .when(nested, |d| match chevron {
+                        Some(c) => d.child(c),
+                        None => d.child(slot()),
+                    })
+                    .child(icon("icons/folder.svg", color, 16.))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(all[f].name.clone()))
+                    // A zero count is calm: no number at all.
+                    .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}")))),
+            );
+        }
+        if shown < rows.len() {
+            group = group.child(
+                row()
+                    .id("folders-more")
+                    .text_color(t.ink2)
+                    .when(nested, |d| d.child(slot()))
+                    .child(icon("icons/chevron.svg", t.ink2, 16.))
+                    .child(format!("{} more", rows.len() - shown))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.all_folders = true;
+                        cx.notify();
+                    })),
+            );
+        }
+        group
     }
 
     fn message_list(&self, cx: &mut Context<Self>) -> Div {
@@ -536,7 +663,7 @@ impl MainWindow {
         let ghosts_at = |ix: usize| {
             self.ghosts.iter().filter(move |g| g.ix == ix).map(move |g| {
                 let (what, dx) = (g.what, g.dx);
-                row(&INBOX[g.id], false)
+                row(&MESSAGES[g.id], false)
                     .with_animation(("ghost", g.seq), motion(), move |el, d| away(el, theme, what, d, dx))
                     .into_any_element()
             })
@@ -544,10 +671,10 @@ impl MainWindow {
         // shortcut: renders every row, fine for the sample inbox. Switch to uniform_list (visible
         // rows only, docs/performance.md rule 3) when real mail arrives.
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (i, &id) in self.inbox.items.iter().enumerate() {
+        for (i, &id) in self.inbox.list().iter().enumerate() {
             rows.extend(ghosts_at(i));
             let selected = i == self.inbox.selected;
-            let el = row(&INBOX[id], selected)
+            let el = row(&MESSAGES[id], selected)
                 .id(("row", id))
                 .on_click(cx.listener(move |this, _, _, cx| this.select(|inbox| inbox.select(i), cx)))
                 .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
@@ -582,7 +709,7 @@ impl MainWindow {
                 None => el.into_any_element(),
             });
         }
-        rows.extend(ghosts_at(self.inbox.items.len()));
+        rows.extend(ghosts_at(self.inbox.list().len()));
 
         let filter = div()
             .flex()
@@ -627,7 +754,7 @@ impl MainWindow {
                             .font_family(font::DISPLAY)
                             .text_size(px(size::TITLE))
                             .font_weight(FontWeight::BOLD)
-                            .child("Inbox"),
+                            .child(self.inbox.open.map_or("Inbox".to_string(), |f| self.inbox.folders[f].name.clone())),
                     )
                     .child(filter),
             )
@@ -651,8 +778,8 @@ impl MainWindow {
                     .border_t_1()
                     .border_color(t.line)
                     .child(roll(
-                        mono(format!("{} left", self.inbox.items.len()), t.ink2),
-                        format!("left-{}", self.inbox.items.len()),
+                        mono(format!("{} left", self.inbox.list().len()), t.ink2),
+                        format!("left-{}", self.inbox.list().len()),
                     ))
                     .child(mono("J K move", t.ink2))
                     .child(mono("E done", t.ink2))
@@ -663,7 +790,7 @@ impl MainWindow {
     fn reading_pane(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
-        let m = &INBOX[id];
+        let m = &MESSAGES[id];
         let para = |text: &'static str| div().child(text);
 
         div()
@@ -695,7 +822,7 @@ impl MainWindow {
                     )
                     .child(key_button(t, "Forward", "F", false))
                     .child(div().flex_1())
-                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.items.len()), t.ink2)),
+                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.list().len()), t.ink2)),
             )
             .child(
                 div()
@@ -834,7 +961,7 @@ impl Render for MainWindow {
             .text_color(t.ink)
             .font_family(font::UI)
             .text_size(px(size::BASE))
-            .child(self.sidebar())
+            .child(self.sidebar(cx))
             .child(
                 div()
                     .flex_1()
@@ -847,9 +974,9 @@ impl Render for MainWindow {
                     .border_color(t.line)
                     .rounded(px(radius::PANEL))
                     .overflow_hidden()
-                    // Undo from the empty screen brings the list back.
-                    .when(self.inbox.items.is_empty(), |d| d.child(crate::empty_inbox::view(&t)))
-                    .when(!self.inbox.items.is_empty(), |d| d.child(self.message_list(cx)).child(self.reading_pane(cx))),
+                    // Undo from the empty screen brings the list back. An empty folder keeps its header.
+                    .when(self.inbox.list().is_empty() && self.inbox.open.is_none(), |d| d.child(crate::empty_inbox::view(&t)))
+                    .when(!self.inbox.list().is_empty() || self.inbox.open.is_some(), |d| d.child(self.message_list(cx)).child(self.reading_pane(cx))),
             )
             .children(self.palette.clone())
             .children(self.compose.clone())
@@ -860,6 +987,8 @@ impl Render for MainWindow {
 enum Move {
     Done,
     Later,
+    /// Into the folder at this index in `Inbox::folders`.
+    Folder(usize),
 }
 
 /// Finger travel before the swipe locks to one direction.
@@ -920,26 +1049,55 @@ impl Swipe {
     }
 }
 
-/// Inbox state as ids into `INBOX`. Plain Rust, so tests run without a window.
+/// Inbox and folder state as ids into `MESSAGES`. Plain Rust, so tests run without a window.
 struct Inbox {
+    /// The inbox.
     items: Vec<usize>,
+    folders: Vec<Folder>,
+    /// The list on screen: the inbox (`None`) or a folder.
+    open: Option<usize>,
     selected: usize,
     later: usize,
-    // (what, message id, index it left from). Act and undo are LIFO, so the index always fits.
-    history: Vec<(Move, usize, usize)>,
+    // (what, message id, list it left, index it left from). Act and undo are LIFO, so the index always fits.
+    history: Vec<(Move, usize, Option<usize>, usize)>,
 }
 
 impl Inbox {
     fn new(len: usize, later: usize) -> Self {
-        Self { items: (0..len).collect(), selected: 0, later, history: Vec::new() }
+        Self { items: (0..len).collect(), folders: Vec::new(), open: None, selected: 0, later, history: Vec::new() }
+    }
+
+    fn list(&self) -> &Vec<usize> {
+        self.open.map_or(&self.items, |f| &self.folders[f].items)
+    }
+
+    fn list_mut(&mut self) -> &mut Vec<usize> {
+        match self.open {
+            Some(f) => &mut self.folders[f].items,
+            None => &mut self.items,
+        }
+    }
+
+    fn open(&mut self, f: Option<usize>) {
+        self.open = f;
+        self.selected = 0;
+    }
+
+    fn create_folder(&mut self, name: &str) -> usize {
+        self.folders.push(Folder::new(name, None, &[]));
+        self.folders.len() - 1
+    }
+
+    fn unread(&self, f: usize) -> usize {
+        self.folders[f].items.iter().filter(|&&id| MESSAGES[id].unread).count()
     }
 
     fn current(&self) -> Option<usize> {
-        self.items.get(self.selected).copied()
+        self.list().get(self.selected).copied()
     }
 
     fn select(&mut self, ix: usize) {
-        if ix < self.items.len() {
+        if ix < self.list().len() {
             self.selected = ix;
         }
     }
@@ -955,27 +1113,38 @@ impl Inbox {
     /// Removes the message at `ix`. If it was selected, the one below it (above it at the end)
     /// becomes selected. A swipe can hit any row, so otherwise the selection stays on its message.
     fn act_at(&mut self, ix: usize, what: Move) -> Option<(usize, usize)> {
-        let id = *self.items.get(ix)?;
-        self.items.remove(ix);
+        if let Move::Folder(f) = what {
+            // A move into the open folder, or a folder that does not exist, changes nothing.
+            if self.open == Some(f) || f >= self.folders.len() {
+                return None;
+            }
+        }
+        let id = *self.list().get(ix)?;
+        self.list_mut().remove(ix);
         if ix < self.selected {
             self.selected -= 1;
         }
-        self.selected = self.selected.min(self.items.len().saturating_sub(1));
-        if what == Move::Later {
-            self.later += 1;
+        self.selected = self.selected.min(self.list().len().saturating_sub(1));
+        match what {
+            Move::Later => self.later += 1,
+            Move::Folder(f) => self.folders[f].items.insert(0, id),
+            Move::Done => {}
         }
-        self.history.push((what, id, ix));
+        self.history.push((what, id, self.open, ix));
         Some((id, ix))
     }
 
-    /// Puts the last Done or Later message back where it was and selects it.
+    /// Puts the last moved message back where it was, opens that list and selects the message.
     fn undo(&mut self) -> Option<(Move, usize, usize)> {
-        let (what, id, ix) = self.history.pop()?;
-        self.items.insert(ix, id);
-        self.selected = ix;
-        if what == Move::Later {
-            self.later -= 1;
+        let (what, id, from, ix) = self.history.pop()?;
+        match what {
+            Move::Later => self.later -= 1,
+            Move::Folder(f) => self.folders[f].items.retain(|&i| i != id),
+            Move::Done => {}
         }
+        self.open = from;
+        self.list_mut().insert(ix, id);
+        self.selected = ix;
         Some((what, id, ix))
     }
 }
@@ -1083,6 +1252,62 @@ mod tests {
         s.moved(300., 0.);
         assert_eq!(s, Swipe::Idle);
         assert_eq!(s.end(), None);
+    }
+
+    fn with_folders() -> Inbox {
+        Inbox { folders: folders::sample(), ..Inbox::new(INBOX_LEN, 0) }
+    }
+
+    #[test]
+    fn move_to_folder_and_undo() {
+        let mut inbox = with_folders();
+        // Tickets (5) into Trains (2): it leaves the inbox, the next message is selected.
+        inbox.select(5);
+        assert_eq!(inbox.act_at(inbox.selected, Move::Folder(2)), Some((5, 5)));
+        assert_eq!(inbox.current(), Some(6));
+        assert_eq!(inbox.folders[2].items, [5, 12]);
+        // Moving into the folder already open does nothing.
+        inbox.open(Some(2));
+        assert_eq!(inbox.act_at(0, Move::Folder(2)), None);
+        // Undo from another list goes back to the inbox, at the same place.
+        assert_eq!(inbox.undo(), Some((Move::Folder(2), 5, 5)));
+        assert_eq!((inbox.open, inbox.current()), (None, Some(5)));
+        assert_eq!(inbox.folders[2].items, [12]);
+        assert_eq!(inbox.items, (0..INBOX_LEN).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn act_inside_a_folder() {
+        let mut inbox = with_folders();
+        inbox.open(Some(0));
+        assert_eq!(inbox.list(), &[7, 8, 9]);
+        inbox.act_at(0, Move::Done);
+        assert_eq!((inbox.list().len(), inbox.current()), (2, Some(8)));
+        inbox.open(None);
+        assert_eq!(inbox.undo(), Some((Move::Done, 7, 0)));
+        assert_eq!((inbox.open, inbox.list().len()), (Some(0), 3));
+    }
+
+    #[test]
+    fn folder_counts_are_unread_only() {
+        let mut inbox = with_folders();
+        let counts: Vec<_> = (0..inbox.folders.len()).map(|f| inbox.unread(f)).collect();
+        assert_eq!(counts, [3, 0, 1, 0, 0, 0, 0, 1, 2]);
+        // A read message (Build bot) into Travel keeps Travel at zero; an unread one counts.
+        inbox.act_at(2, Move::Folder(1));
+        assert_eq!(inbox.unread(1), 0);
+        inbox.act_at(0, Move::Folder(1));
+        assert_eq!(inbox.unread(1), 1);
+    }
+
+    #[test]
+    fn create_folder_from_the_palette() {
+        let mut inbox = with_folders();
+        let f = inbox.create_folder("Taxes");
+        assert_eq!(folders::path(&inbox.folders, f), "Taxes");
+        inbox.act_at(1, Move::Folder(f));
+        assert_eq!(inbox.folders[f].items, [1]);
+        assert_eq!(inbox.act_at(0, Move::Folder(99)), None);
     }
 
     #[test]
