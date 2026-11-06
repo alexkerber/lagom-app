@@ -5,4 +5,4 @@ members = ["crates/lagom-core", "apps/desktop"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/alexkerber/lagom.app"
+repository = "https://github.com/alexkerber/lagom-app"
