@@ -91,6 +91,10 @@ impl Compose {
 
     fn on_key(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &e.keystroke;
+        if k.key == "escape" {
+            // shortcut: Esc discards because fields are static; once they are editable, keep the draft instead.
+            return self.discard(cx);
+        }
         if !k.modifiers.platform {
             return;
         }

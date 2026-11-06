@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
-    App, Context, Div, ElementId, FocusHandle, FontWeight, KeyBinding, Rgba, SharedString, Window,
+    App, Context, Div, ElementId, FocusHandle, FontWeight, KeyBinding, Rgba, ScrollDelta,
+    ScrollWheelEvent, SharedString, TouchPhase, Window,
 };
 
 use crate::command_palette::CommandPalette;
@@ -34,7 +35,7 @@ const INBOX: &[Message] = &[
 // Messages already snoozed in the sample data.
 const LATER_SAMPLE: usize = 2;
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, Undo, OpenPalette, Reply]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, Undo, OpenPalette, Reply, Cancel]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
@@ -48,6 +49,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-k", OpenPalette, ctx),
         KeyBinding::new("r", Reply, ctx),
+        KeyBinding::new("escape", Cancel, ctx),
     ]);
 }
 
@@ -70,6 +72,8 @@ struct Ghost {
     what: Move,
     seq: usize,
     at: Instant,
+    // Where a swipe let go of the row, so the exit motion starts there. 0 for E and L.
+    dx: f32,
 }
 
 pub struct MainWindow {
@@ -80,6 +84,11 @@ pub struct MainWindow {
     // Rows that undo put back, still playing the reverse motion.
     entering: Vec<Ghost>,
     seq: usize,
+    swipe: Swipe,
+    // The row under the pointer for the current scroll event. Rows set it before the list reads it.
+    under: Option<usize>,
+    // (message id, offset it springs back from, seq) for a swipe that did not reach the threshold.
+    spring: Option<(usize, f32, usize)>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
     _appearance: gpui::Subscription,
@@ -102,6 +111,9 @@ impl MainWindow {
             ghosts: Vec::new(),
             entering: Vec::new(),
             seq: 0,
+            swipe: Swipe::Idle,
+            under: None,
+            spring: None,
             palette: None,
             compose: None,
             _appearance: appearance,
@@ -109,6 +121,9 @@ impl MainWindow {
         match screen.as_str() {
             "palette" => this.open_palette("done", window, cx),
             "compose" => this.open_compose(window, cx),
+            // A row held mid-swipe, past the Done threshold, for screenshots.
+            "swipe" => this.swipe = Swipe::Row { id: 1, dx: 150. },
+            "swipe-later" => this.swipe = Swipe::Row { id: 1, dx: -90. },
             _ => {}
         }
         this
@@ -124,6 +139,8 @@ impl MainWindow {
     }
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The overlay swallows the gesture's Ended, so end a swipe now.
+        self.release(false, cx);
         let palette = cx.new(|cx| CommandPalette::new(query, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
             this.palette = None;
@@ -137,6 +154,7 @@ impl MainWindow {
     }
 
     fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.release(false, cx);
         let compose = cx.new(|cx| Compose::new(window, cx));
         cx.subscribe_in(&compose, window, |this, _, _: &gpui::DismissEvent, window, cx| {
             this.compose = None;
@@ -149,7 +167,11 @@ impl MainWindow {
     }
 
     fn act(&mut self, what: Move, cx: &mut Context<Self>) {
-        let Some((id, ix)) = self.inbox.act(what) else { return };
+        self.act_at(self.inbox.selected, what, 0., cx);
+    }
+
+    fn act_at(&mut self, ix: usize, what: Move, dx: f32, cx: &mut Context<Self>) {
+        let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
         self.seq += 1;
         for g in &mut self.ghosts {
             if g.ix > ix {
@@ -157,7 +179,8 @@ impl MainWindow {
             }
         }
         self.entering.retain(|g| g.id != id);
-        self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now() });
+        self.spring = self.spring.filter(|s| s.0 != id);
+        self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx });
         cx.notify();
     }
 
@@ -165,12 +188,52 @@ impl MainWindow {
         let Some((what, id, ix)) = self.inbox.undo() else { return };
         self.seq += 1;
         self.ghosts.retain(|g| g.id != id);
+        // Otherwise a finished spring on this row would hide the undo motion.
+        self.spring = self.spring.filter(|s| s.0 != id);
         for g in &mut self.ghosts {
             if g.ix > ix {
                 g.ix += 1;
             }
         }
-        self.entering.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now() });
+        self.entering.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx: 0. });
+        cx.notify();
+    }
+
+    /// Two-finger swipe on the list. Rows bubble first (GPUI paints child listeners after the
+    /// parent's), so `under` already names the row when this runs.
+    fn on_scroll(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let under = self.under.take();
+        // Line deltas come from a classic wheel: no phases and no horizontal gesture to follow.
+        let ScrollDelta::Pixels(d) = e.delta else { return };
+        if self.overlay_open(cx) {
+            return;
+        }
+        let before = self.swipe;
+        match e.touch_phase {
+            TouchPhase::Started => {
+                self.swipe = under.map_or(Swipe::Idle, Swipe::start);
+                self.swipe.moved(d.x.into(), d.y.into());
+            }
+            // Momentum events after Ended also arrive as Moved; Idle ignores them, so none re-acts.
+            TouchPhase::Moved => self.swipe.moved(d.x.into(), d.y.into()),
+            TouchPhase::Ended => self.release(true, cx),
+        }
+        if self.swipe != before {
+            cx.notify();
+        }
+    }
+
+    /// Fingers lift (`act`) or Esc (not `act`): past the threshold the row goes, else it springs back.
+    fn release(&mut self, act: bool, cx: &mut Context<Self>) {
+        let Some((id, dx, what)) = self.swipe.end() else { return };
+        let ix = self.inbox.items.iter().position(|&i| i == id);
+        match (what.filter(|_| act), ix) {
+            (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
+            _ => {
+                self.seq += 1;
+                self.spring = Some((id, dx, self.seq));
+            }
+        }
         cx.notify();
     }
 
@@ -181,8 +244,8 @@ impl MainWindow {
 }
 
 /// p = 0 is a resting row, p = 1 is fully gone. Undo plays the same curve backwards.
-fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32) -> E {
-    if p <= 0. {
+fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
+    if p <= 0. && dx == 0. {
         return row; // At rest: keep the selection background.
     }
     // Slide first, then close the gap. Padding shrinks too, or the row keeps 20 px.
@@ -194,10 +257,29 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32) -> E {
         .overflow_hidden()
         .opacity(1. - p);
     match what {
-        Move::Done => row.left(px(p * 200.)).bg(Rgba { a: 0.2 * (p * 3.).min(1.), ..t.accent }),
+        // A swiped row already shows the full tint behind it, so it keeps it.
+        Move::Done => row.left(px(dx + p * 200.)).bg(Rgba { a: 0.2 * if dx > 0. { 1. } else { (p * 3.).min(1.) }, ..t.accent }),
         // Towards Later in the sidebar: lift (shadow), shrink and move left.
-        Move::Later => row.left(px(-p * 80.)).w(relative(1. - 0.3 * p)).bg(t.raised).shadow_md(),
+        Move::Later => row.left(px(dx - p * 80.)).w(relative(1. - 0.3 * p)).bg(t.raised).shadow_md(),
     }
+}
+
+/// The action behind a swiped row: Done to the right (dx > 0), Later to the left.
+/// The tint fills as the row nears the threshold; the icon takes colour once it is past.
+fn behind(t: Theme, dx: f32) -> Div {
+    let done = dx >= 0.;
+    let ready = (dx.abs() / THRESHOLD).min(1.);
+    let (path, color) = if done { ("icons/done.svg", t.accent) } else { ("icons/later.svg", t.ink) };
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .when(!done, |d| d.justify_end())
+        .px(px(20.))
+        .rounded(px(radius::CONTROL))
+        .bg(Rgba { a: 0.2 * ready, ..color })
+        .child(icon(path, if ready >= 1. { color } else { t.ink2 }, 18.))
 }
 
 /// Counts roll in from below when they change. The id holds the value, so a new value restarts it.
@@ -453,9 +535,9 @@ impl MainWindow {
         let theme = self.theme;
         let ghosts_at = |ix: usize| {
             self.ghosts.iter().filter(move |g| g.ix == ix).map(move |g| {
-                let what = g.what;
+                let (what, dx) = (g.what, g.dx);
                 row(&INBOX[g.id], false)
-                    .with_animation(("ghost", g.seq), motion(), move |el, d| away(el, theme, what, d))
+                    .with_animation(("ghost", g.seq), motion(), move |el, d| away(el, theme, what, d, dx))
                     .into_any_element()
             })
         };
@@ -464,13 +546,37 @@ impl MainWindow {
         let mut rows: Vec<AnyElement> = Vec::new();
         for (i, &id) in self.inbox.items.iter().enumerate() {
             rows.extend(ghosts_at(i));
-            let el = row(&INBOX[id], i == self.inbox.selected)
+            let selected = i == self.inbox.selected;
+            let el = row(&INBOX[id], selected)
                 .id(("row", id))
-                .on_click(cx.listener(move |this, _, _, cx| this.select(|inbox| inbox.select(i), cx)));
+                .on_click(cx.listener(move |this, _, _, cx| this.select(|inbox| inbox.select(i), cx)))
+                .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
+            // Under the fingers the row follows dx; after a short swipe it springs back from it.
+            let spring = self.spring.filter(|s| s.0 == id).map(|(_, dx, seq)| (dx, Some(seq)));
+            if let Some((dx, seq)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring) {
+                // Opaque, so the action behind shows only where the row has moved away.
+                let el = el.relative().when(!selected, |d| d.bg(t.raised));
+                let el = match seq {
+                    None => el.left(px(dx)).into_any_element(),
+                    Some(seq) => el
+                        .with_animation(("spring", seq), motion(), move |el, d| el.left(px(dx * (1. - d))))
+                        .into_any_element(),
+                };
+                rows.push(
+                    div()
+                        .relative()
+                        .overflow_hidden()
+                        .rounded(px(radius::CONTROL))
+                        .child(behind(theme, dx))
+                        .child(el)
+                        .into_any_element(),
+                );
+                continue;
+            }
             rows.push(match self.entering.iter().find(|g| g.id == id) {
                 Some(g) => {
                     let what = g.what;
-                    el.with_animation(("enter", g.seq), motion(), move |el, d| away(el, theme, what, 1. - d))
+                    el.with_animation(("enter", g.seq), motion(), move |el, d| away(el, theme, what, 1. - d, 0.))
                         .into_any_element()
                 }
                 None => el.into_any_element(),
@@ -525,7 +631,17 @@ impl MainWindow {
                     )
                     .child(filter),
             )
-            .child(div().flex_1().overflow_hidden().flex().flex_col().p(px(6.)).children(rows))
+            .child(
+                div()
+                    .id("rows")
+                    .flex_1()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .p(px(6.))
+                    .on_scroll_wheel(cx.listener(|this, e, _, cx| this.on_scroll(e, cx)))
+                    .children(rows),
+            )
             .child(
                 div()
                     .flex()
@@ -711,6 +827,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &Undo, _, cx| if !this.overlay_open(cx) { this.undo(cx) }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| if !this.overlay_open(cx) { this.open_palette("", window, cx) }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(window, cx) }))
+            .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) { this.release(false, cx) }))
             .size_full()
             .flex()
             .bg(tint)
@@ -745,6 +862,64 @@ enum Move {
     Later,
 }
 
+/// Finger travel before the swipe locks to one direction.
+const SLOP: f32 = 8.;
+/// docs/motion.md: about 35 % of the 408 px row, or 120 px, whichever is less.
+const THRESHOLD: f32 = 120.;
+
+/// A two-finger swipe on one row, as ids into `INBOX`. Plain Rust, so tests run without a window.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Swipe {
+    Idle,
+    /// Fingers down on a row, direction not locked yet.
+    Undecided { id: usize, dx: f32, dy: f32 },
+    /// Locked horizontal: the row follows dx.
+    Row { id: usize, dx: f32 },
+    /// Locked vertical: a list scroll, not a swipe.
+    Scroll,
+}
+
+impl Swipe {
+    fn start(id: usize) -> Self {
+        Swipe::Undecided { id, dx: 0., dy: 0. }
+    }
+
+    fn moved(&mut self, x: f32, y: f32) {
+        *self = match *self {
+            Swipe::Undecided { id, dx, dy } => {
+                let (dx, dy) = (dx + x, dy + y);
+                if dx.abs().max(dy.abs()) < SLOP {
+                    Swipe::Undecided { id, dx, dy }
+                } else if dx.abs() > dy.abs() {
+                    Swipe::Row { id, dx }
+                } else {
+                    Swipe::Scroll
+                }
+            }
+            Swipe::Row { id, dx } => Swipe::Row { id, dx: dx + x },
+            other => other,
+        };
+    }
+
+    fn offset(&self, row: usize) -> Option<f32> {
+        match *self {
+            Swipe::Row { id, dx } if id == row => Some(dx),
+            _ => None,
+        }
+    }
+
+    /// Ends the swipe. Returns the row, its offset and the move it reached, if any.
+    fn end(&mut self) -> Option<(usize, f32, Option<Move>)> {
+        let Swipe::Row { id, dx } = std::mem::replace(self, Swipe::Idle) else { return None };
+        let what = match dx {
+            dx if dx >= THRESHOLD => Some(Move::Done),
+            dx if dx <= -THRESHOLD => Some(Move::Later),
+            _ => None,
+        };
+        Some((id, dx, what))
+    }
+}
+
 /// Inbox state as ids into `INBOX`. Plain Rust, so tests run without a window.
 struct Inbox {
     items: Vec<usize>,
@@ -777,12 +952,15 @@ impl Inbox {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    /// Removes the selected message. The one below it, or above it at the end, becomes selected.
-    fn act(&mut self, what: Move) -> Option<(usize, usize)> {
-        let ix = self.selected;
-        let id = self.current()?;
+    /// Removes the message at `ix`. If it was selected, the one below it (above it at the end)
+    /// becomes selected. A swipe can hit any row, so otherwise the selection stays on its message.
+    fn act_at(&mut self, ix: usize, what: Move) -> Option<(usize, usize)> {
+        let id = *self.items.get(ix)?;
         self.items.remove(ix);
-        self.selected = ix.min(self.items.len().saturating_sub(1));
+        if ix < self.selected {
+            self.selected -= 1;
+        }
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
         if what == Move::Later {
             self.later += 1;
         }
@@ -823,11 +1001,11 @@ mod tests {
     fn done_selects_the_next_message() {
         let mut inbox = Inbox::new(3, 0);
         inbox.next();
-        assert_eq!(inbox.act(Move::Done), Some((1, 1)));
+        assert_eq!(inbox.act_at(inbox.selected, Move::Done), Some((1, 1)));
         assert_eq!(inbox.items, [0, 2]);
         assert_eq!(inbox.current(), Some(2));
         // At the end, the one above becomes selected.
-        assert_eq!(inbox.act(Move::Done), Some((2, 1)));
+        assert_eq!(inbox.act_at(inbox.selected, Move::Done), Some((2, 1)));
         assert_eq!(inbox.current(), Some(0));
         assert_eq!(inbox.later, 0);
     }
@@ -835,7 +1013,7 @@ mod tests {
     #[test]
     fn later_counts_up() {
         let mut inbox = Inbox::new(2, LATER_SAMPLE);
-        inbox.act(Move::Later);
+        inbox.act_at(inbox.selected, Move::Later);
         assert_eq!(inbox.later, LATER_SAMPLE + 1);
         assert_eq!(inbox.items, [1]);
     }
@@ -844,8 +1022,8 @@ mod tests {
     fn undo_reverses_in_order() {
         let mut inbox = Inbox::new(4, 2);
         inbox.next();
-        inbox.act(Move::Done); // removes 1
-        inbox.act(Move::Later); // removes 2
+        inbox.act_at(inbox.selected, Move::Done); // removes 1
+        inbox.act_at(inbox.selected, Move::Later); // removes 2
         inbox.next();
         assert_eq!(inbox.undo(), Some((Move::Later, 2, 1)));
         assert_eq!((inbox.later, inbox.current()), (2, Some(2)));
@@ -856,13 +1034,65 @@ mod tests {
     }
 
     #[test]
+    fn act_at_keeps_the_selection_on_its_message() {
+        let mut inbox = Inbox::new(4, 0);
+        inbox.select(2);
+        assert_eq!(inbox.act_at(0, Move::Done), Some((0, 0)));
+        assert_eq!(inbox.current(), Some(2));
+        assert_eq!(inbox.act_at(2, Move::Later), Some((3, 2)));
+        assert_eq!(inbox.current(), Some(2));
+        assert_eq!(inbox.act_at(5, Move::Done), None);
+        assert_eq!(inbox.undo(), Some((Move::Later, 3, 2)));
+        assert_eq!(inbox.items, [1, 2, 3]);
+    }
+
+    fn swipe(moves: &[(f32, f32)]) -> Swipe {
+        let mut s = Swipe::start(7);
+        for &(x, y) in moves {
+            s.moved(x, y);
+        }
+        s
+    }
+
+    #[test]
+    fn swipe_locks_direction_after_slop() {
+        assert_eq!(swipe(&[(3., 1.)]), Swipe::Undecided { id: 7, dx: 3., dy: 1. });
+        // Mostly horizontal: the row follows every pixel, vertical motion is ignored once locked.
+        assert_eq!(swipe(&[(10., 2.), (6., 40.)]), Swipe::Row { id: 7, dx: 16. });
+        // Mostly vertical: a list scroll, and later horizontal motion never turns it into a swipe.
+        assert_eq!(swipe(&[(2., 9.), (200., 0.)]), Swipe::Scroll);
+        assert_eq!(swipe(&[(-20., 0.)]).offset(7), Some(-20.));
+        assert_eq!(swipe(&[(-20., 0.)]).offset(3), None);
+    }
+
+    #[test]
+    fn swipe_threshold_decides_the_move() {
+        assert_eq!(swipe(&[(THRESHOLD, 0.)]).end(), Some((7, THRESHOLD, Some(Move::Done))));
+        assert_eq!(swipe(&[(-THRESHOLD - 1., 0.)]).end(), Some((7, -THRESHOLD - 1., Some(Move::Later))));
+        // Short of it, or back towards the start: spring back.
+        assert_eq!(swipe(&[(119., 0.)]).end(), Some((7, 119., None)));
+        assert_eq!(swipe(&[(150., 0.), (-140., 0.)]).end(), Some((7, 10., None)));
+        assert_eq!(swipe(&[(0., 30.)]).end(), None);
+    }
+
+    #[test]
+    fn swipe_ignores_motion_after_it_ends() {
+        let mut s = swipe(&[(150., 0.)]);
+        assert!(s.end().is_some());
+        // Momentum events after Ended arrive as Moved; Idle drops them, so nothing acts twice.
+        s.moved(300., 0.);
+        assert_eq!(s, Swipe::Idle);
+        assert_eq!(s.end(), None);
+    }
+
+    #[test]
     fn reaching_zero() {
         let mut inbox = Inbox::new(2, 0);
-        inbox.act(Move::Done);
-        inbox.act(Move::Later);
+        inbox.act_at(inbox.selected, Move::Done);
+        inbox.act_at(inbox.selected, Move::Later);
         assert!(inbox.items.is_empty());
         assert_eq!(inbox.current(), None);
-        assert_eq!(inbox.act(Move::Done), None);
+        assert_eq!(inbox.act_at(inbox.selected, Move::Done), None);
         inbox.next();
         inbox.prev();
         assert_eq!(inbox.undo(), Some((Move::Later, 1, 0)));
