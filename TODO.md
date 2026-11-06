@@ -28,7 +28,7 @@
 - [ ] Typeface trial: Hauora Sans against Inter (Alex 2026-11-06).
 - [ ] Performance: CI that measures the budgets in `docs/performance.md` (Alex 2026-11-06: "the most optimised mail app").
 - [ ] Liquid Glass spike: native `NSGlassEffectView` behind the GPUI sidebar on macOS 26+, blur fallback.
-- [ ] Verify by hand that the window drags by its top edge on macOS (synthetic test blocked: no Accessibility permission).
+- [x] Window drags by its top edge on macOS (Alex verified by hand, 2026-11-06).
 
 - [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features).
 - [ ] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature).
