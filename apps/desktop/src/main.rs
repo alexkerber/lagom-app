@@ -1,3 +1,4 @@
+mod command_palette;
 mod main_window;
 #[cfg(target_os = "macos")]
 mod menus;

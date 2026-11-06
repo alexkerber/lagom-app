@@ -8,6 +8,7 @@ use gpui::{
     App, Context, Div, ElementId, FocusHandle, FontWeight, KeyBinding, Rgba, SharedString, Window,
 };
 
+use crate::command_palette::CommandPalette;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 struct Message {
@@ -76,6 +77,7 @@ pub struct MainWindow {
     // Rows that undo put back, still playing the reverse motion.
     entering: Vec<Ghost>,
     seq: usize,
+    palette: Option<gpui::Entity<CommandPalette>>,
     _appearance: gpui::Subscription,
 }
 
@@ -87,6 +89,17 @@ impl MainWindow {
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
+        // `LAGOM_SCREEN=palette` opens the palette with the query from the design.
+        let palette = (std::env::var("LAGOM_SCREEN").as_deref() == Ok("palette")).then(|| {
+            let palette = cx.new(|cx| CommandPalette::new("done", cx));
+            cx.subscribe(&palette, |this, _, _: &gpui::DismissEvent, cx| {
+                this.palette = None;
+                cx.notify();
+            })
+            .detach();
+            window.focus(&gpui::Focusable::focus_handle(&palette, cx));
+            palette
+        });
         Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             inbox: Inbox::new(INBOX.len(), LATER_SAMPLE),
@@ -94,6 +107,7 @@ impl MainWindow {
             ghosts: Vec::new(),
             entering: Vec::new(),
             seq: 0,
+            palette,
             _appearance: appearance,
         }
     }
@@ -684,6 +698,7 @@ impl Render for MainWindow {
                     .child(self.message_list(cx))
                     .child(self.reading_pane(cx)),
             )
+            .children(self.palette.clone())
     }
 }
 
