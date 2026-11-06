@@ -1,3 +1,4 @@
+mod compose;
 mod main_window;
 mod theme;
 

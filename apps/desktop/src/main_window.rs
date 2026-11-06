@@ -5,6 +5,7 @@ use gpui::{
     div, prelude::*, px, relative, svg, Context, Div, FontWeight, Rgba, SharedString, Window,
 };
 
+use crate::compose::Compose;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 struct Message {
@@ -29,6 +30,7 @@ const INBOX: &[Message] = &[
 pub struct MainWindow {
     theme: Theme,
     selected: usize,
+    compose: Option<gpui::Entity<Compose>>,
     _appearance: gpui::Subscription,
 }
 
@@ -41,12 +43,15 @@ impl MainWindow {
         Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             selected: 0,
+            // Another change wires the compose key. Until then `LAGOM_SCREEN=compose` opens it.
+            compose: (std::env::var("LAGOM_SCREEN").as_deref() == Ok("compose"))
+                .then(|| cx.new(|cx| Compose::new(window, cx))),
             _appearance: appearance,
         }
     }
 }
 
-fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
+pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     div().font_family(font::MONO).text_size(px(size::MONO)).text_color(color).child(text.into())
 }
 
@@ -77,7 +82,7 @@ fn app_mark(t: &Theme) -> Div {
         )
 }
 
-fn key_button(t: &Theme, label: &'static str, key: &'static str, primary: bool) -> Div {
+pub(crate) fn key_button(t: &Theme, label: &'static str, key: &'static str, primary: bool) -> Div {
     let base = div()
         .flex()
         .items_center()
@@ -511,5 +516,6 @@ impl Render for MainWindow {
                     .child(self.message_list())
                     .child(self.reading_pane()),
             )
+            .children(self.compose.clone())
     }
 }
