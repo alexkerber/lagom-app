@@ -1,4 +1,5 @@
 mod command_palette;
+mod compose;
 mod main_window;
 #[cfg(target_os = "macos")]
 mod menus;

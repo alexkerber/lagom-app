@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::command_palette::CommandPalette;
+use crate::compose::Compose;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 struct Message {
@@ -78,6 +79,7 @@ pub struct MainWindow {
     entering: Vec<Ghost>,
     seq: usize,
     palette: Option<gpui::Entity<CommandPalette>>,
+    compose: Option<gpui::Entity<Compose>>,
     _appearance: gpui::Subscription,
 }
 
@@ -108,6 +110,9 @@ impl MainWindow {
             entering: Vec::new(),
             seq: 0,
             palette,
+            // Another change wires the compose key. Until then `LAGOM_SCREEN=compose` opens it.
+            compose: (std::env::var("LAGOM_SCREEN").as_deref() == Ok("compose"))
+                .then(|| cx.new(|cx| Compose::new(window, cx))),
             _appearance: appearance,
         }
     }
@@ -172,7 +177,7 @@ fn roll(el: Div, id: String) -> AnyElement {
     .into_any_element()
 }
 
-fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
+pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     div().font_family(font::MONO).text_size(px(size::MONO)).text_color(color).child(text.into())
 }
 
@@ -203,7 +208,7 @@ fn app_mark(t: &Theme) -> Div {
         )
 }
 
-fn key_button(t: &Theme, label: &'static str, key: &'static str, primary: bool) -> Div {
+pub(crate) fn key_button(t: &Theme, label: &'static str, key: &'static str, primary: bool) -> Div {
     let base = div()
         .flex()
         .items_center()
@@ -830,5 +835,6 @@ mod tests {
         inbox.prev();
         assert_eq!(inbox.undo(), Some((Move::Later, 1, 0)));
         assert_eq!(inbox.current(), Some(1));
+            .children(self.compose.clone())
     }
 }
