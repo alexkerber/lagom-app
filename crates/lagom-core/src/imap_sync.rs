@@ -157,6 +157,7 @@ impl ImapSync {
         for (name, delimiter, role) in rows {
             ids.push(store.save_folder(&self.account.id, &name, delimiter.as_deref(), role)?);
         }
+        store.retain_folders(&self.account.id, &ids)?;
         ids.into_iter().map(|id| store.folder(id)).collect()
     }
     pub async fn sync(&mut self, store: &mut Store, limit: usize) -> Result<()> {
@@ -277,6 +278,7 @@ impl ImapSync {
         let mut parts = Vec::new();
         let mut attachments = false;
         text_parts(body, &[], 0, &mut parts, &mut attachments)?;
+        // shortcut: first preferred inline body only, combine multiple inline parts when needed.
         parts.sort_by_key(|p| p.1);
         if let Some((path, _, size)) = parts.first() {
             if *size as usize > mime::MAX_MIME_BYTES {
@@ -287,6 +289,7 @@ impl ImapSync {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(".");
+            // GreenMail emits malformed partial text responses; check octets before full part fetch.
             let query = if path.is_empty() {
                 "(UID BODY.PEEK[TEXT])".to_owned()
             } else {

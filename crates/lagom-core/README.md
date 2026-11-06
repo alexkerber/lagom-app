@@ -46,9 +46,29 @@ all server UIDs to detect expunges. CONDSTORE refreshes changed flags across cac
 UIDs; other servers refresh flags for the newest N. Snooze uses caller-supplied
 Unix timestamps, with no background timer in the core.
 
-// shortcut: cache the first preferred plain/HTML body part, combine multiple inline text parts when needed.
-// shortcut: selected encoded text plus its headers must fit 4 MiB (headers <=64 KiB), add streaming bodies for larger mail.
-// shortcut: deleted server folders remain locally listed, reconcile folder deletion when account-management UI lands.
+The first preferred plain/HTML text body part is cached. Multiple inline text parts are not combined yet.
+Selected encoded text plus its headers must fit 4 MiB (part headers <64 KiB). Larger text bodies need streaming support.
+Server-deleted folders and their cached messages are removed after a successful complete LIST.
 
 TLS/STARTTLS against real providers and the real OS keychain require manual
 account testing; GreenMail's integration ports exercise local plaintext only.
+
+## Local queries and search budget
+
+`list_messages` returns metadata in date/id descending order with limit/offset;
+`message` loads the full cached text/optional HTML. `folders` includes unread
+counts; `counts` exposes Inbox/Later totals; `later` lists future snoozes. Due
+snoozes become visible at query time. Search accepts FTS5 expressions across
+subject, sender name/address and body, with stable row-id pagination. It returns
+index order, avoiding a relevance sort over every match.
+
+```sh
+cargo test -p lagom-core --release search_100k_budget -- --ignored --nocapture
+```
+
+Measured 2026-11-06 on this Apple silicon host, 100,000 synthetic messages and
+50 first-page results: unique body token 0.205 ms, common body token 0.160 ms,
+sender 0.111 ms, subject 0.101 ms. All passed the <50 ms assertion. This is one
+local run with a freshly populated database in the OS cache, not a cold-disk,
+real-mailbox or CI performance guarantee. UI startup, frame timing, memory and
+idle CPU budgets remain unmeasured by this work.

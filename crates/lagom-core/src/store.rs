@@ -242,6 +242,20 @@ impl Store {
         }
         Ok(self.db.query_row("INSERT INTO folders(account,name,delimiter,role) VALUES(?1,?2,?3,?4) ON CONFLICT(account,name) DO UPDATE SET delimiter=excluded.delimiter,role=excluded.role RETURNING id",params![account,name,delimiter,role.as_str()],|r|r.get(0))?)
     }
+    pub(crate) fn retain_folders(&self, account: &str, present: &[i64]) -> Result<()> {
+        let known = self.folders(account, 0)?;
+        let tx = self.db.unchecked_transaction()?;
+        for folder in known {
+            if !present.contains(&folder.id) {
+                tx.execute(
+                    "DELETE FROM folders WHERE id=?1 AND account=?2",
+                    params![folder.id, account],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn folders(&self, account: &str, now: i64) -> Result<Vec<Folder>> {
         let mut stmt = self.db.prepare("SELECT f.id,f.account,f.name,f.delimiter,f.role,f.uidvalidity,f.uidnext,f.last_uid,f.highest_modseq,(SELECT count(*) FROM messages m WHERE m.folder=f.id AND NOT m.seen AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2)) FROM folders f WHERE f.account=?1 ORDER BY f.name")?;
         let rows = stmt.query_map(params![account, now], folder_row)?;
@@ -282,7 +296,8 @@ impl Store {
         if query.len() > 4096 {
             return Err(Error::Invalid("search query too long"));
         }
-        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND m.account=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY rank LIMIT ?4 OFFSET ?5"))?;
+        // shortcut: index order avoids ranking every hit, add bounded relevance ranking when needed.
+        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND m.account=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY messages_fts.rowid LIMIT ?4 OFFSET ?5"))?;
         let rows = stmt.query_map(params![query, account, now, limit, offset], summary_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -465,10 +480,64 @@ mod mail_tests {
         assert!(Store::open(path).is_err());
     }
     #[test]
+    fn deleted_folders_clean_fts_and_ids_are_not_reused() {
+        let (_t, s, a, f) = setup();
+        let id = s.save_message(&mail(&a, f, 1)).unwrap();
+        let kept = s
+            .save_folder(&a.id, "Kept", None, FolderRole::Other)
+            .unwrap();
+        s.retain_folders(&a.id, &[kept]).unwrap();
+        assert!(s.message(id).is_err());
+        assert!(s.folder(f).is_err());
+        assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
+        let new_id = s.save_message(&mail(&a, kept, 1)).unwrap();
+        assert!(new_id > id);
+    }
+    #[test]
     fn rejects_cross_account_message() {
         let (_t, s, mut a, f) = setup();
         a.id = "other".into();
         s.save_account(&a).unwrap();
         assert!(s.save_message(&mail(&a, f, 1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    #[test]
+    #[ignore = "100k-message search budget; run explicitly with --release --ignored --nocapture"]
+    fn search_100k_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("budget.db")).unwrap();
+        let (i, s) = crate::presets::servers("budget@gmail.com").unwrap();
+        let a = Account::new("budget@gmail.com".into(), i, s).unwrap();
+        store.save_account(&a).unwrap();
+        let f = store
+            .save_folder(&a.id, "INBOX", Some("/"), FolderRole::Inbox)
+            .unwrap();
+        let tx = store.db.unchecked_transaction().unwrap();
+        {
+            let mut insert=store.db.prepare("INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text) VALUES(?1,?2,?3,'','','Alice','alice@example.com','budget@gmail.com','','Status update',?3,'',0,0,0,512,?4)").unwrap();
+            for uid in 1..=100_000 {
+                let body = format!(
+                    "sqlite common body unique{uid} {}",
+                    "message text ".repeat(30)
+                );
+                insert.execute(params![a.id, f, uid, body]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        for query in ["unique50000", "sqlite", "Alice", "subject:Status"] {
+            let start = std::time::Instant::now();
+            let rows = store.search(&a.id, query, i64::MAX, 50, 0).unwrap();
+            let elapsed = start.elapsed();
+            println!("100k FTS {query}: {elapsed:?}, {} results", rows.len());
+            assert!(!rows.is_empty());
+            assert!(
+                elapsed < std::time::Duration::from_millis(50),
+                "{query}: {elapsed:?} exceeds 50 ms"
+            );
+        }
     }
 }
