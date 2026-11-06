@@ -1245,7 +1245,7 @@ impl MainWindow {
                     .child(mono("E done", t.ink2))
                     .child(mono("⌘K run", t.ink2))
                     .child(div().flex_1())
-                    .children(self.sync_line().map(|s| mono(s, t.ink2).truncate())),
+                    .children(self.sync_state().map(|s| mono(s, t.ink2).truncate())),
             )
     }
 

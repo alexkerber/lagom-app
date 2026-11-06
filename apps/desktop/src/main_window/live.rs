@@ -320,8 +320,14 @@ impl MainWindow {
         }
     }
 
-    /// "synced 10:12" for the current account, `None` in demo mode.
+    /// "Home · synced 10:12" for the current account, `None` in demo mode.
     pub(super) fn sync_line(&self) -> Option<SharedString> {
+        let live = self.live.as_ref()?;
+        Some(format!("{} · {}", short_name(live.account()?), self.sync_state()?).into())
+    }
+
+    /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
+    pub(super) fn sync_state(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
         let account = live.account()?;
         let state = match live.sync.get(&account.id) {
@@ -332,7 +338,7 @@ impl MainWindow {
             }
             Some(SyncState::Failed(e)) => format!("offline: {e}"),
         };
-        Some(format!("{} · {state}", short_name(account)).into())
+        Some(state.into())
     }
 
     /// ⌘K search hit: open its list, select it.

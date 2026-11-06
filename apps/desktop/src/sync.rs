@@ -127,8 +127,8 @@ struct Worker {
     /// One logged-in session per account, reused between commands. Dropped after any error.
     sessions: HashMap<String, ImapSync>,
     idle: HashMap<String, tokio::task::JoinHandle<()>>,
-    /// Old store id to new store id for messages this session moved, so undo finds them.
-    moved: HashMap<i64, i64>,
+    /// Store id before a move to (target folder, Message-ID), so undo finds the message again.
+    moved: HashMap<i64, (i64, String)>,
     /// Commands that arrived during a sync and wait for it to finish.
     deferred: VecDeque<Cmd>,
     me: UnboundedSender<Cmd>,
@@ -272,10 +272,7 @@ impl Worker {
     }
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {
-        let mut id = id;
-        while let Some(&next) = self.moved.get(&id) {
-            id = next;
-        }
+        let id = self.resolve(id).await?;
         if let Act::Snooze(until) = act {
             return self.store.snooze(id, until);
         }
@@ -309,11 +306,27 @@ impl Worker {
         .await;
         self.give(&account.id, session, &result);
         if let Some(target) = result? {
-            if let Some(new) = self.store.find_message(target, &message.message_id)? {
-                self.moved.insert(id, new);
-            }
+            self.moved.insert(id, (target, message.message_id));
         }
         Ok(())
+    }
+
+    /// The current store id of a message the UI knew as `id`. The core drops a moved row; the
+    /// target folder's next sync brings it back, so undo syncs that one folder first.
+    // shortcut: a message without Message-ID cannot be found after a move, so its undo fails with a toast; match on headers when that shows up.
+    async fn resolve(&mut self, mut id: i64) -> lagom_core::Result<i64> {
+        while let Some((folder, message_id)) = self.moved.get(&id).cloned() {
+            if self.store.find_message(folder, &message_id)?.is_none() {
+                let account = self.account(&self.store.folder(folder)?.account)?;
+                let mut session = self.take(&account).await?;
+                let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
+                self.give(&account.id, session, &result);
+                result?;
+            }
+            self.moved.remove(&id);
+            id = self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)?;
+        }
+        Ok(id)
     }
 
     async fn mark_seen(&mut self, id: i64) -> lagom_core::Result<()> {
@@ -362,4 +375,136 @@ impl Worker {
 
 fn role(store: &Store, account: &str, role: FolderRole) -> Option<i64> {
     store.folders(account, 0).ok()?.into_iter().find(|f| f.role == role).map(|f| f.id)
+}
+
+/// The worker against GreenMail: add account, send, sync, archive, trash, new folder, move and
+/// undo, each checked on the server by a fresh sync into a second store. Runs only with
+/// `LAGOM_GREENMAIL=1` and the container from crates/lagom-core/README.md.
+#[cfg(test)]
+mod greenmail {
+    use super::*;
+    use lagom_core::{
+        account::{Security, ServerConfig},
+        imap_sync::ImapSync,
+    };
+
+    async fn next(events: &mut UnboundedReceiver<Event>, mut want: impl FnMut(&Event) -> bool) -> Event {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let e = events.recv().await.expect("worker running");
+                if let Event::Sync(_, SyncState::Failed(err)) = &e {
+                    panic!("sync failed: {err}");
+                }
+                if want(&e) {
+                    return e;
+                }
+            }
+        })
+        .await
+        .expect("event in time")
+    }
+
+    async fn synced(events: &mut UnboundedReceiver<Event>) {
+        next(events, |e| matches!(e, Event::Sync(_, SyncState::Synced(_)))).await;
+    }
+
+    async fn op_ok(events: &mut UnboundedReceiver<Event>, op: u64) {
+        if let Event::Op { error, .. } = next(events, |e| matches!(e, Event::Op { op: o, .. } if *o == op)).await {
+            assert_eq!(error, None, "op {op}");
+        }
+    }
+
+    /// Subjects per folder name, as the server has them now.
+    async fn server(account: &Account) -> HashMap<String, Vec<String>> {
+        let dir = std::env::temp_dir().join(format!("lagom-check-{}", uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::open(dir.join("check.sqlite3")).unwrap();
+        store.save_account(account).unwrap();
+        let mut imap = ImapSync::login(account, "test").await.unwrap();
+        imap.sync(&mut store, 50).await.unwrap();
+        let mut out = HashMap::new();
+        for f in store.folders(&account.id, now()).unwrap() {
+            let mut subjects: Vec<_> = store.list_messages(f.id, now(), 50, 0).unwrap().into_iter().map(|m| m.subject).collect();
+            subjects.sort();
+            out.insert(f.name, subjects);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        out
+    }
+
+    fn uuid() -> String {
+        format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
+    }
+
+    #[tokio::test]
+    async fn worker_actions_reach_the_server() {
+        if std::env::var("LAGOM_GREENMAIL").as_deref() != Ok("1") {
+            eprintln!("skipped: set LAGOM_GREENMAIL=1; see crates/lagom-core/README.md");
+            return;
+        }
+        // Never the owner's keychain entries or store.
+        std::env::set_var("LAGOM_KEYCHAIN_SERVICE", "lagom-test");
+        let dir = std::env::temp_dir().join(format!("lagom-worker-{}", uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lagom.sqlite3");
+        let email = format!("worker-{}@lagom.test", uuid());
+        let config = |port| ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: email.clone() };
+        let account = Account::new(email.clone(), config(3143), config(3025)).unwrap();
+        let (bridge, mut events) = start(path.clone());
+
+        bridge.send(Cmd::AddAccount(Box::new(account.clone()), Zeroizing::new("test".into())));
+        let Event::Added(added) = next(&mut events, |e| matches!(e, Event::Added(_))).await else { unreachable!() };
+        assert_eq!(added, Ok(account.id.clone()));
+        synced(&mut events).await;
+
+        for (op, subject) in [(1, "Archive me"), (2, "Trash me"), (3, "File me"), (4, "Move me")] {
+            let mail = Outgoing { to: vec![email.clone()], subject: subject.into(), text: "Body".into(), ..Default::default() };
+            bridge.send(Cmd::Send { op, account: account.id.clone(), mail: Box::new(mail) });
+            let Event::Sent { delivered, error, .. } = next(&mut events, |e| matches!(e, Event::Sent { op: o, .. } if *o == op)).await else { unreachable!() };
+            assert!(delivered, "{error:?}");
+        }
+        bridge.send(Cmd::Sync(None));
+        synced(&mut events).await;
+
+        let store = Store::open(&path).unwrap();
+        let folders = store.folders(&account.id, now()).unwrap();
+        let inbox = folders.iter().find(|f| f.role == FolderRole::Inbox).unwrap().id;
+        let id = |subject: &str| store.list_messages(inbox, now(), 50, 0).unwrap().into_iter().find(|m| m.subject == subject).unwrap().id;
+        let (archive, trash, file, moving) = (id("Archive me"), id("Trash me"), id("File me"), id("Move me"));
+
+        bridge.send(Cmd::Op { op: 10, id: archive, act: Act::Archive });
+        op_ok(&mut events, 10).await;
+        bridge.send(Cmd::Op { op: 11, id: trash, act: Act::Trash });
+        op_ok(&mut events, 11).await;
+        bridge.send(Cmd::Op { op: 12, id: file, act: Act::NewFolder("Projects".into()) });
+        op_ok(&mut events, 12).await;
+        let projects = store.folders(&account.id, now()).unwrap().into_iter().find(|f| f.name == "Projects").unwrap().id;
+        bridge.send(Cmd::Op { op: 13, id: moving, act: Act::Move(projects) });
+        op_ok(&mut events, 13).await;
+
+        let s = server(&account).await;
+        assert_eq!(s["INBOX"], Vec::<String>::new());
+        assert_eq!(s["Archive"], ["Archive me"]);
+        assert_eq!(s["Projects"], ["File me", "Move me"]);
+        assert!(s.iter().any(|(name, subjects)| name != "INBOX" && subjects.contains(&"Trash me".to_string()) && name.to_lowercase().contains("trash")));
+        // Sent copies went to the server's Sent folder.
+        assert!(s.iter().any(|(name, subjects)| name.to_lowercase().contains("sent") && subjects.len() == 4));
+
+        // Undo uses the id the UI saw; the worker follows the move to the new row.
+        bridge.send(Cmd::Op { op: 14, id: archive, act: Act::Move(inbox) });
+        op_ok(&mut events, 14).await;
+        assert_eq!(server(&account).await["INBOX"], ["Archive me"]);
+
+        bridge.send(Cmd::RemoveAccount(account.id.clone()));
+        // Earlier Changed events may still be queued: wait for the store itself.
+        for _ in 0..100 {
+            if store.accounts().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(store.accounts().unwrap().is_empty());
+        assert!(account.password().is_err(), "keychain entry removed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

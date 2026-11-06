@@ -50,7 +50,12 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
             .parse()
             .map_err(|_| Error::Invalid("invalid sender address"))?,
     );
-    let mut message = Message::builder().from(from).subject(&outgoing.subject);
+    // Replies, threads and finding a message after a move all key on Message-ID; lettre adds none.
+    let domain = account.email.rsplit_once('@').map_or("localhost", |(_, d)| d);
+    let mut message = Message::builder()
+        .from(from)
+        .subject(&outgoing.subject)
+        .message_id(Some(format!("<{}@{domain}>", uuid::Uuid::new_v4().simple())));
     for to in &outgoing.to {
         message = message.to(mailbox(to)?);
     }
@@ -174,6 +179,7 @@ mod tests {
         assert!(!raw.contains("hidden@example.com"));
         assert!(raw.contains("In-Reply-To: <parent@test>"));
         assert!(raw.contains("References: <root@test> <parent@test>"));
+        assert!(raw.lines().any(|l| l.starts_with("Message-ID: <") && l.ends_with("@gmail.com>")));
         assert_eq!(m.envelope().to().len(), 3);
     }
     #[test]
