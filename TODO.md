@@ -1,20 +1,38 @@
 # Todo
 
-- [ ] Domain. `lagom.app`, `lagom.com` and `lagom.io` are taken (RDAP, 2026-11-06). `lagomhq.com`, `lagomhq.app` and `lagomhq.io` were free on that date.
+## Brand and site
+
+- [ ] Domain. `lagom.app`, `lagom.com` and `lagom.io` are taken (RDAP, 2026-11-06). Free on that date: `lagom-mail.com/.app/.io`, `lagomhq.com/.app/.io`, `lagommail.app/.io`, and `.se` for lagom-app, lagommail, lagom-mail and lagomhq.
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42.
-- [ ] Run `DESIGN_PROMPT.md` in Claude design and pick a brand concept.
+- [x] Brand concept: Concept D "Butik" from Claude design.
+- [ ] Exact colour tokens from Claude design (current hex values are read from a screenshot).
+- [x] Website in `site/`, Concept D, deployed with GitHub Pages.
+- [ ] Website: point the domain at GitHub Pages.
+
+## Build
+
 - [x] Rust workspace skeleton.
 - [x] Desktop UI framework: GPUI.
-- [ ] Build on macOS. Blocked: GPUI needs the Xcode Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`).
-- [ ] Build on Linux and Windows.
+- [x] Build and start on macOS (2026-11-06).
+- [ ] Build on Linux and Windows (CI).
 - [ ] Native iPhone and iPad app (SwiftUI) in `apps/mobile/apple`. Planned for the night run 2026-11-06.
 - [ ] Native Android phone and tablet app (Jetpack Compose) in `apps/mobile/android`. Planned for the night run 2026-11-06.
 - [ ] UniFFI bindings from `lagom-core` for both mobile apps.
-- [ ] Feature: sort mail into custom folders (Alex 2026-11-06: one of the two features he needs).
-- [ ] Feature: snooze, shown as "Later" in the UI (Alex 2026-11-06: the other feature he needs).
-- [ ] Motion: implement the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
-- [x] Website placeholder in `site/` (static HTML).
-- [x] Website: Concept D "Butik" landing page (hex values read from a screenshot, not exact).
-- [ ] Website: apply the chosen brand concept and the landing hero from Claude design.
-- [ ] Website: choose hosting (for example GitHub Pages) and point the domain at it.
+
+## Mail (v1)
+
+- [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features).
+- [ ] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature).
+- [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
+
+## Calendar (Alex 2026-11-06)
+
+- [ ] Agenda next to the inbox: Google and Microsoft calendars.
+- [ ] Create a meeting from the app with Google Meet or Zoom attached, without opening Gmail or Google Calendar.
+
+## Tasks (Alex 2026-11-06)
+
+- [ ] Task list on the start screen. Lists "Work" and "Private", plus custom lists.
+- [ ] Turn a mail into a task in one key press. The task links back to the mail.
+- [ ] Sync tasks with the mail account (for example Google Tasks, Microsoft To Do).
