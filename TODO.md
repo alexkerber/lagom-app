@@ -11,6 +11,8 @@
 - [ ] Native iPhone and iPad app (SwiftUI) in `apps/mobile/apple`. Planned for the night run 2026-11-06.
 - [ ] Native Android phone and tablet app (Jetpack Compose) in `apps/mobile/android`. Planned for the night run 2026-11-06.
 - [ ] UniFFI bindings from `lagom-core` for both mobile apps.
+- [ ] Motion: implement the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 - [x] Website placeholder in `site/` (static HTML).
+- [x] Website: Concept D "Butik" landing page (hex values read from a screenshot, not exact).
 - [ ] Website: apply the chosen brand concept and the landing hero from Claude design.
 - [ ] Website: choose hosting (for example GitHub Pages) and point the domain at it.

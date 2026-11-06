@@ -4,37 +4,100 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>lagom</title>
-  <meta name="description" content="A fast, minimal, keyboard-first email client. Made in Sweden. Open source.">
+  <meta name="description" content="A fast, keyboard-first email client with one job: getting you back to an empty inbox. Made in Sweden. Open source.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23983A2E'/%3E%3Crect x='14' y='27' width='36' height='10' rx='5' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@800&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400&display=swap" rel="stylesheet">
   <style>
-    /* Placeholder palette until the brand concept from Claude design is picked. */
-    :root { --paper: #f4efe4; --ink: #1c1b19; --muted: #6b665c; --accent: #b0302a; }
+    /* Concept D "Butik". Hex values read from a screenshot of the Claude design board; replace with the exact tokens. */
+    :root {
+      --bg: #ffffff; --surface: #f5f5f3; --ink: #111110; --muted: #5f5f5a;
+      --line: #e6e6e2; --accent: #983a2e; --on-accent: #ffffff;
+    }
     @media (prefers-color-scheme: dark) {
-      :root { --paper: #1c1b19; --ink: #f4efe4; --muted: #a39d90; --accent: #e0574e; }
+      :root {
+        --bg: #0b0b0a; --surface: #151514; --ink: #f2f2ee; --muted: #989896;
+        --line: #262624; --accent: #e86a55; --on-accent: #111110;
+      }
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0; min-height: 100vh; display: grid; place-items: center;
-      background: var(--paper); color: var(--ink);
-      font: 18px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 Inter, system-ui, sans-serif; }
+    a { color: inherit; }
+    .wrap { max-width: 72rem; margin: 0 auto; padding: 0 16px; }
+    .strip { text-align: center; font-size: 12px; color: var(--muted); padding: 8px 16px; border-bottom: 1px solid var(--line); }
+    .strip span + span::before { content: "·"; margin: 0 0.6em; }
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+    .brand { display: flex; align-items: center; gap: 10px; font: 800 22px/1 "Inter Tight", Inter, sans-serif; letter-spacing: -0.03em; text-decoration: none; }
+    .links { display: flex; align-items: center; gap: 20px; font-size: 14px; }
+    .links a { text-decoration: none; }
+    .btn { display: inline-block; padding: 9px 16px; border-radius: 999px; font: 500 14px/1 Inter, sans-serif; text-decoration: none; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+    .btn.dark { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+    .btn.accent { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+    .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; padding: 56px 0 48px; }
+    h1 { font: 800 clamp(4rem, 11vw, 7.5rem)/0.9 "Inter Tight", Inter, sans-serif; letter-spacing: -0.06em; margin: 0 0 16px; }
+    .entry { font-size: 15px; margin: 0 0 8px; }
+    .ipa { font-family: "Geist Mono", ui-monospace, monospace; }
+    .entry em { color: var(--muted); }
+    h2 { font: 800 clamp(2rem, 4vw, 2.75rem)/1.05 "Inter Tight", Inter, sans-serif; letter-spacing: -0.04em; margin: 0 0 20px; max-width: 20ch; }
+    .lede { color: var(--muted); max-width: 32rem; margin: 0 0 24px; }
+    .ctas { display: flex; gap: 10px; flex-wrap: wrap; }
+    .shot { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; aspect-ratio: 16 / 11; padding: 14px; display: grid; grid-template-columns: 22% 34% 1fr; gap: 10px; }
+    .shot div { background: var(--bg); border-radius: 8px; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-bottom: 48px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+    .card h3 { font: 600 15px/1.3 Inter, sans-serif; margin: 0 0 4px; }
+    .card p { font-size: 13px; color: var(--muted); margin: 0 0 24px; }
+    .row { display: flex; align-items: center; justify-content: space-between; }
+    .price { font: 800 32px/1 "Inter Tight", Inter, sans-serif; letter-spacing: -0.04em; }
+    footer { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; border-top: 1px solid var(--line); padding: 20px 0 40px; font: 400 12px/1.5 "Geist Mono", ui-monospace, monospace; color: var(--muted); }
+    footer span { overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      .hero, .cards { grid-template-columns: 1fr; }
+      .links a:not(.btn) { display: none; }
     }
-    main { max-width: 34rem; padding: 2rem 16px; }
-    h1 { font-size: 4rem; font-weight: 800; letter-spacing: -0.03em; margin: 0; }
-    .ipa { font-family: ui-monospace, Menlo, monospace; color: var(--muted); }
-    .pos { font-style: italic; color: var(--muted); }
-    .def { font-size: 1.5rem; margin: 0.5rem 0 2rem; }
-    p { margin: 0 0 1rem; }
-    a { color: var(--accent); }
-    footer { margin-top: 3rem; font-size: 0.875rem; color: var(--muted); }
   </style>
 </head>
 <body>
-  <main>
-    <h1>lagom</h1>
-    <p><span class="ipa">/ˈlɑːɡɔm/ ("LAH-gom")</span> <span class="pos">adv., adj. Swedish.</span></p>
-    <p class="def">Not too much. Not too little. Just right.</p>
-    <p>A fast, minimal, keyboard-first email client. Built in Rust for macOS, Linux and Windows.</p>
-    <p>Early days. Nothing to install yet. <a href="https://github.com/alexkerber/lagom.app">Follow it on GitHub</a>.</p>
-    <footer>Made in Sweden. Open source, MIT licence.</footer>
-  </main>
+  <div class="strip"><span>Made in Sweden</span><span>Open source</span><span>No account. No sign-up.</span></div>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="./">
+        <svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="var(--accent)"/><rect x="14" y="27" width="36" height="10" rx="5" fill="var(--on-accent)"/></svg>
+        lagom
+      </a>
+      <div class="links">
+        <a href="https://github.com/alexkerber/lagom.app">Source</a>
+        <a href="https://github.com/alexkerber/lagom.app/blob/main/LICENSE">Licence</a>
+        <a href="https://github.com/alexkerber/lagom.app/commits/main">Changelog</a>
+        <a class="btn dark" href="#download">Download</a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div>
+        <h1>lagom</h1>
+        <p class="entry"><span class="ipa">/ˈlɑːɡɔm/</span> ("LAH-gom") <em>adv., adj.</em> Swedish.</p>
+        <h2>Not too much. Not too little. Just right.</h2>
+        <p class="lede">A fast, keyboard-first email client with one job: getting you back to an empty inbox.</p>
+        <div class="ctas">
+          <a class="btn accent" href="#download">Download for macOS</a>
+          <a class="btn" href="https://github.com/alexkerber/lagom.app">View source</a>
+        </div>
+      </div>
+      <div class="shot" role="img" aria-label="The Lagom main window: accounts, message list and reading pane."><div></div><div></div><div></div></div>
+    </section>
+
+    <section class="cards" id="download">
+      <div class="card"><h3>lagom for macOS</h3><p>Same app. Same shortcuts.</p><div class="row"><span class="price">0 kr</span><span class="btn">Soon</span></div></div>
+      <div class="card"><h3>lagom for Windows</h3><p>Same app. Same shortcuts.</p><div class="row"><span class="price">0 kr</span><span class="btn">Soon</span></div></div>
+      <div class="card"><h3>lagom for Linux</h3><p>Same app. Same shortcuts.</p><div class="row"><span class="price">0 kr</span><span class="btn">Soon</span></div></div>
+    </section>
+
+    <footer>
+      <span>Not included: AI features, team features, a sign-up wall.</span>
+      <span>Open source · MIT · github.com/alexkerber/lagom.app</span>
+    </footer>
+  </div>
 </body>
 </html>
