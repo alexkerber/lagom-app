@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lagom</title>
+  <meta name="description" content="A fast, minimal, keyboard-first email client. Made in Sweden. Open source.">
+  <style>
+    /* Placeholder palette until the brand concept from Claude design is picked. */
+    :root { --paper: #f4efe4; --ink: #1c1b19; --muted: #6b665c; --accent: #b0302a; }
+    @media (prefers-color-scheme: dark) {
+      :root { --paper: #1c1b19; --ink: #f4efe4; --muted: #a39d90; --accent: #e0574e; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: var(--paper); color: var(--ink);
+      font: 18px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 34rem; padding: 2rem 16px; }
+    h1 { font-size: 4rem; font-weight: 800; letter-spacing: -0.03em; margin: 0; }
+    .ipa { font-family: ui-monospace, Menlo, monospace; color: var(--muted); }
+    .pos { font-style: italic; color: var(--muted); }
+    .def { font-size: 1.5rem; margin: 0.5rem 0 2rem; }
+    p { margin: 0 0 1rem; }
+    a { color: var(--accent); }
+    footer { margin-top: 3rem; font-size: 0.875rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>lagom</h1>
+    <p><span class="ipa">/ˈlɑːɡɔm/ ("LAH-gom")</span> <span class="pos">adv., adj. Swedish.</span></p>
+    <p class="def">Not too much. Not too little. Just right.</p>
+    <p>A fast, minimal, keyboard-first email client. Built in Rust for macOS, Linux and Windows.</p>
+    <p>Early days. Nothing to install yet. <a href="https://github.com/alexkerber/lagom.app">Follow it on GitHub</a>.</p>
+    <footer>Made in Sweden. Open source, MIT licence.</footer>
+  </main>
+</body>
+</html>

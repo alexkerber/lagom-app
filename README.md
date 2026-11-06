@@ -13,6 +13,7 @@ Status: early. Nothing to install yet.
 | ------------------- | ---------------------------------------------------------------- |
 | `crates/lagom-core` | Shared Rust core: accounts, sync, local store and search. No UI. |
 | `apps/desktop`      | macOS, Linux and Windows. First target.                          |
-| `apps/mobile`       | iOS, iPadOS and Android. Later.                                  |
+| `apps/mobile`       | Native iPhone, iPad, Android phone and tablet. Second target.    |
+| `site`              | The website. Static HTML.                                        |
 
 One repository holds all apps, so the core and every app change in the same commit.
