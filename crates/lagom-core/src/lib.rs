@@ -3,6 +3,7 @@ pub mod account;
 pub mod imap_sync;
 pub mod mime;
 pub mod presets;
+pub mod smtp;
 pub mod store;
 
 #[derive(Debug, thiserror::Error)]
@@ -17,6 +18,8 @@ pub enum Error {
     Secret,
     #[error("{0}")]
     Network(&'static str),
+    #[error("message sent, but the Sent copy could not be saved; do not resend")]
+    SentCopy,
     #[error("not found")]
     NotFound,
 }

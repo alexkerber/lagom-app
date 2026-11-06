@@ -278,14 +278,20 @@ impl ImapSync {
         let mut attachments = false;
         text_parts(body, &[], 0, &mut parts, &mut attachments)?;
         parts.sort_by_key(|p| p.1);
-        if let Some((path, _)) = parts.first() {
+        if let Some((path, _, size)) = parts.first() {
+            if *size as usize > mime::MAX_MIME_BYTES {
+                return Err(Error::Invalid("MIME text part exceeds size limit"));
+            }
             let section = path
                 .iter()
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(".");
-            let query =
-                format!("(UID BODY.PEEK[{section}.MIME]<0.65536> BODY.PEEK[{section}]<0.4194304>)");
+            let query = if path.is_empty() {
+                "(UID BODY.PEEK[TEXT])".to_owned()
+            } else {
+                format!("(UID BODY.PEEK[{section}.MIME] BODY.PEEK[{section}])")
+            };
             let bodies = net(async {
                 self.session
                     .uid_fetch(uid.to_string(), query)
@@ -295,16 +301,28 @@ impl ImapSync {
             })
             .await?;
             if let Some(body) = bodies.iter().find(|f| f.uid == Some(uid)) {
-                let headers = body
-                    .section(&SectionPath::Part(path.clone(), Some(MessageSection::Mime)))
-                    .ok_or(Error::Network("MIME part headers missing"))?;
-                let text = body
-                    .section(&SectionPath::Part(path.clone(), None))
-                    .ok_or(Error::Network("MIME text part missing"))?;
+                let headers = if path.is_empty() {
+                    header
+                } else {
+                    body.section(&SectionPath::Part(path.clone(), Some(MessageSection::Mime)))
+                        .ok_or(Error::Network("MIME part headers missing"))?
+                };
+                let text = if path.is_empty() {
+                    body.text()
+                } else {
+                    body.section(&SectionPath::Part(path.clone(), None))
+                }
+                .ok_or(Error::Network("MIME text part missing"))?;
                 if headers.len() >= 65536 || headers.len() + text.len() > mime::MAX_MIME_BYTES {
                     return Err(Error::Invalid("MIME text part exceeds size limit"));
                 }
                 let mut raw = headers.to_vec();
+                if !raw.ends_with(b"\r\n") {
+                    raw.extend_from_slice(b"\r\n");
+                }
+                if !raw.ends_with(b"\r\n\r\n") {
+                    raw.extend_from_slice(b"\r\n");
+                }
                 raw.extend_from_slice(text);
                 let parsed = mime::parse(&raw)?;
                 message.body_text = parsed.body_text;
@@ -508,7 +526,7 @@ fn text_parts(
     body: &BodyStructure<'_>,
     path: &[u32],
     depth: usize,
-    parts: &mut Vec<(Vec<u32>, bool)>,
+    parts: &mut Vec<(Vec<u32>, bool, u32)>,
     attachments: &mut bool,
 ) -> Result<()> {
     if depth > 32 {
@@ -536,17 +554,14 @@ fn text_parts(
                 text_parts(child, &next, depth + 1, parts, attachments)?;
             }
         }
-        BodyStructure::Text { .. }
+        BodyStructure::Text { other, .. }
             if common.ty.subtype.eq_ignore_ascii_case("plain")
                 || common.ty.subtype.eq_ignore_ascii_case("html") =>
         {
             parts.push((
-                if path.is_empty() {
-                    vec![1]
-                } else {
-                    path.to_vec()
-                },
+                path.to_vec(),
                 !common.ty.subtype.eq_ignore_ascii_case("plain"),
+                other.octets,
             ));
         }
         _ => {
