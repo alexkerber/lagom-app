@@ -8,3 +8,23 @@ description = "Shared core for Lagom: accounts, sync, local store and search. No
 publish = false
 
 [dependencies]
+thiserror = "2"
+dirs = "6"
+rusqlite = { version = "0.37", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+zeroize = "1"
+
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "rt", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+# Disable async-imap wire traces, which include LOGIN credentials.
+log = { version = "0.4", features = ["max_level_debug"] }
+futures-util = { version = "0.3", features = ["sink"] }
+mail-parser = { version = "1", features = ["full_encoding"] }
+
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "ring", "webpki-roots"] }
+
+[dev-dependencies]
+tempfile = "3"
