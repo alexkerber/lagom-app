@@ -28,10 +28,17 @@ type Wire = Box<dyn Io>;
 pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
 async fn net<T, E>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
+    net_as("IMAP operation failed", f).await
+}
+/// Like `net`, with a message that tells the user which step failed: host, TLS or login.
+async fn net_as<T, E>(
+    what: &'static str,
+    f: impl Future<Output = std::result::Result<T, E>>,
+) -> Result<T> {
     tokio::time::timeout(TIMEOUT, f)
         .await
         .map_err(|_| Error::Network("IMAP operation timed out"))?
-        .map_err(|_| Error::Network("IMAP operation failed"))
+        .map_err(|_| Error::Network(what))
 }
 async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -45,12 +52,20 @@ async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     let name = ServerName::try_from(host.to_owned())
         .map_err(|_| Error::Invalid("invalid TLS server name"))?;
     Ok(Box::new(
-        net(TlsConnector::from(Arc::new(config)).connect(name, stream)).await?,
+        net_as(
+            "IMAP TLS handshake failed",
+            TlsConnector::from(Arc::new(config)).connect(name, stream),
+        )
+        .await?,
     ))
 }
 async fn connect(config: &ServerConfig, password: &str) -> Result<Session<Wire>> {
     config.validate()?;
-    let socket = net(TcpStream::connect((config.host.as_str(), config.port))).await?;
+    let socket = net_as(
+        "could not reach the IMAP server",
+        TcpStream::connect((config.host.as_str(), config.port)),
+    )
+    .await?;
     // Validate the resolved peer too: a poisoned localhost mapping must not expose LOGIN.
     if config.security == Security::Plain && !socket.peer_addr()?.ip().is_loopback() {
         return Err(Error::Invalid("unencrypted peer must be loopback"));
@@ -79,7 +94,11 @@ async fn connect(config: &ServerConfig, password: &str) -> Result<Session<Wire>>
             client
         }
     };
-    net(client.login(&config.username, password)).await
+    net_as(
+        "IMAP login rejected: check the address and app password",
+        client.login(&config.username, password),
+    )
+    .await
 }
 pub struct ImapSync {
     account: Account,

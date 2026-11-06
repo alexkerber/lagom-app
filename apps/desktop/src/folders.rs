@@ -1,18 +1,44 @@
 //! Custom folders: the tree in the sidebar and "Move to" in ⌘K.
-//! Source: "Lagom · Folders" in Figma (GrDzJzlEBfhe2n9gAhJTor, node 6:2). Sample data, in memory.
+//! Source: "Lagom · Folders" in Figma (GrDzJzlEBfhe2n9gAhJTor, node 6:2). Server folders from
+//! the store, or the sample folders in demo mode.
+
+/// Folders with a place of their own in the sidebar nav stay out of the folder group and ⌘K.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Custom,
+    Trash,
+    Sent,
+    /// The archive: "Done" in the nav.
+    Done,
+    /// Snoozed mail. Local, no server folder.
+    Later,
+}
 
 pub struct Folder {
     pub name: String,
     pub parent: Option<usize>,
-    /// Message ids, newest first.
+    /// Message ids, newest first. For server folders, only the open one is loaded.
     pub items: Vec<usize>,
     /// Subfolders show. Kept in memory only.
     pub open: bool,
+    pub kind: Kind,
+    pub unread: usize,
+    /// Store folder id. `None` for demo folders, Later and a folder still being created.
+    pub store: Option<i64>,
+    /// The IMAP name with its path, "Travel/Trains".
+    pub full: String,
+    /// The server no longer lists it. Kept, so folder indices in undo history stay valid.
+    pub gone: bool,
 }
 
 impl Folder {
     pub fn new(name: &str, parent: Option<usize>, items: &[usize]) -> Self {
-        Self { name: name.into(), parent, items: items.to_vec(), open: true }
+        Self { name: name.into(), parent, items: items.to_vec(), open: true, kind: Kind::Custom, unread: 0, store: None, full: name.into(), gone: false }
+    }
+
+    /// Listed in the folder group and as a "Move to" target.
+    pub fn listed(&self) -> bool {
+        !self.gone && matches!(self.kind, Kind::Custom | Kind::Trash)
     }
 }
 
@@ -33,10 +59,42 @@ pub fn sample() -> Vec<Folder> {
     folders
 }
 
+/// Updates `folders` from the store in place. Indices never move (undo history and the open
+/// list hold them): new folders go last, deleted ones are marked gone.
+pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
+    use lagom_core::store::FolderRole as Role;
+    for f in folders.iter_mut().filter(|f| f.store.is_some()) {
+        f.gone = true;
+    }
+    for s in server {
+        let kind = match s.role {
+            Role::Inbox => continue,
+            Role::Sent => Kind::Sent,
+            Role::Archive => Kind::Done,
+            Role::Trash => Kind::Trash,
+            _ => Kind::Custom,
+        };
+        let name = s.delimiter.as_deref().and_then(|d| s.name.rsplit_once(d)).map_or(s.name.as_str(), |(_, n)| n);
+        // A folder ⌘K created locally is adopted once the server lists it.
+        let found = folders.iter().position(|f| f.store == Some(s.id)).or_else(|| folders.iter().position(|f| f.store.is_none() && f.kind == Kind::Custom && f.full == s.name));
+        let i = found.unwrap_or_else(|| {
+            folders.push(Folder::new(name, None, &[]));
+            folders.len() - 1
+        });
+        let f = &mut folders[i];
+        (f.name, f.full, f.kind, f.unread, f.store, f.gone) = (name.into(), s.name.clone(), kind, s.unread as usize, Some(s.id), false);
+    }
+    for s in server {
+        let Some(i) = folders.iter().position(|f| f.store == Some(s.id)) else { continue };
+        let parent = s.delimiter.as_deref().and_then(|d| s.name.rsplit_once(d)).and_then(|(p, _)| folders.iter().position(|f| f.store.is_some() && !f.gone && f.full == p));
+        folders[i].parent = parent;
+    }
+}
+
 /// (folder, depth) in tree order. Children of a closed folder are left out unless `all`.
 pub fn tree(folders: &[Folder], all: bool) -> Vec<(usize, usize)> {
     fn walk(folders: &[Folder], parent: Option<usize>, depth: usize, all: bool, out: &mut Vec<(usize, usize)>) {
-        for (f, folder) in folders.iter().enumerate().filter(|(_, x)| x.parent == parent) {
+        for (f, folder) in folders.iter().enumerate().filter(|(_, x)| x.parent == parent && x.listed()) {
             out.push((f, depth));
             if all || folder.open {
                 walk(folders, Some(f), depth + 1, all, out);
@@ -49,7 +107,7 @@ pub fn tree(folders: &[Folder], all: bool) -> Vec<(usize, usize)> {
 }
 
 pub fn has_children(folders: &[Folder], f: usize) -> bool {
-    folders.iter().any(|x| x.parent == Some(f))
+    folders.iter().any(|x| x.parent == Some(f) && x.listed())
 }
 
 /// "Travel / Trains".
@@ -86,6 +144,23 @@ mod tests {
         folders[1].open = false;
         assert_eq!(tree(&folders, false).len(), 5);
         assert!(has_children(&folders, 1) && !has_children(&folders, 0));
+    }
+
+    #[test]
+    fn merge_keeps_indices_and_nests_by_delimiter() {
+        use lagom_core::store::{Folder as F, FolderRole as R};
+        let f = |id, name: &str, role, unread| F { id, account: "a".into(), name: name.into(), delimiter: Some("/".into()), role, uidvalidity: None, uidnext: None, last_uid: 0, highest_modseq: None, unread };
+        let mut folders = vec![Folder { kind: Kind::Later, ..Folder::new("Later", None, &[]) }, Folder::new("Taxes", None, &[])];
+        merge(&mut folders, &[f(1, "INBOX", R::Inbox, 4), f(2, "Archive", R::Archive, 0), f(3, "Travel", R::Other, 0), f(4, "Travel/Trains", R::Other, 2), f(5, "Taxes", R::Other, 0)]);
+        let names: Vec<_> = folders.iter().map(|x| (x.name.as_str(), x.kind, x.parent)).collect();
+        // INBOX stays out; the local "Taxes" is adopted, not doubled; Trains sits under Travel.
+        assert_eq!(names, [("Later", Kind::Later, None), ("Taxes", Kind::Custom, None), ("Archive", Kind::Done, None), ("Travel", Kind::Custom, None), ("Trains", Kind::Custom, Some(3))]);
+        assert_eq!(folders[4].unread, 2);
+        // Travel goes on the server: marked gone, indices unchanged, Trains is top level.
+        merge(&mut folders, &[f(2, "Archive", R::Archive, 0), f(4, "Travel/Trains", R::Other, 0), f(5, "Taxes", R::Other, 0)]);
+        assert!(folders[3].gone && !folders[3].listed());
+        assert_eq!((folders.len(), folders[4].parent), (5, None));
+        assert_eq!(tree(&folders, true).iter().map(|r| r.0).collect::<Vec<_>>(), [1, 4]);
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! Command palette (⌘K), concept B structure in Concept D tokens.
-//! Source: CommandPalette on the Claude design canvas. Commands do not run yet: Enter only closes.
+//! Source: CommandPalette on the Claude design canvas. Enter runs the selected command: the
+//! palette emits `Run` or `MoveTo` and the main window does the work.
 //! The query is a `TextInput`; ↑ and ↓ reach the palette because a single-line field leaves them.
 //! "move <query>" lists folders (Figma "Lagom · Folders", frame 6). Enter there emits `MoveTo`.
+//! A query that matches no command searches the local store and lists messages.
 
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use gpui::{
     div, ease_out_quint, prelude::*, px, Animation, AnimationExt, App, Context, Div, DismissEvent,
@@ -11,6 +13,7 @@ use gpui::{
     MouseButton, Rgba, SharedString, StyledText, Subscription, Window,
 };
 
+use crate::mail::LaterWhen;
 use crate::motion::spring;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
@@ -20,19 +23,49 @@ enum Hint {
     Note(&'static str),
 }
 
+/// A command the main window runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Run {
+    Done,
+    Later(LaterWhen),
+    Delete,
+    Reply,
+    Compose,
+    Sync,
+    Settings,
+    AddAccount,
+    /// A search hit: the store id of the message.
+    Open(i64),
+}
+
+/// What Enter on an item does.
+#[derive(Clone, Debug, PartialEq)]
+enum Action {
+    Run(Run),
+    Move(MoveTo),
+    /// Replaces the query, for "Move to…".
+    Fill(&'static str),
+}
+
 struct Command {
     section: &'static str,
     label: &'static str,
     hint: Hint,
+    action: Action,
 }
 
-// The five commands in the design.
 const COMMANDS: &[Command] = &[
-    Command { section: "Actions", label: "Done", hint: Hint::Key("E") },
-    Command { section: "Actions", label: "Done: everything from Ingrid Holm", hint: Hint::Key("⇧E") },
-    Command { section: "Actions", label: "Done: everything older than a week", hint: Hint::Note("4 messages") },
-    Command { section: "Actions", label: "Undo done", hint: Hint::Key("Z") },
-    Command { section: "Go to", label: "Done mailbox", hint: Hint::Key("G D") },
+    Command { section: "Actions", label: "Done", hint: Hint::Key("E"), action: Action::Run(Run::Done) },
+    Command { section: "Actions", label: LaterWhen::Evening.label(), hint: Hint::Note("18:00"), action: Action::Run(Run::Later(LaterWhen::Evening)) },
+    Command { section: "Actions", label: LaterWhen::Tomorrow.label(), hint: Hint::Key("L"), action: Action::Run(Run::Later(LaterWhen::Tomorrow)) },
+    Command { section: "Actions", label: LaterWhen::NextWeek.label(), hint: Hint::Note("Mon 08:00"), action: Action::Run(Run::Later(LaterWhen::NextWeek)) },
+    Command { section: "Actions", label: "Move to…", hint: Hint::Note("move"), action: Action::Fill("move ") },
+    Command { section: "Actions", label: "Delete", hint: Hint::Key("⌫"), action: Action::Run(Run::Delete) },
+    Command { section: "Actions", label: "Reply", hint: Hint::Key("R"), action: Action::Run(Run::Reply) },
+    Command { section: "Actions", label: "New message", hint: Hint::Key("C"), action: Action::Run(Run::Compose) },
+    Command { section: "Mail", label: "Sync now", hint: Hint::Note("IMAP"), action: Action::Run(Run::Sync) },
+    Command { section: "Mail", label: "Settings", hint: Hint::Key("⌘,"), action: Action::Run(Run::Settings) },
+    Command { section: "Mail", label: "Add account", hint: Hint::Note("IMAP"), action: Action::Run(Run::AddAccount) },
 ];
 
 /// Where "Move to" sends the selected message.
@@ -42,13 +75,13 @@ pub enum MoveTo {
     New(String),
 }
 
-/// One row in the list: a command, or a folder target in "move" mode.
+/// One row in the list: a command, a folder target in "move" mode, or a message found.
 struct Item {
     section: &'static str,
     label: String,
     hint: Option<&'static Hint>,
     range: Option<std::ops::Range<usize>>,
-    target: Option<MoveTo>,
+    action: Action,
 }
 
 const MOVE_TO: &str = "Move to ";
@@ -58,20 +91,25 @@ fn move_query(query: &str) -> Option<&str> {
     query.get(..4).filter(|p| p.eq_ignore_ascii_case("move")).map(|_| query[4..].trim_start())
 }
 
-/// `folders` is (folder index, "Travel / Trains").
-fn matches(query: &str, folders: &[(usize, String)]) -> Vec<Item> {
+fn commands(query: &str) -> Vec<Item> {
+    COMMANDS
+        .iter()
+        .filter_map(|c| {
+            find(c.label, query).map(|range| Item { section: c.section, label: c.label.into(), hint: Some(&c.hint), range, action: c.action.clone() })
+        })
+        .collect()
+}
+
+/// `folders` is (folder index, "Travel / Trains"); `hits` is (store id, "Sender · Subject").
+fn matches(query: &str, folders: &[(usize, String)], hits: &[(i64, String)]) -> Vec<Item> {
     let Some(q) = move_query(query) else {
-        return COMMANDS
+        let items = commands(query);
+        if !items.is_empty() {
+            return items;
+        }
+        return hits
             .iter()
-            .filter_map(|c| {
-                find(c.label, query).map(|range| Item {
-                    section: c.section,
-                    label: c.label.into(),
-                    hint: Some(&c.hint),
-                    range,
-                    target: None,
-                })
-            })
+            .map(|(id, label)| Item { section: "Messages", label: label.clone(), hint: None, range: None, action: Action::Run(Run::Open(*id)) })
             .collect();
     };
     let mut items: Vec<Item> = folders
@@ -82,7 +120,7 @@ fn matches(query: &str, folders: &[(usize, String)]) -> Vec<Item> {
                 label: format!("{MOVE_TO}{path}"),
                 hint: None,
                 range: r.map(|r| r.start + MOVE_TO.len()..r.end + MOVE_TO.len()),
-                target: Some(MoveTo::Folder(*f)),
+                action: Action::Move(MoveTo::Folder(*f)),
             })
         })
         .collect();
@@ -92,7 +130,7 @@ fn matches(query: &str, folders: &[(usize, String)]) -> Vec<Item> {
             label: format!("New folder “{q}”"),
             hint: None,
             range: None,
-            target: Some(MoveTo::New(q.into())),
+            action: Action::Move(MoveTo::New(q.into())),
         });
     }
     items
@@ -107,17 +145,24 @@ fn find(label: &str, query: &str) -> Option<Option<std::ops::Range<usize>>> {
     Some(Some(start..start + query.len()))
 }
 
+/// Full-text search in the store: (store id, label) for a query.
+pub type Search = Rc<dyn Fn(&str) -> Vec<(i64, String)>>;
+
 pub struct CommandPalette {
     input: Entity<TextInput>,
     selected: usize,
     folders: Vec<(usize, String)>,
     // Subject of the message a move would take.
     subject: Option<String>,
+    search: Option<Search>,
+    /// Search results for the current query, found once per edit, not per frame.
+    hits: Vec<(i64, String)>,
     _input: Subscription,
 }
 
 impl EventEmitter<DismissEvent> for CommandPalette {}
 impl EventEmitter<MoveTo> for CommandPalette {}
+impl EventEmitter<Run> for CommandPalette {}
 
 impl Focusable for CommandPalette {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -130,19 +175,32 @@ impl CommandPalette {
         query: &str,
         folders: Vec<(usize, String)>,
         subject: Option<String>,
+        search: Option<Search>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| TextInput::new(window, cx).placeholder("Type a command").with_text(query));
+        let input = cx.new(|cx| TextInput::new(window, cx).placeholder("Type a command or search").with_text(query));
         let sub = cx.subscribe(&input, |this, _, e: &TextInputEvent, cx| match e {
             TextInputEvent::Changed => {
                 this.selected = 0;
+                this.find_hits(cx);
                 cx.notify();
             }
             TextInputEvent::Enter => this.run(this.matches(cx), cx),
             TextInputEvent::Escape => cx.emit(DismissEvent),
         });
-        Self { input, selected: 0, folders, subject, _input: sub }
+        let mut this = Self { input, selected: 0, folders, subject, search, hits: Vec::new(), _input: sub };
+        this.find_hits(cx);
+        this
+    }
+
+    /// Searches only when no command matches: a typed command never waits on the store.
+    fn find_hits(&mut self, cx: &App) {
+        let query = self.input.read(cx).text();
+        self.hits = match &self.search {
+            Some(search) if !query.trim().is_empty() && move_query(query).is_none() && commands(query).is_empty() => search(query),
+            _ => Vec::new(),
+        };
     }
 
     #[cfg(test)]
@@ -151,13 +209,19 @@ impl CommandPalette {
     }
 
     fn matches(&self, cx: &App) -> Vec<Item> {
-        matches(self.input.read(cx).text(), &self.folders)
+        matches(self.input.read(cx).text(), &self.folders, &self.hits)
     }
 
     /// Enter or a click: the selected item runs and the palette closes.
     fn run(&mut self, matches: Vec<Item>, cx: &mut Context<Self>) {
-        if let Some(target) = matches.into_iter().nth(self.selected).and_then(|i| i.target) {
-            cx.emit(target);
+        match matches.into_iter().nth(self.selected).map(|i| i.action) {
+            Some(Action::Fill(text)) => {
+                self.input.update(cx, |input, cx| input.set_text(text, cx));
+                return;
+            }
+            Some(Action::Move(target)) => cx.emit(target),
+            Some(Action::Run(run)) => cx.emit(run),
+            None => {}
         }
         cx.emit(DismissEvent);
     }
@@ -342,24 +406,33 @@ mod tests {
     }
 
     #[test]
-    fn design_query_shows_all_five() {
-        assert_eq!(COMMANDS.iter().filter(|c| find(c.label, "done").is_some()).count(), 5);
+    fn later_offers_three_times_and_search_follows_commands() {
+        let labels: Vec<_> = matches("later", &[], &[]).iter().map(|i| i.label.clone()).collect();
+        assert_eq!(labels, ["Later: this evening 18:00", "Later: tomorrow 08:00", "Later: next week, Monday 08:00"]);
+        assert_eq!(matches("tomorrow", &[], &[])[0].action, Action::Run(Run::Later(LaterWhen::Tomorrow)));
+        // A query with no command lists the messages found; a command query never shows them.
+        let hits = vec![(42, "Ingrid · Board".to_string())];
+        let found = matches("ingrid", &[], &hits);
+        assert_eq!((found.len(), found[0].section, &found[0].action), (1, "Messages", &Action::Run(Run::Open(42))));
+        assert!(matches("done", &[], &hits).iter().all(|i| i.section != "Messages"));
+        // "mov" still lists the command; four letters switch to folder mode.
+        assert_eq!(matches("mov", &[], &[])[0].action, Action::Fill("move "));
     }
 
     #[test]
     fn move_lists_matching_folders_then_create() {
         let folders = vec![(0, "Receipts".into()), (1, "Travel".into()), (2, "Travel / Trains".into())];
-        let items = matches("Move tr", &folders);
+        let items = matches("Move tr", &folders, &[]);
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["Move to Travel", "Move to Travel / Trains", "New folder “tr”"]);
         // The highlight covers the query inside the folder path, not "Move to".
         assert_eq!(items[0].range, Some(8..10));
-        assert_eq!(items[1].target, Some(MoveTo::Folder(2)));
-        assert_eq!(items[2].target, Some(MoveTo::New("tr".into())));
+        assert_eq!(items[1].action, Action::Move(MoveTo::Folder(2)));
+        assert_eq!(items[2].action, Action::Move(MoveTo::New("tr".into())));
         // An exact name offers no duplicate folder; bare "move" lists all folders.
-        assert!(matches("move travel", &folders).iter().all(|i| i.section == "Move to"));
-        assert_eq!(matches("move", &folders).len(), 3);
+        assert!(matches("move travel", &folders, &[]).iter().all(|i| i.section == "Move to"));
+        assert_eq!(matches("move", &folders, &[]).len(), 3);
         // Other queries stay commands.
-        assert!(matches("done", &folders).iter().all(|i| i.target.is_none()));
+        assert!(matches("done", &folders, &[]).iter().all(|i| matches!(i.action, Action::Run(_))));
     }
 }

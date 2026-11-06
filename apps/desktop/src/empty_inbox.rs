@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use gpui::{div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, Div, FontWeight};
+use gpui::{div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, Div, FontWeight, SharedString};
 
 use crate::main_window::mono;
 use crate::theme::{font, size, Theme};
@@ -11,7 +11,8 @@ use crate::theme::{font, size, Theme};
 /// The headline is the one hero size in the app; the design sets it at 56 px.
 const HEADLINE: f32 = 56.0;
 
-pub fn view(t: &Theme) -> Div {
+/// `status`: the account and its sync state for the footer.
+pub fn view(t: &Theme, status: SharedString) -> Div {
     let content = div()
         .w_full()
         .max_w(px(560.))
@@ -108,7 +109,7 @@ pub fn view(t: &Theme) -> Div {
                 .py(px(12.))
                 .border_t_1()
                 .border_color(t.line)
-                .child(mono("Home · synced 10:12", t.ink2))
+                .child(mono(status, t.ink2))
                 .child(mono("0 left", t.ink2)),
         )
 }

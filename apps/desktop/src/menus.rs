@@ -36,6 +36,8 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "lagom".into(),
             items: vec![
+                MenuItem::action("Settings…", crate::main_window::OpenSettings),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide lagom", Hide),
@@ -64,6 +66,7 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "Message".into(),
             items: vec![
+                MenuItem::action("New Message", crate::main_window::NewMessage),
                 MenuItem::action("Reply", crate::main_window::Reply),
                 MenuItem::action("Delete", crate::main_window::DeleteMessage),
                 MenuItem::separator(),

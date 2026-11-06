@@ -441,7 +441,6 @@ impl TextInput {
     }
 
     /// Password mode: bullets, and no copy or cut.
-    #[allow(dead_code)] // The add-account form uses it next.
     pub fn masked(mut self) -> Self {
         self.masked = true;
         self

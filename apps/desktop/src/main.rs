@@ -1,9 +1,13 @@
+mod accounts;
 mod command_palette;
 mod compose;
 mod empty_inbox;
 mod folders;
+mod mail;
 mod main_window;
 mod motion;
+mod settings;
+mod sync;
 #[cfg(target_os = "macos")]
 mod menus;
 mod text_input;
@@ -75,7 +79,8 @@ fn main() {
                 window_background: WindowBackgroundAppearance::Blurred,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| MainWindow::new(window, cx)),
+            // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
+            |window, cx| cx.new(|cx| MainWindow::new(std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1"), window, cx)),
         )
         .expect("open main window");
         cx.activate(true);

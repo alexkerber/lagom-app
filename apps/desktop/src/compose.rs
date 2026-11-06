@@ -12,7 +12,9 @@ use gpui::{
 
 use crate::main_window::{key_button, mono, pressable};
 use crate::motion::spring;
+use crate::mail::recipients;
 use crate::text_input::{TextInput, TextInputEvent};
+use lagom_core::smtp::Outgoing;
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 /// Sample reply for `LAGOM_SCREEN=compose-text`.
@@ -48,14 +50,35 @@ pub struct Compose {
     keep: bool,
     /// The field that had focus when Esc closed the sheet.
     refocus: Option<FocusHandle>,
+    /// "Account · address" in the From row.
+    from: String,
+    /// In-Reply-To and References, for a reply.
+    reply: Option<(Option<String>, Vec<String>)>,
+    /// Why Send did nothing, shown in the footer.
+    problem: Option<&'static str>,
+    /// After Send, the sheet has finished leaving and no longer renders.
+    slid_out: bool,
     _count: Option<Task<()>>,
     _dismiss: Option<Task<()>>,
     _appearance: Subscription,
     _fields: Vec<Subscription>,
 }
 
+/// What the main window hears from the sheet besides `DismissEvent`.
+pub enum ComposeEvent {
+    /// Send was pressed: the sheet is no longer a modal, the Undo window runs.
+    Sending,
+    /// Undo in the window: the sheet is a modal again.
+    Restored,
+    /// The Undo window ended: send this now.
+    Send(Box<Outgoing>),
+}
+
+impl gpui::EventEmitter<ComposeEvent> for Compose {}
+
 impl Compose {
-    pub fn new(to: &str, subject: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `reply`: In-Reply-To and References. `None` is a new message.
+    pub fn new(from: &str, to: &str, subject: &str, reply: Option<(Option<String>, Vec<String>)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             this.theme = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
             cx.notify();
@@ -63,11 +86,16 @@ impl Compose {
         let to = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients").with_text(to));
         let cc = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
         let subject = cx.new(|cx| TextInput::new(window, cx).placeholder("Subject").with_text(subject));
-        let body = cx.new(|cx| TextInput::new(window, cx).multiline().placeholder("Write your reply"));
+        let body = cx.new(|cx| TextInput::new(window, cx).multiline().placeholder("Write your message"));
         let fields = [&to, &cc, &subject, &body].map(|f| cx.subscribe_in(f, window, Self::on_field)).into();
-        // A reply starts in the body.
-        window.focus(&body.focus_handle(cx));
+        // A reply starts in the body, a new message in To.
+        let first = if reply.is_some() { &body } else { &to };
+        window.focus(&first.focus_handle(cx));
         Self {
+            from: from.into(),
+            reply,
+            problem: None,
+            slid_out: false,
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             phase: Phase::Open,
             focus: cx.focus_handle(),
@@ -135,19 +163,60 @@ impl Compose {
         cx.notify();
     }
 
+    fn outgoing(&self, cx: &gpui::App) -> Outgoing {
+        let text = |f: &Entity<TextInput>| f.read(cx).text().to_string();
+        let (in_reply_to, references) = self.reply.clone().unwrap_or_default();
+        Outgoing {
+            to: recipients(&text(&self.to)),
+            cc: recipients(&text(&self.cc)),
+            subject: text(&self.subject),
+            text: text(&self.body),
+            in_reply_to,
+            references,
+            ..Default::default()
+        }
+    }
+
+    /// Nothing leaves before the Undo window ends: the timer sends, Undo drops the timer.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.phase == Phase::Sent || self.phase == Phase::Gone {
             return;
         }
+        let mail = self.outgoing(cx);
+        if mail.to.is_empty() && mail.cc.is_empty() {
+            self.problem = Some("Add a recipient");
+            window.focus(&self.to.focus_handle(cx));
+            cx.notify();
+            return;
+        }
+        if mail.to.iter().chain(&mail.cc).any(|a| !a.contains('@')) {
+            self.problem = Some("A recipient is not an email address");
+            window.focus(&self.to.focus_handle(cx));
+            cx.notify();
+            return;
+        }
+        self.problem = None;
         self.phase = Phase::Sent;
         self.keep = false;
         // Off the fading fields: ⌘Z now undoes the send, and typing goes nowhere.
         window.focus(&self.focus);
         // Replacing the task cancels an older timer.
+        self.slid_out = false;
         self._dismiss = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(UNDO_WINDOW).await;
-            this.update(cx, |this, cx| this.set(Phase::Gone, cx)).ok();
+            cx.background_executor().timer(SLIDE).await;
+            this.update(cx, |this, cx| {
+                this.slid_out = true;
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor().timer(UNDO_WINDOW - SLIDE).await;
+            this.update(cx, |this, cx| {
+                cx.emit(ComposeEvent::Send(Box::new(this.outgoing(cx))));
+                this.set(Phase::Gone, cx);
+            })
+            .ok();
         }));
+        cx.emit(ComposeEvent::Sending);
         cx.notify();
     }
 
@@ -155,8 +224,14 @@ impl Compose {
         if self.phase == Phase::Sent {
             self._dismiss = None;
             self.set(Phase::Restored, cx);
+            cx.emit(ComposeEvent::Restored);
             window.focus(&self.body.focus_handle(cx));
         }
+    }
+
+    /// The sheet blocks the inbox. After Send it only shows the Undo toast.
+    pub fn is_modal(&self) -> bool {
+        matches!(self.phase, Phase::Open | Phase::Restored)
     }
 
     /// The faded sheet keeps its hitboxes while Sent, so Discard must not act then.
@@ -252,7 +327,7 @@ impl Compose {
                     .bg(t.subtle)
                     .border_b_1()
                     .border_color(t.line)
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Reply"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(if self.reply.is_some() { "Reply" } else { "New message" }))
                     .child(
                         pressable(div().id("discard"), t, false)
                             .flex()
@@ -272,7 +347,7 @@ impl Compose {
                     .flex()
                     .flex_col()
                     .px(px(24.))
-                    .child(field("From").child("Home · you@home.example"))
+                    .child(field("From").child(self.from.clone()))
                     .child(field("To").child(grow(&self.to)).when(!self.show_cc, |d| {
                         d.child(
                             pressable(div().id("add-cc"), t, false)
@@ -315,16 +390,18 @@ impl Compose {
                         key_button(t, "Send", "⌘↵", Some(t.accent))
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     )
-                    .child(key_button(t, "Attach", "⌘⇧A", None))
-                    .child(key_button(t, "Send later", "⌘L", None))
+                    // shortcut: Attach and Send later are left out until the core supports them.
                     .child(div().flex_1())
-                    .child(mono(
-                        match self.words {
-                            1 => "1 word · saved".to_string(),
-                            n => format!("{n} words · saved"),
-                        },
-                        t.ink2,
-                    )),
+                    .child(match self.problem {
+                        Some(p) => div().text_size(px(size::SNIPPET)).text_color(t.danger).child(p),
+                        None => mono(
+                            match self.words {
+                                1 => "1 word".to_string(),
+                                n => format!("{n} words"),
+                            },
+                            t.ink2,
+                        ),
+                    }),
             )
     }
 
@@ -332,15 +409,16 @@ impl Compose {
         let t = &self.theme;
         toast(
             t,
-            "Sent",
-            key_button(t, "Undo", "⌘Z", None)
-                .on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))),
+            // Nothing has left yet: it goes when the Undo window ends.
+            "Sending",
+            Some(key_button(t, "Undo", "⌘Z", None).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))).into_any_element()),
         )
     }
 }
 
-/// A toast at the bottom of the window: a label and an Undo button.
-pub(crate) fn toast(t: &Theme, label: &'static str, undo: impl IntoElement) -> impl IntoElement {
+/// A toast at the bottom of the window: a label and, optionally, an Undo button.
+pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Option<gpui::AnyElement>) -> impl IntoElement {
+    let label = label.into();
     div()
         .absolute()
         .bottom(px(24.))
@@ -355,7 +433,7 @@ pub(crate) fn toast(t: &Theme, label: &'static str, undo: impl IntoElement) -> i
                 .gap(px(16.))
                 .h(px(48.))
                 .pl(px(16.))
-                .pr(px(7.))
+                .pr(px(if undo.is_some() { 7. } else { 16. }))
                 .bg(t.raised)
                 .border_1()
                 .border_color(t.line)
@@ -363,7 +441,7 @@ pub(crate) fn toast(t: &Theme, label: &'static str, undo: impl IntoElement) -> i
                 .shadow_lg()
                 .font_weight(FontWeight::MEDIUM)
                 .child(label)
-                .child(undo),
+                .children(undo),
         )
         .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
             d.opacity(ease_out_quint()(v)).bottom(px(16. + 8. * spring(v)))
@@ -400,6 +478,8 @@ impl Render for Compose {
                 .into_any_element(),
             Phase::Gone => layer.into_any_element(),
         };
+        // Once the sheet has slid out, its invisible hitboxes must not catch inbox clicks.
+        let layer = (!(self.phase == Phase::Sent && self.slid_out)).then_some(layer);
 
         div()
             .absolute()
@@ -413,7 +493,7 @@ impl Render for Compose {
             .text_color(t.ink)
             .font_family(font::ui())
             .text_size(px(size::BASE))
-            .child(layer)
+            .children(layer)
             .when(self.phase == Phase::Sent, |d| d.child(self.toast(cx)))
     }
 }

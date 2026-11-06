@@ -106,7 +106,12 @@ pub async fn send(
 pub async fn verify(account: &Account, password: &str) -> Result<()> {
     match transport(account, password)?.test_connection().await {
         Ok(true) => Ok(()),
-        _ => Err(Error::Network("SMTP login failed")),
+        Err(e) if e.is_permanent() => Err(Error::Network(
+            "SMTP login rejected: check the address and app password",
+        )),
+        Err(e) if e.is_tls() => Err(Error::Network("SMTP TLS handshake failed")),
+        Err(e) if e.is_timeout() => Err(Error::Network("SMTP server timed out")),
+        _ => Err(Error::Network("could not reach the SMTP server")),
     }
 }
 fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
