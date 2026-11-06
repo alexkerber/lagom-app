@@ -31,6 +31,7 @@ impl AssetSource for Assets {
             "icons/chevron-right.svg" => include_bytes!("../assets/icons/chevron-right.svg"),
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
+            "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
             _ => return Ok(None),
         };

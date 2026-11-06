@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
     App, Context, Div, ElementId, FocusHandle, FontWeight, KeyBinding, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, TouchPhase, Window,
+    ScrollWheelEvent, SharedString, Task, TouchPhase, Window,
 };
 
 use crate::command_palette::{CommandPalette, MoveTo};
@@ -48,7 +48,7 @@ const MESSAGES: &[Message] = &[
 // Messages already snoozed in the sample data.
 const LATER_SAMPLE: usize = 2;
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, Undo, OpenPalette, Reply, Cancel]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
@@ -59,6 +59,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SelectPrev, ctx),
         KeyBinding::new("e", Done, ctx),
         KeyBinding::new("l", Later, ctx),
+        KeyBinding::new("backspace", DeleteMessage, ctx),
+        KeyBinding::new("delete", DeleteMessage, ctx),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-k", OpenPalette, ctx),
         KeyBinding::new("r", Reply, ctx),
@@ -71,6 +73,8 @@ pub fn bind_keys(cx: &mut App) {
 // NSWorkspace.accessibilityDisplayShouldReduceMotion (and the Windows/Linux equivalents) and fall
 // back to a short fade once GPUI or lagom-core can provide it.
 const MOTION: Duration = Duration::from_millis(180);
+/// Colour change behind a swiped row when it crosses a threshold.
+const TINT_FADE: Duration = Duration::from_millis(100);
 // GPUI line height is phi x font size. A row is two BASE lines, one SNIPPET line, gaps and padding.
 const ROW_H: f32 = 2. * 10. + 2. * 3. + (2. * size::BASE + size::SNIPPET) * 1.618_034;
 
@@ -102,6 +106,10 @@ pub struct MainWindow {
     under: Option<usize>,
     // (message id, offset it springs back from, seq) for a swipe that did not reach the threshold.
     spring: Option<(usize, f32, usize)>,
+    // (move it was, move it is, seq) for the colour behind a swiped row. See `retint`.
+    tint: (Option<Move>, Option<Move>, usize),
+    // The "Deleted" toast with Undo. Dropping the task cancels its timer.
+    toast: Option<Task<()>>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
     // "N more" was clicked, so every folder row shows.
@@ -129,6 +137,8 @@ impl MainWindow {
             swipe: Swipe::Idle,
             under: None,
             spring: None,
+            tint: (None, None, 0),
+            toast: None,
             palette: None,
             compose: None,
             all_folders: false,
@@ -139,11 +149,16 @@ impl MainWindow {
             "folders" => this.inbox.open(Some(0)),
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(window, cx),
-            // A row held mid-swipe, past the Done threshold, for screenshots.
+            // A row held mid-swipe in each state, for screenshots.
+            "swipe-neutral" => this.swipe = Swipe::Row { id: 1, dx: 70. },
             "swipe" => this.swipe = Swipe::Row { id: 1, dx: 150. },
-            "swipe-later" => this.swipe = Swipe::Row { id: 1, dx: -90. },
+            "swipe-later" => this.swipe = Swipe::Row { id: 1, dx: -160. },
+            "swipe-delete" => this.swipe = Swipe::Row { id: 1, dx: -280. },
+            // The first message just deleted: the "Deleted" toast.
+            "deleted" => this.act(Move::Delete, cx),
             _ => {}
         }
+        this.retint();
         this
     }
 
@@ -159,6 +174,8 @@ impl MainWindow {
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
+        // The overlay takes ⌘Z, so the toast's Undo would not work while it is open.
+        self.toast = None;
         // The open folder stays listed, so its name never offers "New folder". Moving there is a no-op.
         let targets = folders::tree(&self.inbox.folders, true)
             .into_iter()
@@ -187,6 +204,7 @@ impl MainWindow {
 
     fn open_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
+        self.toast = None;
         let compose = cx.new(|cx| Compose::new(window, cx));
         cx.subscribe_in(&compose, window, |this, _, _: &gpui::DismissEvent, window, cx| {
             this.compose = None;
@@ -213,6 +231,17 @@ impl MainWindow {
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx });
+        // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
+        self.toast = (what == Move::Delete).then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::compose::UNDO_WINDOW).await;
+                this.update(cx, |this, cx| {
+                    this.toast = None;
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
         cx.notify();
     }
 
@@ -234,6 +263,7 @@ impl MainWindow {
     fn undo(&mut self, cx: &mut Context<Self>) {
         let open = self.inbox.open;
         let Some((what, id, ix)) = self.inbox.undo() else { return };
+        self.toast = None;
         // Undo goes back to the list the message left, as the reverse motion needs it on screen.
         if self.inbox.open != open {
             self.swipe = Swipe::Idle;
@@ -264,6 +294,8 @@ impl MainWindow {
         let before = self.swipe;
         match e.touch_phase {
             TouchPhase::Started => {
+                // A new swipe starts neutral, not with the fade the last acted swipe never showed.
+                self.tint = (None, None, self.tint.2);
                 self.swipe = under.map_or(Swipe::Idle, Swipe::start);
                 self.swipe.moved(d.x.into(), d.y.into());
             }
@@ -271,14 +303,30 @@ impl MainWindow {
             TouchPhase::Moved => self.swipe.moved(d.x.into(), d.y.into()),
             TouchPhase::Ended => self.release(true, cx),
         }
+        self.retint();
         if self.swipe != before {
             cx.notify();
+        }
+    }
+
+    /// Starts a short cross-fade when the move a release would make changes.
+    // shortcut: no trackpad haptic at the thresholds; GPUI 0.2.2 has no API for
+    // NSHapticFeedbackManager. Add one with a small objc call or a GPUI patch.
+    fn retint(&mut self) {
+        let to = match self.swipe {
+            Swipe::Row { dx, .. } => reach(dx),
+            _ => None,
+        };
+        if to != self.tint.1 {
+            self.seq += 1;
+            self.tint = (self.tint.1, to, self.seq);
         }
     }
 
     /// Fingers lift (`act`) or Esc (not `act`): past the threshold the row goes, else it springs back.
     fn release(&mut self, act: bool, cx: &mut Context<Self>) {
         let Some((id, dx, what)) = self.swipe.end() else { return };
+        self.retint();
         let ix = self.inbox.list().iter().position(|&i| i == id);
         match (what.filter(|_| act), ix) {
             (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
@@ -309,31 +357,64 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
         .py(px(10. * (1. - collapse)))
         .overflow_hidden()
         .opacity(1. - p);
+    // Opaque, so the colour of the move shows only where the row has left (see `with_behind`).
+    let row = row.bg(t.raised);
     match what {
-        // A swiped row already shows the full tint behind it, so it keeps it.
         // A move to a folder leaves like Done.
-        Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)).bg(Rgba { a: 0.2 * if dx > 0. { 1. } else { (p * 3.).min(1.) }, ..t.accent }),
+        Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)),
+        // Delete leaves the other way, at the same speed.
+        Move::Delete => row.left(px(dx - p * 200.)),
         // Towards Later in the sidebar: lift (shadow), shrink and move left.
-        Move::Later => row.left(px(dx - p * 80.)).w(relative(1. - 0.3 * p)).bg(t.raised).shadow_md(),
+        Move::Later => row.left(px(dx - p * 80.)).w(relative(1. - 0.3 * p)).shadow_md(),
     }
 }
 
-/// The action behind a swiped row: Done to the right (dx > 0), Later to the left.
-/// The tint fills as the row nears the threshold; the icon takes colour once it is past.
-fn behind(t: Theme, dx: f32) -> Div {
-    let done = dx >= 0.;
-    let ready = (dx.abs() / THRESHOLD).min(1.);
-    let (path, color) = if done { ("icons/done.svg", t.accent) } else { ("icons/later.svg", t.ink) };
+/// The colour behind a row for the move it commits to, and the ink on it. `None`: short of a threshold.
+fn swipe_colors(t: &Theme, what: Option<Move>) -> (Rgba, Rgba) {
+    match what {
+        None => (t.sel, t.ink2),
+        Some(Move::Done | Move::Folder(_)) => (t.swipe_done, t.accent_ink),
+        Some(Move::Later) => (t.swipe_later, t.accent_ink),
+        Some(Move::Delete) => (t.danger, t.accent_ink),
+    }
+}
+
+/// What shows behind a moving row: the colour of `what`, and its icon on the side the row uncovers.
+fn behind(t: Theme, what: Option<Move>, right: bool) -> Div {
+    let (bg, ink) = swipe_colors(&t, what);
+    let path = match what {
+        Some(Move::Delete) => "icons/trash.svg",
+        Some(Move::Later) => "icons/later.svg",
+        Some(_) => "icons/done.svg",
+        None if right => "icons/done.svg",
+        None => "icons/later.svg",
+    };
     div()
         .absolute()
         .inset_0()
         .flex()
         .items_center()
-        .when(!done, |d| d.justify_end())
+        .when(!right, |d| d.justify_end())
         .px(px(20.))
         .rounded(px(radius::CONTROL))
-        .bg(Rgba { a: 0.2 * ready, ..color })
-        .child(icon(path, if ready >= 1. { color } else { t.ink2 }, 18.))
+        .bg(bg)
+        .child(icon(path, ink, 18.))
+}
+
+/// A row that leaves (or comes back) over the colour of its move, so E, L and ⌫ look like a swipe.
+/// The colour fades with the row; at rest (p = 0) it is gone, as resting rows are not opaque.
+fn with_behind(row: AnyElement, t: Theme, what: Move, seq: usize, p: impl Fn(f32) -> f32 + 'static) -> AnyElement {
+    let right = !matches!(what, Move::Later | Move::Delete);
+    div()
+        .relative()
+        .overflow_hidden()
+        .rounded(px(radius::CONTROL))
+        .child(behind(t, Some(what), right).with_animation(("behind", seq), motion(), move |el, d| {
+            let p = p(d);
+            el.opacity(if p > 0. { 1. - p } else { 0. })
+        }))
+        .child(row)
+        .into_any_element()
 }
 
 /// Counts roll in from below when they change. The id holds the value, so a new value restarts it.
@@ -662,9 +743,10 @@ impl MainWindow {
         let ghosts_at = |ix: usize| {
             self.ghosts.iter().filter(move |g| g.ix == ix).map(move |g| {
                 let (what, dx) = (g.what, g.dx);
-                row(&MESSAGES[g.id], false)
+                let el = row(&MESSAGES[g.id], false)
                     .with_animation(("ghost", g.seq), motion(), move |el, d| away(el, theme, what, d, dx))
-                    .into_any_element()
+                    .into_any_element();
+                with_behind(el, theme, what, g.seq, |d| d)
             })
         };
         // shortcut: renders every row, fine for the sample inbox. Switch to uniform_list (visible
@@ -688,12 +770,20 @@ impl MainWindow {
                         .with_animation(("spring", seq), motion(), move |el, d| el.left(px(dx * (1. - d))))
                         .into_any_element(),
                 };
+                // The colour of the move the row would make, cross-faded from the last one so a
+                // change of state never cuts hard. The row itself never waits for it.
+                let (from, to, tint) = self.tint;
                 rows.push(
                     div()
                         .relative()
                         .overflow_hidden()
                         .rounded(px(radius::CONTROL))
-                        .child(behind(theme, dx))
+                        .child(behind(theme, from, dx >= 0.))
+                        .child(behind(theme, to, dx >= 0.).with_animation(
+                            ("tint", tint),
+                            Animation::new(TINT_FADE).with_easing(ease_out_quint()),
+                            |el, d| el.opacity(d),
+                        ))
                         .child(el)
                         .into_any_element(),
                 );
@@ -702,8 +792,10 @@ impl MainWindow {
             rows.push(match self.entering.iter().find(|g| g.id == id) {
                 Some(g) => {
                     let what = g.what;
-                    el.with_animation(("enter", g.seq), motion(), move |el, d| away(el, theme, what, 1. - d, 0.))
-                        .into_any_element()
+                    let el = el
+                        .with_animation(("enter", g.seq), motion(), move |el, d| away(el, theme, what, 1. - d, 0.))
+                        .into_any_element();
+                    with_behind(el, theme, what, g.seq, |d| 1. - d)
                 }
                 None => el.into_any_element(),
             });
@@ -950,6 +1042,8 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
             .on_action(cx.listener(|this, _: &Done, _, cx| if !this.overlay_open(cx) { this.act(Move::Done, cx) }))
             .on_action(cx.listener(|this, _: &Later, _, cx| if !this.overlay_open(cx) { this.act(Move::Later, cx) }))
+            // The guard hands ⌫ to the palette, where it edits the query.
+            .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| if !this.overlay_open(cx) { this.act(Move::Delete, cx) }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| if !this.overlay_open(cx) { this.undo(cx) }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| if !this.overlay_open(cx) { this.open_palette("", window, cx) }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(window, cx) }))
@@ -978,6 +1072,16 @@ impl Render for MainWindow {
                     .when(!self.inbox.list().is_empty() || self.inbox.open.is_some(), |d| d.child(self.message_list(cx)).child(self.reading_pane(cx))),
             )
             .children(self.palette.clone())
+            .when(self.toast.is_some(), |d| {
+                d.child(crate::compose::toast(
+                    &t,
+                    "Deleted",
+                    key_button(&t, "Undo", "⌘Z", false)
+                        .id("undo-delete")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
+                ))
+            })
             .children(self.compose.clone())
     }
 }
@@ -988,12 +1092,26 @@ enum Move {
     Later,
     /// Into the folder at this index in `Inbox::folders`.
     Folder(usize),
+    /// To Trash.
+    Delete,
 }
 
 /// Finger travel before the swipe locks to one direction.
 const SLOP: f32 = 8.;
 /// docs/motion.md: about 35 % of the 408 px row, or 120 px, whichever is less.
 const THRESHOLD: f32 = 120.;
+/// A long left swipe deletes: about 60 % of the 408 px row (the list is a fixed 420 px wide).
+const DELETE_THRESHOLD: f32 = 0.6 * 408.;
+
+/// The move a swipe released at `dx` makes. Right has one stage (Done), left has two (Later, Delete).
+fn reach(dx: f32) -> Option<Move> {
+    match dx {
+        dx if dx >= THRESHOLD => Some(Move::Done),
+        dx if dx <= -DELETE_THRESHOLD => Some(Move::Delete),
+        dx if dx <= -THRESHOLD => Some(Move::Later),
+        _ => None,
+    }
+}
 
 /// A two-finger swipe on one row, as ids into `INBOX`. Plain Rust, so tests run without a window.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1039,12 +1157,7 @@ impl Swipe {
     /// Ends the swipe. Returns the row, its offset and the move it reached, if any.
     fn end(&mut self) -> Option<(usize, f32, Option<Move>)> {
         let Swipe::Row { id, dx } = std::mem::replace(self, Swipe::Idle) else { return None };
-        let what = match dx {
-            dx if dx >= THRESHOLD => Some(Move::Done),
-            dx if dx <= -THRESHOLD => Some(Move::Later),
-            _ => None,
-        };
-        Some((id, dx, what))
+        Some((id, dx, reach(dx)))
     }
 }
 
@@ -1057,13 +1170,15 @@ struct Inbox {
     open: Option<usize>,
     selected: usize,
     later: usize,
+    /// Deleted message ids, newest first.
+    trash: Vec<usize>,
     // (what, message id, list it left, index it left from). Act and undo are LIFO, so the index always fits.
     history: Vec<(Move, usize, Option<usize>, usize)>,
 }
 
 impl Inbox {
     fn new(len: usize, later: usize) -> Self {
-        Self { items: (0..len).collect(), folders: Vec::new(), open: None, selected: 0, later, history: Vec::new() }
+        Self { items: (0..len).collect(), folders: Vec::new(), open: None, selected: 0, later, trash: Vec::new(), history: Vec::new() }
     }
 
     fn list(&self) -> &Vec<usize> {
@@ -1127,6 +1242,7 @@ impl Inbox {
         match what {
             Move::Later => self.later += 1,
             Move::Folder(f) => self.folders[f].items.insert(0, id),
+            Move::Delete => self.trash.insert(0, id),
             Move::Done => {}
         }
         self.history.push((what, id, self.open, ix));
@@ -1139,6 +1255,7 @@ impl Inbox {
         match what {
             Move::Later => self.later -= 1,
             Move::Folder(f) => self.folders[f].items.retain(|&i| i != id),
+            Move::Delete => self.trash.retain(|&i| i != id),
             Move::Done => {}
         }
         self.open = from;
@@ -1241,6 +1358,32 @@ mod tests {
         assert_eq!(swipe(&[(119., 0.)]).end(), Some((7, 119., None)));
         assert_eq!(swipe(&[(150., 0.), (-140., 0.)]).end(), Some((7, 10., None)));
         assert_eq!(swipe(&[(0., 30.)]).end(), None);
+    }
+
+    #[test]
+    fn long_left_swipe_deletes() {
+        // Left has two stages: Later past 120 px, Delete past 60 % of the row.
+        assert_eq!(swipe(&[(-DELETE_THRESHOLD + 1., 0.)]).end(), Some((7, -DELETE_THRESHOLD + 1., Some(Move::Later))));
+        assert_eq!(swipe(&[(-DELETE_THRESHOLD, 0.)]).end(), Some((7, -DELETE_THRESHOLD, Some(Move::Delete))));
+        // Back below the delete threshold is Later again; back near the start springs back.
+        assert_eq!(swipe(&[(-300., 0.), (100., 0.)]).end(), Some((7, -200., Some(Move::Later))));
+        assert_eq!(swipe(&[(-300., 0.), (250., 0.)]).end(), Some((7, -50., None)));
+        // Right has no long stage.
+        assert_eq!(reach(400.), Some(Move::Done));
+        assert_eq!(reach(-0.), None);
+    }
+
+    #[test]
+    fn delete_goes_to_trash_and_undo_restores() {
+        let mut inbox = Inbox::new(3, 0);
+        inbox.next();
+        assert_eq!(inbox.act_at(inbox.selected, Move::Delete), Some((1, 1)));
+        assert_eq!((inbox.items.as_slice(), inbox.trash.as_slice()), ([0, 2].as_slice(), [1].as_slice()));
+        assert_eq!(inbox.current(), Some(2));
+        assert_eq!(inbox.undo(), Some((Move::Delete, 1, 1)));
+        assert_eq!(inbox.items, [0, 1, 2]);
+        assert!(inbox.trash.is_empty());
+        assert_eq!((inbox.current(), inbox.later), (Some(1), 0));
     }
 
     #[test]

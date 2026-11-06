@@ -34,6 +34,12 @@ pub struct Theme {
     pub sel: Rgba,
     pub accent: Rgba,
     pub accent_ink: Rgba,
+    // Behind a swiped row, by the move it commits to. `accent_ink` sits on all three:
+    // 5.6–7.0:1 in light (white), 7.1–8.9:1 in dark (near black).
+    pub swipe_done: Rgba,
+    pub swipe_later: Rgba,
+    /// Delete. A purer red than Falu red, so Delete never reads as the accent.
+    pub danger: Rgba,
 }
 
 impl Theme {
@@ -49,6 +55,9 @@ impl Theme {
             sel: rgb(0xEFEFEC),
             accent: rgb(accent.hex().0),
             accent_ink: rgb(0xFFFFFF),
+            swipe_done: rgb(Accent::PineGreen.hex().0),
+            swipe_later: rgb(Accent::CatalogueBlue.hex().0),
+            danger: rgb(0xC62828),
         }
     }
 
@@ -64,6 +73,9 @@ impl Theme {
             sel: rgb(0x1F1F1D),
             accent: rgb(accent.hex().1),
             accent_ink: rgb(0x0B0B0A),
+            swipe_done: rgb(Accent::PineGreen.hex().1),
+            swipe_later: rgb(Accent::CatalogueBlue.hex().1),
+            danger: rgb(0xF87171),
         }
     }
 

@@ -14,8 +14,8 @@ use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 const SUBJECT: &str = "Re: Board meeting moved to Thursday";
 const BODY: &str = "Thursday works. I will read the minutes before the meeting. Probably on the train.\n\nAlex";
-/// How long the "Sent" toast offers Undo.
-const UNDO_WINDOW: Duration = Duration::from_secs(5);
+/// How long the "Sent" and "Deleted" toasts offer Undo.
+pub(crate) const UNDO_WINDOW: Duration = Duration::from_secs(5);
 /// docs/motion.md: 120–200 ms, ease-out.
 const SLIDE: Duration = Duration::from_millis(200);
 
@@ -219,39 +219,46 @@ impl Compose {
 
     fn toast(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
-        div()
-            .absolute()
-            .bottom(px(24.))
-            .left_0()
-            .right_0()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(16.))
-                    .h(px(48.))
-                    .pl(px(16.))
-                    .pr(px(7.))
-                    .bg(t.raised)
-                    .border_1()
-                    .border_color(t.line)
-                    .rounded(px(radius::PANEL))
-                    .shadow_lg()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Sent")
-                    .child(
-                        key_button(t, "Undo", "⌘Z", false)
-                            .id("undo")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
-                    ),
-            )
-            .with_animation("toast-in", Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), |d, v| {
-                d.opacity(v).bottom(px(16. + 8. * v))
-            })
+        toast(
+            t,
+            "Sent",
+            key_button(t, "Undo", "⌘Z", false)
+                .id("undo")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
+        )
     }
+}
+
+/// A toast at the bottom of the window: a label and an Undo button.
+pub(crate) fn toast(t: &Theme, label: &'static str, undo: impl IntoElement) -> impl IntoElement {
+    div()
+        .absolute()
+        .bottom(px(24.))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .h(px(48.))
+                .pl(px(16.))
+                .pr(px(7.))
+                .bg(t.raised)
+                .border_1()
+                .border_color(t.line)
+                .rounded(px(radius::PANEL))
+                .shadow_lg()
+                .font_weight(FontWeight::MEDIUM)
+                .child(label)
+                .child(undo),
+        )
+        .with_animation("toast-in", Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()), |d, v| {
+            d.opacity(v).bottom(px(16. + 8. * v))
+        })
 }
 
 impl gpui::EventEmitter<gpui::DismissEvent> for Compose {}
