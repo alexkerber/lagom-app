@@ -5,6 +5,20 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone};
 use lagom_core::store::MessageSummary;
 
 /// One message in the list and the reading pane.
+/// A folder a message can be in. `New`: one ⌘K is creating, known by its full name until the
+/// server lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    Folder(i64),
+    New(String),
+}
+
+impl Default for Place {
+    fn default() -> Self {
+        Place::Folder(0)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Mail {
     pub from: String,
@@ -19,10 +33,10 @@ pub struct Mail {
     pub unread: bool,
     /// Local store row id. `None` in demo mode.
     pub store: Option<i64>,
-    /// Store folder id the message is in, as far as this window knows: optimistic moves set it.
-    pub folder: i64,
+    /// The folder the message is in, as far as this window knows: optimistic moves set it.
+    pub folder: Place,
     /// The folders it left, newest last: undo goes back to where it was when the action ran.
-    pub was: Vec<i64>,
+    pub was: Vec<Place>,
     pub to: String,
     pub message_id: String,
     pub thread_key: String,
@@ -41,7 +55,7 @@ impl Mail {
             attachment: m.has_attachments.then(|| ("Attachments".into(), "not downloaded yet".into())),
             unread: !m.seen,
             store: Some(m.id),
-            folder: m.folder,
+            folder: Place::Folder(m.folder),
             was: Vec::new(),
             to: m.to.clone(),
             message_id: m.message_id.clone(),

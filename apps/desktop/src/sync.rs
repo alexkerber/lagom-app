@@ -312,7 +312,12 @@ impl Worker {
                     Some(folder)
                 }
                 Act::NewFolder(name) => {
-                    let folder = session.create_folder(store, &name).await?;
+                    // Also undo into a folder ⌘K created: it exists by now, so it is not made twice.
+                    let known = store.folders(&account.id, now())?.into_iter().find(|f| f.name == name).map(|f| f.id);
+                    let folder = match known {
+                        Some(folder) => folder,
+                        None => session.create_folder(store, &name).await?,
+                    };
                     session.move_message(store, id, folder).await?;
                     Some(folder)
                 }
@@ -519,7 +524,9 @@ mod greenmail {
         bridge.send(Cmd::Op { op: 12, id: file, act: Act::NewFolder("Projects".into()) });
         op_ok(&mut events, 12).await;
         let projects = store.folders(&account.id, now()).unwrap().into_iter().find(|f| f.name == "Projects").unwrap().id;
-        bridge.send(Cmd::Op { op: 13, id: moving, act: Act::Move(projects) });
+        // A second "new" folder of the same name reuses the first.
+        assert!(projects > 0);
+        bridge.send(Cmd::Op { op: 13, id: moving, act: Act::NewFolder("Projects".into()) });
         op_ok(&mut events, 13).await;
 
         let s = server(&account).await;

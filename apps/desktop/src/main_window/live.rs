@@ -242,8 +242,8 @@ impl MainWindow {
                         _ => None,
                     };
                     self.notify(sent_note(delivery, error), cx);
-                    // The text is not lost: C opens it again. The sheet keeps its Message-ID, so a
-                    // resend after "may have been sent" is the same message, not a second one.
+                    // The text is not lost: C opens it again. A resend keeps the sheet's Message-ID;
+                    // that does not stop a duplicate, it only lets mail clients spot one.
                     if delivery != Delivery::Sent {
                         self.drafts.extend(compose);
                         self.exit = None;
@@ -254,9 +254,7 @@ impl MainWindow {
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
             self.reload(cx);
         }
-        // Quit or close waited for sends; a failed one cancelled it, so its draft stays.
-        if let Some(exit) = self.exit.filter(|_| !self.live.as_ref().is_some_and(|l| l.sending())) {
-            self.exit = None;
+        if let Some(exit) = self.exit_ready(cx) {
             match exit {
                 Exit::Quit => cx.quit(),
                 Exit::Close => window.remove_window(),
@@ -265,18 +263,28 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// Quit or close waited for sends (a failed one cancelled it, so its draft stays). Sheets
+    /// sent meanwhile are still in their Undo window: they go now, and the exit waits for them.
+    pub(super) fn exit_ready(&mut self, cx: &mut Context<Self>) -> Option<Exit> {
+        let exit = self.exit.take()?;
+        (!self.hold_exit(exit, cx)).then_some(exit)
+    }
+
     /// The worker half of an optimistic move.
     pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen) {
         let Some(store) = self.inbox.mail[id].store else { return };
         let Some(live) = &mut self.live else { return };
-        let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store);
+        let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store).map(mail::Place::Folder);
         let (act, target) = match what {
             Move::Done => (Act::Archive, store_of(Kind::Done)),
             Move::Delete => (Act::Trash, store_of(Kind::Trash)),
             Move::Later => (Act::Snooze(Some(when.at(chrono::Local::now()).timestamp())), None),
             Move::Folder(f) => match self.inbox.folders[f].store {
-                Some(folder) => (Act::Move(folder), Some(folder)),
-                None => (Act::NewFolder(self.inbox.folders[f].full.clone()), None),
+                Some(folder) => (Act::Move(folder), Some(mail::Place::Folder(folder))),
+                None => {
+                    let name = self.inbox.folders[f].full.clone();
+                    (Act::NewFolder(name.clone()), Some(mail::Place::New(name)))
+                }
             },
         };
         self.inbox.left(id, target);
@@ -293,7 +301,11 @@ impl MainWindow {
         let back = self.inbox.back(id);
         let act = match what {
             Move::Later => Act::Snooze(None),
-            Move::Done | Move::Delete | Move::Folder(_) => Act::Move(back),
+            Move::Done | Move::Delete | Move::Folder(_) => match back {
+                mail::Place::Folder(id) => Act::Move(id),
+                // The worker finds it by name: the create ran before this undo.
+                mail::Place::New(name) => Act::NewFolder(name),
+            },
         };
         let Some(live) = &mut self.live else { return };
         let op = live.op(Op::Undo);

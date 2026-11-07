@@ -1816,21 +1816,21 @@ impl Inbox {
 
     /// An optimistic move of `id` left its folder for `target` (unknown for a new folder or
     /// Later, where the folder stays).
-    fn left(&mut self, id: usize, target: Option<i64>) {
+    fn left(&mut self, id: usize, target: Option<mail::Place>) {
         let m = &mut self.mail[id];
-        m.was.push(m.folder);
+        m.was.push(m.folder.clone());
         if let Some(target) = target {
             m.folder = target;
         }
     }
 
     /// Undo or a failed move: back to the folder it left last. Returns that folder.
-    fn back(&mut self, id: usize) -> i64 {
+    fn back(&mut self, id: usize) -> mail::Place {
         let m = &mut self.mail[id];
         if let Some(folder) = m.was.pop() {
             m.folder = folder;
         }
-        m.folder
+        m.folder.clone()
     }
 
     /// The id in `mail` for a store row, refreshed from the summary. A loaded body stays.
@@ -2107,19 +2107,24 @@ mod tests {
 
     #[test]
     fn undo_goes_back_to_the_folder_the_action_left() {
+        use mail::Place::{Folder as F, New};
         let mut inbox = with_folders();
-        inbox.mail[1].folder = 10;
+        inbox.mail[1].folder = F(10);
         // INBOX 10 to Projects 20, then from Projects to Archive 30, before any store read.
-        inbox.left(1, Some(20));
-        inbox.left(1, Some(30));
-        assert_eq!(inbox.mail[1].folder, 30);
-        assert_eq!(inbox.back(1), 20);
-        assert_eq!(inbox.back(1), 10);
+        inbox.left(1, Some(F(20)));
+        inbox.left(1, Some(F(30)));
+        assert_eq!(inbox.mail[1].folder, F(30));
+        assert_eq!(inbox.back(1), F(20));
+        assert_eq!(inbox.back(1), F(10));
         // Nothing left: it stays where it is.
-        assert_eq!(inbox.back(1), 10);
-        // Later and new folders keep the folder but still stack, so undo stays in step.
+        assert_eq!(inbox.back(1), F(10));
+        // Later keeps the folder but still stacks, so undo stays in step.
         inbox.left(1, None);
-        assert_eq!((inbox.mail[1].folder, inbox.back(1)), (10, 10));
+        assert_eq!((inbox.mail[1].folder.clone(), inbox.back(1)), (F(10), F(10)));
+        // Into a folder ⌘K is still creating, archived there: undo goes back to it by name.
+        inbox.left(1, Some(New("Projects".into())));
+        inbox.left(1, Some(F(30)));
+        assert_eq!(inbox.back(1), New("Projects".into()));
     }
 
     #[test]
@@ -2265,6 +2270,21 @@ mod dispatch {
         let second = view.read_with(cx, |v, _| v.sending.last().cloned()).unwrap();
         assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
         assert!(!second.read_with(cx, |c, _| c.undoable()));
+    }
+
+    #[gpui::test]
+    fn a_waiting_quit_also_sends_mail_sent_meanwhile(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        // Quit is waiting for mail A; mail B was sent after it and is in its Undo window.
+        view.update(cx, |v, _| v.exit = Some(Exit::Quit));
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("bo@example.com");
+        cx.simulate_keystrokes("cmd-enter");
+        let b = view.read_with(cx, |v, _| v.sending.last().cloned()).unwrap();
+        assert!(b.read_with(cx, |c, _| c.undoable()));
+        // A has finished: before quitting, B goes to the worker too (demo: nothing to wait for).
+        assert_eq!(view.update(cx, |v, cx| v.exit_ready(cx)), Some(Exit::Quit));
+        assert!(!b.read_with(cx, |c, _| c.undoable()));
     }
 
     #[test]

@@ -24,8 +24,8 @@ pub struct Outgoing {
     pub text: String,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
-    /// Kept by the caller across retries, so a resend after `MaybeSent` is the same message.
-    /// `None`: a new one from `message_id`.
+    /// Kept by the caller across retries, so clients can spot a duplicate after `MaybeSent`; it
+    /// does not prevent one. `None`: a new one from `message_id`.
     pub message_id: Option<String>,
 }
 /// A new Message-ID on the sender's domain.

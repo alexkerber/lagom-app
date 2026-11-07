@@ -52,7 +52,7 @@ pub struct Compose {
     refocus: Option<FocusHandle>,
     /// "Account · address" in the From row.
     from: String,
-    /// One per sheet: a resend after an unsure failure must not become a second message.
+    /// One per sheet, kept across resends, so clients can spot a duplicate. It does not stop one.
     message_id: String,
     /// In-Reply-To and References, for a reply.
     reply: Option<(Option<String>, Vec<String>)>,
