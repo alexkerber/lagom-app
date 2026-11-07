@@ -152,8 +152,6 @@ pub struct MainWindow {
     exit: Option<Exit>,
     // Gives up the wait after `EXIT_WAIT`; dropping it cancels.
     exit_timer: Option<Task<()>>,
-    // The wait gave up: the next quit or close goes, sends or not.
-    force_exit: bool,
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
     page: Page,
@@ -213,7 +211,6 @@ impl MainWindow {
             sending: Vec::new(),
             exit: None,
             exit_timer: None,
-            force_exit: false,
             live,
             page: Page::Mail,
             all_folders: false,
@@ -377,25 +374,33 @@ impl MainWindow {
         cx.notify();
     }
 
-    /// Before quit or close: sheets in their Undo window send now. True while a send is still
-    /// on its way; the window then closes or quits once the worker answers.
+    /// Before quit or close. One rule: nothing unsent (a send on its way, a draft, an open sheet) is lost
+    /// unless the user quits again while the toast that asks for it is on screen. Sheets in
+    /// their Undo window send now. True: do not exit yet.
     fn hold_exit(&mut self, exit: Exit, cx: &mut Context<Self>) -> bool {
         for compose in self.sending.clone() {
             if let Some(mail) = compose.update(cx, |c, cx| c.send_now(cx)) {
                 self.send_mail(compose, mail, cx);
             }
         }
-        let waiting = self.live.as_ref().is_some_and(|l| l.sending());
-        if !waiting || std::mem::take(&mut self.force_exit) {
+        let sending = self.live.as_ref().is_some_and(|l| l.sending());
+        let asked = self.toast.as_ref().is_some_and(|t| t.0 == QUIT_AGAIN_SENDING || t.0 == QUIT_AGAIN_UNSENT);
+        let drafts = !self.drafts.is_empty() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
+        if !sending && !drafts || asked {
+            self.cancel_exit();
             return false;
+        }
+        if !sending {
+            self.cancel_exit();
+            self.notify(QUIT_AGAIN_UNSENT, cx);
+            return true;
         }
         if self.exit.is_none() {
             self.exit_timer = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(EXIT_WAIT).await;
                 this.update(cx, |this, cx| {
                     if this.exit.take().is_some() {
-                        this.force_exit = true;
-                        this.notify("Still sending. Quit again to quit anyway; unsent mail is then lost.", cx);
+                        this.notify(QUIT_AGAIN_SENDING, cx);
                     }
                 })
                 .ok();
@@ -1636,6 +1641,9 @@ fn exit_actions<E: InteractiveElement>(el: E, cx: &mut Context<MainWindow>) -> E
 
 /// How long quit or close waits for sends before it lets the user quit anyway.
 const EXIT_WAIT: Duration = Duration::from_secs(90);
+/// While one of these toasts shows (5 s), the next quit or close goes and drops what is unsent.
+const QUIT_AGAIN_UNSENT: &str = "Unsent mail kept. Quit again to discard it.";
+const QUIT_AGAIN_SENDING: &str = "Still sending. Quit again to quit anyway; unsent mail is then lost.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Exit {
@@ -2312,6 +2320,28 @@ mod dispatch {
         // A has finished: before quitting, B goes to the worker too (demo: nothing to wait for).
         assert_eq!(view.update(cx, |v, cx| v.exit_ready(cx)), Some(Exit::Quit));
         assert!(!b.read_with(cx, |c, _| c.undoable()));
+    }
+
+    #[gpui::test]
+    fn quit_with_a_draft_asks_once_per_episode(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Not done yet");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(cx, |v, _| v.drafts.len()), 1);
+        // First quit keeps the draft and asks; quitting again while asked discards it.
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        // Once the toast has gone, the question is new: a single quit does not discard.
+        cx.executor().advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        // An open sheet with text counts too: reopening the draft must not let quit through.
+        cx.executor().advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("r");
+        assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.drafts.is_empty()));
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
     }
 
     #[test]

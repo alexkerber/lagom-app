@@ -598,10 +598,12 @@ mod tests {
         let (view, cx, rx) = window(cx);
         drop(rx);
         send_one(cx);
-        // Quit hands the mail over; the worker refuses it, so nothing waits and the text stays.
-        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        // Quit hands the mail over; the worker refuses it. The text is a draft again, so quit
+        // stops and asks; only a second quit while asked discards it.
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
         assert_eq!(view.read_with(cx, |v, _| (v.drafts.len(), v.exit)), (1, None));
-        assert!(toast(&view, cx).starts_with("Mail stopped working"));
+        assert_eq!(toast(&view, cx), QUIT_AGAIN_UNSENT);
+        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
     }
 
     #[gpui::test]
@@ -625,7 +627,7 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(2));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.exit), None);
-        assert!(toast(&view, cx).starts_with("Still sending. Quit again to quit anyway"));
+        assert_eq!(toast(&view, cx), QUIT_AGAIN_SENDING);
         // The second quit does not wait.
         assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
     }

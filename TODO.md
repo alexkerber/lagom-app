@@ -81,6 +81,7 @@ Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
 - [x] IMAP folder discovery, bounded initial and incremental sync, flags, expunges, IDLE and mail operations.
 - [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.
 - [x] `lagom-cli` and disposable GreenMail integration coverage.
+- [ ] Outbox in the store: persist drafts and pending sends so quit never needs to wait or warn.
 - [ ] Gmail/Microsoft OAuth2 (XOAUTH2). Outlook.com requires OAuth2; the preset alone does not enable password login.
 - [ ] JMAP.
 - [ ] Push beyond IMAP IDLE.
