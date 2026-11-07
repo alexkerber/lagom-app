@@ -3,6 +3,7 @@ pub mod account;
 pub mod imap_sync;
 pub mod mime;
 pub mod presets;
+pub mod oauth;
 pub mod smtp;
 pub mod store;
 
@@ -20,6 +21,12 @@ pub enum Error {
     Network(&'static str),
     #[error("message sent, but the Sent copy could not be saved; do not resend")]
     SentCopy,
+    #[error("sign in again")]
+    ReauthRequired,
+    #[error("sign-in cancelled")]
+    Cancelled,
+    #[error("authentication rejected")]
+    Authentication,
     #[error("not found")]
     NotFound,
     /// The connection broke after the message may have been handed over.

@@ -140,3 +140,43 @@ Plain `cargo clippy --workspace` fails on an existing desktop
 The desktop is untouched. `cargo clippy --workspace -- -A clippy::approx_constant`
 passes. Existing dependency future-compatibility notices remain for `block`
 and `proc-macro-error2`.
+
+## Sign-in providers
+
+Lagom is a public installed client: browser authorization uses PKCE S256 and a
+five-minute loopback listener. No Lagom server is involved. Refresh tokens use
+the OS keychain, under the account UUID; access tokens are cached only in memory.
+Dropping `oauth::sign_in` cancels it. Never log the authorization URL or tokens.
+
+For Google, create a Google Cloud project, configure the OAuth consent screen,
+and create an OAuth client of type **Desktop app**. Request the restricted Gmail
+scope `https://mail.google.com/` plus `openid email profile`. In **Testing** mode,
+add each tester under test users; Gmail refresh tokens in testing can expire
+after seven days. Production distribution needs Google's verification for the
+restricted scope (and any applicable security assessment). The desktop client
+secret is non-confidential; Lagom sends it when configured. See
+[Google's installed-app guide](https://developers.google.com/identity/protocols/oauth2/native-app).
+
+For Microsoft, register an app in Entra with **Accounts in any organizational
+directory and personal Microsoft accounts**. Add the **Mobile and desktop
+applications** platform, redirect URI `http://localhost`, and enable public
+client flows. Under **Office 365 Exchange Online**, add delegated permissions
+`IMAP.AccessAsUser.All` and `SMTP.Send`; request `offline_access openid email
+profile` too. Do not create a client secret. The `common` endpoint supports both
+account types; organization policy may require admin consent or enabling IMAP
+and authenticated SMTP. See [Microsoft's mail OAuth guide](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth)
+and [loopback redirect rules](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url).
+
+Pass your own registrations at build time; no real IDs are in the source:
+
+```sh
+LAGOM_GOOGLE_CLIENT_ID='<desktop-client-id>' \
+LAGOM_GOOGLE_CLIENT_SECRET='<desktop-client-secret>' \
+LAGOM_MICROSOFT_CLIENT_ID='<application-client-id>' \
+  cargo build --workspace
+```
+
+The same environment variables override compiled values at runtime. An empty
+runtime ID disables that provider; `oauth::available(provider)` lets the UI hide
+its button. The account's email/name come from the token endpoint's ID token;
+Microsoft falls back to `preferred_username` when `email` is absent.

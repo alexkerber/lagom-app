@@ -2843,6 +2843,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -3265,6 +3266,7 @@ name = "lagom-core"
 version = "0.0.0"
 dependencies = [
  "async-imap",
+ "base64 0.22.1",
  "dirs 6.0.0",
  "futures-util",
  "keyring",
@@ -3272,12 +3274,17 @@ dependencies = [
  "log",
  "mail-parser",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "url",
  "uuid",
- "webpki-roots",
+ "webpki-roots 1.0.11",
+ "zed-reqwest",
  "zeroize",
 ]
 
@@ -3335,7 +3342,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "url",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -6799,6 +6806,15 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.11",
+]
+
+[[package]]
+name = "webpki-roots"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
@@ -7732,6 +7748,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+ "webpki-roots 0.26.11",
  "windows-registry 0.4.0",
 ]
 

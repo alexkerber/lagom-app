@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{oauth::Provider, Error, Result};
 use std::net::IpAddr;
 use zeroize::Zeroizing;
 
@@ -56,9 +56,33 @@ impl ServerConfig {
         Ok(())
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Auth {
+    #[default]
+    Password,
+    OAuth(Provider),
+}
+impl Auth {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::OAuth(Provider::Google) => "google",
+            Self::OAuth(Provider::Microsoft) => "microsoft",
+        }
+    }
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "password" => Ok(Self::Password),
+            "google" => Ok(Self::OAuth(Provider::Google)),
+            "microsoft" => Ok(Self::OAuth(Provider::Microsoft)),
+            _ => Err(Error::Invalid("unknown account authentication")),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
+    pub auth: Auth,
     pub display_name: String,
     pub email: String,
     pub imap: ServerConfig,
@@ -68,6 +92,7 @@ impl Account {
     pub fn new(email: String, imap: ServerConfig, smtp: ServerConfig) -> Result<Self> {
         let account = Self {
             id: uuid::Uuid::new_v4().to_string(),
+            auth: Auth::Password,
             display_name: email.clone(),
             email,
             imap,
@@ -109,7 +134,10 @@ impl Account {
     /// Ok when the secret is gone, also when it was never there.
     pub fn delete_password(&self) -> Result<()> {
         match self.secret_entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring::Error::NoEntry) => {
+                crate::oauth::forget(&self.id);
+                Ok(())
+            },
             Err(_) => Err(Error::Secret),
         }
     }
@@ -154,8 +182,7 @@ mod tests {
     }
     #[test]
     fn keychain_contract_with_mock() {
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-        let entry = keyring::Entry::new("lagom", "unit-test").unwrap();
+        let entry = keyring::Entry::new_with_credential(Box::new(keyring::mock::MockCredential::default()));
         entry.set_password("test secret").unwrap();
         assert_eq!(entry.get_password().unwrap(), "test secret");
         entry.delete_credential().unwrap();
