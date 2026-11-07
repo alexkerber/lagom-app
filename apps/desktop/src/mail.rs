@@ -19,8 +19,10 @@ pub struct Mail {
     pub unread: bool,
     /// Local store row id. `None` in demo mode.
     pub store: Option<i64>,
-    /// Store folder id the row was in when it was loaded.
+    /// Store folder id the message is in, as far as this window knows: optimistic moves set it.
     pub folder: i64,
+    /// The folders it left, newest last: undo goes back to where it was when the action ran.
+    pub was: Vec<i64>,
     pub to: String,
     pub message_id: String,
     pub thread_key: String,
@@ -40,6 +42,7 @@ impl Mail {
             unread: !m.seen,
             store: Some(m.id),
             folder: m.folder,
+            was: Vec::new(),
             to: m.to.clone(),
             message_id: m.message_id.clone(),
             thread_key: m.thread_key.clone(),

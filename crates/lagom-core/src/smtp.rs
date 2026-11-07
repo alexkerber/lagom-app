@@ -24,6 +24,14 @@ pub struct Outgoing {
     pub text: String,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// Kept by the caller across retries, so a resend after `MaybeSent` is the same message.
+    /// `None`: a new one from `message_id`.
+    pub message_id: Option<String>,
+}
+/// A new Message-ID on the sender's domain.
+pub fn message_id(email: &str) -> String {
+    let domain = email.rsplit_once('@').map_or("localhost", |(_, d)| d);
+    format!("<{}@{domain}>", uuid::Uuid::new_v4().simple())
 }
 fn mailbox(value: &str) -> Result<Mailbox> {
     value
@@ -51,11 +59,17 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
             .map_err(|_| Error::Invalid("invalid sender address"))?,
     );
     // Replies, threads and finding a message after a move all key on Message-ID; lettre adds none.
-    let domain = account.email.rsplit_once('@').map_or("localhost", |(_, d)| d);
+    let id = match &outgoing.message_id {
+        Some(id) => {
+            header_value(id)?;
+            id.clone()
+        }
+        None => message_id(&account.email),
+    };
     let mut message = Message::builder()
         .from(from)
         .subject(&outgoing.subject)
-        .message_id(Some(format!("<{}@{domain}>", uuid::Uuid::new_v4().simple())));
+        .message_id(Some(id));
     for to in &outgoing.to {
         message = message.to(mailbox(to)?);
     }
@@ -91,10 +105,14 @@ pub async fn send(
     let message = compose(account, outgoing)?;
     let transport = transport(account, password)?;
     let raw = message.formatted();
+    // Log in first: a failure here certainly sent nothing. One extra handshake per message.
+    if !matches!(transport.test_connection().await, Ok(true)) {
+        return Err(Error::Network("could not reach the SMTP server"));
+    }
     transport
         .send_raw(message.envelope(), &raw)
         .await
-        .map_err(|_| Error::Network("SMTP submission failed"))?;
+        .map_err(submission_error)?;
     if !presets::is_gmail(account) {
         let mut imap = ImapSync::login(account, password)
             .await
@@ -106,6 +124,15 @@ pub async fn send(
         let _ = imap.logout().await;
     }
     Ok(())
+}
+/// A reply code means the server refused the message. Anything else (a dropped connection, a
+/// timeout) can happen after the server took it.
+fn submission_error(e: lettre::transport::smtp::Error) -> Error {
+    if e.status().is_some() {
+        Error::Network("the SMTP server refused the message")
+    } else {
+        Error::MaybeSent
+    }
 }
 /// Connects and authenticates to SMTP, then quits. Sends nothing.
 pub async fn verify(account: &Account, password: &str) -> Result<()> {
@@ -171,6 +198,7 @@ mod tests {
                 text: "Hello".into(),
                 in_reply_to: Some("<parent@test>".into()),
                 references: vec!["<root@test>".into(), "<parent@test>".into()],
+                message_id: Some("<kept@gmail.com>".into()),
             },
         )
         .unwrap();
@@ -179,7 +207,11 @@ mod tests {
         assert!(!raw.contains("hidden@example.com"));
         assert!(raw.contains("In-Reply-To: <parent@test>"));
         assert!(raw.contains("References: <root@test> <parent@test>"));
-        assert!(raw.lines().any(|l| l.starts_with("Message-ID: <") && l.ends_with("@gmail.com>")));
+        // A retry keeps its Message-ID; a new message gets one on the sender's domain.
+        assert!(raw.contains("Message-ID: <kept@gmail.com>"));
+        let fresh = compose(&a, &Outgoing { to: vec!["b@example.com".into()], ..Default::default() }).unwrap();
+        let fresh = String::from_utf8(fresh.formatted()).unwrap();
+        assert!(fresh.lines().any(|l| l.starts_with("Message-ID: <") && l.ends_with("@gmail.com>")));
         assert_eq!(m.envelope().to().len(), 3);
     }
     #[test]

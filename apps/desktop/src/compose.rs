@@ -52,6 +52,8 @@ pub struct Compose {
     refocus: Option<FocusHandle>,
     /// "Account · address" in the From row.
     from: String,
+    /// One per sheet: a resend after an unsure failure must not become a second message.
+    message_id: String,
     /// In-Reply-To and References, for a reply.
     reply: Option<(Option<String>, Vec<String>)>,
     /// Why Send did nothing, shown in the footer.
@@ -93,6 +95,7 @@ impl Compose {
         window.focus(&first.focus_handle(cx));
         Self {
             from: from.into(),
+            message_id: lagom_core::smtp::message_id(from),
             reply,
             problem: None,
             slid_out: false,
@@ -167,7 +170,7 @@ impl Compose {
         cx.notify();
     }
 
-    fn outgoing(&self, cx: &gpui::App) -> Outgoing {
+    pub(crate) fn outgoing(&self, cx: &gpui::App) -> Outgoing {
         let text = |f: &Entity<TextInput>| f.read(cx).text().to_string();
         let (in_reply_to, references) = self.reply.clone().unwrap_or_default();
         Outgoing {
@@ -177,6 +180,7 @@ impl Compose {
             text: text(&self.body),
             in_reply_to,
             references,
+            message_id: Some(self.message_id.clone()),
             ..Default::default()
         }
     }
@@ -228,6 +232,17 @@ impl Compose {
     /// The sender address the sheet shows.
     pub fn from(&self) -> &str {
         &self.from
+    }
+
+    /// Quit or close during the Undo window: the mail goes now instead of with the dropped timer.
+    pub fn send_now(&mut self, cx: &mut Context<Self>) -> Option<Outgoing> {
+        if self.phase != Phase::Sent {
+            return None;
+        }
+        self._dismiss = None;
+        let mail = self.outgoing(cx);
+        self.set(Phase::Gone, cx);
+        Some(mail)
     }
 
     pub fn undoable(&self) -> bool {

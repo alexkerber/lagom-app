@@ -341,6 +341,7 @@ async fn main() -> Result<()> {
                     text: body,
                     in_reply_to,
                     references,
+                    message_id: None,
                 },
                 &mut store,
             )

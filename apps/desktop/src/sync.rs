@@ -53,6 +53,15 @@ pub enum SyncState {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Delivery {
+    Sent,
+    /// Nothing left: the server refused it or was never reached.
+    NotSent,
+    /// The connection broke after the hand-over may have happened.
+    Maybe,
+}
+
 pub enum Event {
     /// The store changed: read it again.
     Changed,
@@ -62,8 +71,8 @@ pub enum Event {
     Added(Result<String, String>),
     /// A MarkSeen finished, done or not.
     Seen(i64),
-    /// `delivered`: SMTP took the message, even if `error` says the Sent copy failed.
-    Sent { op: u64, delivered: bool, error: Option<String> },
+    /// `error` says why, also when the message went out but its Sent copy failed.
+    Sent { op: u64, delivery: Delivery, error: Option<String> },
 }
 
 #[derive(Clone)]
@@ -168,12 +177,13 @@ impl Worker {
                 self.emit(Event::Changed);
             }
             Cmd::Send { op, account, mail } => {
-                let (delivered, error) = match self.send(&account, &mail).await {
-                    Ok(()) => (true, None),
-                    Err(Error::SentCopy) => (true, Some(Error::SentCopy.to_string())),
-                    Err(e) => (false, Some(e.to_string())),
+                let (delivery, error) = match self.send(&account, &mail).await {
+                    Ok(()) => (Delivery::Sent, None),
+                    Err(Error::SentCopy) => (Delivery::Sent, Some(Error::SentCopy.to_string())),
+                    Err(Error::MaybeSent) => (Delivery::Maybe, None),
+                    Err(e) => (Delivery::NotSent, Some(e.to_string())),
                 };
-                self.emit(Event::Sent { op, delivered, error });
+                self.emit(Event::Sent { op, delivery, error });
                 self.emit(Event::Changed);
             }
             other => self.deferred.push_back(other),
@@ -313,10 +323,7 @@ impl Worker {
         .await;
         self.give(&account.id, session, &result);
         if let Some(target) = result?.filter(|_| !message.message_id.is_empty()) {
-            for place in self.moved.values_mut().filter(|p| p.1 == message.message_id) {
-                place.0 = target;
-            }
-            self.moved.insert(id, (target, message.message_id));
+            follow(&mut self.moved, id, message.folder, &message.message_id, target);
         }
         Ok(())
     }
@@ -387,6 +394,32 @@ fn role(store: &Store, account: &str, role: FolderRole) -> Option<i64> {
 /// The worker against GreenMail: add account, send, sync, archive, trash, new folder, move and
 /// undo, each checked on the server by a fresh sync into a second store. Runs only with
 /// `LAGOM_GREENMAIL=1` and the container from crates/lagom-core/README.md.
+/// Store row `id` (in folder `from`) moved to `target`. Older ids of the same message point
+/// at `from`; the same Message-ID elsewhere (another folder, another account) is another copy.
+fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_id: &str, target: i64) {
+    for place in moved.values_mut().filter(|p| p.0 == from && p.1 == message_id) {
+        place.0 = target;
+    }
+    moved.insert(id, (target, message_id.to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_move_redirects_only_this_message_aliases() {
+        let mut moved = HashMap::new();
+        // The same newsletter in account A (INBOX 1, Archive 2) and B (INBOX 10, Archive 20).
+        follow(&mut moved, 100, 1, "<n@x>", 2);
+        follow(&mut moved, 200, 10, "<n@x>", 20);
+        assert_eq!((moved[&100].0, moved[&200].0), (2, 20));
+        // A's copy, now row 101 in Archive 2, goes back to INBOX 1: A's old id follows, B's not.
+        follow(&mut moved, 101, 2, "<n@x>", 1);
+        assert_eq!((moved[&100].0, moved[&101].0, moved[&200].0), (1, 1, 20));
+    }
+}
+
 #[cfg(test)]
 mod greenmail {
     use super::*;
@@ -467,8 +500,8 @@ mod greenmail {
         for (op, subject) in [(1, "Archive me"), (2, "Trash me"), (3, "File me"), (4, "Move me")] {
             let mail = Outgoing { to: vec![email.clone()], subject: subject.into(), text: "Body".into(), ..Default::default() };
             bridge.send(Cmd::Send { op, account: account.id.clone(), mail: Box::new(mail) });
-            let Event::Sent { delivered, error, .. } = next(&mut events, |e| matches!(e, Event::Sent { op: o, .. } if *o == op)).await else { unreachable!() };
-            assert!(delivered, "{error:?}");
+            let Event::Sent { delivery, error, .. } = next(&mut events, |e| matches!(e, Event::Sent { op: o, .. } if *o == op)).await else { unreachable!() };
+            assert_eq!(delivery, Delivery::Sent, "{error:?}");
         }
         bridge.send(Cmd::Sync(None));
         synced(&mut events).await;

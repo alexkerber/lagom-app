@@ -9,6 +9,15 @@ pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
 /// text is not downloaded. Readers compare against this to show why the body is missing.
 pub const BODY_UNAVAILABLE: &str = "The text of this message is larger than 4 MiB and was not downloaded.";
 
+/// A row for a message whose headers do not parse: the list shows it, the body says why.
+pub fn placeholder() -> Message {
+    Message {
+        summary: MessageSummary { subject: "(headers too large to read)".into(), ..Default::default() },
+        body_text: BODY_UNAVAILABLE.into(),
+        body_html: None,
+    }
+}
+
 /// Headers only, with the body marked unavailable, so one huge message never stops a sync.
 pub fn metadata_only(header: &[u8]) -> Result<Message> {
     let mut message = parse(header)?;

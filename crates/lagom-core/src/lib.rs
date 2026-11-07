@@ -22,5 +22,8 @@ pub enum Error {
     SentCopy,
     #[error("not found")]
     NotFound,
+    /// The connection broke after the message may have been handed over.
+    #[error("may have been sent; check Sent before sending again")]
+    MaybeSent,
 }
 pub type Result<T> = std::result::Result<T, Error>;

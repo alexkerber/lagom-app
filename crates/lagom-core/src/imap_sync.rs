@@ -293,8 +293,11 @@ impl ImapSync {
         let header = fetch
             .header()
             .ok_or(Error::Network("IMAP message header missing"))?;
+        // Only the first 256 KiB were fetched: keep what parses and go on, so one message
+        // never stops the folder's later UIDs.
         if header.len() >= 262144 {
-            return Err(Error::Invalid("message header exceeds 256 KiB"));
+            let message = mime::metadata_only(header).unwrap_or_else(|_| mime::placeholder());
+            return self.save(store, folder, uid, fetch, message, false);
         }
         let mut message;
         let body = fetch

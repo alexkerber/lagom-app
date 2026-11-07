@@ -20,7 +20,7 @@ use crate::compose::{Compose, ComposeEvent};
 use crate::folders::{self, Folder, Kind};
 use crate::mail::{self, LaterWhen, Mail, INBOX_LEN, LATER_SAMPLE};
 use crate::motion::spring;
-use crate::sync::{Act, Bridge, Cmd, Event, SyncState};
+use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
 actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings]);
@@ -148,6 +148,8 @@ pub struct MainWindow {
     drafts: Vec<gpui::Entity<Compose>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
+    // Quit or close waits for these sends to reach the worker's answer.
+    exit: Option<Exit>,
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
     page: Page,
@@ -172,6 +174,9 @@ impl MainWindow {
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
+        // The close button: a send in its Undo window goes first instead of being dropped.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| this.update(cx, |this, cx| !this.hold_exit(Exit::Close, cx)).unwrap_or(true));
         // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
         let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
@@ -202,6 +207,7 @@ impl MainWindow {
             compose: None,
             drafts: Vec::new(),
             sending: Vec::new(),
+            exit: None,
             live,
             page: Page::Mail,
             all_folders: false,
@@ -363,6 +369,22 @@ impl MainWindow {
         };
         self.compose = Some(compose);
         cx.notify();
+    }
+
+    /// Before quit or close: sheets in their Undo window send now. True while a send is still
+    /// on its way; the window then closes or quits once the worker answers.
+    fn hold_exit(&mut self, exit: Exit, cx: &mut Context<Self>) -> bool {
+        for compose in self.sending.clone() {
+            if let Some(mail) = compose.update(cx, |c, cx| c.send_now(cx)) {
+                self.send_mail(compose, mail, cx);
+            }
+        }
+        let waiting = self.live.as_ref().is_some_and(|l| l.sending());
+        if waiting {
+            self.exit = Some(exit);
+            self.notify("Sending first, then closing", cx);
+        }
+        waiting
     }
 
     fn watch_compose(&mut self, compose: &Entity<Compose>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1461,6 +1483,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(cx) }))
             .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) { this.release(false, cx) }))
+            .map(|d| exit_actions(d, cx))
             .size_full()
             .flex()
             .bg(tint)
@@ -1573,6 +1596,24 @@ impl Swipe {
         let Swipe::Row { id, dx } = std::mem::replace(self, Swipe::Idle) else { return None };
         Some((id, dx, reach(dx)))
     }
+}
+
+/// ⌘Q and ⌘W (macOS menu) wait for sends in their Undo window. Menu and key actions reach
+/// the window before the app's global handlers, which run when this one propagates.
+fn exit_actions<E: InteractiveElement>(el: E, cx: &mut Context<MainWindow>) -> E {
+    #[cfg(target_os = "macos")]
+    let el = el
+        .on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(Exit::Quit, cx) { cx.propagate() }))
+        .on_action(cx.listener(|this, _: &crate::menus::CloseWindow, _, cx| if !this.hold_exit(Exit::Close, cx) { cx.propagate() }));
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
+    el
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Exit {
+    Close,
+    Quit,
 }
 
 /// Inbox and folder state as ids into `mail`. Plain Rust, so tests run without a window.
@@ -1773,6 +1814,25 @@ impl Inbox {
         Some((what, id, ix))
     }
 
+    /// An optimistic move of `id` left its folder for `target` (unknown for a new folder or
+    /// Later, where the folder stays).
+    fn left(&mut self, id: usize, target: Option<i64>) {
+        let m = &mut self.mail[id];
+        m.was.push(m.folder);
+        if let Some(target) = target {
+            m.folder = target;
+        }
+    }
+
+    /// Undo or a failed move: back to the folder it left last. Returns that folder.
+    fn back(&mut self, id: usize) -> i64 {
+        let m = &mut self.mail[id];
+        if let Some(folder) = m.was.pop() {
+            m.folder = folder;
+        }
+        m.folder
+    }
+
     /// The id in `mail` for a store row, refreshed from the summary. A loaded body stays.
     fn intern(&mut self, m: &lagom_core::store::MessageSummary, seen: &HashSet<i64>, now: chrono::DateTime<chrono::Local>) -> usize {
         let mut fresh = Mail::from_summary(m, now);
@@ -1783,6 +1843,7 @@ impl Inbox {
         match self.by_store.get(&m.id) {
             Some(&id) => {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
+                fresh.was = std::mem::take(&mut self.mail[id].was);
                 self.mail[id] = fresh;
                 id
             }
@@ -2045,6 +2106,23 @@ mod tests {
     }
 
     #[test]
+    fn undo_goes_back_to_the_folder_the_action_left() {
+        let mut inbox = with_folders();
+        inbox.mail[1].folder = 10;
+        // INBOX 10 to Projects 20, then from Projects to Archive 30, before any store read.
+        inbox.left(1, Some(20));
+        inbox.left(1, Some(30));
+        assert_eq!(inbox.mail[1].folder, 30);
+        assert_eq!(inbox.back(1), 20);
+        assert_eq!(inbox.back(1), 10);
+        // Nothing left: it stays where it is.
+        assert_eq!(inbox.back(1), 10);
+        // Later and new folders keep the folder but still stack, so undo stays in step.
+        inbox.left(1, None);
+        assert_eq!((inbox.mail[1].folder, inbox.back(1)), (10, 10));
+    }
+
+    #[test]
     fn no_move_into_the_list_it_is_in() {
         let mut inbox = with_folders();
         let done = inbox.folders.len();
@@ -2165,6 +2243,35 @@ mod dispatch {
         assert_eq!(inbox_len(&view, cx), n);
         cx.simulate_keystrokes("r");
         assert_eq!(body(&view, cx), "");
+    }
+
+    #[gpui::test]
+    fn quit_sends_a_mail_in_its_undo_window_now(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("ana@example.com");
+        cx.simulate_keystrokes("cmd-enter");
+        let sheet = view.read_with(cx, |v, _| v.sending[0].clone());
+        let id = sheet.read_with(cx, |c, cx| c.outgoing(cx).message_id);
+        assert!(id.as_deref().is_some_and(|id| id.starts_with('<') && id.ends_with("@home.example>")));
+        // The sheet hands over its mail at once, with the Message-ID a resend would reuse.
+        let mail = sheet.update(cx, |c, cx| c.send_now(cx)).expect("mail in its Undo window");
+        assert_eq!((mail.to.as_slice(), mail.message_id), (["ana@example.com".to_string()].as_slice(), id));
+        assert!(sheet.update(cx, |c, cx| c.send_now(cx)).is_none());
+        // Quit flushes every sheet; demo mode has no worker, so nothing holds the quit.
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("bo@example.com");
+        cx.simulate_keystrokes("cmd-enter");
+        let second = view.read_with(cx, |v, _| v.sending.last().cloned()).unwrap();
+        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        assert!(!second.read_with(cx, |c, _| c.undoable()));
+    }
+
+    #[test]
+    fn an_unsure_send_says_check_sent() {
+        assert_eq!(live::sent_note(Delivery::Sent, None), "Sent");
+        assert!(live::sent_note(Delivery::Maybe, None).starts_with("May have been sent. Check Sent before sending again."));
+        assert!(live::sent_note(Delivery::NotSent, Some("refused".into())).starts_with("Not sent: refused."));
     }
 
     #[gpui::test]

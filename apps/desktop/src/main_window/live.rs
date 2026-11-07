@@ -43,6 +43,16 @@ fn now() -> i64 {
     chrono::Local::now().timestamp()
 }
 
+/// The toast after the worker tried to send.
+pub(super) fn sent_note(delivery: Delivery, error: Option<String>) -> String {
+    match (delivery, error) {
+        (Delivery::Sent, None) => "Sent".into(),
+        (Delivery::Sent, Some(e)) => format!("Sent. {e}"),
+        (Delivery::Maybe, _) => "May have been sent. Check Sent before sending again. C opens the draft.".into(),
+        (Delivery::NotSent, e) => format!("Not sent: {}. C opens the draft.", e.unwrap_or_default()),
+    }
+}
+
 /// The sidebar name of an account: its display name, or its domain.
 pub fn short_name(a: &Account) -> String {
     if a.display_name != a.email {
@@ -102,6 +112,10 @@ impl Live {
                 .map(|m| (m.id, format!("{} · {}", if m.from_name.is_empty() { &m.from_address } else { &m.from_name }, m.subject)))
                 .collect()
         }))
+    }
+
+    pub(super) fn sending(&self) -> bool {
+        self.ops.values().any(|op| matches!(op, Op::Send(_)))
     }
 
     fn op(&mut self, op: Op) -> u64 {
@@ -194,6 +208,7 @@ impl MainWindow {
                     match (done, error) {
                         (_, None) => {}
                         (Op::Move(id), Some(e)) => {
+                            self.inbox.back(id);
                             if let Some((what, id, ix)) = self.inbox.revert(id) {
                                 self.come_back(what, id, ix, false, cx);
                             }
@@ -220,20 +235,18 @@ impl MainWindow {
                         }
                     }
                 },
-                Event::Sent { op, delivered, error } => {
+                Event::Sent { op, delivery, error } => {
                     read = true;
                     let compose = match self.live.as_mut().and_then(|l| l.ops.remove(&op)) {
                         Some(Op::Send(compose)) => Some(compose),
                         _ => None,
                     };
-                    match (delivered, error) {
-                        (true, None) => self.notify("Sent", cx),
-                        (true, Some(e)) => self.notify(format!("Sent. {e}"), cx),
-                        (false, e) => {
-                            // The text is not lost: R or C opens it again.
-                            self.drafts.extend(compose);
-                            self.notify(format!("Not sent: {}. C opens the draft.", e.unwrap_or_default()), cx);
-                        }
+                    self.notify(sent_note(delivery, error), cx);
+                    // The text is not lost: C opens it again. The sheet keeps its Message-ID, so a
+                    // resend after "may have been sent" is the same message, not a second one.
+                    if delivery != Delivery::Sent {
+                        self.drafts.extend(compose);
+                        self.exit = None;
                     }
                 }
             }
@@ -241,33 +254,46 @@ impl MainWindow {
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
             self.reload(cx);
         }
+        // Quit or close waited for sends; a failed one cancelled it, so its draft stays.
+        if let Some(exit) = self.exit.filter(|_| !self.live.as_ref().is_some_and(|l| l.sending())) {
+            self.exit = None;
+            match exit {
+                Exit::Quit => cx.quit(),
+                Exit::Close => window.remove_window(),
+            }
+        }
         cx.notify();
     }
 
     /// The worker half of an optimistic move.
     pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen) {
         let Some(store) = self.inbox.mail[id].store else { return };
-        let act = match what {
-            Move::Done => Act::Archive,
-            Move::Delete => Act::Trash,
-            Move::Later => Act::Snooze(Some(when.at(chrono::Local::now()).timestamp())),
+        let Some(live) = &mut self.live else { return };
+        let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store);
+        let (act, target) = match what {
+            Move::Done => (Act::Archive, store_of(Kind::Done)),
+            Move::Delete => (Act::Trash, store_of(Kind::Trash)),
+            Move::Later => (Act::Snooze(Some(when.at(chrono::Local::now()).timestamp())), None),
             Move::Folder(f) => match self.inbox.folders[f].store {
-                Some(folder) => Act::Move(folder),
-                None => Act::NewFolder(self.inbox.folders[f].full.clone()),
+                Some(folder) => (Act::Move(folder), Some(folder)),
+                None => (Act::NewFolder(self.inbox.folders[f].full.clone()), None),
             },
         };
-        let Some(live) = &mut self.live else { return };
+        self.inbox.left(id, target);
         let op = live.op(Op::Move(id));
         live.bridge.send(Cmd::Op { op, id: store, act });
     }
 
     /// Undo on the server: the message goes back to the folder it was in, or off Later.
     pub(super) fn unserver(&mut self, what: Move, id: usize) {
-        let m = &self.inbox.mail[id];
-        let Some(store) = m.store else { return };
+        let Some(store) = self.inbox.mail[id].store else { return };
+        if self.live.is_none() {
+            return;
+        }
+        let back = self.inbox.back(id);
         let act = match what {
             Move::Later => Act::Snooze(None),
-            Move::Done | Move::Delete | Move::Folder(_) => Act::Move(m.folder),
+            Move::Done | Move::Delete | Move::Folder(_) => Act::Move(back),
         };
         let Some(live) = &mut self.live else { return };
         let op = live.op(Op::Undo);

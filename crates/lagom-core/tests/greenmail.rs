@@ -328,3 +328,29 @@ async fn oversized_body_is_stored_as_metadata_and_sync_goes_on() {
     external.logout().await.unwrap();
     imap.logout().await.unwrap();
 }
+
+#[tokio::test]
+#[cfg_attr(not(lagom_greenmail), ignore = "set LAGOM_GREENMAIL=1; see README")]
+async fn oversized_header_is_stored_and_sync_goes_on() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+    let account = account();
+    store.save_account(&account).unwrap();
+    let mut external = raw(&account).await;
+    let pad = "X-Pad: ".to_string() + &"y".repeat(990) + "\r\n";
+    let huge = format!("Subject: Big header\r\n{}\r\nBody", pad.repeat(300));
+    external.append("INBOX", None, None, huge).await.unwrap();
+    external
+        .append("INBOX", None, None, b"Subject: Later UID\r\n\r\nSmall body")
+        .await
+        .unwrap();
+    let mut imap = ImapSync::login(&account, "test").await.unwrap();
+    imap.sync(&mut store, DEFAULT_LIMIT).await.unwrap();
+    let inbox = folder(&store, &account, FolderRole::Inbox);
+    let messages = store.list_messages(inbox, now(), 20, 0).unwrap();
+    assert_eq!(messages.len(), 2);
+    let big = messages.iter().find(|m| m.subject != "Later UID").unwrap();
+    assert_eq!(store.message(big.id).unwrap().body_text, lagom_core::mime::BODY_UNAVAILABLE);
+    external.logout().await.unwrap();
+    imap.logout().await.unwrap();
+}
