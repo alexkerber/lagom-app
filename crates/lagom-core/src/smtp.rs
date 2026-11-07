@@ -1,7 +1,7 @@
 use tokio::time::timeout;
 
 use crate::{
-    account::{Account, Security},
+    account::{Account, Auth, Security},
     imap_sync::ImapSync,
     presets,
     store::Store,
@@ -10,7 +10,7 @@ use crate::{
 use lettre::{
     message::{header, Mailbox},
     transport::smtp::{
-        authentication::Credentials,
+        authentication::{Credentials, Mechanism},
         client::{Tls, TlsParameters},
     },
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
@@ -121,16 +121,31 @@ async fn send_within(
     submit: Duration,
 ) -> Result<()> {
     let message = compose(account, outgoing)?;
-    let transport = transport(account, password)?;
     let raw = message.formatted();
-    // Log in first: a failure or stall here certainly sent nothing. One extra handshake per message.
-    if !matches!(timeout(login, transport.test_connection()).await, Ok(Ok(true))) {
-        return Err(Error::Network("could not reach the SMTP server"));
+    let oauth = matches!(account.auth, Auth::OAuth(_));
+    let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
+    for attempt in 0..2 {
+        let transport = transport(account, &credential)?;
+        // Authentication failures precede DATA; only those can safely refresh and retry.
+        let result = async {
+            match timeout(login, transport.test_connection()).await {
+                Ok(Ok(true)) => {},
+                Ok(Err(e)) if auth_failure(&e) => return Err(Error::Authentication),
+                _ => return Err(Error::Network("could not reach the SMTP server")),
+            }
+            match timeout(submit, transport.send_raw(message.envelope(), &raw)).await {
+                Err(_) => Err(Error::MaybeSent),
+                Ok(Err(e)) if auth_failure(&e) => Err(Error::Authentication),
+                Ok(result) => result.map_err(submission_error),
+            }
+        }.await;
+        match result {
+            Err(Error::Authentication) if oauth && attempt == 0 => {
+                credential = crate::oauth::access_token(account, Some(&credential)).await?;
+            }
+            result => { result?; break; }
+        }
     }
-    match timeout(submit, transport.send_raw(message.envelope(), &raw)).await {
-        Err(_) => return Err(Error::MaybeSent),
-        Ok(result) => result.map_err(submission_error)?,
-    };
     if !presets::is_gmail(account) {
         let copy = async {
             let mut imap = ImapSync::login(account, password).await?;
@@ -157,19 +172,30 @@ fn submission_error(e: lettre::transport::smtp::Error) -> Error {
 }
 /// Connects and authenticates to SMTP, then quits. Sends nothing.
 pub async fn verify(account: &Account, password: &str) -> Result<()> {
-    let Ok(result) = timeout(LOGIN_DEADLINE, transport(account, password)?.test_connection()).await else {
-        return Err(Error::Network("SMTP server timed out"));
-    };
-    match result {
-        Ok(true) => Ok(()),
-        Err(e) if e.is_permanent() => Err(Error::Network(
-            "SMTP login rejected: check the address and app password",
-        )),
-        Err(e) if e.is_tls() => Err(Error::Network("SMTP TLS handshake failed")),
-        Err(e) if e.is_timeout() => Err(Error::Network("SMTP server timed out")),
-        _ => Err(Error::Network("could not reach the SMTP server")),
+    let oauth = matches!(account.auth, Auth::OAuth(_));
+    let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
+    for attempt in 0..2 {
+        let Ok(result) = timeout(LOGIN_DEADLINE, transport(account, &credential)?.test_connection()).await else {
+            return Err(Error::Network("SMTP server timed out"));
+        };
+        match result {
+            Ok(true) => return Ok(()),
+            Err(e) if auth_failure(&e) && oauth && attempt == 0 => {
+                credential = crate::oauth::access_token(account, Some(&credential)).await?;
+            }
+            Err(e) if auth_failure(&e) && oauth => return Err(Error::Authentication),
+            Err(e) if e.is_permanent() => return Err(Error::Network("SMTP login rejected: check the address and app password")),
+            Err(e) if e.is_tls() => return Err(Error::Network("SMTP TLS handshake failed")),
+            Err(e) if e.is_timeout() => return Err(Error::Network("SMTP server timed out")),
+            _ => return Err(Error::Network("could not reach the SMTP server")),
+        }
     }
+    Err(Error::Authentication)
 }
+fn auth_failure(error: &lettre::transport::smtp::Error) -> bool {
+    error.status().is_some_and(|status| u16::from(status) == 535)
+}
+
 fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     let config = &account.smtp;
     config.validate()?;
@@ -190,17 +216,14 @@ fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tok
         } else {
             &config.host
         };
-    Ok(
-        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
-            .port(config.port)
-            .tls(tls)
-            .credentials(Credentials::new(
-                config.username.clone(),
-                password.to_owned(),
-            ))
-            .timeout(Some(Duration::from_secs(60)))
-            .build(),
-    )
+    let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+        .port(config.port).tls(tls)
+        .credentials(Credentials::new(config.username.clone(), password.to_owned()))
+        .timeout(Some(Duration::from_secs(60)));
+    if matches!(account.auth, Auth::OAuth(_)) {
+        builder = builder.authentication(vec![Mechanism::Xoauth2]);
+    }
+    Ok(builder.build())
 }
 #[cfg(test)]
 mod tests {
@@ -209,6 +232,40 @@ mod tests {
     fn account() -> Account {
         let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
         Account::new("a@gmail.com".into(), i, s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn xoauth2_smtp_wire() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut account = account();
+        account.auth = Auth::OAuth(crate::oauth::Provider::Google);
+        account.smtp.host = "127.0.0.1".into();
+        account.smtp.port = listener.local_addr().unwrap().port();
+        account.smtp.security = Security::Plain;
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"220 fake\r\n").await.unwrap();
+            let mut line = String::new();
+            let mut authenticated = false;
+            loop {
+                line.clear();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let reply: &[u8] = if line.starts_with("EHLO ") {
+                    b"250-fake\r\n250 AUTH PLAIN LOGIN XOAUTH2\r\n"
+                } else if let Some(value) = line.strip_prefix("AUTH XOAUTH2 ") {
+                    assert_eq!(STANDARD.decode(value.trim()).unwrap(), b"user=a@gmail.com\x01auth=Bearer access-token\x01\x01");
+                    authenticated = true;
+                    b"235 authenticated\r\n"
+                } else if line.starts_with("QUIT") { b"221 bye\r\n" }
+                else { assert!(authenticated, "password mechanism used"); b"250 ok\r\n" };
+                socket.get_mut().write_all(reply).await.unwrap();
+            }
+            assert!(authenticated);
+        });
+        assert!(transport(&account, "access-token").unwrap().test_connection().await.unwrap());
+        server.await.unwrap();
     }
 
     /// A local SMTP server that answers until `stall_at` (a command prefix, or "greeting"), then

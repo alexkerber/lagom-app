@@ -332,13 +332,12 @@ impl Drop for Token {
     }
 }
 async fn exchange(config: &Config, fields: &[(&str, &str)]) -> Result<Token> {
-    let mut form = url::form_urlencoded::Serializer::new(String::new());
-    form.extend_pairs(fields.iter().copied())
-        .append_pair("client_id", &config.id);
-    if !config.secret.is_empty() {
-        form.append_pair("client_secret", &config.secret);
-    }
-    let form = Zeroizing::new(form.finish());
+    let form = {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.extend_pairs(fields.iter().copied()).append_pair("client_id", &config.id);
+        if !config.secret.is_empty() { form.append_pair("client_secret", &config.secret); }
+        Zeroizing::new(form.finish())
+    };
     let response = http(Duration::from_secs(30))?
         .post(&config.token)
         .header("Content-Type", "application/x-www-form-urlencoded")

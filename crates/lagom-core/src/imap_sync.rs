@@ -1,7 +1,7 @@
 //! async-imap provides CONDSTORE and cancellable IDLE without a dedicated polling
 //! thread; Tokio/rustls also shares the desktop's existing runtime dependencies.
 use crate::{
-    account::{Account, Security, ServerConfig},
+    account::{Account, Auth, Security, ServerConfig},
     mime, presets,
     store::{Folder, FolderRole, Message, Store},
     Error, Result,
@@ -59,7 +59,7 @@ async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
         .await?,
     ))
 }
-async fn connect(config: &ServerConfig, password: &str) -> Result<Session<Wire>> {
+async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Wire>> {
     config.validate()?;
     let socket = net_as(
         "could not reach the IMAP server",
@@ -94,12 +94,29 @@ async fn connect(config: &ServerConfig, password: &str) -> Result<Session<Wire>>
             client
         }
     };
-    net_as(
-        "IMAP login rejected: check the address and app password",
-        client.login(&config.username, password),
-    )
-    .await
+    if oauth {
+        tokio::time::timeout(TIMEOUT, client.authenticate("XOAUTH2", Xoauth2(Some(xoauth2(&config.username, password)))))
+            .await.map_err(|_| Error::Network("IMAP login timed out"))?
+            .map_err(|(error, _)| match error {
+                async_imap::error::Error::No(_) => Error::Authentication,
+                _ => Error::Network("IMAP authentication failed"),
+            })
+    } else {
+        net_as("IMAP login rejected: check the address and app password", client.login(&config.username, password)).await
+    }
 }
+fn xoauth2(email: &str, token: &str) -> zeroize::Zeroizing<String> {
+    zeroize::Zeroizing::new(format!("user={email}\x01auth=Bearer {token}\x01\x01"))
+}
+struct Xoauth2(Option<zeroize::Zeroizing<String>>);
+impl async_imap::Authenticator for Xoauth2 {
+    type Response = zeroize::Zeroizing<String>;
+    fn process(&mut self, _: &[u8]) -> Self::Response {
+        // A second challenge is an OAuth error: acknowledge it without resending the token.
+        self.0.take().unwrap_or_default()
+    }
+}
+
 pub struct ImapSync {
     account: Account,
     session: Session<Wire>,
@@ -108,7 +125,19 @@ pub struct ImapSync {
 impl ImapSync {
     pub async fn login(account: &Account, password: &str) -> Result<Self> {
         account.validate()?;
-        let mut session = connect(&account.imap, password).await?;
+        let mut session = match account.auth {
+            Auth::Password => connect(&account.imap, password, false).await?,
+            Auth::OAuth(_) => {
+                let token = crate::oauth::access_token(account, None).await?;
+                match connect(&account.imap, &token, true).await {
+                    Err(Error::Authentication) => {
+                        let fresh = crate::oauth::access_token(account, Some(&token)).await?;
+                        connect(&account.imap, &fresh, true).await?
+                    }
+                    result => result?,
+                }
+            }
+        };
         let capabilities = net(session.capabilities()).await?;
         Ok(Self {
             account: account.clone(),
@@ -628,6 +657,38 @@ fn text_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn xoauth2_wire_and_error_acknowledgement() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        assert_eq!(&*xoauth2("a@example.com", "token"), "user=a@example.com\x01auth=Bearer token\x01\x01");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "a@example.com".into() };
+        let server = tokio::spawn(async move {
+            for reject in [true, false] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fake\r\n").await.unwrap();
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                let tag = line.split_whitespace().next().unwrap().to_owned();
+                assert!(line.contains(" AUTHENTICATE XOAUTH2\r\n"));
+                socket.get_mut().write_all(b"+ \r\n").await.unwrap();
+                line.clear(); socket.read_line(&mut line).await.unwrap();
+                assert_eq!(STANDARD.decode(line.trim()).unwrap(), xoauth2("a@example.com", "token").as_bytes());
+                if reject {
+                    socket.get_mut().write_all(format!("+ {}\r\n", STANDARD.encode(r#"{"status":"401"}"#)).as_bytes()).await.unwrap();
+                    line.clear(); socket.read_line(&mut line).await.unwrap();
+                    assert_eq!(line, "\r\n");
+                }
+                socket.get_mut().write_all(format!("{tag} {}\r\n", if reject { "NO rejected" } else { "OK authenticated" }).as_bytes()).await.unwrap();
+            }
+        });
+        assert!(matches!(connect(&config, "token", true).await, Err(Error::Authentication)));
+        assert!(connect(&config, "token", true).await.is_ok());
+        server.await.unwrap();
+    }
+
     #[test]
     fn roles_and_input() {
         assert_eq!(role("Localized", &[NameAttribute::Sent]), FolderRole::Sent);
