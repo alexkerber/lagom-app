@@ -34,6 +34,16 @@ pub struct Theme {
     pub sel: Rgba,
     pub accent: Rgba,
     pub accent_ink: Rgba,
+    // Behind a swiped row, by the move it commits to. `accent_ink` sits on all three:
+    // 5.6–7.0:1 in light (white), 7.1–8.9:1 in dark (near black).
+    pub swipe_done: Rgba,
+    pub swipe_later: Rgba,
+    /// Delete. A purer red than Falu red, so Delete never reads as the accent.
+    pub danger: Rgba,
+    /// Under the pointer, and while pressed. Translucent ink, so one token works on every surface
+    /// and stacks (a chevron inside a hovered row). Hover sits between `raised` and `sel`, press past `sel`.
+    pub hover: Rgba,
+    pub press: Rgba,
 }
 
 impl Theme {
@@ -49,6 +59,11 @@ impl Theme {
             sel: rgb(0xEFEFEC),
             accent: rgb(accent.hex().0),
             accent_ink: rgb(0xFFFFFF),
+            swipe_done: rgb(Accent::PineGreen.hex().0),
+            swipe_later: rgb(Accent::CatalogueBlue.hex().0),
+            danger: rgb(0xC62828),
+            hover: Rgba { a: 0.03, ..rgb(0x111110) },
+            press: Rgba { a: 0.075, ..rgb(0x111110) },
         }
     }
 
@@ -64,6 +79,11 @@ impl Theme {
             sel: rgb(0x1F1F1D),
             accent: rgb(accent.hex().1),
             accent_ink: rgb(0x0B0B0A),
+            swipe_done: rgb(Accent::PineGreen.hex().1),
+            swipe_later: rgb(Accent::CatalogueBlue.hex().1),
+            danger: rgb(0xF87171),
+            hover: Rgba { a: 0.035, ..rgb(0xF2F2EE) },
+            press: Rgba { a: 0.08, ..rgb(0xF2F2EE) },
         }
     }
 
@@ -82,8 +102,18 @@ pub const DEFAULT_ACCENT: Accent = Accent::FaluRed;
 
 pub mod font {
     pub const DISPLAY: &str = "Inter Tight"; // 700–800, bundled
-    pub const UI: &str = "Inter"; // 400–600
     pub const MONO: &str = "Geist Mono"; // keys and counts
+
+    /// UI text, 400–600: the platform's system font (SF Pro on macOS), chosen by the owner
+    /// 2026-11-06 because it feels native. GPUI maps ".SystemUIFont" per platform.
+    /// `LAGOM_UI_FONT=inter` switches back to Inter for comparison.
+    pub fn ui() -> &'static str {
+        static UI: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+        UI.get_or_init(|| match std::env::var("LAGOM_UI_FONT").as_deref() {
+            Ok("inter") => "Inter",
+            _ => ".SystemUIFont",
+        })
+    }
 }
 
 /// Type scale in px, as used in ConceptD and MainWindowD.

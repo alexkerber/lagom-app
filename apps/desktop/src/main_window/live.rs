@@ -1,0 +1,634 @@
+//! The window's side of real mail: store reads, worker events, optimistic moves and their undo.
+//! The UI thread only reads the store (bounded, indexed queries) and never waits on the network.
+
+use super::*;
+
+/// What an in-flight worker command needs when it finishes.
+enum Op {
+    /// A move of this row (id in `Inbox::mail`). On failure the row comes back.
+    Move(usize),
+    /// Undo of a move: on failure only a message.
+    Undo,
+    /// The sheet that sent; on failure it becomes the draft again.
+    Send(Entity<Compose>),
+}
+
+pub struct Live {
+    bridge: Bridge,
+    store: Rc<Store>,
+    pub(super) accounts: Vec<Account>,
+    pub(super) current: usize,
+    sync: HashMap<String, SyncState>,
+    ops: HashMap<u64, Op>,
+    next_op: u64,
+    /// A store change arrived while moves were in flight; read again once they finish.
+    stale: bool,
+    /// Rows per list read. Grows when the selection nears the end.
+    limit: u32,
+    /// The ⌘K hit on screen: loaded even past `limit`, until another list opens.
+    pub(super) pin: Option<i64>,
+    /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
+    want: Option<i64>,
+    /// Store ids marked read here, until the server confirms.
+    seen: HashSet<i64>,
+    _events: Task<()>,
+    /// Wakes the window when the next message on Later is due.
+    due: Option<(i64, Task<()>)>,
+}
+
+/// Rows per page of a list.
+const PAGE: u32 = 200;
+
+fn now() -> i64 {
+    chrono::Local::now().timestamp()
+}
+
+/// The toast after the worker tried to send.
+pub(super) fn sent_note(delivery: Delivery, error: Option<String>) -> String {
+    match (delivery, error) {
+        (Delivery::Sent, None) => "Sent".into(),
+        (Delivery::Sent, Some(e)) => format!("Sent. {e}"),
+        (Delivery::Maybe, _) => "May have been sent. Check Sent before sending again. C opens the draft.".into(),
+        (Delivery::NotSent, e) => format!("Not sent: {}. C opens the draft.", e.unwrap_or_default()),
+    }
+}
+
+/// The sidebar name of an account: its display name, or its domain.
+pub fn short_name(a: &Account) -> String {
+    if a.display_name != a.email {
+        return a.display_name.clone();
+    }
+    a.email.rsplit_once('@').map_or(a.email.clone(), |(_, d)| d.to_string())
+}
+
+impl Live {
+    pub fn start(window: &mut Window, cx: &mut Context<MainWindow>) -> lagom_core::Result<Self> {
+        let path = Store::default_path()?;
+        let store = Store::open(&path)?;
+        let (bridge, mut events) = crate::sync::start(path);
+        let task = cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                // Several changes in a row read the store once.
+                let mut batch = vec![event];
+                while let Ok(more) = events.try_recv() {
+                    batch.push(more);
+                }
+                if this.update_in(cx, |this, window, cx| this.on_events(batch, window, cx)).is_err() {
+                    return;
+                }
+            }
+            // The worker stopped: nothing will answer the commands still pending.
+            this.update(cx, |this, cx| this.worker_gone(cx)).ok();
+        });
+        Ok(Self {
+            bridge,
+            accounts: store.accounts()?,
+            store: Rc::new(store),
+            current: 0,
+            sync: HashMap::new(),
+            ops: HashMap::new(),
+            next_op: 0,
+            stale: false,
+            limit: PAGE,
+            pin: None,
+            want: None,
+            seen: HashSet::new(),
+            _events: task,
+            due: None,
+        })
+    }
+
+    pub fn account(&self) -> Option<&Account> {
+        self.accounts.get(self.current)
+    }
+
+    /// Full-text search for ⌘K in the current account: (store id, "Sender · Subject").
+    pub fn search(&self) -> Option<crate::command_palette::Search> {
+        let (store, account) = (self.store.clone(), self.account()?.id.clone());
+        Some(Rc::new(move |q: &str| {
+            let Some(q) = mail::fts_query(q) else { return Vec::new() };
+            store
+                .search(&account, &q, now(), 20, 0)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| (m.id, format!("{} · {}", if m.from_name.is_empty() { &m.from_address } else { &m.from_name }, m.subject)))
+                .collect()
+        }))
+    }
+
+    pub(super) fn sending(&self) -> bool {
+        self.ops.values().any(|op| matches!(op, Op::Send(_)))
+    }
+
+    fn op(&mut self, op: Op) -> u64 {
+        self.next_op += 1;
+        self.ops.insert(self.next_op, op);
+        self.next_op
+    }
+}
+
+impl MainWindow {
+    /// Reads the store for the account and list on screen. Waits while moves are in flight, so
+    /// a read never shows a moved row back before the server has it.
+    pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        if !live.ops.values().all(|op| matches!(op, Op::Send(_))) {
+            live.stale = true;
+            return;
+        }
+        live.stale = false;
+        live.accounts = live.store.accounts().unwrap_or_default();
+        live.current = live.current.min(live.accounts.len().saturating_sub(1));
+        let Some(account) = live.account().map(|a| a.id.clone()) else {
+            self.inbox = Inbox::live();
+            return;
+        };
+        let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
+            None => mail::View::Inbox,
+            Some((Kind::Later, _)) => mail::View::Later,
+            Some((_, Some(id))) => mail::View::Folder(id),
+            // A folder ⌘K just created: nothing on the server yet.
+            Some((_, None)) => mail::View::Inbox,
+        };
+        match mail::load(&live.store, &account, view, live.limit, now(), live.pin) {
+            Ok(snap) => {
+                let due = snap.next_due;
+                self.inbox.apply(snap, &live.seen, chrono::Local::now());
+                let want = live.want.take();
+                self.wake_at(due, cx);
+                if let Some(want) = want {
+                    self.select_found(want, cx);
+                }
+            }
+            Err(e) => self.notify(format!("Could not read mail: {e}"), cx),
+        }
+        cx.notify();
+    }
+
+    /// One timer for the next message on Later, not a polling loop.
+    fn wake_at(&mut self, due: Option<i64>, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        let Some(at) = due else {
+            live.due = None;
+            return;
+        };
+        if live.due.as_ref().is_some_and(|d| d.0 == at) {
+            return;
+        }
+        let wait = Duration::from_secs((at - now()).max(0) as u64 + 1);
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                if let Some(live) = &mut this.live {
+                    live.due = None;
+                }
+                this.reload(cx);
+            })
+            .ok();
+        });
+        live.due = Some((at, task));
+    }
+
+    fn on_events(&mut self, events: Vec<Event>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut read = false;
+        for event in events {
+            match event {
+                Event::Changed => read = true,
+                Event::Seen(id) => {
+                    if let Some(live) = &mut self.live {
+                        live.seen.remove(&id);
+                    }
+                }
+                Event::Sync(account, state) => {
+                    if let Some(live) = &mut self.live {
+                        live.sync.insert(account, state);
+                    }
+                }
+                Event::Op { op, error } => {
+                    read = true;
+                    let Some(done) = self.live.as_mut().and_then(|l| l.ops.remove(&op)) else { continue };
+                    match (done, error) {
+                        (_, None) => {}
+                        (Op::Move(id), Some(e)) => {
+                            self.inbox.back(id);
+                            if let Some((what, id, ix)) = self.inbox.revert(id) {
+                                self.come_back(what, id, ix, false, cx);
+                            }
+                            self.notify(format!("Not moved: {e}"), cx);
+                        }
+                        (_, Some(e)) => self.notify(format!("Could not undo: {e}"), cx),
+                    }
+                }
+                Event::Added(result) => match result {
+                    Ok(id) => {
+                        self.page = Page::Mail;
+                        if let Some(live) = &mut self.live {
+                            live.accounts = live.store.accounts().unwrap_or_default();
+                            live.current = live.accounts.iter().position(|a| a.id == id).unwrap_or(0);
+                        }
+                        self.inbox = Inbox::live();
+                        self.clear_motion();
+                        window.focus(&self.focus);
+                        read = true;
+                    }
+                    Err(e) => {
+                        if let Page::AddAccount(add) = &self.page {
+                            add.update(cx, |add, cx| add.failed(e, cx));
+                        }
+                    }
+                },
+                Event::Sent { op, delivery, error } => {
+                    read = true;
+                    let compose = match self.live.as_mut().and_then(|l| l.ops.remove(&op)) {
+                        Some(Op::Send(compose)) => Some(compose),
+                        _ => None,
+                    };
+                    self.notify(sent_note(delivery, error), cx);
+                    // The text is not lost: C opens it again. A resend keeps the sheet's Message-ID;
+                    // that does not stop a duplicate, it only lets mail clients spot one.
+                    if delivery != Delivery::Sent {
+                        self.drafts.extend(compose);
+                        self.cancel_exit();
+                    }
+                }
+            }
+        }
+        if read || self.live.as_ref().is_some_and(|l| l.stale) {
+            self.reload(cx);
+        }
+        if let Some(exit) = self.exit_ready(cx) {
+            match exit {
+                Exit::Quit => cx.quit(),
+                Exit::Close => window.remove_window(),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Quit or close waited for sends (a failed one cancelled it, so its draft stays). Sheets
+    /// sent meanwhile are still in their Undo window: they go now, and the exit waits for them.
+    pub(super) fn exit_ready(&mut self, cx: &mut Context<Self>) -> Option<Exit> {
+        let exit = self.exit?;
+        if self.hold_exit(exit, cx) {
+            return None;
+        }
+        self.cancel_exit();
+        Some(exit)
+    }
+
+    /// The worker stopped or refused a command: pending moves come back, pending sends become
+    /// drafts again, and a quit no longer waits for answers that will not come.
+    pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        let ops: Vec<_> = live.ops.drain().map(|(_, op)| op).collect();
+        live.stale = false;
+        for op in ops {
+            match op {
+                Op::Send(compose) => self.drafts.push(compose),
+                Op::Move(id) => {
+                    self.inbox.back(id);
+                    if let Some((what, id, ix)) = self.inbox.revert(id) {
+                        self.come_back(what, id, ix, false, cx);
+                    }
+                }
+                Op::Undo => {}
+            }
+        }
+        self.cancel_exit();
+        self.notify("Mail stopped working. Restart Lagom; unsent mail is in drafts (C).", cx);
+    }
+
+    /// The worker half of an optimistic move.
+    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) {
+        let Some(store) = self.inbox.mail[id].store else { return };
+        let Some(live) = &mut self.live else { return };
+        let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store).map(mail::Place::Folder);
+        let (act, target) = match what {
+            Move::Done => (Act::Archive, store_of(Kind::Done)),
+            Move::Delete => (Act::Trash, store_of(Kind::Trash)),
+            Move::Later => (Act::Snooze(Some(when.at(chrono::Local::now()).timestamp())), None),
+            Move::Folder(f) => match self.inbox.folders[f].store {
+                Some(folder) => (Act::Move(folder), Some(mail::Place::Folder(folder))),
+                None => {
+                    let name = self.inbox.folders[f].full.clone();
+                    (Act::NewFolder(name.clone()), Some(mail::Place::New(name)))
+                }
+            },
+        };
+        self.inbox.left(id, target);
+        let op = live.op(Op::Move(id));
+        if !live.bridge.send(Cmd::Op { op, id: store, act }) {
+            self.worker_gone(cx);
+        }
+    }
+
+    /// Undo on the server: the message goes back to the folder it was in, or off Later.
+    pub(super) fn unserver(&mut self, what: Move, id: usize, cx: &mut Context<Self>) {
+        let Some(store) = self.inbox.mail[id].store else { return };
+        if self.live.is_none() {
+            return;
+        }
+        let back = self.inbox.back(id);
+        let act = match what {
+            Move::Later => Act::Snooze(None),
+            Move::Done | Move::Delete | Move::Folder(_) => match back {
+                mail::Place::Folder(id) => Act::Move(id),
+                // The worker finds it by name: the create ran before this undo.
+                mail::Place::New(name) => Act::NewFolder(name),
+            },
+        };
+        let Some(live) = &mut self.live else { return };
+        let op = live.op(Op::Undo);
+        if !live.bridge.send(Cmd::Op { op, id: store, act }) {
+            self.worker_gone(cx);
+        }
+    }
+
+    /// Before a frame: the selected message's body comes from the store once, and opening a
+    /// message marks it read. One indexed row read, only when the selection changed.
+    pub(super) fn open_current(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.inbox.current() else { return };
+        let Some(live) = &mut self.live else { return };
+        let Some(store) = self.inbox.mail[id].store else { return };
+        if self.inbox.mail[id].body.is_empty() {
+            self.inbox.mail[id].body = match live.store.message(store) {
+                Ok(m) => mail::paragraphs(&m.body_text),
+                Err(_) => vec!["This message is no longer in the local store.".into()],
+            };
+        }
+        if self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
+            self.inbox.mail[id].unread = false;
+            if let Some(f) = self.inbox.open {
+                self.inbox.folders[f].unread = self.inbox.folders[f].unread.saturating_sub(1);
+            }
+            live.seen.insert(store);
+            // A stopped worker shows up through the event channel; nothing waits on this.
+            let _ = live.bridge.send(Cmd::MarkSeen(store));
+            cx.notify();
+        }
+    }
+
+    /// Reads the next page when the selection nears the end of what is loaded.
+    pub(super) fn near_end(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        let len = self.inbox.list().len();
+        if len as u32 >= live.limit && self.inbox.selected + 20 >= len {
+            live.limit += PAGE;
+            self.reload(cx);
+        }
+    }
+
+    pub(super) fn open_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        if let Some(f) = self.inbox.find_kind(kind) {
+            self.open_box(Some(f), cx);
+        }
+    }
+
+    pub(super) fn switch_account(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        if ix >= live.accounts.len() {
+            return;
+        }
+        live.current = ix;
+        live.limit = PAGE;
+        live.pin = None;
+        // Folder indices belong to one account; history does too.
+        self.inbox = Inbox::live();
+        self.clear_motion();
+        self.page = Page::Mail;
+        self.reload(cx);
+    }
+
+    pub(super) fn sync_now(&mut self) {
+        if let Some(live) = &self.live {
+            let _ = live.bridge.send(Cmd::Sync(None));
+        }
+    }
+
+    /// "Home · synced 10:12" for the current account, `None` in demo mode.
+    pub(super) fn sync_line(&self) -> Option<SharedString> {
+        let live = self.live.as_ref()?;
+        Some(format!("{} · {}", short_name(live.account()?), self.sync_state()?).into())
+    }
+
+    /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
+    pub(super) fn sync_state(&self) -> Option<SharedString> {
+        let live = self.live.as_ref()?;
+        let account = live.account()?;
+        let state = match live.sync.get(&account.id) {
+            None | Some(SyncState::Syncing) => "syncing…".to_string(),
+            Some(SyncState::Synced(at)) => {
+                let at = chrono::DateTime::from_timestamp(*at, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
+                format!("synced {}", at.unwrap_or_default())
+            }
+            Some(SyncState::Failed(e)) => format!("offline: {e}"),
+        };
+        Some(state.into())
+    }
+
+    /// ⌘K search hit: open its list (Later when snoozed) and select it. The hit is pinned into
+    /// that list, so the selection never lands on another row that Delete or Reply would hit.
+    pub(super) fn open_found(&mut self, store: i64, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        let Ok(m) = live.store.message(store) else { return self.notify("That message is gone", cx) };
+        let list = if m.summary.snoozed_until.is_some_and(|t| t > now()) {
+            self.inbox.find_kind(Kind::Later)
+        } else {
+            // INBOX is not in `folders`: no match means the inbox.
+            self.inbox.folders.iter().position(|f| f.store == Some(m.summary.folder) && !f.gone)
+        };
+        self.open_box(list, cx);
+        if let Some(live) = &mut self.live {
+            (live.pin, live.want) = (Some(store), Some(store));
+        }
+        self.reload(cx);
+    }
+
+    fn select_found(&mut self, store: i64, cx: &mut Context<Self>) {
+        match self.inbox.list().iter().position(|&id| self.inbox.mail[id].store == Some(store)) {
+            Some(ix) => self.select(|inbox| inbox.select(ix), cx),
+            None => self.notify("That message is not in this list any more", cx),
+        }
+    }
+
+    pub(super) fn send_mail(&mut self, compose: Entity<Compose>, mail: lagom_core::smtp::Outgoing, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        // The account the sheet shows, not the one on screen now: the user may switch during Undo.
+        let from = compose.read(cx).from().to_string();
+        let Some(account) = live.accounts.iter().find(|a| a.email == from).map(|a| a.id.clone()) else {
+            self.drafts.push(compose);
+            self.notify("Not sent: its account is gone. C opens the draft.", cx);
+            return;
+        };
+        let op = live.op(Op::Send(compose));
+        if !live.bridge.send(Cmd::Send { op, account, mail: Box::new(mail) }) {
+            self.worker_gone(cx);
+        }
+    }
+
+    pub(super) fn add_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.live.is_none() {
+            return self.notify("Demo mode: start without LAGOM_DEMO to add an account", cx);
+        }
+        let can_cancel = self.live.as_ref().is_some_and(|l| !l.accounts.is_empty());
+        let add = cx.new(|cx| AddAccount::new(can_cancel, window, cx));
+        cx.subscribe(&add, |this, add, Connect(account, password): &Connect, cx| {
+            let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::AddAccount(account.clone(), password.clone())));
+            if !sent {
+                add.update(cx, |add, cx| add.failed("Mail stopped working. Restart Lagom.".into(), cx));
+            }
+        })
+        .detach();
+        cx.subscribe_in(&add, window, |this, _, _: &gpui::DismissEvent, window, cx| {
+            this.page = Page::Mail;
+            window.focus(&this.focus);
+            cx.notify();
+        })
+        .detach();
+        test_hook(&add, window, cx);
+        self.page = Page::AddAccount(add);
+        cx.notify();
+    }
+
+    pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.release(false, cx);
+        self.page = Page::Settings(None);
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_remove(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.page = Page::Settings(id);
+        cx.notify();
+    }
+
+    /// Deletes the keychain secret and every local row of the account. The server keeps its mail.
+    pub(crate) fn remove_account(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        if !live.bridge.send(Cmd::RemoveAccount(id.clone())) {
+            return self.worker_gone(cx);
+        }
+        live.accounts.retain(|a| a.id != id);
+        live.current = 0;
+        self.inbox = Inbox::live();
+        self.clear_motion();
+        self.page = Page::Settings(None);
+        cx.notify();
+    }
+
+    pub(crate) fn settings_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_account(window, cx);
+    }
+}
+
+/// `LAGOM_TEST_ACCOUNT=email|password|imap host:port|smtp host:port|tls,starttls or plain`
+/// fills the form and presses Connect: the real add-account path, for end-to-end runs.
+/// Only with `LAGOM_DATA_DIR`, so it never writes into the owner's store.
+fn test_hook(add: &Entity<AddAccount>, window: &mut Window, cx: &mut Context<MainWindow>) {
+    let (Ok(spec), Some(_)) = (std::env::var("LAGOM_TEST_ACCOUNT"), std::env::var_os("LAGOM_DATA_DIR")) else { return };
+    let parts: Vec<&str> = spec.split('|').collect();
+    let [email, password, imap, smtp, security] = parts[..] else { return };
+    let security = match security {
+        "plain" => lagom_core::account::Security::Plain,
+        "starttls" => lagom_core::account::Security::StartTls,
+        _ => lagom_core::account::Security::Tls,
+    };
+    let split = |s: &str| s.rsplit_once(':').map(|(h, p)| (h.to_string(), p.to_string())).unwrap_or_default();
+    let ((imap_host, imap_port), (smtp_host, smtp_port)) = (split(imap), split(smtp));
+    let servers = crate::accounts::Servers { imap_host, imap_port, imap_security: security, smtp_host, smtp_port, smtp_security: security };
+    let connect = std::env::var("LAGOM_SCREEN").as_deref() != Ok("add-account-form");
+    add.update(cx, |add, cx| {
+        add.fill(email, password, &servers, window, cx);
+        if connect {
+            add.connect(cx);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use lagom_core::account::{Security, ServerConfig};
+
+    /// A demo window with a live side whose worker is `rx`: kept alive it never answers,
+    /// dropped it has stopped.
+    fn window(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext, tokio::sync::mpsc::UnboundedReceiver<Cmd>) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            crate::text_input::bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let (bridge, rx) = crate::sync::Bridge::detached();
+        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
+        let account = Account::new("me@lagom.test".into(), config.clone(), config).unwrap();
+        let live = Live {
+            bridge,
+            store: Rc::new(Store::open(dir.join("t.sqlite3")).unwrap()),
+            accounts: vec![account],
+            current: 0,
+            sync: HashMap::new(),
+            ops: HashMap::new(),
+            next_op: 0,
+            stale: false,
+            limit: PAGE,
+            pin: None,
+            want: None,
+            seen: HashSet::new(),
+            _events: Task::ready(()),
+            due: None,
+        };
+        view.update(cx, |v, _| v.live = Some(live));
+        (view, cx, rx)
+    }
+
+    fn send_one(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("ana@example.com");
+        cx.simulate_keystrokes("cmd-enter");
+    }
+
+    fn toast(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.to_string()).unwrap_or_default())
+    }
+
+    #[gpui::test]
+    fn a_stopped_worker_returns_the_mail_to_drafts(cx: &mut TestAppContext) {
+        let (view, cx, rx) = window(cx);
+        drop(rx);
+        send_one(cx);
+        // Quit hands the mail over; the worker refuses it. The text is a draft again, so quit
+        // stops and asks; only a second quit while asked discards it.
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        assert_eq!(view.read_with(cx, |v, _| (v.drafts.len(), v.exit)), (1, None));
+        assert_eq!(toast(&view, cx), QUIT_AGAIN_UNSENT);
+        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+    }
+
+    #[gpui::test]
+    fn a_closed_event_channel_ends_the_wait(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        send_one(cx);
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        // What the event task does when the worker's channel closes.
+        view.update(cx, |v, cx| v.worker_gone(cx));
+        assert_eq!(view.read_with(cx, |v, _| (v.drafts.len(), v.exit, v.live.as_ref().unwrap().sending())), (1, None, false));
+    }
+
+    #[gpui::test]
+    fn a_long_wait_lets_the_next_quit_go(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        send_one(cx);
+        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        cx.executor().advance_clock(EXIT_WAIT - Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.exit), Some(Exit::Quit));
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.exit), None);
+        assert_eq!(toast(&view, cx), QUIT_AGAIN_SENDING);
+        // The second quit does not wait.
+        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+    }
+}

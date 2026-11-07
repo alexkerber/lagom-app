@@ -1,4 +1,16 @@
+mod accounts;
+mod command_palette;
+mod compose;
+mod empty_inbox;
+mod folders;
+mod mail;
 mod main_window;
+mod motion;
+mod settings;
+mod sync;
+#[cfg(target_os = "macos")]
+mod menus;
+mod text_input;
 mod theme;
 
 use std::borrow::Cow;
@@ -22,6 +34,11 @@ impl AssetSource for Assets {
             "icons/done.svg" => include_bytes!("../assets/icons/done.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
             "icons/chevron.svg" => include_bytes!("../assets/icons/chevron.svg"),
+            "icons/chevron-right.svg" => include_bytes!("../assets/icons/chevron-right.svg"),
+            "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
+            "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
+            "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
+            "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(bytes)))
@@ -43,6 +60,11 @@ fn main() {
             ])
             .expect("load bundled fonts");
 
+        main_window::bind_keys(cx);
+        text_input::bind_keys(cx);
+        // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
+        #[cfg(target_os = "macos")]
+        menus::init(cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         cx.open_window(
             WindowOptions {
@@ -57,7 +79,8 @@ fn main() {
                 window_background: WindowBackgroundAppearance::Blurred,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| MainWindow::new(window, cx)),
+            // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
+            |window, cx| cx.new(|cx| MainWindow::new(std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1"), window, cx)),
         )
         .expect("open main window");
         cx.activate(true);

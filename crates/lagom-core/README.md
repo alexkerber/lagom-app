@@ -1,0 +1,142 @@
+# Lagom mail core
+
+Local-first Rust API; the desktop app is deliberately not wired to it yet.
+`Store` exposes plain structs and reads SQLite only. Run network operations on
+an executor outside the UI thread; own each `Store` on its worker thread.
+
+`async-imap` supplies CONDSTORE and IDLE without a blocking thread per account.
+Transport is rustls with certificate/hostname verification and required STARTTLS;
+`Plain` is rejected outside loopback. Protocol trace logging is compiled out
+because async-imap's wire trace includes LOGIN credentials. Lettre's optional
+tracing and connection pool features are disabled. Passwords go only to OS
+keychain entries with service `lagom` and account UUID as key.
+
+## Tests
+
+Unit tests need no network or keychain; credential tests use keyring's mock.
+Integration tests use unique disposable GreenMail users and temporary databases.
+They are ignored by default; `LAGOM_GREENMAIL=1` enables them at compile time.
+
+```sh
+docker run -d --rm -p 127.0.0.1:3143:3143 -p 127.0.0.1:3025:3025 \
+  -e 'GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=test:test@lagom.test -Dgreenmail.auth.disabled' \
+  greenmail/standalone:2.1.2
+# Save the container id printed above.
+LAGOM_GREENMAIL=1 cargo test -p lagom-core --test greenmail
+# Stop only that container, using its saved id:
+docker stop <container-id>
+```
+
+Coverage: login, folders, SMTP delivery then INBOX sync, Sent APPEND, seen/unseen
+and external flags, bounded initial sync, incremental arrivals, local snooze,
+folder creation, MOVE/archive/trash, external expunge, HTML/charset parsing,
+attachment detection without fetching attachment bodies, IDLE notification, and
+COPY + UID EXPUNGE fallback without expunging another client's deleted mail.
+A local scripted IMAP peer also tests CONDSTORE, SPECIAL-USE and rejection of a
+stale UID operation after a UIDVALIDITY change.
+
+## Failure and sync semantics
+
+Drop/reconnect an IMAP session after any network/protocol error or cancellation;
+partially consumed commands must not be reused. No automatic retry or polling.
+A failed operation may have reached the server; resync before retrying a move.
+`Error::SentCopy` means SMTP succeeded: do not submit the message again.
+
+Initial sync stores the newest 500 UIDs per folder by default; subsequent sync
+keeps cached older messages and fetches every UID beyond the saved checkpoint.
+UIDVALIDITY changes invalidate that folder's cached rows. Successful sync compares
+all server UIDs to detect expunges. CONDSTORE refreshes changed flags across cached
+UIDs; other servers refresh flags for the newest N. Snooze uses caller-supplied
+Unix timestamps, with no background timer in the core.
+
+The first preferred plain/HTML text body part is cached. Multiple inline text parts are not combined yet.
+Selected encoded text plus its headers must fit 4 MiB (part headers <64 KiB). Larger text bodies need streaming support.
+Server-deleted folders and their cached messages are removed after a successful complete LIST.
+
+TLS/STARTTLS against real providers and the real OS keychain require manual
+account testing; GreenMail's integration ports exercise local plaintext only.
+
+## Local queries and search budget
+
+`list_messages` returns metadata in date/id descending order with limit/offset;
+`message` loads the full cached text/optional HTML. `folders` includes unread
+counts; `counts` exposes Inbox/Later totals; `later` lists future snoozes. Due
+snoozes become visible at query time. Search accepts FTS5 expressions across
+subject, sender name/address and body, with stable row-id pagination. It returns
+index order, avoiding a relevance sort over every match.
+
+```sh
+cargo test -p lagom-core --release search_100k_budget -- --ignored --nocapture
+```
+
+Measured 2026-11-06 on this Apple silicon host, 100,000 synthetic messages and
+50 first-page results: unique body token 0.205 ms, common body token 0.160 ms,
+sender 0.111 ms, subject 0.101 ms. All passed the <50 ms assertion. This is one
+local run with a freshly populated database in the OS cache, not a cold-disk,
+real-mailbox or CI performance guarantee. UI startup, frame timing, memory and
+idle CPU budgets remain unmeasured by this work.
+
+## CLI
+
+```sh
+cargo run -p lagom-cli -- add-account you@gmail.com
+cargo run -p lagom-cli -- accounts
+cargo run -p lagom-cli -- sync                 # all accounts; or sync <UUID/email>
+cargo run -p lagom-cli -- folders
+cargo run -p lagom-cli -- list INBOX --limit 20
+cargo run -p lagom-cli -- show <message-id>    # local numeric id printed by list
+cargo run -p lagom-cli -- search 'subject:invoice'
+cargo run -p lagom-cli -- send --to recipient@example.com --subject Hi --body Hello
+cargo run -p lagom-cli -- archive <message-id>
+cargo run -p lagom-cli -- trash <message-id>
+cargo run -p lagom-cli -- move <message-id> Receipts
+```
+
+For multiple accounts, pass global `--account <UUID/email>`. Folder selectors
+accept an exact name or local numeric id. `--database <path>` selects a test
+store. `folders`, `list`, `show` and `search` perform no network/keychain access.
+`send` also accepts comma-separated `--cc`/`--bcc`, `--in-reply-to` and repeated
+`--references`. Bcc recipients enter the SMTP envelope only, never the saved header.
+
+`add-account` verifies IMAP login, then saves the password to the OS keychain and
+account metadata to SQLite. It reads a hidden terminal password interactively,
+or one line from stdin when piped. No password argument or environment variable
+is accepted. Unknown domains require both server overrides. Standard overrides
+use `--imap host:port --smtp host:port`; custom transport modes use
+`--imap-security tls|start-tls|plain --smtp-security tls|start-tls|plain`.
+
+For a disposable GreenMail account:
+
+```sh
+cargo run -p lagom-cli -- --database /tmp/lagom-manual.sqlite3 add-account test@lagom.test \
+  --imap 127.0.0.1:3143 --smtp 127.0.0.1:3025 \
+  --imap-security plain --smtp-security plain
+# Enter the disposable test password at the hidden prompt; then use the same --database.
+```
+
+Provider settings checked against [Google](https://developers.google.com/workspace/gmail/imap/imap-smtp),
+[Apple](https://support.apple.com/en-ie/102525),
+[Fastmail](https://www.fastmail.help/hc/en-us/articles/1500000278342-Server-names-and-ports)
+and [Microsoft](https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com).
+Outlook.com requires OAuth2, which is deferred; its preset is present but password
+login is not expected to work. App passwords/provider IMAP access must be enabled
+where supported. The CLI does not perform web login or provision credentials.
+
+Dependencies: rusqlite/bundled supplies portable SQLite/FTS5; dirs locates app
+data; keyring uses native credential stores; zeroize clears owned secret buffers;
+uuid gives account ids; thiserror gives core errors. async-imap, Tokio,
+futures-util and tokio-rustls provide the IMAP transport/streams; webpki-roots
+supplies trust anchors; log disables unsafe wire traces; mail-parser handles
+MIME/charsets/HTML text; lettre supplies SMTP and RFC message construction.
+The CLI adds anyhow, clap and rpassword for errors, arguments and hidden input.
+Tempfile is test-only. No OpenSSL or native-tls is enabled by the core.
+
+## Workspace validation on 2026-11-06
+
+`cargo build --workspace` and `LAGOM_GREENMAIL=1 cargo test --workspace` pass.
+Core/CLI Clippy including all test targets passes with `-D warnings`.
+Plain `cargo clippy --workspace` fails on an existing desktop
+`clippy::approx_constant` at `apps/desktop/src/main_window.rs:120` (golden ratio).
+The desktop is untouched. `cargo clippy --workspace -- -A clippy::approx_constant`
+passes. Existing dependency future-compatibility notices remain for `block`
+and `proc-macro-error2`.

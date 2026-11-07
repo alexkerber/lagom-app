@@ -11,3 +11,15 @@ publish = false
 anyhow = "1"
 gpui = "0.2.2"
 lagom-core = { path = "../../crates/lagom-core" }
+# Grapheme clusters for the caret and backspace (emoji, combining marks). Already in Cargo.lock.
+unicode-segmentation = "1.13"
+# The mail worker's runtime and channels; the core's IMAP and SMTP need Tokio. Already in Cargo.lock.
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# Local time zone for list dates and Later times; std has none. Already in Cargo.lock via async-imap.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The app password between the add-account form and the keychain. Already in Cargo.lock.
+zeroize = "1"
+
+[dev-dependencies]
+# GPUI's TestAppContext, to drive key dispatch in tests.
+gpui = { version = "0.2.2", features = ["test-support"] }
