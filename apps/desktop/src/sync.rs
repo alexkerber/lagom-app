@@ -79,9 +79,17 @@ pub enum Event {
 pub struct Bridge(UnboundedSender<Cmd>);
 
 impl Bridge {
-    pub fn send(&self, cmd: Cmd) {
-        // The worker only stops with the app.
-        let _ = self.0.send(cmd);
+    /// A bridge without a worker: the receiver stands in for it, dropping it stops it.
+    #[cfg(test)]
+    pub fn detached() -> (Self, UnboundedReceiver<Cmd>) {
+        let (tx, rx) = unbounded_channel();
+        (Self(tx), rx)
+    }
+
+    /// False when the worker has stopped (it could not open the store, or it panicked).
+    #[must_use]
+    pub fn send(&self, cmd: Cmd) -> bool {
+        self.0.send(cmd).is_ok()
     }
 }
 
@@ -413,6 +421,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_stopped_worker_refuses_commands() {
+        let (tx, rx) = unbounded_channel();
+        let bridge = Bridge(tx);
+        assert!(bridge.send(Cmd::Sync(None)));
+        drop(rx);
+        assert!(!bridge.send(Cmd::Sync(None)));
+    }
+
+    #[test]
     fn a_move_redirects_only_this_message_aliases() {
         let mut moved = HashMap::new();
         // The same newsletter in account A (INBOX 1, Archive 2) and B (INBOX 10, Archive 20).
@@ -497,18 +514,18 @@ mod greenmail {
         let account = Account::new(email.clone(), config(3143), config(3025)).unwrap();
         let (bridge, mut events) = start(path.clone());
 
-        bridge.send(Cmd::AddAccount(Box::new(account.clone()), Zeroizing::new("test".into())));
+        let _ = bridge.send(Cmd::AddAccount(Box::new(account.clone()), Zeroizing::new("test".into())));
         let Event::Added(added) = next(&mut events, |e| matches!(e, Event::Added(_))).await else { unreachable!() };
         assert_eq!(added, Ok(account.id.clone()));
         synced(&mut events).await;
 
         for (op, subject) in [(1, "Archive me"), (2, "Trash me"), (3, "File me"), (4, "Move me")] {
             let mail = Outgoing { to: vec![email.clone()], subject: subject.into(), text: "Body".into(), ..Default::default() };
-            bridge.send(Cmd::Send { op, account: account.id.clone(), mail: Box::new(mail) });
+            let _ = bridge.send(Cmd::Send { op, account: account.id.clone(), mail: Box::new(mail) });
             let Event::Sent { delivery, error, .. } = next(&mut events, |e| matches!(e, Event::Sent { op: o, .. } if *o == op)).await else { unreachable!() };
             assert_eq!(delivery, Delivery::Sent, "{error:?}");
         }
-        bridge.send(Cmd::Sync(None));
+        let _ = bridge.send(Cmd::Sync(None));
         synced(&mut events).await;
 
         let store = Store::open(&path).unwrap();
@@ -517,16 +534,16 @@ mod greenmail {
         let id = |subject: &str| store.list_messages(inbox, now(), 50, 0).unwrap().into_iter().find(|m| m.subject == subject).unwrap().id;
         let (archive, trash, file, moving) = (id("Archive me"), id("Trash me"), id("File me"), id("Move me"));
 
-        bridge.send(Cmd::Op { op: 10, id: archive, act: Act::Archive });
+        let _ = bridge.send(Cmd::Op { op: 10, id: archive, act: Act::Archive });
         op_ok(&mut events, 10).await;
-        bridge.send(Cmd::Op { op: 11, id: trash, act: Act::Trash });
+        let _ = bridge.send(Cmd::Op { op: 11, id: trash, act: Act::Trash });
         op_ok(&mut events, 11).await;
-        bridge.send(Cmd::Op { op: 12, id: file, act: Act::NewFolder("Projects".into()) });
+        let _ = bridge.send(Cmd::Op { op: 12, id: file, act: Act::NewFolder("Projects".into()) });
         op_ok(&mut events, 12).await;
         let projects = store.folders(&account.id, now()).unwrap().into_iter().find(|f| f.name == "Projects").unwrap().id;
         // A second "new" folder of the same name reuses the first.
         assert!(projects > 0);
-        bridge.send(Cmd::Op { op: 13, id: moving, act: Act::NewFolder("Projects".into()) });
+        let _ = bridge.send(Cmd::Op { op: 13, id: moving, act: Act::NewFolder("Projects".into()) });
         op_ok(&mut events, 13).await;
 
         let s = server(&account).await;
@@ -538,15 +555,15 @@ mod greenmail {
         assert!(s.iter().any(|(name, subjects)| name.to_lowercase().contains("sent") && subjects.len() == 4));
 
         // Undo uses the id the UI saw; the worker follows the move to the new row.
-        bridge.send(Cmd::Op { op: 14, id: archive, act: Act::Move(inbox) });
+        let _ = bridge.send(Cmd::Op { op: 14, id: archive, act: Act::Move(inbox) });
         op_ok(&mut events, 14).await;
         assert_eq!(server(&account).await["INBOX"], ["Archive me"]);
         // And again, with the id the UI first saw: the alias still leads to the message.
-        bridge.send(Cmd::Op { op: 15, id: archive, act: Act::Archive });
+        let _ = bridge.send(Cmd::Op { op: 15, id: archive, act: Act::Archive });
         op_ok(&mut events, 15).await;
         assert_eq!(server(&account).await["Archive"], ["Archive me"]);
 
-        bridge.send(Cmd::RemoveAccount(account.id.clone()));
+        let _ = bridge.send(Cmd::RemoveAccount(account.id.clone()));
         // Earlier Changed events may still be queued: wait for the store itself.
         for _ in 0..100 {
             if store.accounts().unwrap().is_empty() {

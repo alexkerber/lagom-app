@@ -150,6 +150,10 @@ pub struct MainWindow {
     sending: Vec<Entity<Compose>>,
     // Quit or close waits for these sends to reach the worker's answer.
     exit: Option<Exit>,
+    // Gives up the wait after `EXIT_WAIT`; dropping it cancels.
+    exit_timer: Option<Task<()>>,
+    // The wait gave up: the next quit or close goes, sends or not.
+    force_exit: bool,
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
     page: Page,
@@ -208,6 +212,8 @@ impl MainWindow {
             drafts: Vec::new(),
             sending: Vec::new(),
             exit: None,
+            exit_timer: None,
+            force_exit: false,
             live,
             page: Page::Mail,
             all_folders: false,
@@ -380,11 +386,29 @@ impl MainWindow {
             }
         }
         let waiting = self.live.as_ref().is_some_and(|l| l.sending());
-        if waiting {
-            self.exit = Some(exit);
-            self.notify("Sending first, then closing", cx);
+        if !waiting || std::mem::take(&mut self.force_exit) {
+            return false;
         }
-        waiting
+        if self.exit.is_none() {
+            self.exit_timer = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(EXIT_WAIT).await;
+                this.update(cx, |this, cx| {
+                    if this.exit.take().is_some() {
+                        this.force_exit = true;
+                        this.notify("Still sending. Quit again to quit anyway; unsent mail is then lost.", cx);
+                    }
+                })
+                .ok();
+            }));
+        }
+        self.exit = Some(exit);
+        self.notify("Sending first, then closing", cx);
+        true
+    }
+
+    fn cancel_exit(&mut self) {
+        self.exit = None;
+        self.exit_timer = None;
     }
 
     fn watch_compose(&mut self, compose: &Entity<Compose>, window: &mut Window, cx: &mut Context<Self>) {
@@ -453,7 +477,7 @@ impl MainWindow {
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx });
-        self.server(what, id, when);
+        self.server(what, id, when, cx);
         // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
         if what == Move::Delete {
             self.notify("Deleted", cx);
@@ -492,7 +516,7 @@ impl MainWindow {
     fn undo(&mut self, cx: &mut Context<Self>) {
         let open = self.inbox.open;
         let Some((what, id, ix)) = self.inbox.undo() else { return };
-        self.unserver(what, id);
+        self.unserver(what, id, cx);
         self.toast = None;
         self.come_back(what, id, ix, self.inbox.open != open, cx);
     }
@@ -1609,6 +1633,9 @@ fn exit_actions<E: InteractiveElement>(el: E, cx: &mut Context<MainWindow>) -> E
     let _ = cx;
     el
 }
+
+/// How long quit or close waits for sends before it lets the user quit anyway.
+const EXIT_WAIT: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Exit {

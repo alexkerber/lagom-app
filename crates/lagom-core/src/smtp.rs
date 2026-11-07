@@ -1,3 +1,5 @@
+use tokio::time::timeout;
+
 use crate::{
     account::{Account, Security},
     imap_sync::ImapSync,
@@ -94,6 +96,12 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
         .body(outgoing.text.clone())
         .map_err(|_| Error::Invalid("could not construct message"))
 }
+/// Whole-step deadlines. lettre's own timeout bounds the TCP connect, not a server that
+/// answers and then stalls; without these the worker, and a quit waiting on it, would hang.
+const LOGIN_DEADLINE: Duration = Duration::from_secs(30);
+const SUBMIT_DEADLINE: Duration = Duration::from_secs(60);
+const SENT_COPY_DEADLINE: Duration = Duration::from_secs(60);
+
 /// SMTP success is irreversible. `SentCopy` means delivery succeeded; retry only
 /// saving the copy, never the SMTP submission. No connection pool or idle timers.
 pub async fn send(
@@ -102,26 +110,39 @@ pub async fn send(
     outgoing: &Outgoing,
     store: &mut Store,
 ) -> Result<()> {
+    send_within(account, password, outgoing, store, LOGIN_DEADLINE, SUBMIT_DEADLINE).await
+}
+async fn send_within(
+    account: &Account,
+    password: &str,
+    outgoing: &Outgoing,
+    store: &mut Store,
+    login: Duration,
+    submit: Duration,
+) -> Result<()> {
     let message = compose(account, outgoing)?;
     let transport = transport(account, password)?;
     let raw = message.formatted();
-    // Log in first: a failure here certainly sent nothing. One extra handshake per message.
-    if !matches!(transport.test_connection().await, Ok(true)) {
+    // Log in first: a failure or stall here certainly sent nothing. One extra handshake per message.
+    if !matches!(timeout(login, transport.test_connection()).await, Ok(Ok(true))) {
         return Err(Error::Network("could not reach the SMTP server"));
     }
-    transport
-        .send_raw(message.envelope(), &raw)
-        .await
-        .map_err(submission_error)?;
+    match timeout(submit, transport.send_raw(message.envelope(), &raw)).await {
+        Err(_) => return Err(Error::MaybeSent),
+        Ok(result) => result.map_err(submission_error)?,
+    };
     if !presets::is_gmail(account) {
-        let mut imap = ImapSync::login(account, password)
-            .await
-            .map_err(|_| Error::SentCopy)?;
-        imap.append_sent(store, &raw)
-            .await
-            .map_err(|_| Error::SentCopy)?;
-        // A failed LOGOUT cannot turn an already submitted and saved message into a send failure.
-        let _ = imap.logout().await;
+        let copy = async {
+            let mut imap = ImapSync::login(account, password).await?;
+            imap.append_sent(store, &raw).await?;
+            // A failed LOGOUT cannot turn an already submitted and saved message into a send failure.
+            let _ = imap.logout().await;
+            Ok::<_, Error>(())
+        };
+        match timeout(SENT_COPY_DEADLINE, copy).await {
+            Ok(Ok(())) => {}
+            _ => return Err(Error::SentCopy),
+        }
     }
     Ok(())
 }
@@ -136,7 +157,10 @@ fn submission_error(e: lettre::transport::smtp::Error) -> Error {
 }
 /// Connects and authenticates to SMTP, then quits. Sends nothing.
 pub async fn verify(account: &Account, password: &str) -> Result<()> {
-    match transport(account, password)?.test_connection().await {
+    let Ok(result) = timeout(LOGIN_DEADLINE, transport(account, password)?.test_connection()).await else {
+        return Err(Error::Network("SMTP server timed out"));
+    };
+    match result {
         Ok(true) => Ok(()),
         Err(e) if e.is_permanent() => Err(Error::Network(
             "SMTP login rejected: check the address and app password",
@@ -181,9 +205,73 @@ fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tok
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     fn account() -> Account {
         let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
         Account::new("a@gmail.com".into(), i, s).unwrap()
+    }
+
+    /// A local SMTP server that answers until `stall_at` (a command prefix, or "greeting"), then
+    /// says nothing more and keeps the connection open.
+    async fn stalling_server(stall_at: &'static str) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let (read, mut write) = socket.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    let stall = || std::future::pending::<()>();
+                    if stall_at == "greeting" {
+                        return stall().await;
+                    }
+                    write.write_all(b"220 fake\r\n").await.unwrap();
+                    let mut data = false;
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if data {
+                            if line == "." {
+                                return stall().await;
+                            }
+                            continue;
+                        }
+                        let reply: &[u8] = match line.split(' ').next().unwrap_or("").to_ascii_uppercase().as_str() {
+                            "EHLO" => b"250-fake\r\n250 AUTH PLAIN\r\n",
+                            "AUTH" => b"235 ok\r\n",
+                            "MAIL" | "RCPT" => b"250 ok\r\n",
+                            "DATA" => {
+                                data = true;
+                                b"354 go\r\n"
+                            }
+                            "QUIT" => b"221 bye\r\n",
+                            _ => b"250 ok\r\n",
+                        };
+                        write.write_all(reply).await.unwrap();
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_stalling_server_ends_in_not_sent_or_maybe_sent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("s.db")).unwrap();
+        let mail = Outgoing { to: vec!["b@example.com".into()], subject: "Hi".into(), text: "x".into(), ..Default::default() };
+        let account_on = |port| {
+            let config = crate::account::ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "a@lagom.test".into() };
+            Account::new("a@lagom.test".into(), config.clone(), config).unwrap()
+        };
+        let short = Duration::from_millis(300);
+        // Silent before the greeting: nothing was handed over.
+        let silent = account_on(stalling_server("greeting").await);
+        let e = send_within(&silent, "pw", &mail, &mut store, short, short).await.unwrap_err();
+        assert!(matches!(e, Error::Network(_)), "{e:?}");
+        // Silent after the message body: it may have been taken.
+        let after_data = account_on(stalling_server("data").await);
+        let e = send_within(&after_data, "pw", &mail, &mut store, short, short).await.unwrap_err();
+        assert!(matches!(e, Error::MaybeSent), "{e:?}");
     }
     #[test]
     fn reply_and_bcc_envelope() {
