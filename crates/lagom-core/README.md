@@ -1,6 +1,6 @@
 # Lagom mail core
 
-Local-first Rust API; the desktop app is deliberately not wired to it yet.
+Local-first Rust API shared by the desktop app and CLI.
 `Store` exposes plain structs and reads SQLite only. Run network operations on
 an executor outside the UI thread; own each `Store` on its worker thread.
 
@@ -79,7 +79,9 @@ idle CPU budgets remain unmeasured by this work.
 ## CLI
 
 ```sh
-cargo run -p lagom-cli -- add-account you@gmail.com
+cargo run -p lagom-cli -- sign-in google       # or microsoft
+cargo run -p lagom-cli -- discover you@example.com
+cargo run -p lagom-cli -- add-account you@icloud.com
 cargo run -p lagom-cli -- accounts
 cargo run -p lagom-cli -- sync                 # all accounts; or sync <UUID/email>
 cargo run -p lagom-cli -- folders
@@ -210,3 +212,24 @@ presentation of discovery/cancellation belong to the subsequent UI change.
 existing callers; OAuth accounts ignore that argument and use the memory cache
 and keychain. Only an explicit authentication rejection causes one refresh and
 retry. SMTP never retries an ambiguous submission (`MaybeSent`).
+
+## OAuth validation on 2026-11-07
+
+`cargo build --workspace` and `cargo test --workspace` pass: 99 tests pass,
+with five GreenMail tests and the search benchmark ignored by default. The
+worker's opt-in GreenMail test also skips its network work without its flag.
+OAuth tests run a local fake authorization/token server and real loopback
+callback for both providers, including PKCE/state, JWT identity, refresh-token
+rotation, expiry, concurrent stale-token rejection, invalid_grant, and dropping
+the sign-in future. Scripted IMAP/SMTP peers check XOAUTH2 bytes; discovery
+uses fake MX/ISPDB responses and exercises fallbacks and timeouts. Migration
+fixtures cover old password rows and both OAuth providers. CLI process tests
+cover discovery and missing client IDs; worker tests cover command cancellation.
+
+Core/CLI Clippy passes with `--all-targets -- -D warnings`. Workspace Clippy
+passes with `--all-targets -- -D warnings -A clippy::approx_constant`; without
+the exception it fails on the existing `main_window.rs:67` golden-ratio value.
+No OpenSSL/native-tls occurs in the core dependency tree. Existing dependency
+future-compatibility notices remain for `block` and `proc-macro-error2`.
+Real provider consent, native keychain, Windows/Linux browser launch and release
+performance were not verified; real client IDs are not available in this task.

@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use lagom_core::{
     account::{Account, Security, ServerConfig},
+    discovery::{discover, Discovery},
     imap_sync::{ImapSync, DEFAULT_LIMIT},
+    oauth::{self, Provider},
     presets,
     smtp::{self, Outgoing},
     store::{Folder, MessageSummary, Store},
@@ -46,8 +48,28 @@ impl From<Transport> for Security {
         }
     }
 }
+#[derive(Clone, Copy, ValueEnum)]
+enum SignInProvider {
+    Google,
+    Microsoft,
+}
+impl From<SignInProvider> for Provider {
+    fn from(value: SignInProvider) -> Self {
+        match value {
+            SignInProvider::Google => Self::Google,
+            SignInProvider::Microsoft => Self::Microsoft,
+        }
+    }
+}
 #[derive(Subcommand)]
 enum Command {
+    SignIn {
+        #[arg(value_enum)]
+        provider: SignInProvider,
+    },
+    Discover {
+        email: String,
+    },
     AddAccount {
         email: String,
         #[arg(long)]
@@ -214,6 +236,42 @@ async fn connection(account: &Account) -> Result<ImapSync> {
     let password = account.password()?;
     Ok(ImapSync::login(account, &password).await?)
 }
+fn browser_command(url: &str) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(not(target_os = "windows"))]
+    command.arg(url);
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd");
+        // OAuth URLs are URL-encoded; explicit quotes protect their ampersands from cmd.exe.
+        command
+            .args(["/C", "start", ""])
+            .raw_arg(format!("\"{url}\""));
+        command
+    };
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+async fn sign_in(provider: Provider) -> Result<oauth::SignedIn> {
+    let (failed, failure) = tokio::sync::oneshot::channel();
+    tokio::select! {
+        result = oauth::sign_in(provider, |url| {
+            let command = browser_command(url);
+            tokio::spawn(async move {
+                if !tokio::process::Command::from(command).status().await.is_ok_and(|s| s.success()) {
+                    let _ = failed.send(());
+                }
+            });
+        }) => Ok(result?),
+        _ = async { if failure.await.is_err() { std::future::pending::<()>().await; } } => bail!("Could not open the browser"),
+    }
+}
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -222,6 +280,41 @@ async fn main() -> Result<()> {
         None => Store::open_default()?,
     };
     match args.command {
+        Command::SignIn { provider } => {
+            let signed = sign_in(provider.into()).await?;
+            if let Err(error) = store.save_account(&signed.account) {
+                let _ = signed.account.delete_password();
+                return Err(error.into());
+            }
+            println!("Added {} ({})", clean(&signed.email), signed.account.id);
+        }
+        Command::Discover { email } => match discover(&email).await {
+            Discovery::OAuth(provider) => println!(
+                "OAuth: {}",
+                match provider {
+                    Provider::Google => "google",
+                    Provider::Microsoft => "microsoft",
+                }
+            ),
+            Discovery::Password { preset, help_url } => {
+                println!(
+                    "Password: {}\nIMAP: {}:{} {:?} ({})\nSMTP: {}:{} {:?} ({})",
+                    clean(&preset.name),
+                    preset.imap.host,
+                    preset.imap.port,
+                    preset.imap.security,
+                    clean(&preset.imap.username),
+                    preset.smtp.host,
+                    preset.smtp.port,
+                    preset.smtp.security,
+                    clean(&preset.smtp.username)
+                );
+                if let Some(url) = help_url {
+                    println!("App password: {url}");
+                }
+            }
+            Discovery::Manual => println!("Manual configuration required"),
+        },
         Command::AddAccount {
             email,
             imap,
@@ -406,6 +499,10 @@ mod tests {
     fn parser_and_terminal_output() {
         use clap::CommandFactory;
         Args::command().debug_assert();
+        assert!(Args::try_parse_from(["lagom-cli", "sign-in", "google"]).is_ok());
+        assert!(Args::try_parse_from(["lagom-cli", "sign-in", "microsoft"]).is_ok());
+        assert!(Args::try_parse_from(["lagom-cli", "sign-in", "unknown"]).is_err());
+        assert!(Args::try_parse_from(["lagom-cli", "discover", "a@example.com"]).is_ok());
         assert!(Args::try_parse_from(["lagom-cli", "list", "INBOX", "--limit", "10"]).is_ok());
         assert!(Args::try_parse_from([
             "lagom-cli",

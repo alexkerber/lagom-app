@@ -51,7 +51,7 @@ impl Provider {
             scope,
         }
     }
-    pub fn servers(self, email: &str) -> (ServerConfig, ServerConfig) {
+    fn servers(self, email: &str) -> (ServerConfig, ServerConfig) {
         let (imap, smtp) = match self {
             Self::Google => ("imap.gmail.com", "smtp.gmail.com"),
             Self::Microsoft => ("outlook.office365.com", "smtp.office365.com"),
@@ -401,7 +401,7 @@ pub(crate) fn forget(id: &str) {
         .remove(id);
 }
 /// `rejected` is the token refused by the server. Concurrent IMAP/SMTP retries share one refresh.
-pub async fn access_token(account: &Account, rejected: Option<&str>) -> Result<Zeroizing<String>> {
+pub(crate) async fn access_token(account: &Account, rejected: Option<&str>) -> Result<Zeroizing<String>> {
     let Auth::OAuth(provider) = account.auth else {
         return Err(Error::Invalid("not an OAuth account"));
     };

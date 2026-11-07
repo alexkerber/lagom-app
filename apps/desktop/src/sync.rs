@@ -172,6 +172,8 @@ async fn run(path: PathBuf, mut rx: UnboundedReceiver<Cmd>, me: UnboundedSender<
     }
 }
 
+type Flow<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
 struct Worker {
     store: Store,
     /// One logged-in session per account, reused between commands. Dropped after any error.
@@ -182,8 +184,8 @@ struct Worker {
     moved: HashMap<i64, (i64, String)>,
     /// Commands that arrived during a sync and wait for it to finish.
     deferred: VecDeque<Cmd>,
-    sign_in: Option<Pin<Box<dyn Future<Output = lagom_core::Result<SignedIn>> + Send>>>,
-    discovery: Option<Pin<Box<dyn Future<Output = (String, Discovery)> + Send>>>,
+    sign_in: Option<Flow<lagom_core::Result<SignedIn>>>,
+    discovery: Option<Flow<(String, Discovery)>>,
     me: UnboundedSender<Cmd>,
     events: UnboundedSender<Event>,
 }
