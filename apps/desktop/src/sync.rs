@@ -5,11 +5,15 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
+    future::Future,
+    pin::Pin,
     time::Duration,
 };
 
 use lagom_core::{
     account::Account,
+    oauth::{self, Provider, SignedIn},
+    discovery::{self, Discovery},
     imap_sync::{ImapSync, DEFAULT_LIMIT},
     smtp::{self, Outgoing},
     store::{FolderRole, Store},
@@ -33,6 +37,13 @@ pub enum Act {
 }
 
 pub enum Cmd {
+    /// Onboarding API; the UI consumes OpenUrl on its own thread.
+    #[allow(dead_code)]
+    SignIn(Provider),
+    #[allow(dead_code)]
+    CancelSignIn,
+    #[allow(dead_code)]
+    Discover(String),
     AddAccount(Box<Account>, Zeroizing<String>),
     RemoveAccount(String),
     /// One account, or all of them.
@@ -63,6 +74,14 @@ pub enum Delivery {
 }
 
 pub enum Event {
+    /// Forward to GPUI cx.open_url; never log this URL.
+    OpenUrl(String),
+    SignedIn(Result<String, String>),
+    SignInCancelled,
+    /// The email identifies the request, so the UI can ignore a stale result.
+    #[allow(dead_code)]
+    Discovered { email: String, discovery: Discovery },
+    ReauthRequired(String),
     /// The store changed: read it again.
     Changed,
     Sync(String, SyncState),
@@ -119,7 +138,7 @@ async fn run(path: PathBuf, mut rx: UnboundedReceiver<Cmd>, me: UnboundedSender<
             return;
         }
     };
-    let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), me, events };
+    let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
     for account in w.store.accounts().unwrap_or_default() {
         w.watch(&account);
     }
@@ -132,6 +151,18 @@ async fn run(path: PathBuf, mut rx: UnboundedReceiver<Cmd>, me: UnboundedSender<
             continue;
         }
         tokio::select! {
+            result = async {
+                match &mut w.sign_in { Some(flow) => flow.await, None => std::future::pending().await }
+            } => {
+                w.sign_in = None;
+                w.signed_in(result);
+            },
+            (email, discovery) = async {
+                match &mut w.discovery { Some(flow) => flow.await, None => std::future::pending().await }
+            } => {
+                w.discovery = None;
+                w.emit(Event::Discovered { email, discovery });
+            },
             cmd = rx.recv() => match cmd {
                 Some(cmd) => w.handle(cmd, &mut rx).await,
                 None => break,
@@ -151,6 +182,8 @@ struct Worker {
     moved: HashMap<i64, (i64, String)>,
     /// Commands that arrived during a sync and wait for it to finish.
     deferred: VecDeque<Cmd>,
+    sign_in: Option<Pin<Box<dyn Future<Output = lagom_core::Result<SignedIn>> + Send>>>,
+    discovery: Option<Pin<Box<dyn Future<Output = (String, Discovery)> + Send>>>,
     me: UnboundedSender<Cmd>,
     events: UnboundedSender<Event>,
 }
@@ -173,6 +206,22 @@ impl Worker {
     /// Commands that a running sync handles between folders, so a triage key never waits long.
     async fn quick(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::SignIn(provider) => {
+                let events = self.events.clone();
+                self.sign_in = Some(Box::pin(oauth::sign_in(provider, move |url| {
+                    let _ = events.send(Event::OpenUrl(url.into()));
+                })));
+            }
+            Cmd::CancelSignIn => {
+                self.sign_in = None;
+                self.emit(Event::SignInCancelled);
+            }
+            Cmd::Discover(email) => {
+                self.discovery = Some(Box::pin(async move {
+                    let result = discovery::discover(&email).await;
+                    (email, result)
+                }));
+            }
             Cmd::Op { op, id, act } => {
                 let error = self.op(id, act).await.err().map(|e| e.to_string());
                 self.emit(Event::Op { op, error });
@@ -189,6 +238,10 @@ impl Worker {
                     Ok(()) => (Delivery::Sent, None),
                     Err(Error::SentCopy) => (Delivery::Sent, Some(Error::SentCopy.to_string())),
                     Err(Error::MaybeSent) => (Delivery::Maybe, None),
+                    Err(Error::ReauthRequired) => {
+                        self.emit(Event::ReauthRequired(account));
+                        (Delivery::NotSent, Some(Error::ReauthRequired.to_string()))
+                    }
                     Err(e) => (Delivery::NotSent, Some(e.to_string())),
                 };
                 self.emit(Event::Sent { op, delivery, error });
@@ -196,6 +249,24 @@ impl Worker {
             }
             other => self.deferred.push_back(other),
         }
+    }
+
+    fn signed_in(&mut self, result: lagom_core::Result<SignedIn>) {
+        let signed = match result {
+            Ok(signed) => signed,
+            Err(Error::Cancelled) => { self.emit(Event::SignInCancelled); return; }
+            Err(error) => { self.emit(Event::SignedIn(Err(error.to_string()))); return; }
+        };
+        let account = signed.account;
+        if let Err(error) = self.store.save_account(&account) {
+            let _ = account.delete_password();
+            self.emit(Event::SignedIn(Err(error.to_string())));
+            return;
+        }
+        self.emit(Event::SignedIn(Ok(account.id.clone())));
+        self.emit(Event::Changed);
+        self.watch(&account);
+        self.deferred.push_back(Cmd::Sync(Some(account.id)));
     }
 
     fn account(&self, id: &str) -> lagom_core::Result<Account> {
@@ -265,6 +336,10 @@ impl Worker {
             self.emit(Event::Sync(account.id.clone(), SyncState::Syncing));
             let state = match self.sync_account(&account, inbox_only, rx).await {
                 Ok(()) => SyncState::Synced(now()),
+                Err(Error::ReauthRequired) => {
+                    self.emit(Event::ReauthRequired(account.id.clone()));
+                    SyncState::Failed(Error::ReauthRequired.to_string())
+                }
                 Err(e) => SyncState::Failed(e.to_string()),
             };
             self.emit(Event::Sync(account.id.clone(), state));
@@ -419,6 +494,30 @@ fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_and_sign_in_cancellation_commands() {
+        let path = std::env::temp_dir().join(format!("lagom-oauth-worker-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
+        worker.quick(Cmd::SignIn(Provider::Google)).await;
+        assert!(worker.sign_in.is_some());
+        worker.quick(Cmd::CancelSignIn).await;
+        assert!(worker.sign_in.is_none());
+        assert!(matches!(out.recv().await, Some(Event::SignInCancelled)));
+        worker.quick(Cmd::Discover("alice@gmail.com".into())).await;
+        let (email, result) = worker.discovery.take().unwrap().await;
+        assert_eq!(email, "alice@gmail.com");
+        assert_eq!(result, Discovery::OAuth(Provider::Google));
+        worker.signed_in(Err(Error::Cancelled));
+        assert!(matches!(out.recv().await, Some(Event::SignInCancelled)));
+        assert!(worker.store.accounts().unwrap().is_empty());
+        worker.signed_in(Err(Error::Network("test error")));
+        assert!(matches!(out.recv().await, Some(Event::SignedIn(Err(_)))));
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn a_stopped_worker_refuses_commands() {

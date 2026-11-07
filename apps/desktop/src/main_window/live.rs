@@ -193,6 +193,13 @@ impl MainWindow {
         let mut read = false;
         for event in events {
             match event {
+                Event::OpenUrl(url) => cx.open_url(&url),
+                Event::Discovered { .. } | Event::SignInCancelled => {},
+                Event::ReauthRequired(account) => {
+                    if let Some(live) = &mut self.live {
+                        live.sync.insert(account, SyncState::Failed("Sign in again".into()));
+                    }
+                }
                 Event::Changed => read = true,
                 Event::Seen(id) => {
                     if let Some(live) = &mut self.live {
@@ -219,7 +226,7 @@ impl MainWindow {
                         (_, Some(e)) => self.notify(format!("Could not undo: {e}"), cx),
                     }
                 }
-                Event::Added(result) => match result {
+                Event::Added(result) | Event::SignedIn(result) => match result {
                     Ok(id) => {
                         self.page = Page::Mail;
                         if let Some(live) = &mut self.live {

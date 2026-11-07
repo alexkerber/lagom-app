@@ -189,3 +189,24 @@ ISPDB accepts only TLS/required STARTTLS and supported password authentication;
 otherwise discovery returns `Manual`. MX uses Hickory with system DNS settings;
 quick-xml reuses the workspace XML parser for ISPDB. The [ISPDB format](https://github.com/thunderbird/autoconfig/wiki/Autoconfig-file-reference)
 defines the supported email placeholders.
+
+Desktop worker contract (`apps/desktop/src/sync.rs`):
+
+- `Cmd::SignIn(Provider)` replaces a pending sign-in; `Cmd::CancelSignIn` drops it.
+- `Event::OpenUrl(String)` must go to `cx.open_url` on the UI thread (wired in
+  `main_window/live.rs`). Do not log or persist this URL.
+- `Event::SignedIn(Result<String, String>)` returns the saved account UUID or a
+  sanitized error; `Event::SignInCancelled` also covers provider access denial.
+  Success emits `Changed`, starts IDLE, and queues a normal sync.
+- `Cmd::Discover(String)` replaces pending discovery;
+  `Event::Discovered { email, discovery }` identifies which input produced it.
+- `Event::ReauthRequired(String)` identifies an account whose refresh grant was
+  revoked. Core callers receive the distinct `Error::ReauthRequired`.
+
+The worker owns these futures, so pending sign-in/discovery does not hold up
+other commands. Network work stays off the UI thread. Onboarding buttons and
+presentation of discovery/cancellation belong to the subsequent UI change.
+`ImapSync::login` and `smtp::{send, verify}` retain their password argument for
+existing callers; OAuth accounts ignore that argument and use the memory cache
+and keychain. Only an explicit authentication rejection causes one refresh and
+retry. SMTP never retries an ambiguous submission (`MaybeSent`).
