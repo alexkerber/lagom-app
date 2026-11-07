@@ -118,9 +118,9 @@ Provider settings checked against [Google](https://developers.google.com/workspa
 [Apple](https://support.apple.com/en-ie/102525),
 [Fastmail](https://www.fastmail.help/hc/en-us/articles/1500000278342-Server-names-and-ports)
 and [Microsoft](https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com).
-Outlook.com requires OAuth2, which is deferred; its preset is present but password
-login is not expected to work. App passwords/provider IMAP access must be enabled
-where supported. The CLI does not perform web login or provision credentials.
+Google and Microsoft support browser sign-in through `oauth::sign_in`.
+Outlook password login is not expected to work. App passwords/provider IMAP
+access must be enabled where supported for password accounts.
 
 Dependencies: rusqlite/bundled supplies portable SQLite/FTS5; dirs locates app
 data; keyring uses native credential stores; zeroize clears owned secret buffers;
@@ -180,3 +180,12 @@ The same environment variables override compiled values at runtime. An empty
 runtime ID disables that provider; `oauth::available(provider)` lets the UI hide
 its button. The account's email/name come from the token endpoint's ID token;
 Microsoft falls back to `preferred_username` when `email` is absent.
+
+`discover(&str) -> Discovery` first checks known domains, then MX, then Mozilla
+ISPDB. DNS and ISPDB each have a three-second deadline and fail through to the
+next step. `Discovery::Password { preset, help_url }` includes both server
+configurations; iCloud and Fastmail also include an app-password help link.
+ISPDB accepts only TLS/required STARTTLS and supported password authentication;
+otherwise discovery returns `Manual`. MX uses Hickory with system DNS settings;
+quick-xml reuses the workspace XML parser for ISPDB. The [ISPDB format](https://github.com/thunderbird/autoconfig/wiki/Autoconfig-file-reference)
+defines the supported email placeholders.

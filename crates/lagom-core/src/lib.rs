@@ -1,5 +1,7 @@
 //! Local-first mail services. Blocking network and keychain calls belong on a worker.
 pub mod account;
+pub mod discovery;
+pub use discovery::{discover, Discovery, Preset};
 pub mod imap_sync;
 pub mod mime;
 pub mod presets;
