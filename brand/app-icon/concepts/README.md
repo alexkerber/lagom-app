@@ -19,3 +19,16 @@ The references informed hierarchy, silhouette and small-size testing; their mark
 - [Apple app icon guidance](https://developer.apple.com/design/human-interface-guidelines/app-icons): platform context for icon shape and presentation.
 
 The resulting design choices are our own interpretation of these references.
+
+## Two soft 3D studies
+
+`3d-stamp.png` develops `claude-4-stamp.svg` with a thick, genuinely scalloped paper outline, a lifted corner and a coral/white print following the bent surface. `3d-foldcheck.png` develops `claude-1-fold-check.svg` with a raised paper flap whose lower edge forms the green check.
+
+From the repository root:
+
+```sh
+/Applications/Blender.app/Contents/MacOS/Blender -b -P brand/app-icon/concepts/render-3d.py -- brand/app-icon/concepts
+rsvg-convert brand/app-icon/concepts/compare-board.svg -o brand/app-icon/concepts/compare-board.png
+```
+
+The renderer also requires `rsvg-convert` and keeps its temporary print texture under `target/icon-concepts/`. The comparison board contains all five concepts at 256, 128 and 32 px on light and dark backgrounds.
