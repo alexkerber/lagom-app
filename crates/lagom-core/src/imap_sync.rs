@@ -23,6 +23,9 @@ use tokio_rustls::{
     TlsConnector,
 };
 
+mod bounded;
+use bounded::{Bounded, MAX_LITERAL};
+
 trait Io: AsyncRead + AsyncWrite + Unpin + Send + Debug {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + Debug> Io for T {}
 type Wire = Box<dyn Io>;
@@ -60,7 +63,7 @@ async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
         .await?,
     ))
 }
-async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Wire>> {
+async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Bounded<Wire>>> {
     config.validate()?;
     let socket = net_as(
         "could not reach the IMAP server",
@@ -71,9 +74,9 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
     if config.security == Security::Plain && !socket.peer_addr()?.ip().is_loopback() {
         return Err(Error::Invalid("unencrypted peer must be loopback"));
     }
-    let client: Client<Wire> = match config.security {
+    let client: Client<Bounded<Wire>> = match config.security {
         Security::Tls => {
-            let mut client = Client::new(tls(socket, &config.host).await?);
+            let mut client = Client::new(Bounded::new(tls(socket, &config.host).await?));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
@@ -85,10 +88,10 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
                 return Err(Error::Network("IMAP greeting missing"));
             }
             net(client.run_command_and_check_ok("STARTTLS", None)).await?;
-            Client::new(tls(client.into_inner(), &config.host).await?)
+            Client::new(Bounded::new(tls(client.into_inner(), &config.host).await?))
         }
         Security::Plain => {
-            let mut client = Client::new(Box::new(socket) as Wire);
+            let mut client = Client::new(Bounded::new(Box::new(socket) as Wire));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
@@ -120,7 +123,7 @@ impl async_imap::Authenticator for Xoauth2 {
 
 pub struct ImapSync {
     account: Account,
-    session: Session<Wire>,
+    session: Session<Bounded<Wire>>,
     capabilities: Capabilities,
 }
 impl ImapSync {
@@ -445,25 +448,30 @@ impl ImapSync {
         let part = store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
         let path = section.split('.').map(|s| s.parse::<u32>().ok().filter(|n| *n > 0))
             .collect::<Option<Vec<_>>>().ok_or(Error::Invalid("invalid attachment section"))?;
-        // shortcut: buffer parts reported at up to 64 MiB; stream to disk when larger attachments are needed.
-        const MAX: usize = 64 * 1024 * 1024;
-        if part.size as usize > MAX {
+        // shortcut: buffer encoded parts up to 64 MiB; stream to disk when larger attachments are needed.
+        if part.size as usize > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
         }
+        // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
+        self.session.get_mut().remaining = Some(part.size as usize + 65536);
         let before = store.folder(message.folder)?.uidvalidity;
         let (folder, _) = self.select(store, message.folder).await?;
         if folder.uidvalidity != before {
             return Err(Error::Invalid("mailbox changed; resync before download"));
         }
-        // As with text, GreenMail's partial responses are malformed; bound octets before fetching.
         let query = format!("(UID BODY.PEEK[{section}])");
         let fetched = net(async {
-            self.session.uid_fetch(message.uid.to_string(), query).await?.try_collect::<Vec<_>>().await
+            let mut stream = self.session.uid_fetch(message.uid.to_string(), query).await?;
+            let mut found = None;
+            while let Some(fetch) = stream.try_next().await? {
+                if fetch.uid == Some(message.uid) && found.is_none() { found = Some(fetch); }
+            }
+            Ok::<_, async_imap::error::Error>(found)
         }).await?;
-        let bytes = fetched.iter().find(|f| f.uid == Some(message.uid))
-            .and_then(|f| f.section(&SectionPath::Part(path, None)))
+        self.session.get_mut().remaining = None;
+        let bytes = fetched.as_ref().and_then(|f| f.section(&SectionPath::Part(path, None)))
             .ok_or(Error::Network("attachment part missing"))?;
-        if bytes.len() > MAX {
+        if bytes.len() > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
         }
         if bytes.len() != part.size as usize {
@@ -815,6 +823,48 @@ mod protocol_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     #[tokio::test]
+    async fn understated_attachment_is_rejected_before_reading_the_literal() {
+        let (client, server) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            for response in ["", "* CAPABILITY IMAP4rev1\r\n", "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n"] {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+                let tag = line.split_whitespace().next().unwrap();
+                server.get_mut().write_all(format!("{response}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            assert!(line.contains("UID FETCH 1 (UID BODY.PEEK[1])"));
+            server.get_mut().write_all(b"* 1 FETCH (UID 1 BODY[1] {268435456}\r\n").await.unwrap();
+            // Withhold the body: rejection must not wait for, or allocate, the literal.
+            line.clear();
+            server.read_line(&mut line).await.unwrap();
+        });
+        let config = ServerConfig { host: "localhost".into(), port: 3143, security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+        store.save_account(&account).unwrap();
+        let inbox = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        store.reset_uidvalidity(inbox, 7).unwrap();
+        let message = Message { summary: crate::store::MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, ..Default::default()
+        }, ..Default::default() };
+        store.save_synced_message(&message, &[Attachment {
+            section: "1".into(), size: 1024, encoding: "binary".into(), ..Default::default()
+        }]).unwrap();
+        let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
+        let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
+        let capabilities = session.capabilities().await.unwrap();
+        let mut imap = ImapSync { account, session, capabilities };
+        let result = tokio::time::timeout(Duration::from_secs(2), imap.fetch_attachment(&mut store, id, "1")).await;
+        drop(imap);
+        server.await.unwrap();
+        assert!(result.expect("must reject the literal header without waiting for its body").is_err());
+    }
+
+    #[tokio::test]
     async fn condstore_special_use_and_uidvalidity_guard() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -873,8 +923,8 @@ mod protocol_tests {
             .save_folder(&account.id, "INBOX", Some("/"), FolderRole::Inbox)
             .unwrap();
         store.reset_uidvalidity(inbox, 7).unwrap();
-        let id = store
-            .save_message(&crate::store::Message {
+        store
+            .save_synced_message(&crate::store::Message {
                 summary: crate::store::MessageSummary {
                     account: account.id.clone(),
                     folder: inbox,
@@ -882,8 +932,9 @@ mod protocol_tests {
                     ..Default::default()
                 },
                 ..Default::default()
-            })
+            }, &[])
             .unwrap();
+        let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
         store
             .finish_sync(inbox, &[1].into_iter().collect(), 1, Some(2), Some(10))
             .unwrap();

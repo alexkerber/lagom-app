@@ -384,7 +384,7 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub(crate) fn missing_attachments(&self, folder: i64, limit: usize) -> Result<Vec<u32>> {
-        let mut stmt = self.db.prepare("SELECT uid FROM messages WHERE folder=?1 AND has_attachments AND NOT attachments_loaded ORDER BY uid DESC LIMIT ?2")?;
+        let mut stmt = self.db.prepare("SELECT uid FROM messages WHERE folder=?1 AND NOT attachments_loaded ORDER BY uid DESC LIMIT ?2")?;
         let rows = stmt.query_map(params![folder, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -584,7 +584,7 @@ mod mail_tests {
         old.save_account(&account).unwrap();
         let folder = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
         let mut message = mail(&account, folder, 1);
-        message.summary.has_attachments = true;
+        message.summary.has_attachments = false;
         let id = old.save_message(&message).unwrap();
         drop(old);
         let mut store = Store::open(&path).unwrap();

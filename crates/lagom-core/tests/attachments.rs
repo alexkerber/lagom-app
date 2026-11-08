@@ -7,15 +7,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn sync_only_fetches_text_then_downloads_selected_parts_and_guards_uidvalidity() {
-    attachment_roundtrip(false).await;
+    attachment_roundtrip(None).await;
 }
 
 #[tokio::test]
 async fn cached_messages_gain_attachment_metadata_on_sync() {
-    attachment_roundtrip(true).await;
+    attachment_roundtrip(Some(true)).await;
 }
 
-async fn attachment_roundtrip(cached: bool) {
+#[tokio::test]
+async fn cached_messages_with_false_attachment_flags_gain_metadata_on_sync() {
+    attachment_roundtrip(Some(false)).await;
+}
+
+async fn attachment_roundtrip(cached: Option<bool>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -47,7 +52,7 @@ async fn attachment_roundtrip(cached: bool) {
                 assert!(!synced);
                 assert_eq!(command, "UID FETCH 1 (UID ENVELOPE FLAGS BODYSTRUCTURE RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER]<0.262144>)");
                 let header = "Subject: Files\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n";
-                let structure = r#"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1)(("APPLICATION" "OCTET-STREAM" ("NAME" "fallback.bin") NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME" "data.bin")))("TEXT" "PLAIN" NIL NIL NIL "QUOTED-PRINTABLE" 9 1 NIL ("ATTACHMENT" ("FILENAME" "note.txt"))) "MIXED") "MIXED")"#;
+                let structure = r#"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1)(("APPLICATION" "OCTET-STREAM" ("NAME" "fallback.bin") NIL NIL "BASE64" 10 NIL ("ATTACHMENT" ("FILENAME" "data.bin")))("TEXT" "PLAIN" ("NAME" "note.txt") NIL NIL "QUOTED-PRINTABLE" 9 1) "MIXED") "MIXED")"#;
                 format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 300 BODYSTRUCTURE {structure} BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
             } else if command == "UID FETCH 1 (UID BODY.PEEK[1])" {
                 assert!(!synced);
@@ -60,7 +65,7 @@ async fn attachment_roundtrip(cached: bool) {
                 if downloads == 3 {
                     "* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAP9o)\r\n".into()
                 } else {
-                    "* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQ==)\r\n".into()
+                    "* 2 FETCH (UID 2 FLAGS ())\r\n* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQ==)\r\n* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAAAA)\r\n".into()
                 }
             } else if command == "UID FETCH 1 (UID BODY.PEEK[2.2])" {
                 assert!(synced);
@@ -82,11 +87,11 @@ async fn attachment_roundtrip(cached: bool) {
     let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
     store.save_account(&account).unwrap();
     let inbox = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
-    if cached {
+    if let Some(has_attachments) = cached {
         store.reset_uidvalidity(inbox, 7).unwrap();
         store.save_message(&lagom_core::store::Message {
             summary: lagom_core::store::MessageSummary {
-                account: account.id.clone(), folder: inbox, uid: 1, has_attachments: true, ..Default::default()
+                account: account.id.clone(), folder: inbox, uid: 1, has_attachments, ..Default::default()
             },
             ..Default::default()
         }).unwrap();
