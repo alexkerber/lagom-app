@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
     App, Context, CursorStyle, Div, ElementId, Entity, FocusHandle, FontFeatures, FontWeight, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, ScrollHandle,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, Stateful, Task, TouchPhase, Window,
 };
 use lagom_core::{account::Account, store::Store};
@@ -23,7 +23,7 @@ use crate::motion::spring;
 use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
@@ -52,6 +52,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewMessage, ctx),
         KeyBinding::new("c", NewMessage, keys),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
+        KeyBinding::new("alt-secondary-s", ToggleSidebar, ctx),
         KeyBinding::new("escape", Cancel, keys),
     ]);
 }
@@ -78,25 +79,24 @@ const GLIDE: Duration = Duration::from_millis(140);
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
 const SIDEBAR_ROW: f32 = 28.;
-const SIDEBAR_W: f32 = 220.;
-/// The list column shrinks between these widths; the reading pane takes the rest.
-const LIST_MIN: f32 = 300.;
-const LIST_MAX: f32 = 420.;
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
-/// The reading pane at the window's minimum width: room for a 56-character line of 14 pt text.
-const READING_MIN: f32 = 440.;
-/// The content panel's right margin and its two borders.
-const PANEL_INSET: f32 = 8. + 2.;
-/// The smallest window: sidebar, the narrowest list and the narrowest reading pane, plus the
-/// panel's margin and border. 600 pt tall keeps the sidebar's groups on screen.
-pub const MIN_WINDOW: (f32, f32) = (SIDEBAR_W + LIST_MIN + READING_MIN + PANEL_INSET, 600.);
+/// 600 pt tall keeps the sidebar's groups on screen.
+pub const MIN_WINDOW: (f32, f32) = (970., 600.);
 
-/// The list column for a window `viewport` pt wide: 36 % of the panel, 300 to 420 pt.
-/// A pixel width, not a relative one: GPUI measures clamped text at a narrower width first
-/// when the column is relative and a row animates, and then drops the ellipsis.
-fn list_width(viewport: f32) -> f32 {
-    (0.36 * (viewport - SIDEBAR_W - PANEL_INSET)).clamp(LIST_MIN, LIST_MAX)
+mod panes;
+use panes::{default_list, Panes, SIDEBAR_DEFAULT};
+
+#[derive(Clone, Copy)]
+enum Divider { Sidebar, List }
+
+#[derive(Clone, Copy)]
+struct Resize {
+    divider: Divider,
+    start_x: Pixels,
+    start_width: f32,
+    start_panes: Panes,
+    moved: bool,
 }
 
 fn motion() -> Animation {
@@ -198,6 +198,10 @@ pub struct MainWindow {
     window_active: bool,
     // The list column's width for this render's window size.
     list_w: f32,
+    sidebar_w: f32,
+    panes: Panes,
+    preferences_path: Option<std::path::PathBuf>,
+    resize: Option<Resize>,
     // The window title last set, so render sets it only when the list changes.
     title: SharedString,
     _appearance: gpui::Subscription,
@@ -229,6 +233,27 @@ impl MainWindow {
             Some(_) => Inbox::live(),
             None => Inbox::demo(if screen == "empty" { 0 } else { INBOX_LEN }),
         };
+        let viewport = f32::from(window.viewport_size().width);
+        // Demo mode never resolves a store path or reads/writes preferences.
+        let preferences = if demo { Ok(None) } else {
+            Store::default_path().map(|p| Some(p.with_file_name("window.json")))
+        };
+        let mut preference_problem = None;
+        let preferences_path = match preferences {
+            Ok(path) => path,
+            Err(e) => {
+                preference_problem = Some(format!("Could not locate window preferences: {e}"));
+                None
+            }
+        };
+        let panes = match preferences_path.as_ref().map(|p| Panes::load(p, viewport)).transpose() {
+            Ok(panes) => panes.unwrap_or_else(|| Panes::new(viewport)),
+            Err(e) => {
+                preference_problem = Some(format!("Could not read window preferences: {e}"));
+                Panes::new(viewport)
+            }
+        };
+        let (sidebar_w, list_w) = panes.fit(viewport);
         let mut this = Self {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             inbox,
@@ -256,12 +281,16 @@ impl MainWindow {
             glide: None,
             list_focused: false,
             window_active: false,
-            list_w: LIST_MAX,
+            list_w,
+            sidebar_w,
+            panes,
+            preferences_path,
+            resize: None,
             title: SharedString::default(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         };
-        if let Some(problem) = problem {
+        if let Some(problem) = problem.or(preference_problem) {
             this.notify(problem, cx);
         }
         if this.live.is_some() {
@@ -614,7 +643,7 @@ impl MainWindow {
         // Line deltas come from a classic wheel: no phases and no horizontal gesture to follow.
         let ScrollDelta::Pixels(d) = e.delta else { return };
         // A mouse press owns the swipe; trackpad momentum must not move or release it.
-        if self.drag.is_some() || self.overlay_open(cx) {
+        if self.drag.is_some() || self.resize.is_some() || self.overlay_open(cx) {
             return;
         }
         let before = self.swipe;
@@ -895,6 +924,103 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
 }
 
 impl MainWindow {
+    fn save_panes(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = &self.preferences_path {
+            if let Err(e) = self.panes.save(path) {
+                self.notify(format!("Could not save window preferences: {e}"), cx);
+            }
+        }
+    }
+
+    fn finish_resize(&mut self, cx: &mut Context<Self>) {
+        if let Some(resize) = self.resize.take() {
+            if resize.moved {
+                self.save_panes(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    fn resize_to(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
+        let Some(resize) = self.resize.as_mut() else { return };
+        if x == resize.start_x && !resize.moved { return; }
+        resize.moved = true;
+        self.panes = resize.start_panes;
+        let width = resize.start_width + f32::from(x - resize.start_x);
+        let viewport = f32::from(window.viewport_size().width);
+        match resize.divider {
+            Divider::Sidebar => self.panes.resize_sidebar(width, viewport),
+            Divider::List => self.panes.resize_list(width, viewport),
+        }
+        cx.notify();
+    }
+
+    fn divider(&self, divider: Divider, left: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(match divider { Divider::Sidebar => "sidebar-divider", Divider::List => "list-divider" })
+            .absolute()
+            .left(px(left))
+            .top(px(8.))
+            .bottom(px(8.))
+            .w(px(6.))
+            .occlude()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.release(false, cx);
+                let viewport = f32::from(window.viewport_size().width);
+                if e.click_count == 2 {
+                    match divider {
+                        Divider::Sidebar => {
+                            this.panes.sidebar = SIDEBAR_DEFAULT;
+                            this.panes.sidebar_hidden = false;
+                        }
+                        Divider::List => this.panes.list = default_list(viewport, this.sidebar_w),
+                    }
+                    this.resize = None;
+                    this.save_panes(cx);
+                } else {
+                    this.resize = Some(Resize {
+                        divider,
+                        start_x: e.position.x,
+                        start_width: match divider { Divider::Sidebar => this.sidebar_w, Divider::List => this.list_w },
+                        start_panes: this.panes,
+                        moved: false,
+                    });
+                }
+                cx.notify();
+            }))
+    }
+
+    /// Window listeners retain the drag when the pointer leaves the divider or the window.
+    fn resize_events(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let resizing = self.resize.is_some();
+        let on_move = cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+            if this.resize.is_some() {
+                if e.pressed_button == Some(MouseButton::Left) {
+                    this.resize_to(e.position.x, window, cx);
+                } else {
+                    this.finish_resize(cx);
+                }
+            }
+        });
+        let on_up = cx.listener(|this, e: &MouseUpEvent, window, cx| {
+            if e.button == MouseButton::Left && this.resize.is_some() {
+                this.resize_to(e.position.x, window, cx);
+                this.finish_resize(cx);
+            }
+        });
+        gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+            if resizing { window.set_window_cursor_style(CursorStyle::ResizeLeftRight); }
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                if phase.bubble() { on_move(e, window, cx); }
+            });
+            window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                if phase.bubble() { on_up(e, window, cx); }
+            });
+        }).absolute().size(px(0.))
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let heading = |label: &'static str| {
@@ -966,7 +1092,7 @@ impl MainWindow {
         let in_settings = matches!(self.page, Page::Settings(_));
 
         div()
-            .w(px(SIDEBAR_W))
+            .w(px(self.sidebar_w))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1518,7 +1644,8 @@ impl Render for MainWindow {
         self.open_current(cx);
         self.window_active = window.is_window_active();
         self.list_focused = self.window_active && self.focus.is_focused(window);
-        self.list_w = list_width(f32::from(window.viewport_size().width));
+        // A definite pixel width keeps ellipses intact during row motion and live resizing.
+        (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let title = match &self.page {
@@ -1597,16 +1724,26 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(cx) }))
-            .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) { this.release(false, cx) }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.finish_resize(cx);
+                this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
+                this.save_panes(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) {
+                this.finish_resize(cx);
+                this.release(false, cx);
+            }))
             .map(|d| exit_actions(d, cx))
             .size_full()
+            .relative()
             .flex()
             .bg(tint)
             .text_color(t.ink)
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
-            .when(!welcome, |d| d.child(self.sidebar(cx)))
+            .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.sidebar(cx)))
             .child(
                 div()
                     .flex_1()
@@ -1615,6 +1752,7 @@ impl Render for MainWindow {
                     .my(px(8.))
                     .mr(px(8.))
                     .when(welcome, |d| d.ml(px(8.)).mt(px(36.)))
+                    .when(!welcome && self.panes.sidebar_hidden && cfg!(target_os = "macos"), |d| d.mt(px(36.)))
                     .bg(t.bg)
                     .border_1()
                     .border_color(t.line)
@@ -1622,8 +1760,11 @@ impl Render for MainWindow {
                     .overflow_hidden()
                     .relative()
                     .child(panel)
-                    .children(toasts),
+                    .children(toasts)
+                    .when(matches!(self.page, Page::Mail) && !empty, |d| d.child(self.divider(Divider::List, self.list_w - 3., cx))),
             )
+            .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
+            .child(self.resize_events(cx))
             .children(self.palette.clone())
             .children(self.sending.clone())
             .children(self.compose.clone())
@@ -2115,14 +2256,6 @@ mod tests {
     }
 
     #[test]
-    fn list_width_clamps_and_leaves_the_reading_pane_its_minimum() {
-        assert_eq!(list_width(1440.), LIST_MAX);
-        assert_eq!(list_width(MIN_WINDOW.0), LIST_MIN);
-        let pane = MIN_WINDOW.0 - SIDEBAR_W - PANEL_INSET - list_width(MIN_WINDOW.0);
-        assert!(pane >= READING_MIN, "reading pane {pane}");
-    }
-
-    #[test]
     fn long_left_swipe_deletes() {
         // Left has two stages: Later past 120 px, Delete past 60 % of the row.
         assert_eq!(swipe(&[(-DELETE_THRESHOLD + 1., 0.)]).end(), Some((7, -DELETE_THRESHOLD + 1., Some(Move::Later))));
@@ -2351,6 +2484,83 @@ mod dispatch {
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
         view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    #[gpui::test]
+    fn dividers_resize_reset_collapse_and_leave_swipes_idle(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| { v.panes = Panes::new(1440.); cx.notify(); });
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        cx.run_until_parked();
+        let at = |x| gpui::point(px(x), px(200.));
+        let widths = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| (v.sidebar_w, v.list_w));
+        cx.simulate_mouse_down(at(220.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(300.), MouseButton::Left, Default::default());
+        assert_eq!(widths(cx).0, 300.);
+        cx.simulate_mouse_up(at(300.), MouseButton::Left, Default::default());
+        let list_edge = widths(cx).0 + 1. + widths(cx).1;
+        cx.simulate_mouse_down(at(list_edge), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(list_edge + 80.), MouseButton::Left, Default::default());
+        assert_eq!(widths(cx).1, 500.);
+        cx.simulate_mouse_up(at(list_edge + 80.), MouseButton::Left, Default::default());
+        assert!(view.read_with(cx, |v, _| v.resize.is_none() && v.drag.is_none() && v.swipe == Swipe::Idle));
+        let list_edge = widths(cx).0 + 1. + widths(cx).1;
+        cx.simulate_event(MouseDownEvent { position: at(list_edge), click_count: 2, ..Default::default() });
+        assert_eq!(widths(cx).1, default_list(1440., 300.));
+        cx.simulate_event(MouseDownEvent { position: at(300.), click_count: 2, ..Default::default() });
+        assert_eq!(widths(cx).0, 220.);
+        cx.simulate_mouse_down(at(220.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(100.), MouseButton::Left, Default::default());
+        assert_eq!(widths(cx).0, 0.);
+        cx.simulate_mouse_up(at(100.), MouseButton::Left, Default::default());
+        cx.simulate_keystrokes("alt-cmd-s");
+        assert_eq!(widths(cx).0, 220.);
+        cx.simulate_keystrokes("alt-cmd-s");
+        assert_eq!(widths(cx).0, 0.);
+        assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
+    }
+
+    #[gpui::test]
+    fn sidebar_collapse_restores_width_from_drag_start(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| { v.panes.sidebar = 300.; cx.notify(); });
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        cx.run_until_parked();
+        let at = |x| gpui::point(px(x), px(200.));
+        cx.simulate_mouse_down(at(300.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(140.), MouseButton::Left, Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 180.);
+        cx.simulate_mouse_move(at(119.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(at(119.), MouseButton::Left, Default::default());
+        cx.simulate_keystrokes("alt-cmd-s");
+        assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 300.);
+    }
+
+    #[gpui::test]
+    fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false };
+        // Valid JSON with trailing whitespace also detects an unnecessary save.
+        let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
+        std::fs::write(&path, &bytes).unwrap();
+        view.update(cx, |v, cx| {
+            v.panes = panes;
+            v.preferences_path = Some(path.clone());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(970.), px(900.)));
+        cx.run_until_parked();
+        let (sidebar, list) = panes.fit(970.);
+        for x in [sidebar, sidebar + 1. + list] {
+            let at = gpui::point(px(x), px(200.));
+            cx.simulate_mouse_down(at, MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(at, MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(at, MouseButton::Left, Default::default());
+            assert_eq!(view.read_with(cx, |v, _| v.panes), panes);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[gpui::test]

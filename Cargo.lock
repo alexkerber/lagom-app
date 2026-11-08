@@ -3320,6 +3320,8 @@ dependencies = [
  "gpui",
  "lagom-core",
  "pulldown-cmark",
+ "serde",
+ "serde_json",
  "tokio",
  "unicode-segmentation",
  "zeroize",
