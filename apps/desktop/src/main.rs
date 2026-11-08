@@ -5,6 +5,7 @@ mod empty_inbox;
 mod folders;
 mod mail;
 mod main_window;
+mod markdown;
 mod motion;
 mod settings;
 mod sync;
