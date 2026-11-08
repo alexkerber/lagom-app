@@ -93,6 +93,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Accounts, OS keychain app passwords and configurable provider presets.
 - [x] Migrated SQLite/WAL store, FTS5 search, paged metadata and local Later/snooze queries.
 - [x] IMAP folder discovery, bounded initial and incremental sync, flags, expunges, IDLE and mail operations.
+- [x] IMAP BODYSTRUCTURE nesting: skip text branches beyond depth 32 as attachments; reject structured responses above 40 nested lists and independently cap parser recursion at 40 (including unsolicited and fragmented FETCH, message bodies and extensions). Local imap-proto patch prevents quoted unknown attributes from bypassing the wire scanner; remove the patch when upstream bounds recursion.
 - [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.
 - [x] `lagom-cli` and disposable GreenMail integration coverage.
 - [ ] Outbox in the store: persist drafts and pending sends so quit never needs to wait or warn.

@@ -1,5 +1,7 @@
 //! async-imap provides CONDSTORE and cancellable IDLE without a dedicated polling
 //! thread; Tokio/rustls also shares the desktop's existing runtime dependencies.
+mod guard;
+use guard::Guarded;
 use crate::{
     account::{Account, Auth, Security, ServerConfig},
     mime, presets,
@@ -51,13 +53,13 @@ async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     .with_no_client_auth();
     let name = ServerName::try_from(host.to_owned())
         .map_err(|_| Error::Invalid("invalid TLS server name"))?;
-    Ok(Box::new(
+    Ok(Box::new(Guarded::new(
         net_as(
             "IMAP TLS handshake failed",
             TlsConnector::from(Arc::new(config)).connect(name, stream),
         )
         .await?,
-    ))
+    )))
 }
 async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Wire>> {
     config.validate()?;
@@ -79,15 +81,15 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
             client
         }
         Security::StartTls => {
-            let mut client = Client::new(socket);
+            let mut client = Client::new(Guarded::new(socket));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
             net(client.run_command_and_check_ok("STARTTLS", None)).await?;
-            Client::new(tls(client.into_inner(), &config.host).await?)
+            Client::new(tls(client.into_inner().inner, &config.host).await?)
         }
         Security::Plain => {
-            let mut client = Client::new(Box::new(socket) as Wire);
+            let mut client = Client::new(Box::new(Guarded::new(socket)) as Wire);
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
@@ -338,7 +340,7 @@ impl ImapSync {
             .ok_or(Error::Network("IMAP BODYSTRUCTURE missing"))?;
         let mut parts = Vec::new();
         let mut attachments = false;
-        text_parts(body, &[], 0, &mut parts, &mut attachments)?;
+        text_parts(body, &[], 0, &mut parts, &mut attachments);
         // The first text part (search, and the reading pane where HTML does not render) and the
         // first HTML part (the rendered view), in one fetch.
         // shortcut: further inline parts are not combined; combine them when needed.
@@ -620,9 +622,10 @@ fn text_parts(
     depth: usize,
     parts: &mut Vec<(Vec<u32>, bool, u32, String)>,
     attachments: &mut bool,
-) -> Result<()> {
+) {
     if depth > 32 {
-        return Err(Error::Invalid("MIME nesting exceeds 32 levels"));
+        *attachments = true;
+        return;
     }
     let common = match body {
         BodyStructure::Basic { common, .. }
@@ -636,14 +639,14 @@ fn text_parts(
         .is_some_and(|d| d.ty.eq_ignore_ascii_case("attachment"))
     {
         *attachments = true;
-        return Ok(());
+        return;
     }
     match body {
         BodyStructure::Multipart { bodies, .. } => {
             for (index, child) in bodies.iter().enumerate() {
                 let mut next = path.to_vec();
                 next.push(index as u32 + 1);
-                text_parts(child, &next, depth + 1, parts, attachments)?;
+                text_parts(child, &next, depth + 1, parts, attachments);
             }
         }
         BodyStructure::Text { other, .. }
@@ -673,11 +676,36 @@ fn text_parts(
             *attachments = true;
         }
     }
-    Ok(())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_parts_skip_excessive_nesting_and_keep_siblings() {
+        use async_imap::imap_proto::{AttributeValue, Response};
+        let text = r#"("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1)"#;
+        for depth in [32, 33, 39] {
+            let nested = format!("{}{text}{}", "(".repeat(depth - 1), " \"MIXED\")".repeat(depth - 1));
+            let raw = format!("* 1 FETCH (BODYSTRUCTURE ({nested}{text} \"MIXED\"))\r\n");
+            let (_, Response::Fetch(_, attrs)) = Response::parse(raw.as_bytes()).unwrap() else {
+                panic!("expected FETCH");
+            };
+            let AttributeValue::BodyStructure(body) = &attrs[0] else {
+                panic!("expected BODYSTRUCTURE");
+            };
+            let mut parts = Vec::new();
+            let mut attachments = false;
+            text_parts(body, &[], 0, &mut parts, &mut attachments);
+            assert_eq!(parts.len(), if depth == 32 { 2 } else { 1 });
+            assert_eq!(attachments, depth > 32);
+            assert_eq!(parts.last().unwrap().0, vec![2]);
+            if depth == 32 {
+                assert_eq!(parts[0].0, vec![1; depth]);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn xoauth2_wire_and_error_acknowledgement() {
         use base64::{Engine, engine::general_purpose::STANDARD};
