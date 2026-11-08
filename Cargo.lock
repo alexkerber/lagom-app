@@ -3506,6 +3506,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "embed-resource",
  "gpui",
  "lagom-core",
  "objc2",
@@ -3516,6 +3517,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "unicode-segmentation",
+ "windows 0.61.3",
  "wry",
  "zeroize",
 ]
