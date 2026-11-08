@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 5 {
+        if version > 7 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -76,8 +76,18 @@ impl Store {
         if version < 5 {
             db.execute_batch(include_str!("schema_v5.sql"))?;
         }
+        if version < 6 {
+            db.execute_batch(include_str!("schema_v6.sql"))?;
+        }
+        if version < 7 {
+            db.execute_batch(include_str!("schema_v7.sql"))?;
+        }
         Ok(Self { db })
     }
+    pub fn path(&self) -> &Path {
+        Path::new(self.db.path().expect("file-backed store"))
+    }
+
     pub fn save_account(&self, account: &Account) -> Result<()> {
         account.validate()?;
         self.db.execute("INSERT INTO accounts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
@@ -178,7 +188,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 5);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 7);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -571,11 +581,16 @@ mod mail_tests {
     }
     #[test]
     fn attachment_migration_roundtrip_rollback_and_cascade() {
-        use crate::attachment::Attachment;
+        for version in [4, 5, 6] {
+            attachment_migration(version);
+        }
+    }
+    fn attachment_migration(version: usize) {
+        use crate::{attachment::Attachment, outbox::Draft, smtp::Outgoing};
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("v4.db");
+        let path = temp.path().join(format!("v{version}.db"));
         let db = Connection::open(&path).unwrap();
-        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql")] {
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql")].iter().take(version) {
             db.execute_batch(schema).unwrap();
         }
         let old = Store { db };
@@ -586,9 +601,45 @@ mod mail_tests {
         let mut message = mail(&account, folder, 1);
         message.summary.has_attachments = false;
         let id = old.save_message(&message).unwrap();
+        let saved_message = old.message(id).unwrap();
+        let saved_folder = old.folder(folder).unwrap();
+        let draft = Draft { id: "draft".into(), account: account.id.clone(), text: "unfinished draft".into(), ..Default::default() };
+        let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "queued mail".into(), ..Default::default() };
+        if version >= 5 {
+            old.db.execute("INSERT INTO drafts(id,account,content) VALUES (?1,?2,?3)",
+                params![draft.id, account.id, serde_json::to_string(&draft).unwrap()]).unwrap();
+            old.db.execute("INSERT INTO outbox(id,account,content,raw,ready_at,submitted) VALUES ('queued',?1,?2,?3,1234,1)",
+                params![account.id, serde_json::to_string(&outgoing).unwrap(), b"queued MIME bytes".as_slice()]).unwrap();
+        }
+        if version == 6 {
+            old.db.execute_batch("UPDATE drafts SET revision='saved-revision';
+                UPDATE outbox SET state='failed',attempts=3,copied=1;").unwrap();
+        }
+        assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.message(id).unwrap().body_text, message.body_text);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 7);
+        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.folder(folder).unwrap(), saved_folder);
+        assert_eq!(store.message(id).unwrap(), saved_message);
+        assert_eq!(store.search(&account.id, "sqlite", 100, 10, 0).unwrap(), [saved_message.summary]);
+        if version >= 5 {
+            assert_eq!(store.drafts().unwrap(), [draft.clone()]);
+            let pending = store.pending("queued").unwrap();
+            assert_eq!(pending.mail.text, outgoing.text);
+            assert_eq!(pending.raw, b"queued MIME bytes");
+            assert!(pending.submitted);
+            assert_eq!(pending.copied, version == 6);
+            assert_eq!(pending.state, if version == 6 { "failed" } else { "ready" });
+            assert_eq!(store.db.query_row("SELECT ready_at,attempts FROM outbox", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?))).unwrap(), (1234, if version == 6 { 3 } else { 0 }));
+            let revision = store.draft_revision(&draft.id).unwrap();
+            assert!(!revision.is_empty());
+            if version == 6 { assert_eq!(revision, "saved-revision"); }
+        } else {
+            store.save_draft(&draft).unwrap();
+            assert_eq!(store.drafts().unwrap(), [draft]);
+            assert!(store.due_outbox(&account.id, i64::MAX).unwrap().is_empty());
+        }
         assert_eq!(store.missing_attachments(folder, 1).unwrap(), [1]);
         let part = Attachment { section: "2.1".into(), filename: "report.pdf".into(), mime_type: "application/pdf".into(), size: 128, encoding: "base64".into() };
         store.save_synced_message(&message, &[part.clone()]).unwrap();
@@ -634,7 +685,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            5
+            7
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -662,7 +713,7 @@ mod mail_tests {
         assert_eq!(s.folder(f).unwrap(), folder);
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 5);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 7);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

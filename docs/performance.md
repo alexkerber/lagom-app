@@ -20,7 +20,7 @@ The targets are ours, set 2026-11-06. None is measured yet.
 
 1. Local first. The UI reads only from the local store. Network never blocks a frame.
 2. Do the work once. Parse a message once, index it once, store the result.
-3. Show only what is on screen. Long lists render visible rows only (GPUI `uniform_list`).
+3. Show only what is on screen. Long lists render visible rows plus a small overscan; animated rows use spacers that track their changing heights.
 4. Idle means idle. Push sync (IMAP IDLE, Gmail and Microsoft push), no polling loops.
 5. Measure before optimising, and keep the measurement in CI.
 6. A new dependency must earn its place in startup time, memory and binary size.
@@ -37,3 +37,27 @@ Measured 2026-11-06 on macOS 27.2, Apple silicon, release build of the static ma
 | CPU in the sample | 23 % | startup, not idle |
 
 Not measured yet: start time, frame times, idle CPU.
+
+## Message list virtualisation
+
+Measured 2026-11-08 with `cargo test -p lagom ten_thousand_message_rows -- --nocapture`,
+on macOS in GPUI's headless `TestAppContext`, debug build. The fixture contains
+10,000 synthetic messages in a 1440 × 600 test window. One warm-up frame, then
+10 forced full-window frames including element construction, layout and paint.
+No native app, GPU presentation or real account is involved.
+
+| | Before (`e163ce1` + measurement test) | Virtualised |
+|---|---:|---:|
+| Row elements built at the top | 10,000 | 9 |
+| Mean full-frame time | 1,093.18 ms | 10.99 ms |
+
+The old list built empty row boxes outside its text-rendering range. The new
+list builds two spacers and visible rows with two row heights of overscan on
+each side. Off-screen selection does not enlarge that range; glide text copies
+are also bounded to it. Sparse animation height changes adjust the offsets.
+
+The test asserts a screenful of elements, checks the middle and end of the list,
+and checks the scroll extent. Companion tests cover keyboard navigation, swipe,
+wheel scrolling, resizing, folder changes, animated heights and loading the next
+200-row page from a fixture store. Timing is reported, not asserted: these debug
+measurements do not establish the release frame-time budget above.

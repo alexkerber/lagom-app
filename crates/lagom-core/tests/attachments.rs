@@ -65,7 +65,7 @@ async fn attachment_roundtrip(cached: Option<bool>) {
                 if downloads == 3 {
                     "* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAP9o)\r\n".into()
                 } else {
-                    "* 2 FETCH (UID 2 FLAGS ())\r\n* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQ==)\r\n* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAAAA)\r\n".into()
+                    "* 2 FETCH (UID 2 BODY[2.1] {4}\r\nAAAA)\r\n* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n* 1 FETCH (UID 1 BODY[2.2] {4}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQ==)\r\n* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAAAA)\r\n".into()
                 }
             } else if command == "UID FETCH 1 (UID BODY.PEEK[2.2])" {
                 assert!(synced);

@@ -47,18 +47,19 @@
 - [ ] Trash: a sidebar entry to open it and empty it. Delete only moves to an in-memory Trash now.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
 - [x] Swipe: drag a row with the mouse, same stages as the trackpad. Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
-- [x] Compose: Esc keeps the draft in memory and R brings it back; Send and ⌘⌫ end it (`feat/text-input`).
+- [x] Compose: Esc keeps the draft locally and R brings it back; Send moves it to the outbox and ⌘⌫ discards it.
 - [x] Text input: `TextInput` (single and multi-line, selection, word and line keys, clipboard, undo, IME, password mode) in compose and the palette (`feat/text-input`).
 - [ ] Text input: try by hand. Typing, an IME (Japanese, Pinyin), dead keys, mouse and double-click selection, drag past the edge, scrolling a long body, the Edit menu. Tests cover the editing model and GPUI key dispatch only.
 - [ ] Text input: caret, accent selection and focus ring are not in a screenshot yet. GPUI blurs fields in an inactive window, and the capture window was inactive.
-- [ ] Compose: save the draft to Drafts via `lagom-core`; it lives in memory now and is lost on quit.
+- [x] Compose: debounce autosave for 300 ms and write off the UI thread; revision checks preserve Send/Undo/Discard ordering; restore drafts on start and release retained drafts after account removal.
+- [ ] Compose: sync local drafts with the server-side Drafts folder.
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 - [x] Feel: hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).
 - [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.
 - [x] Selection contrast raised and the sidebar frosted denser. Real blur radius needs native code.
 - [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
 - [x] Typeface: the system font (SF Pro on macOS) is the UI default. `LAGOM_UI_FONT=inter` switches back.
-- [ ] Message list: virtualise (visible rows only) when real mail arrives; it renders every row now.
+- [x] Message list: visible rows plus two-row overscan, with animated-height spacers; integrated with persisted drafts, outbox and non-blocking quit.
 
 ## Folders: open questions
 
@@ -93,9 +94,10 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Accounts, OS keychain app passwords and configurable provider presets.
 - [x] Migrated SQLite/WAL store, FTS5 search, paged metadata and local Later/snooze queries.
 - [x] IMAP folder discovery, bounded initial and incremental sync, flags, expunges, IDLE and mail operations.
+- [x] IMAP BODYSTRUCTURE nesting: skip text branches beyond depth 32 as attachments; reject structured responses above 40 nested lists and independently cap parser recursion at 40 (including unsolicited and fragmented FETCH, message bodies and extensions). Local imap-proto patch prevents quoted unknown attributes from bypassing the wire scanner; remove the patch when upstream bounds recursion.
 - [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.
 - [x] `lagom-cli` and disposable GreenMail integration coverage.
-- [ ] Outbox in the store: persist drafts and pending sends so quit never needs to wait or warn.
+- [x] Outbox in the store: persist drafts and pending sends; retry temporary failures on sync with exponential backoff (1 min–1 h), stop permanent failures, and require deliberate retry for uncertain delivery. Failed sends offer Send again and atomic return to draft. Checkpoint SMTP and Sent APPEND separately; CLI sends leave no queue entries. Quit needs no network wait or unsent-mail warning.
 - [ ] Gmail/Microsoft OAuth2 (XOAUTH2). Outlook.com requires OAuth2; the preset alone does not enable password login.
 - [ ] JMAP.
 - [ ] Push beyond IMAP IDLE.
@@ -105,7 +107,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] HTML: mail synced before `feat/html-mail` has no stored HTML part (multipart mail kept only its text part). Refetch bodies once, or on open.
 - [ ] HTML: check on Windows (WebView2: do app scripts run with page scripts off, so links and Esc work?).
 - [ ] HTML: wide newsletters scroll sideways in a narrow pane; Apple Mail scales them to fit.
-- [x] Attachment download: BODYSTRUCTURE metadata, on-demand decoding on the worker, bounded incoming bytes, Windows-safe length-limited unique Downloads files and reveal; backfill all unclassified cached messages. Fixture regressions and GreenMail coverage. Encoded parts over 64 MiB need streaming.
+- [x] Attachment download: BODYSTRUCTURE metadata, on-demand decoding on the worker, bounded incoming bytes, Windows-safe length-limited unique Downloads files and reveal; backfill all unclassified cached messages. Attachment schema v7 follows drafts/outbox v5–v6, with data-preserving upgrade fixtures from v4, v5 and v6. FETCH selection requires both the UID and requested BODY section, including preceding FLAGS-only responses. Fixture regressions and GreenMail coverage. Encoded parts over 64 MiB need streaming.
 - [ ] Threading UI.
 - [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
 - [ ] Desktop: try by hand with a real account. Only GreenMail, tests and screenshots cover it; nobody has clicked or typed in the live window.
@@ -113,7 +115,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Outlook preset: password login will fail until OAuth2 lands; the form says so in its note only.
 - [ ] Bodies over 4 MiB are stored as headers with a "not downloaded" body; fetch on demand.
 - [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).
-- [ ] Message list virtualisation: the list reads 200 rows per page and renders them all.
+- [x] Message list virtualisation: visible rows plus overscan; height animation, selection glide, swipe, keyboard scrolling and paging covered by headless tests. Undo plus swipe keeps row heights consistent; spring-back keeps its progress across off-screen rows. 10,000-row measurement in `docs/performance.md`.
 - [ ] Store reads on the UI thread: each reload runs account-wide count queries. Codex measured about 37 ms at 100k rows (Python SQLite, not the app). Build the snapshot on the worker before large mailboxes.
 - [ ] Undo of Done or Delete on a message in Later puts it back in its folder but not on Later: the server move drops the local snooze.
 - [ ] A server MOVE that succeeds but whose follow-up folder sync fails shows as "Not moved"; the next sync shows the truth.

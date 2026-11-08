@@ -5,6 +5,9 @@ Run headless:
   Blender -b -P skymning.py -- layers [res] [samples] -> layer-bg.png, layer-envelope.png
   Blender -b -P skymning.py -- all                    -> both, 1024 px
 
+  Blender -b -P skymning.py -- icon 1024 512 B out.png  -> PUNCH variant B to out.png
+  (default variant: C2)
+
 Scene units: 1 unit = 100 px of the 1024 canvas. The plate is the 824 px macOS
 rounded square (-4.12..4.12), the camera looks down -Z, front faces point +Z.
 """
@@ -21,8 +24,52 @@ argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 MODE = argv[0] if argv else "icon"
 RES = int(argv[1]) if len(argv) > 1 else 1024
 SAMPLES = int(argv[2]) if len(argv) > 2 else 512
+VARIANT = argv[3] if len(argv) > 3 else "C2"
+OUT = argv[4] if len(argv) > 4 else None  # icon mode only; default icon-<res>.png
 
 PLATE = 4.12
+
+# Colour and light strength. "base" is the first approved look; A/B/C add punch.
+# C2 is the default.
+# Plate stops run bottom (0.0, violet) to top (1.0, blue).
+BASE = dict(
+    plate=[(0.0, "#8A60AA"), (0.25, "#6C589E"), (0.5, "#49528B"), (0.70, "#38537F"), (1.0, "#2A4068")],
+    sheen=1.0, sheen_tint="#DCD6FF",
+    glass="#ECE8F6", translucent="#E6DEEC", diffuse="#EEE8F4", translucency=0.25, rim=(0.08, 0.9),
+    glow=("#FF7A34", "#FFC6A6"), glow_strength=2.1, glow_power=1.6, spill_strength=1.6,
+    ember="#FF9C70", ember_energy=150,
+    key=3300, key_size=5.0, key_y=9.5, fill=550, exposure=-0.28,
+)
+PUNCH = {
+    "base": {},
+    # A, subtle: a touch more saturation, whiter rims, warmer core
+    "A": dict(
+        plate=[(0.0, "#9358BC"), (0.25, "#7054AA"), (0.5, "#4A5096"), (0.70, "#344E8C"), (1.0, "#223C7C")],
+        sheen=0.8, rim=(0.14, 0.95), diffuse="#F4F0FA", translucency=0.3,
+        glow=("#FF7026", "#FFC890"), glow_strength=2.5, glow_power=1.7, spill_strength=1.8, ember_energy=180,
+        key=3400, key_size=4.4, fill=520,
+    ),
+    # B, clear: rich blue-to-violet plate, crisp white glass, gold core with a falloff
+    "B": dict(
+        plate=[(0.0, "#9A50C8"), (0.25, "#7450B8"), (0.5, "#4A4EA8"), (0.70, "#304C9C"), (1.0, "#1A388C")],
+        sheen=0.6, sheen_tint="#D4D8FF", glass="#F2F0FA", diffuse="#F8F6FC", translucency=0.32,
+        rim=(0.18, 1.0),
+        glow=("#FF6A1C", "#FFBE80"), glow_strength=2.9, glow_power=2.0, spill_strength=1.9,
+        ember="#FF9050", ember_energy=210, key=3600, key_size=3.8, fill=480,
+    ),
+    # C, bold: deepest plate range, near-white glass, hottest core, deepest shadow
+    "C": dict(
+        plate=[(0.0, "#9E46D0"), (0.25, "#7846C0"), (0.5, "#484AB0"), (0.70, "#2C48A2"), (1.0, "#14348E")],
+        sheen=0.45, sheen_tint="#D0D8FF", glass="#F6F4FC", diffuse="#FAF8FE", translucency=0.35,
+        rim=(0.24, 1.0),
+        glow=("#FF6414", "#FFB46C"), glow_strength=3.4, glow_power=2.2, spill_strength=2.2,
+        ember="#FF8C44", ember_energy=260, key=3800, key_size=3.2, fill=440,
+    ),
+}
+# C2: C with a lighter, softer shadow. A bigger key placed more overhead shortens
+# the dark band under the envelope; more fill lifts what remains.
+PUNCH["C2"] = dict(PUNCH["C"], key=2500, key_size=9.0, key_y=6.0, fill=640, glow_strength=3.7)
+P = dict(BASE, **PUNCH[VARIANT])
 
 
 def lin(hexstr, a=1.0):
@@ -118,7 +165,7 @@ def plate_material(span):
     l.new(sep.outputs["Y"], mr.inputs["Value"])
     ramp = n.new("ShaderNodeValToRGB")
     el = ramp.color_ramp.elements
-    stops = [(0.0, "#8A60AA"), (0.25, "#6C589E"), (0.5, "#49528B"), (0.70, "#38537F"), (1.0, "#2A4068")]
+    stops = P["plate"]
     el[0].position, el[0].color = stops[0][0], lin(stops[0][1])
     el[1].position, el[1].color = stops[-1][0], lin(stops[-1][1])
     for pos, col in stops[1:-1]:
@@ -130,9 +177,9 @@ def plate_material(span):
     l.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = 0.92
     bsdf.inputs["Specular IOR Level"].default_value = 0.15
-    bsdf.inputs["Sheen Weight"].default_value = 1.0
+    bsdf.inputs["Sheen Weight"].default_value = P["sheen"]
     bsdf.inputs["Sheen Roughness"].default_value = 0.45
-    bsdf.inputs["Sheen Tint"].default_value = lin("#DCD6FF")
+    bsdf.inputs["Sheen Tint"].default_value = lin(P["sheen_tint"])
 
     # velvety grain: tiny noise bump
     noise = n.new("ShaderNodeTexNoise")
@@ -153,25 +200,24 @@ def glass_material():
     m, nt, out = node_mat("glass")
     n, l = nt.nodes, nt.links
     p = n.new("ShaderNodeBsdfPrincipled")
-    p.inputs["Base Color"].default_value = lin("#ECE8F6")
+    p.inputs["Base Color"].default_value = lin(P["glass"])
     p.inputs["Transmission Weight"].default_value = 1.0
     p.inputs["Roughness"].default_value = 0.45
     p.inputs["IOR"].default_value = 1.33
     p.inputs["Specular IOR Level"].default_value = 0.6
     tr = n.new("ShaderNodeBsdfTranslucent")
-    tr.inputs["Color"].default_value = lin("#E6DEEC")
+    tr.inputs["Color"].default_value = lin(P["translucent"])
     df = n.new("ShaderNodeBsdfDiffuse")
-    df.inputs["Color"].default_value = lin("#EEE8F4")
+    df.inputs["Color"].default_value = lin(P["diffuse"])
     mix1 = n.new("ShaderNodeMixShader")
-    mix1.inputs["Fac"].default_value = 0.25
+    mix1.inputs["Fac"].default_value = P["translucency"]
     l.new(p.outputs[0], mix1.inputs[1])
     l.new(tr.outputs[0], mix1.inputs[2])
     # thicker optical path at the bevels scatters more: milkier, whiter rims
     lw = n.new("ShaderNodeLayerWeight")
     lw.inputs["Blend"].default_value = 0.35
     rim = n.new("ShaderNodeMapRange")
-    rim.inputs["To Min"].default_value = 0.08
-    rim.inputs["To Max"].default_value = 0.9
+    rim.inputs["To Min"].default_value, rim.inputs["To Max"].default_value = P["rim"]
     l.new(lw.outputs["Facing"], rim.inputs["Value"])
     mix2 = n.new("ShaderNodeMixShader")
     l.new(rim.outputs["Result"], mix2.inputs["Fac"])
@@ -197,11 +243,11 @@ def glow_material(strength, radius):
     l.new(vm.outputs["Value"], inv.inputs["Value"])
     pw = n.new("ShaderNodeMath")
     pw.operation = "POWER"
-    pw.inputs[1].default_value = 1.6
+    pw.inputs[1].default_value = P["glow_power"]
     l.new(inv.outputs["Result"], pw.inputs[0])
     col = n.new("ShaderNodeValToRGB")
-    col.color_ramp.elements[0].color = lin("#FF7A34")
-    col.color_ramp.elements[1].color = lin("#FFC6A6")
+    col.color_ramp.elements[0].color = lin(P["glow"][0])
+    col.color_ramp.elements[1].color = lin(P["glow"][1])
     l.new(pw.outputs[0], col.inputs["Fac"])
     em = n.new("ShaderNodeEmission")
     em.inputs["Strength"].default_value = strength
@@ -252,7 +298,7 @@ def reset():
     sc.render.film_transparent = True
     sc.view_settings.view_transform = "Standard"
     sc.view_settings.look = "None"
-    sc.view_settings.exposure = -0.28
+    sc.view_settings.exposure = P["exposure"]
     sc.render.image_settings.file_format = "PNG"
     sc.render.image_settings.color_mode = "RGBA"
     sc.render.image_settings.color_depth = "8"
@@ -275,17 +321,17 @@ def reset():
     # soft key from above-front; it sets the contact shadow under the envelope
     key = bpy.data.lights.new("key", "AREA")
     key.shape = "DISK"
-    key.size = 5.0
-    key.energy = 3300
+    key.size = P["key_size"]
+    key.energy = P["key"]
     key.color = lin("#FFFDF8")[:3]
     ko = bpy.data.objects.new("key", key)
-    ko.location = (0, 9.5, 11.0)
+    ko.location = (0, P["key_y"], 11.0)
     ko.rotation_euler = (Vector((0, 0, 0)) - ko.location).to_track_quat("-Z", "Y").to_euler()
     sc.collection.objects.link(ko)
     # broad cool fill from the front so nothing goes dark
     fill = bpy.data.lights.new("fill", "AREA")
     fill.size = 16.0
-    fill.energy = 550
+    fill.energy = P["fill"]
     fill.color = lin("#EEF0FF")[:3]
     fo = bpy.data.objects.new("fill", fill)
     fo.location = (0, -2.0, 16.0)
@@ -318,14 +364,14 @@ def build(sc):
     glow = bpy.data.objects.new("glow", me)
     sc.collection.objects.link(glow)
     glow.location = (centre.x, centre.y, 1.17)
-    glow.data.materials.append(glow_material(2.1, 2.5))
+    glow.data.materials.append(glow_material(P["glow_strength"], 2.5))
     glow.visible_shadow = False
     objs["glow"] = glow
     # weaker spill behind the body so the lower flap and side panels warm up near the tip
     bpy.ops.mesh.primitive_circle_add(vertices=96, radius=1.0, fill_type="NGON", location=(0.0, -0.35, 0.32))
     spill = bpy.context.active_object
     spill.name = "spill"
-    spill.data.materials.append(glow_material(1.6, 1.0))  # radius in object space
+    spill.data.materials.append(glow_material(P["spill_strength"], 1.0))  # radius in object space
     spill.scale = (2.2, 1.6, 1.0)
     spill.visible_shadow = False
     spill.visible_diffuse = False  # keep it off the plate
@@ -333,8 +379,8 @@ def build(sc):
 
     pl = bpy.data.lights.new("ember", "POINT")
     pl.shadow_soft_size = 0.6
-    pl.energy = 150
-    pl.color = lin("#FF9C70")[:3]
+    pl.energy = P["ember_energy"]
+    pl.color = lin(P["ember"])[:3]
     po = bpy.data.objects.new("ember", pl)
     po.location = (0.0, -0.35, 1.16)
     # lights the inner faces only; never seen as a hot spot through the glass
@@ -375,7 +421,7 @@ def save_rgba(arr, path):
 def do_icon():
     sc = reset()
     build(sc)
-    render(os.path.join(HERE, "icon-%d.png" % RES))
+    render(OUT or os.path.join(HERE, "icon-%d.png" % RES))
 
 
 def do_layers():

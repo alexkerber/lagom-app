@@ -1,9 +1,8 @@
 //! Compose, Concept B structure (Compose on the Claude design canvas) in Concept D tokens.
 //! A reply sheet over the main window. To, Cc (on demand), Subject and Body are `TextInput`s.
-//! Esc closes and keeps the draft in memory; Send and Discard (⌘⌫) end it.
-//! shortcut: the draft lives in memory only and is lost on quit; save it to Drafts with lagom-core.
+//! Edits are saved locally; Send atomically moves the draft to the outbox.
 
-use std::{io::Read, path::{Path, PathBuf}, time::Duration};
+use std::{io::Read, rc::Rc, path::{Path, PathBuf}, time::Duration};
 
 use gpui::{
     div, ease_out_quint, prelude::*, px, relative, Animation, AnimationExt, Context, Div, Entity,
@@ -14,7 +13,7 @@ use crate::main_window::{button, mono, pressable};
 use crate::motion::spring;
 use crate::mail::recipients;
 use crate::text_input::{TextInput, TextInputEvent};
-use lagom_core::smtp::Outgoing;
+use lagom_core::{smtp::Outgoing, outbox::Draft, store::Store, account::Account};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, READING_LEADING};
 
 /// Sample reply for `LAGOM_SCREEN=compose-text`.
@@ -39,6 +38,10 @@ enum Phase {
 }
 
 pub struct Compose {
+    store: Option<(Rc<Store>, Account)>,
+    _save_delay: Option<Task<()>>,
+    _save: Option<Task<()>>,
+    save_again: bool,
     theme: Theme,
     phase: Phase,
     focus: FocusHandle,
@@ -77,7 +80,7 @@ pub enum ComposeEvent {
     /// Undo in the window: the sheet is a modal again.
     Restored,
     /// The Undo window ended: send this now.
-    Send(Box<Outgoing>),
+    Send(String),
 }
 
 impl gpui::EventEmitter<ComposeEvent> for Compose {}
@@ -98,6 +101,10 @@ impl Compose {
         let first = if reply.is_some() { &body } else { &to };
         window.focus(&first.focus_handle(cx));
         Self {
+            store: None,
+            _save_delay: None,
+            _save: None,
+            save_again: false,
             from: from.into(),
             message_id: lagom_core::smtp::message_id(from),
             reply,
@@ -120,6 +127,95 @@ impl Compose {
             _dismiss: None,
             _appearance: appearance,
             _fields: fields,
+        }
+    }
+
+    pub fn persist(&mut self, store: Rc<Store>, account: Account, cx: &mut Context<Self>) {
+        self.store = Some((store, account));
+        self.save(cx);
+    }
+
+    pub fn restore(draft: Draft, account: Account, store: Rc<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new(&account.email, &draft.to, &draft.subject, draft.reply, window, cx);
+        this.message_id = draft.id;
+        this.cc.update(cx, |input, cx| input.set_text(&draft.cc, cx));
+        this.body.update(cx, |input, cx| input.set_text(&draft.text, cx));
+        this.show_cc = !draft.cc.is_empty();
+        this.keep = true;
+        this.phase = Phase::Gone;
+        this.store = Some((store, account));
+        this.count(cx);
+        this
+    }
+
+    fn draft(&self, account: &Account, cx: &gpui::App) -> Draft {
+        Draft {
+            id: self.message_id.clone(), account: account.id.clone(),
+            to: self.to.read(cx).text().into(), cc: self.cc.read(cx).text().into(),
+            subject: self.subject.read(cx).text().into(), text: self.body.read(cx).text().into(),
+            reply: self.reply.clone(),
+        }
+    }
+
+    fn save_later(&mut self, cx: &mut Context<Self>) {
+        self._save_delay = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COUNT_DELAY).await;
+            this.update(cx, |this, cx| this.autosave(cx)).ok();
+        }));
+    }
+
+    fn autosave(&mut self, cx: &mut Context<Self>) {
+        if !(self.is_modal() || self.keep) { return; }
+        if self._save.is_some() {
+            self.save_again = true;
+            return;
+        }
+        let Some((store, account)) = &self.store else { return };
+        let draft = self.draft(account, cx);
+        let path = store.path().to_owned();
+        let revision = store.draft_revision(&self.message_id);
+        let save = cx.background_executor().spawn(async move {
+            Store::open(path)?.autosave_draft(&draft, &revision?)
+        });
+        self._save = Some(cx.spawn(async move |this, cx| {
+            let result = save.await;
+            this.update(cx, |this, cx| {
+                this._save = None;
+                let message = "Could not save draft. Check local storage and try again.";
+                if result.is_err() && (this.is_modal() || this.keep) {
+                    this.problem = Some(message);
+                    cx.notify();
+                } else if result.is_ok() && this.problem == Some(message) {
+                    this.problem = None;
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.save_again) { this.autosave(cx); }
+            }).ok();
+        }));
+    }
+
+    pub(crate) fn account_id(&self) -> Option<&str> {
+        self.store.as_ref().map(|(_, account)| account.id.as_str())
+    }
+
+    // shortcut: explicit Send/close/quit still flush synchronously; use ordered worker commands if these actions stall.
+    pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
+        self._save_delay = None;
+        self.save_again = false;
+        let Some((store, account)) = &self.store else { return true };
+        match store.save_draft(&self.draft(account, cx)) {
+            Ok(()) => {
+                if self.problem == Some("Could not save draft. Check local storage and try again.") {
+                    self.problem = None;
+                    cx.notify();
+                }
+                true
+            },
+            Err(_) => {
+                self.problem = Some("Could not save draft. Check local storage and try again.");
+                cx.notify();
+                false
+            }
         }
     }
 
@@ -233,6 +329,7 @@ impl Compose {
     }
 
     fn on_field(&mut self, field: &Entity<TextInput>, e: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(e, TextInputEvent::Changed) { self.save_later(cx); }
         match e {
             TextInputEvent::Escape => self.close(window, cx),
             // Enter in To, Cc or Subject moves on, as Tab does.
@@ -285,6 +382,15 @@ impl Compose {
             cx.notify();
             return;
         }
+        if !self.save(cx) { return; }
+        if let Some((store, account)) = &self.store {
+            let ready = chrono::Local::now().timestamp_millis() + UNDO_WINDOW.as_millis() as i64;
+            if store.enqueue(account, &mail, ready).is_err() {
+                self.problem = Some("Could not queue message. Check recipients and local storage.");
+                cx.notify();
+                return;
+            }
+        }
         self.problem = None;
         self.phase = Phase::Sent;
         self.keep = false;
@@ -302,29 +408,13 @@ impl Compose {
             .ok();
             cx.background_executor().timer(UNDO_WINDOW - SLIDE).await;
             this.update(cx, |this, cx| {
-                cx.emit(ComposeEvent::Send(Box::new(this.outgoing(cx))));
+                cx.emit(ComposeEvent::Send(this.message_id.clone()));
                 this.set(Phase::Gone, cx);
             })
             .ok();
         }));
         cx.emit(ComposeEvent::Sending);
         cx.notify();
-    }
-
-    /// The sender address the sheet shows.
-    pub fn from(&self) -> &str {
-        &self.from
-    }
-
-    /// Quit or close during the Undo window: the mail goes now instead of with the dropped timer.
-    pub fn send_now(&mut self, cx: &mut Context<Self>) -> Option<Outgoing> {
-        if self.phase != Phase::Sent {
-            return None;
-        }
-        self._dismiss = None;
-        let mail = self.outgoing(cx);
-        self.set(Phase::Gone, cx);
-        Some(mail)
     }
 
     pub fn undoable(&self) -> bool {
@@ -335,6 +425,17 @@ impl Compose {
     pub fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.phase != Phase::Sent {
             return false;
+        }
+        if let Some((store, _)) = &self.store {
+            match store.undo_send(&self.message_id) {
+                Ok(true) => {},
+                Ok(false) => return false,
+                Err(_) => {
+                    self.problem = Some("Could not undo send. Check local storage.");
+                    cx.notify();
+                    return false;
+                }
+            }
         }
         self._dismiss = None;
         self.set(Phase::Restored, cx);
@@ -350,7 +451,16 @@ impl Compose {
 
     /// The faded sheet keeps its hitboxes while Sent, so Discard must not act then.
     fn discard(&mut self, cx: &mut Context<Self>) {
+        self._save_delay = None;
+        self.save_again = false;
         if self.phase != Phase::Sent {
+            if let Some((store, _)) = &self.store {
+                if store.delete_draft(&self.message_id).is_err() {
+                    self.problem = Some("Could not delete draft. Check local storage.");
+                    cx.notify();
+                    return;
+                }
+            }
             self.keep = false;
             self.set(Phase::Gone, cx);
         }
@@ -361,6 +471,7 @@ impl Compose {
         if self.phase == Phase::Sent {
             return;
         }
+        if !self.save(cx) { return; }
         self.refocus = self.focused_field(window, cx).map(|i| self.fields()[i].focus_handle(cx));
         self.keep = true;
         self.set(Phase::Gone, cx);
@@ -534,6 +645,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
         .items_center()
         .gap(px(12.))
         .h(px(40.))
+        .max_w_full()
         .pl(px(14.))
         .pr(px(if undo.is_some() { 6. } else { 14. }))
         .bg(t.raised)
@@ -542,7 +654,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
         .rounded(px(radius::PANEL))
         .shadow_lg()
         .font_weight(FontWeight::MEDIUM)
-        .child(label)
+        .child(div().flex_1().min_w(px(0.)).line_clamp(1).text_ellipsis().child(label))
         .children(undo)
         .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
             d.opacity(ease_out_quint()(v)).relative().top(px(8. * (1. - spring(v))))
