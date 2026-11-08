@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 mkdir -p brand/app-icon/export
 mkdir -p target
 scratch=$(mktemp -d "$PWD/target/icon-export.XXXXXX")
-trap 'rm -f "$scratch"/*; rmdir "$scratch"' EXIT
+trap 'rm -rf "$scratch"' EXIT
 cat > "$scratch/export.swift" <<'SWIFT'
 import AppKit
 import ImageIO
@@ -92,7 +92,8 @@ try png(light,32,"favicon-32.png")
 try png(light,180,"apple-touch-icon-180.png")
 for size in [16,24,32,48,64,128,256] { try png(light,size,"windows-\(size).png") }
 SWIFT
-swift "$scratch/export.swift" "$scratch"
+# Keep the Swift interpreter's temp files and module cache inside the scratch folder.
+TMPDIR="$scratch" swift -module-cache-path "$scratch/module-cache" "$scratch/export.swift" "$scratch"
 # Lossless recompression keeps the source renders and duplicated platform sizes small.
 python3 - <<'PNG'
 from pathlib import Path
