@@ -1,5 +1,5 @@
 //! The window's side of real mail: store reads, worker events, optimistic moves and their undo.
-//! The UI thread only reads the store (bounded, indexed queries) and never waits on the network.
+//! The UI reads mail and commits compose edits locally; it never waits on the network.
 
 use super::*;
 
@@ -9,13 +9,11 @@ enum Op {
     Move(usize),
     /// Undo of a move: on failure only a message.
     Undo,
-    /// The sheet that sent; on failure it becomes the draft again.
-    Send(Entity<Compose>),
 }
 
 pub struct Live {
     bridge: Bridge,
-    store: Rc<Store>,
+    pub(super) store: Rc<Store>,
     pub(super) accounts: Vec<Account>,
     pub(super) current: usize,
     sync: HashMap<String, SyncState>,
@@ -47,9 +45,9 @@ fn now() -> i64 {
 pub(super) fn sent_note(delivery: Delivery, error: Option<String>) -> String {
     match (delivery, error) {
         (Delivery::Sent, None) => "Sent".into(),
-        (Delivery::Sent, Some(e)) => format!("Sent. {e}"),
-        (Delivery::Maybe, _) => "May have been sent. Check Sent before sending again. C opens the draft.".into(),
-        (Delivery::NotSent, e) => format!("Not sent: {}. C opens the draft.", e.unwrap_or_default()),
+        (Delivery::Sent, Some(e)) => format!("Sent. {e}. Retrying the Sent copy on next sync."),
+        (Delivery::Maybe, _) => "Delivery uncertain. Kept in outbox for retry; a duplicate is possible.".into(),
+        (Delivery::NotSent, e) => format!("Kept in outbox: {}. Retrying on next sync.", e.unwrap_or_default()),
     }
 }
 
@@ -116,10 +114,6 @@ impl Live {
         }))
     }
 
-    pub(super) fn sending(&self) -> bool {
-        self.ops.values().any(|op| matches!(op, Op::Send(_)))
-    }
-
     fn op(&mut self, op: Op) -> u64 {
         self.next_op += 1;
         self.ops.insert(self.next_op, op);
@@ -132,7 +126,7 @@ impl MainWindow {
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
-        if !live.ops.values().all(|op| matches!(op, Op::Send(_))) {
+        if !live.ops.is_empty() {
             live.stale = true;
             return;
         }
@@ -246,54 +240,25 @@ impl MainWindow {
                         }
                     }
                 },
-                Event::Sent { op, delivery, error } => {
+                Event::Sent { delivery, error } => {
                     read = true;
-                    let compose = match self.live.as_mut().and_then(|l| l.ops.remove(&op)) {
-                        Some(Op::Send(compose)) => Some(compose),
-                        _ => None,
-                    };
                     self.notify(sent_note(delivery, error), cx);
-                    // The text is not lost: C opens it again. A resend keeps the sheet's Message-ID;
-                    // that does not stop a duplicate, it only lets mail clients spot one.
-                    if delivery != Delivery::Sent {
-                        self.drafts.extend(compose);
-                        self.cancel_exit();
-                    }
                 }
             }
         }
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
             self.reload(cx);
         }
-        if let Some(exit) = self.exit_ready(cx) {
-            match exit {
-                Exit::Quit => cx.quit(),
-                Exit::Close => window.remove_window(),
-            }
-        }
         cx.notify();
     }
 
-    /// Quit or close waited for sends (a failed one cancelled it, so its draft stays). Sheets
-    /// sent meanwhile are still in their Undo window: they go now, and the exit waits for them.
-    pub(super) fn exit_ready(&mut self, cx: &mut Context<Self>) -> Option<Exit> {
-        let exit = self.exit?;
-        if self.hold_exit(exit, cx) {
-            return None;
-        }
-        self.cancel_exit();
-        Some(exit)
-    }
-
-    /// The worker stopped or refused a command: pending moves come back, pending sends become
-    /// drafts again, and a quit no longer waits for answers that will not come.
+    /// Pending sends remain in the outbox when the worker stops.
     pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
         let ops: Vec<_> = live.ops.drain().map(|(_, op)| op).collect();
         live.stale = false;
         for op in ops {
             match op {
-                Op::Send(compose) => self.drafts.push(compose),
                 Op::Move(id) => {
                     self.inbox.back(id);
                     if let Some((what, id, ix)) = self.inbox.revert(id) {
@@ -303,8 +268,7 @@ impl MainWindow {
                 Op::Undo => {}
             }
         }
-        self.cancel_exit();
-        self.notify("Mail stopped working. Restart Lagom; unsent mail is in drafts (C).", cx);
+        self.notify("Mail stopped working. Restart Lagom; pending sends are saved in the outbox.", cx);
     }
 
     /// The worker half of an optimistic move.
@@ -464,19 +428,26 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn send_mail(&mut self, compose: Entity<Compose>, mail: lagom_core::smtp::Outgoing, cx: &mut Context<Self>) {
-        let Some(live) = &mut self.live else { return };
-        // The account the sheet shows, not the one on screen now: the user may switch during Undo.
-        let from = compose.read(cx).from().to_string();
-        let Some(account) = live.accounts.iter().find(|a| a.email == from).map(|a| a.id.clone()) else {
-            self.drafts.push(compose);
-            self.notify("Not sent: its account is gone. C opens the draft.", cx);
-            return;
-        };
-        let op = live.op(Op::Send(compose));
-        if !live.bridge.send(Cmd::Send { op, account, mail: Box::new(mail) }) {
-            self.worker_gone(cx);
+    pub(super) fn send_mail(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        if !live.bridge.send(Cmd::Send(id)) { self.worker_gone(cx); }
+    }
+
+    pub(super) fn restore_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        let store = live.store.clone();
+        let accounts = live.accounts.clone();
+        match store.drafts() {
+            Ok(drafts) => for draft in drafts {
+                if let Some(account) = accounts.iter().find(|a| a.id == draft.account) {
+                    let compose = cx.new(|cx| Compose::restore(draft, account.clone(), store.clone(), window, cx));
+                    self.watch_compose(&compose, window, cx);
+                    self.drafts.push(compose);
+                }
+            },
+            Err(e) => self.notify(format!("Could not restore drafts: {e}"), cx),
         }
+        window.focus(&self.focus);
     }
 
     pub(super) fn add_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -573,13 +544,15 @@ mod tests {
         });
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         let (bridge, rx) = crate::sync::Bridge::detached();
-        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
         let account = Account::new("me@lagom.test".into(), config.clone(), config).unwrap();
+        let store = Rc::new(Store::open(dir.join("t.sqlite3")).unwrap());
+        store.save_account(&account).unwrap();
         let live = Live {
             bridge,
-            store: Rc::new(Store::open(dir.join("t.sqlite3")).unwrap()),
+            store,
             accounts: vec![account],
             current: 0,
             sync: HashMap::new(),
@@ -649,41 +622,95 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_stopped_worker_returns_the_mail_to_drafts(cx: &mut TestAppContext) {
+    fn a_stopped_worker_keeps_the_outbox_and_allows_quit(cx: &mut TestAppContext) {
         let (view, cx, rx) = window(cx);
         drop(rx);
         send_one(cx);
-        // Quit hands the mail over; the worker refuses it. The text is a draft again, so quit
-        // stops and asks; only a second quit while asked discards it.
-        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        assert_eq!(view.read_with(cx, |v, _| (v.drafts.len(), v.exit)), (1, None));
-        assert_eq!(toast(&view, cx), QUIT_AGAIN_UNSENT);
-        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-    }
-
-    #[gpui::test]
-    fn a_closed_event_channel_ends_the_wait(cx: &mut TestAppContext) {
-        let (view, cx, _rx) = window(cx);
-        send_one(cx);
-        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        // What the event task does when the worker's channel closes.
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
         view.update(cx, |v, cx| v.worker_gone(cx));
-        assert_eq!(view.read_with(cx, |v, _| (v.drafts.len(), v.exit, v.live.as_ref().unwrap().sending())), (1, None, false));
+        let count = view.read_with(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().len()
+        });
+        assert_eq!(count, 1);
+        assert!(view.read_with(cx, |v, _| v.drafts.is_empty()));
+        assert!(toast(&view, cx).contains("outbox"));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
     }
 
     #[gpui::test]
-    fn a_long_wait_lets_the_next_quit_go(cx: &mut TestAppContext) {
+    fn quit_does_not_wait_for_an_in_flight_send(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         send_one(cx);
-        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        cx.executor().advance_clock(EXIT_WAIT - Duration::from_secs(1));
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.exit), Some(Exit::Quit));
-        cx.executor().advance_clock(Duration::from_secs(2));
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.exit), None);
-        assert_eq!(toast(&view, cx), QUIT_AGAIN_SENDING);
-        // The second quit does not wait.
-        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        let id = view.read_with(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            let id = live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().remove(0);
+            assert!(live.store.claim_send(&id, i64::MAX).unwrap());
+            id
+        });
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.pending(&id).is_ok()));
+    }
+
+    #[gpui::test]
+    fn a_failed_local_write_keeps_the_unsaved_draft(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Keep this text");
+        view.update(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            live.store.delete_account(&live.accounts[0].id).unwrap();
+        });
+        assert!(view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(toast(&view, cx).contains("Could not save draft"));
+        assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx)), "Keep this text");
+        view.update(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            live.store.save_account(&live.accounts[0]).unwrap();
+        });
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "Keep this text");
+    }
+
+    #[gpui::test]
+    fn startup_restores_saved_edits_and_reply_headers(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, _| {
+            let id = v.inbox.current().unwrap();
+            v.inbox.mail[id].message_id = "<parent@example.com>".into();
+            v.inbox.mail[id].thread_key = "<root@example.com>".into();
+        });
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Draft **body**");
+        let original = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx));
+        assert_eq!(original.in_reply_to.as_deref(), Some("<parent@example.com>"));
+        assert!(original.references.contains(&"<root@example.com>".into()));
+        // The same turn's save has completed, without advancing a debounce timer or quitting.
+        let stored = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap());
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "Draft **body**");
+        view.update_in(cx, |v, window, cx| {
+            v.compose = None;
+            v.drafts.clear();
+            v.restore_drafts(window, cx);
+        });
+        cx.simulate_keystrokes("c");
+        assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
+        cx.simulate_keystrokes("cmd-backspace");
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+    }
+
+    #[gpui::test]
+    fn undo_returns_the_persisted_send_to_drafts(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        send_one(cx);
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().len()), 1);
+        assert!(view.read_with(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().is_empty()
+        }));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
     }
 }

@@ -7,6 +7,7 @@ pub mod mime;
 pub mod presets;
 pub mod oauth;
 pub mod smtp;
+pub mod outbox;
 pub mod store;
 pub mod tasks;
 

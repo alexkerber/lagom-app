@@ -42,6 +42,15 @@ partially consumed commands must not be reused. No automatic retry or polling.
 A failed operation may have reached the server; resync before retrying a move.
 `Error::SentCopy` means SMTP succeeded: do not submit the message again.
 
+Draft edits are stored locally, coalesced within each UI event turn. Sending commits
+an outbox row before the five-second Undo window; Undo atomically restores the
+draft. Startup restores drafts and resumes pending sends. Failed sends retain their
+error and retry on sync. An SMTP acknowledgement is checkpointed before Sent APPEND,
+so an APPEND failure retries only the copy. Quit does not wait for network work.
+A crash or lost acknowledgement between server acceptance and the local checkpoint
+can still produce duplicate delivery or Sent copies; Message-ID stays unchanged.
+One desktop worker owns the queue per store. Server-side Drafts sync is not implemented.
+
 Initial sync stores the newest 500 UIDs per folder by default; subsequent sync
 keeps cached older messages and fetches every UID beyond the saved checkpoint.
 UIDVALIDITY changes invalidate that folder's cached rows. Successful sync compares
@@ -211,7 +220,8 @@ presentation of discovery/cancellation belong to the subsequent UI change.
 `ImapSync::login` and `smtp::{send, verify}` retain their password argument for
 existing callers; OAuth accounts ignore that argument and use the memory cache
 and keychain. Only an explicit authentication rejection causes one refresh and
-retry. SMTP never retries an ambiguous submission (`MaybeSent`).
+retry. SMTP does not retry within an ambiguous submission (`MaybeSent`); the outbox
+retries it on the next sync with the same Message-ID, which can produce a duplicate.
 
 ## OAuth validation on 2026-11-07
 
