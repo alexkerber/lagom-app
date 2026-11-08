@@ -1,49 +1,11 @@
 #!/bin/bash
-# Rebuild platform assets from the layered Skymning SVG masters on macOS.
+# Rebuild platform assets from the layered Skymning Blender renders on macOS.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 mkdir -p brand/app-icon/export
 mkdir -p target
 scratch=$(mktemp -d "$PWD/target/icon-export.XXXXXX")
 trap 'rm -f "$scratch"/*; rmdir "$scratch"' EXIT
-python3 - "$scratch" <<'PYTHON'
-import copy
-import sys
-import xml.etree.ElementTree as ET
-from pathlib import Path
-
-ET.register_namespace('', 'http://www.w3.org/2000/svg')
-ns = '{http://www.w3.org/2000/svg}'
-scratch = Path(sys.argv[1])
-for variant, filename in [('light', 'icon.svg'), ('dark', 'icon-dark.svg'), ('tinted', 'icon-tinted.svg')]:
-    root = ET.parse(Path('brand/app-icon/skymning') / filename).getroot()
-    defs, *layers = list(root)
-    background, foreground = layers[:2], layers[2:]
-    assert defs.tag == ns + 'defs'
-    assert [e.get('fill') for e in background] == ['url(#plate)', 'url(#sheen)']
-    assert all(e.get('width') == '824' for e in background)
-    for e in background:
-        e.attrib.update(x='0', y='0', width='1024', height='1024', rx='0')
-    def write(name, elements):
-        output = ET.Element(root.tag, root.attrib)
-        output.extend([copy.deepcopy(defs), *copy.deepcopy(elements)])
-        ET.ElementTree(output).write(scratch / (name + '.svg'))
-    write('ios-' + variant, background + foreground)
-    if variant == 'light':
-        write('android-background', background)
-        write('foreground', foreground)
-        silhouette = [copy.deepcopy(e) for e in foreground if e.get('fill') == 'url(#glass)']
-        assert [e.tag for e in silhouette] == [ns + 'rect', ns + 'path']
-        for e in silhouette:
-            for key in ('stroke', 'stroke-opacity', 'stroke-width'):
-                e.attrib.pop(key, None)
-            e.set('fill', '#fff')
-        write('monochrome', silhouette)
-PYTHON
-rsvg-convert -o "$scratch/mac.png" brand/app-icon/skymning/icon.svg
-for asset in ios-light ios-dark ios-tinted android-background foreground monochrome; do
-    rsvg-convert -o "$scratch/$asset.png" "$scratch/$asset.svg"
-done
 cat > "$scratch/export.swift" <<'SWIFT'
 import AppKit
 import ImageIO
@@ -52,10 +14,10 @@ let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let dest = root.appendingPathComponent("brand/app-icon/export")
 let scratch = URL(fileURLWithPath: CommandLine.arguments[1])
 func source(_ name: String) -> NSImage {
-    NSImage(contentsOf: scratch.appendingPathComponent(name + ".png"))!
+    NSImage(contentsOf: root.appendingPathComponent("brand/app-icon/skymning/3d/" + name + ".png"))!
 }
-let light = source("mac")
-let subject = source("foreground")
+let light = source("icon-1024")
+let subject = source("layer-envelope")
 // Include the glow's nonzero alpha when fitting inside the circular safe zone.
 let probe = CGContext(data: nil, width: 1024, height: 1024, bitsPerComponent: 8,
     bytesPerRow: 4096, space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -72,6 +34,28 @@ assert(adaptiveScale > 0 && adaptiveScale <= 1)
 func color(_ hex: UInt32) -> NSColor {
     NSColor(srgbRed: CGFloat((hex >> 16) & 255)/255, green: CGFloat((hex >> 8) & 255)/255, blue: CGFloat(hex & 255)/255, alpha: 1)
 }
+func composite(dark: Bool) -> NSImage {
+    let context = CGContext(data: nil, width: 1024, height: 1024, bitsPerComponent: 8,
+        bytesPerRow: 4096, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    let rect = CGRect(x: 0, y: 0, width: 1024, height: 1024)
+    if dark {
+        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+            colors: [color(0x1E2238).cgColor, color(0x2A1F3C).cgColor] as CFArray,
+            locations: [0, 1])!
+        context.drawLinearGradient(gradient, start: CGPoint(x: 512, y: 1024),
+            end: CGPoint(x: 512, y: 0), options: [])
+    } else {
+        context.draw(source("layer-bg").cgImage(forProposedRect: nil, context: nil, hints: nil)!, in: rect)
+    }
+    context.draw(subject.cgImage(forProposedRect: nil, context: nil, hints: nil)!, in: rect)
+    return NSImage(cgImage: context.makeImage()!, size: NSSize(width: 1024, height: 1024))
+}
+// Preserve the render's alpha coverage while replacing its colour with white.
+for i in stride(from: 0, to: 1024 * 1024 * 4, by: 4) {
+    pixels[i] = pixels[i+3]; pixels[i+1] = pixels[i+3]; pixels[i+2] = pixels[i+3]
+}
+let silhouette = NSImage(cgImage: probe.makeImage()!, size: NSSize(width: 1024, height: 1024))
 func png(_ image: NSImage, _ size: Int, _ name: String, background: NSColor? = nil, subjectScale: CGFloat = 1) throws {
     let space = CGColorSpace(name: CGColorSpace.sRGB)!
     let alpha: CGImageAlphaInfo = background == nil ? .premultipliedLast : .noneSkipLast
@@ -95,19 +79,52 @@ for size in [16,32,128,256,512] {
     try png(light,size,"AppIcon.iconset/icon_\(size)x\(size).png")
     try png(light,size*2,"AppIcon.iconset/icon_\(size)x\(size)@2x.png")
 }
-for variant in ["light", "dark", "tinted"] {
-    try png(source("ios-" + variant),1024,"ios-" + variant + ".png",background:color(0))
-}
+try png(composite(dark: false),1024,"ios-light.png",background:color(0))
+try png(composite(dark: true),1024,"ios-dark.png",background:color(0))
+try png(silhouette,1024,"ios-tinted.png")
 try png(subject,432,"android-foreground.png",subjectScale:adaptiveScale)
-try png(source("monochrome"),432,"android-monochrome.png",subjectScale:adaptiveScale)
-try png(source("android-background"),432,"android-background.png",background:color(0))
-try png(source("ios-light"),512,"play-store-512.png",background:color(0))
+try png(silhouette,432,"android-monochrome.png",subjectScale:adaptiveScale)
+try png(source("layer-bg"),432,"android-background.png",background:color(0))
+try png(light,512,"play-store-512.png")
 try png(light,512,"lagom-512.png")
 try png(light,32,"favicon-32.png")
-try png(source("ios-light"),180,"apple-touch-icon-180.png",background:color(0))
+try png(light,180,"apple-touch-icon-180.png")
 for size in [16,24,32,48,64,128,256] { try png(light,size,"windows-\(size).png") }
 SWIFT
 swift "$scratch/export.swift" "$scratch"
+# Lossless recompression keeps the source renders and duplicated platform sizes small.
+python3 - <<'PNG'
+from pathlib import Path
+import struct
+import zlib
+
+def chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+for path in [*Path('brand/app-icon/export').rglob('*.png'),
+             *Path('brand/app-icon/skymning/3d').glob('*.png')]:
+    original = path.read_bytes()
+    assert original[:8] == b'\x89PNG\r\n\x1a\n'
+    chunks, compressed, pos = [], b'', 8
+    while pos < len(original):
+        size = struct.unpack_from('>I', original, pos)[0]
+        kind = original[pos+4:pos+8]
+        data = original[pos+8:pos+8+size]
+        assert zlib.crc32(kind + data) == struct.unpack_from('>I', original, pos+8+size)[0]
+        chunks.append((kind, data))
+        if kind == b'IDAT': compressed += data
+        pos += size + 12
+    raw = zlib.decompress(compressed)
+    packed = zlib.compress(raw, 9)
+    assert zlib.decompress(packed) == raw
+    result, written = original[:8], False
+    for kind, data in chunks:
+        if kind == b'IDAT':
+            if written: continue
+            data, written = packed, True
+        result += chunk(kind, data)
+    if len(result) < len(original): path.write_bytes(result)
+PNG
 iconutil -c icns brand/app-icon/export/AppIcon.iconset -o brand/app-icon/export/AppIcon.icns
 python3 - <<'PY'
 import struct

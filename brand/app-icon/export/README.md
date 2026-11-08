@@ -1,25 +1,25 @@
 # App icon exports
 
-Source: `../skymning/icon.svg`, with `icon-dark.svg` and `icon-tinted.svg` variants.
-Rebuild from the repository root with `bash brand/app-icon/export.sh`.
-Requires macOS, Swift/AppKit, iconutil, Python 3 and rsvg-convert (Homebrew librsvg).
-Temporary files stay under the ignored `target/` directory.
+Approved source: `../skymning/3d/icon-1024.png`, rendered by `skymning.py`.
+Rebuild exports from the repository root with `bash brand/app-icon/export.sh`.
+Requires macOS, Swift/AppKit, iconutil and Python 3. Temporary files stay under
+ignored `target/`. No Blender render is required when exporting existing layers.
+PNG data is recompressed losslessly, including source renders; pixels are unchanged.
 
-The first two SVG rectangles are the background; subsequent shapes are the
-separate envelope, shadow and glow. The exporter checks this structure before
-extracting layers. iOS light/dark/tinted, Play Store and Apple touch icons have
-opaque full-bleed backgrounds, with no baked-in rounding. macOS, Windows,
-Linux and favicon retain the rounded tile from the light master.
+macOS (`AppIcon.icns` and `AppIcon.iconset`), Windows (`lagom.ico`), Linux and
+the desktop runtime (`lagom-512.png`), favicon, Apple touch icon and Play Store
+use the approved composite, including its rounded plate and transparency.
+The website copies are also updated by the exporter.
 
-Android adaptive layers are 432 × 432: `android-background.png` contains the
-full-bleed gradient; `android-foreground.png` contains the envelope and glow.
-All visible foreground pixels fit inside the central 66% diameter circle.
-`android-monochrome.png` uses the same placement with a white envelope
-silhouette on transparency. The background gradient runs from #4A74C6 through
-#5860BC to #935FCB, with the master's subtle white sheen.
+`ios-light.png` composites `layer-envelope.png` over the full-bleed `layer-bg.png`.
+`ios-dark.png` uses the same envelope over a #1E2238 → #2A1F3C gradient.
+Both are opaque 1024 px squares without baked-in rounding.
+`ios-tinted.png` is a white silhouette derived from the envelope layer's alpha,
+on transparency, as requested; it is a tint input, not an opaque App Store icon.
 
-`AppIcon.iconset` contains 16–1024 px assets including @2x; `lagom.ico` contains
-16, 24, 32, 48, 64, 128 and 256 px images. The desktop embeds `lagom-512.png`.
-The exporter also updates the two matching assets in `site/`.
-Historical Blender and concept sources remain in `../3d/` and `../concepts/`;
-they are not inputs to this export.
+Android layers are 432 px: `android-background.png` uses the full-bleed background;
+`android-foreground.png` scales the envelope and shadow inside a central circle
+with diameter 66% of the canvas. `android-monochrome.png` uses the same placement
+and alpha coverage with white colour on transparency.
+
+The iconset covers 16–1024 px including @2x. ICO sizes: 16, 24, 32, 48, 64, 128, 256.
