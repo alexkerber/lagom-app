@@ -82,6 +82,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 
 ## Tasks
 
+- [x] Core: local task lists and tasks, mail link, CLI (feat/tasks-core)
 - [ ] Task list on the start screen. Lists "Work" and "Private", plus custom lists.
 - [ ] Turn a mail into a task in one key press. The task links back to the mail.
 - [ ] Sync tasks with the mail account (for example Google Tasks, Microsoft To Do).

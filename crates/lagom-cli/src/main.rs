@@ -8,6 +8,7 @@ use lagom_core::{
     presets,
     smtp::{self, Outgoing},
     store::{Folder, MessageSummary, Store},
+    tasks::{Task, TaskList},
 };
 use std::{
     io::{IsTerminal, Write},
@@ -63,6 +64,10 @@ impl From<SignInProvider> for Provider {
 }
 #[derive(Subcommand)]
 enum Command {
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
+    },
     SignIn {
         #[arg(value_enum)]
         provider: SignInProvider,
@@ -126,6 +131,41 @@ enum Command {
         id: i64,
         folder: String,
     },
+}
+#[derive(Subcommand)]
+enum TasksCommand {
+    Lists,
+    List {
+        list: String,
+        #[arg(long, help = "Include completed tasks")]
+        done: bool,
+    },
+    Add { list: String, title: String },
+    Done { id: i64 },
+    FromMail {
+        id: i64,
+        #[arg(long)]
+        list: Option<String>,
+    },
+}
+
+fn selected_task_list(store: &Store, selector: Option<&str>) -> Result<TaskList> {
+    let lists = store.task_lists()?;
+    let Some(selector) = selector else {
+        return lists.into_iter().next().context("No task lists");
+    };
+    if let Some(list) = lists.iter().find(|l| l.id.to_string() == selector) {
+        return Ok(list.clone());
+    }
+    let mut found = lists.into_iter().filter(|l| l.name.to_lowercase() == selector.to_lowercase());
+    let list = found.next().context("Task list missing; run tasks lists")?;
+    if found.next().is_some() {
+        bail!("Task list ambiguous; run tasks lists and use its numeric id");
+    }
+    Ok(list)
+}
+fn print_task(task: &Task) {
+    println!("{}\t{}\t{}", task.id, if task.done_at.is_some() { "x" } else { " " }, clean(&task.title));
 }
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -282,6 +322,30 @@ async fn main() -> Result<()> {
         None => Store::open_default()?,
     };
     match args.command {
+        Command::Tasks { command } => match command {
+            TasksCommand::Lists => {
+                for list in store.task_lists()? {
+                    println!("{}\t{}", list.id, clean(&list.name));
+                }
+            }
+            TasksCommand::List { list, done } => {
+                let list = selected_task_list(&store, Some(&list))?;
+                for task in store.tasks(list.id, done)? { print_task(&task); }
+            }
+            TasksCommand::Add { list, title } => {
+                let list = selected_task_list(&store, Some(&list))?;
+                print_task(&store.add_task(list.id, &title, "", None)?);
+            }
+            TasksCommand::Done { id } => {
+                store.set_done(id, true)?;
+                println!("Updated {id}");
+            }
+            TasksCommand::FromMail { id, list } => {
+                let list = selected_task_list(&store, list.as_deref())?;
+                let mail = store.message(id)?.summary;
+                print_task(&store.task_from_mail(list.id, &mail)?);
+            }
+        },
         Command::SignIn { provider } => {
             let signed = sign_in(provider.into()).await?;
             if let Err(error) = store.save_account(&signed.account) {
