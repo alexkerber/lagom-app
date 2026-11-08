@@ -51,6 +51,7 @@
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 - [x] Feel (Alex 2026-11-06: "de känns så kalla"): hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).
 - [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.
+- [x] Selection contrast raised and the sidebar frosted denser (Alex 2026-11-08). Real blur radius needs native code.
 - [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
 - [x] Typeface: the system font (SF Pro on macOS) is the UI default, chosen by Alex 2026-11-06. `LAGOM_UI_FONT=inter` switches back.
 - [ ] Message list: virtualise (visible rows only) when real mail arrives; it renders every row now.
