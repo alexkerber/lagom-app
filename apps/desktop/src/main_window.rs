@@ -1334,17 +1334,22 @@ impl MainWindow {
         // coming back change height, which uniform_list cannot lay out.
         let mut rows: Vec<AnyElement> = vec![match gliding {
             // First child, so it paints under the rows. `child_ix` counts it.
-            // The animation only asks for the next frames; this render places the highlight.
-            Some(g) => div()
-                .absolute()
-                .top(px(fill_y))
-                .left(px(LIST_PAD))
-                .right(px(LIST_PAD))
-                .h(px(ROW_H))
-                .rounded(px(radius::CONTROL))
-                .bg(sel_bg)
-                .with_animation(("glide", g.seq), Animation::new(g.dur), |el, _| el)
-                .into_any_element(),
+            Some(g) => {
+                let fill = div()
+                    .absolute()
+                    .top(px(fill_y))
+                    .left(px(LIST_PAD))
+                    .right(px(LIST_PAD))
+                    .h(px(ROW_H))
+                    .rounded(px(radius::CONTROL))
+                    .bg(sel_bg);
+                // This render places the highlight; the animation only asks for the next frame. It
+                // repeats until a render sees the glide land, so a late frame cannot end it early.
+                match landed {
+                    true => fill.into_any_element(),
+                    false => fill.with_animation(("glide", g.seq), Animation::new(g.dur).repeat(), |el, _| el).into_any_element(),
+                }
+            }
             None => div().into_any_element(),
         }];
         let dragging = self.mouse_swiping();
