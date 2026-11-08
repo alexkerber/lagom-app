@@ -359,6 +359,8 @@ impl Worker {
         if inbox_only {
             folders.truncate(1);
         }
+        // One bad folder must not keep the others from syncing.
+        let mut first = None;
         for folder in folders {
             // Triage keys pressed meanwhile run between folders.
             while let Ok(cmd) = rx.try_recv() {
@@ -367,10 +369,15 @@ impl Worker {
             let mut session = self.take(account).await?;
             let result = session.sync_folder(&mut self.store, folder.id, DEFAULT_LIMIT).await;
             self.give(&account.id, session, &result);
-            result?;
-            self.emit(Event::Changed);
+            match result {
+                Ok(()) => self.emit(Event::Changed),
+                Err(e) if e.is_account_wide() => return Err(e),
+                Err(e) => {
+                    first.get_or_insert(lagom_core::Error::Folder { folder: folder.name, source: Box::new(e) });
+                }
+            }
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {

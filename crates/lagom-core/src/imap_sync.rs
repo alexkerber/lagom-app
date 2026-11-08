@@ -162,7 +162,7 @@ impl ImapSync {
                 use async_imap::imap_proto::{MailboxDatum, Response, Status};
                 match response.parsed() {
                     Response::MailboxData(MailboxDatum::List(data)) => {
-                        if !data.name_attributes.contains(&NameAttribute::NoSelect) {
+                        if selectable(&data.name_attributes) {
                             rows.push((
                                 data.name.to_string(),
                                 data.delimiter.as_deref().map(str::to_owned),
@@ -191,7 +191,7 @@ impl ImapSync {
             })
             .await?;
             for name in &names {
-                if name.attributes().contains(&NameAttribute::NoSelect) {
+                if !selectable(name.attributes()) {
                     continue;
                 }
                 rows.push((
@@ -213,7 +213,11 @@ impl ImapSync {
             return Err(Error::Invalid("sync limit must be positive"));
         }
         for folder in self.list_folders(store).await? {
-            self.sync_folder(store, folder.id, limit).await?;
+            // Stop here: after an error this session may hold a half-read response.
+            self.sync_folder(store, folder.id, limit).await.map_err(|e| match e {
+                e if e.is_account_wide() => e,
+                e => Error::Folder { folder: folder.name, source: Box::new(e) },
+            })?;
         }
         Ok(())
     }
@@ -794,5 +798,25 @@ mod protocol_tests {
         imap.logout().await.unwrap();
         server.await.unwrap();
         assert!(log::STATIC_MAX_LEVEL < log::LevelFilter::Trace);
+    }
+}
+
+/// RFC 5258: `\NonExistent` implies `\Noselect`; Gmail sends it for `[Gmail]`.
+fn selectable(attrs: &[NameAttribute]) -> bool {
+    !attrs.iter().any(|a| match a {
+        NameAttribute::NoSelect => true,
+        NameAttribute::Extension(x) => x.eq_ignore_ascii_case("\\NonExistent"),
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod selectable_tests {
+    use super::*;
+    #[test]
+    fn nonexistent_and_noselect_are_skipped() {
+        assert!(!selectable(&[NameAttribute::Extension("\\HasChildren".into()), NameAttribute::Extension("\\NonExistent".into())]));
+        assert!(!selectable(&[NameAttribute::NoSelect]));
+        assert!(selectable(&[NameAttribute::Extension("\\HasNoChildren".into()), NameAttribute::Sent]));
     }
 }

@@ -34,5 +34,15 @@ pub enum Error {
     /// The connection broke after the message may have been handed over.
     #[error("may have been sent; check Sent before sending again")]
     MaybeSent,
+    /// Sync of this folder failed.
+    #[error("{folder}: {source}")]
+    Folder { folder: String, source: Box<Error> },
+}
+
+impl Error {
+    /// Errors that fail every folder alike, so a sync stops at the first one.
+    pub fn is_account_wide(&self) -> bool {
+        matches!(self, Error::ReauthRequired | Error::Authentication | Error::Secret | Error::Cancelled)
+    }
 }
 pub type Result<T> = std::result::Result<T, Error>;
