@@ -474,6 +474,13 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+    /// Metadata saved beyond a completed sync checkpoint, including snoozed rows.
+    pub fn messages_since(&self, folder: i64, uid: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.folder=?1 AND m.uid>?2 ORDER BY m.uid"))?;
+        let rows = stmt.query_map(params![folder, uid], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn known_uids(&self, folder: i64) -> Result<Vec<u32>> {
         let mut stmt = self
             .db
@@ -549,6 +556,26 @@ mod mail_tests {
             body_html: None,
         }
     }
+    #[test]
+    fn messages_since_uses_folder_and_uid_not_date_or_read_state() {
+        let (_temp, s, a, inbox) = setup();
+        let done = s.save_folder(&a.id, "Archive", None, FolderRole::Archive).unwrap();
+        for uid in 1..=3 {
+            s.save_message(&mail(&a, inbox, uid)).unwrap();
+            s.save_message(&mail(&a, done, uid)).unwrap();
+        }
+        let mut m = mail(&a, inbox, 3);
+        m.summary.date = 0;
+        m.summary.seen = true;
+        let id = s.save_message(&m).unwrap();
+        s.snooze(id, Some(1000)).unwrap();
+        let rows = s.messages_since(inbox, 1).unwrap();
+        assert_eq!(rows.iter().map(|m| m.uid).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(rows[1].seen);
+        assert_eq!(rows[1].snoozed_until, Some(1000));
+        assert!(s.messages_since(inbox, 3).unwrap().is_empty());
+    }
+
     #[test]
     fn insert_page_fts_and_snooze() {
         let (_temp, s, a, f) = setup();

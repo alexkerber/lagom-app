@@ -111,7 +111,10 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Threading UI.
 - [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
 - [ ] Desktop: try by hand with a real account. Only GreenMail, tests and screenshots cover it; nobody has clicked or typed in the live window.
-- [ ] Notifications for new mail.
+- [x] Notifications for new mail: macOS UserNotifications (lazy permission) and Linux D-Bus, sender/subject or batch summary, click to message/Inbox, persisted On/Off setting. First sync, UIDVALIDITY resets, read, Later and Done mail are silent. Fixture and headless tests cover selection and activation.
+- [ ] Notifications: Linux cold-start activation via a desktop entry; current click callbacks need Lagom running.
+- [ ] Notifications: Windows toast app identity and activation registration with the installer; no Windows notifications yet.
+- [ ] Notifications: verify permission, delivery and clicks in a macOS app bundle and on a Linux notification server; no GUI acceptance run yet.
 - [ ] Outlook preset: password login will fail until OAuth2 lands; the form says so in its note only.
 - [ ] Bodies over 4 MiB are stored as headers with a "not downloaded" body; fetch on demand.
 - [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).

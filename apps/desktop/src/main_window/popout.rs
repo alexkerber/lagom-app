@@ -147,7 +147,7 @@ impl MainWindow {
     pub(super) fn open_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.inbox.current() else { return };
         // The body and HTML come from the store here; the new window only reads them.
-        self.open_current(cx);
+        self.open_current(true, cx);
         self.popouts.retain(|(_, h)| h.read(cx).is_ok());
         if let Some((_, h)) = self.popouts.iter().find(|p| p.0 == id) {
             h.update(cx, |_, window, _| window.activate_window()).ok();

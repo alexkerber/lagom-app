@@ -86,6 +86,7 @@ pub enum Event {
     ReauthRequired(String),
     /// The store changed: read it again.
     Changed,
+    NewMail(Vec<lagom_core::store::MessageSummary>),
     Sync(String, SyncState),
     Op { op: u64, error: Option<String> },
     /// The new account's id, or why it could not connect.
@@ -369,11 +370,21 @@ impl Worker {
             while let Ok(cmd) = rx.try_recv() {
                 self.quick(cmd).await;
             }
+            let before = self.store.folder(folder.id)?;
             let mut session = self.take(account).await?;
             let result = session.sync_folder(&mut self.store, folder.id, DEFAULT_LIMIT).await;
             self.give(&account.id, session, &result);
             match result {
-                Ok(()) => self.emit(Event::Changed),
+                Ok(()) => {
+                    if folder.role == FolderRole::Inbox {
+                        match self.new_mail(&before) {
+                            Ok(messages) if !messages.is_empty() => self.emit(Event::NewMail(messages)),
+                            Ok(_) => {},
+                            Err(e) => { first.get_or_insert(e); },
+                        }
+                    }
+                    self.emit(Event::Changed);
+                },
                 Err(e) if e.is_account_wide() => return Err(e),
                 Err(e) => {
                     first.get_or_insert(lagom_core::Error::Folder { folder: folder.name, source: Box::new(e) });
@@ -381,6 +392,12 @@ impl Worker {
             }
         }
         first.map_or(Ok(()), Err)
+    }
+
+    fn new_mail(&self, before: &lagom_core::store::Folder) -> lagom_core::Result<Vec<lagom_core::store::MessageSummary>> {
+        let after = self.store.folder(before.id)?;
+        let messages = self.store.messages_since(before.id, before.last_uid)?;
+        Ok(crate::notifications::new_mail(before, &after, messages))
     }
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {

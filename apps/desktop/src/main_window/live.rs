@@ -27,10 +27,13 @@ pub struct Live {
     pub(super) pin: Option<i64>,
     /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
     want: Option<i64>,
+    notification_target: Option<crate::notifications::Target>,
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
     _events: Task<()>,
+    notifications: crate::notifications::Service,
+    _notification_events: Task<()>,
     /// Wakes the window when the next message on Later is due.
     due: Option<(i64, Task<()>)>,
 }
@@ -65,6 +68,12 @@ impl Live {
         let path = Store::default_path()?;
         let store = Store::open(&path)?;
         let (bridge, mut events) = crate::sync::start(path);
+        let (notifications, mut notification_events) = crate::notifications::Service::new();
+        let notification_task = cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = notification_events.recv().await {
+                if this.update_in(cx, |this, window, cx| this.on_notification(event, window, cx)).is_err() { return; }
+            }
+        });
         let task = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.recv().await {
                 // Several changes in a row read the store once.
@@ -92,8 +101,11 @@ impl Live {
             limit: PAGE,
             pin: None,
             want: None,
+            notification_target: None,
             seen: HashSet::new(),
             _events: task,
+            notifications,
+            _notification_events: notification_task,
             due: None,
         })
     }
@@ -195,6 +207,7 @@ impl MainWindow {
 
     fn on_events(&mut self, events: Vec<Event>, window: &mut Window, cx: &mut Context<Self>) {
         let mut read = false;
+        let mut new_mail = Vec::new();
         for event in events {
             match event {
                 Event::OpenUrl(url) => cx.open_url(&url),
@@ -209,6 +222,7 @@ impl MainWindow {
                     }
                 }
                 Event::Changed => read = true,
+                Event::NewMail(messages) => new_mail.extend(messages),
                 Event::Seen(id) => {
                     if let Some(live) = &mut self.live {
                         live.seen.remove(&id);
@@ -262,6 +276,72 @@ impl MainWindow {
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
             self.reload(cx);
         }
+        if let Some(target) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.notification_target.take()) {
+            self.open_notification(target, window, cx);
+        }
+        self.notify_mail(new_mail, window);
+        cx.notify();
+    }
+
+    fn notify_mail(&mut self, messages: Vec<lagom_core::store::MessageSummary>, window: &Window) {
+        if !self.panes.notifications || window.is_window_active() { return; }
+        let Some(live) = &mut self.live else { return };
+        // Permission prompts and queued UI events can outlive a read, snooze or move.
+        let mut ids = HashSet::new();
+        let messages = messages.into_iter().filter_map(|m| {
+            if !ids.insert(m.id) || live.seen.contains(&m.id) || live.ops.values().any(|op| {
+                matches!(op, Op::Move(id) if self.inbox.mail.get(*id).is_some_and(|row| row.store == Some(m.id)))
+            }) { return None; }
+            let current = live.store.message(m.id).ok()?.summary;
+            let folder = live.store.folder(current.folder).ok()?;
+            (!current.seen && current.snoozed_until.is_none() && folder.role == lagom_core::store::FolderRole::Inbox)
+                .then_some(current)
+        }).collect();
+        live.notifications.show(messages);
+    }
+
+    fn on_notification(&mut self, event: crate::notifications::Event, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::notifications::Event;
+        match event {
+            Event::Authorized(allowed) => {
+                let pending = self.live.as_mut().map(|l| l.notifications.authorized(allowed)).unwrap_or_default();
+                self.notify_mail(pending, window);
+            }
+            Event::Failed(error) => self.notify(error, cx),
+            Event::Clicked(target) => self.open_notification(target, window, cx),
+        }
+    }
+
+    fn open_notification(&mut self, target: crate::notifications::Target, window: &mut Window, cx: &mut Context<Self>) {
+        cx.activate(true);
+        window.activate_window();
+        let Some(live) = &mut self.live else { return };
+        if !live.ops.is_empty() {
+            live.notification_target = Some(target);
+            return;
+        }
+        let Some(account) = live.accounts.iter().position(|a| a.id == target.account) else { return };
+        live.current = account;
+        live.limit = PAGE;
+        live.pin = None;
+        live.want = None;
+        self.page = Page::Mail;
+        self.palette = None;
+        // Preserve an unfinished compose sheet as a draft while revealing the clicked mail.
+        if let Some(compose) = self.compose.take() {
+            self.drafts.push(compose);
+        }
+        self.close_popouts(None, cx);
+        self.inbox = Inbox::live();
+        self.release(false, cx);
+        self.clear_motion();
+        self.reload(cx);
+        if let Some(id) = target.message {
+            if self.live.as_ref().is_some_and(|l| l.store.message(id).is_ok_and(|m| m.summary.account == target.account)) {
+                self.open_found(id, cx);
+            }
+        }
+        window.focus(&self.focus);
         cx.notify();
     }
 
@@ -340,7 +420,7 @@ impl MainWindow {
 
     /// Before a frame: the selected message's body comes from the store once, and opening a
     /// message marks it read. One indexed row read, only when the selection changed.
-    pub(super) fn open_current(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn open_current(&mut self, mark_read: bool, cx: &mut Context<Self>) {
         let Some(id) = self.inbox.current() else { return };
         let Some(live) = &mut self.live else { return };
         let Some(store) = self.inbox.mail[id].store else { return };
@@ -354,7 +434,7 @@ impl MainWindow {
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
         }
-        if self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
+        if mark_read && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
             self.inbox.mail[id].unread = false;
             if let Some(f) = self.inbox.open {
                 self.inbox.folders[f].unread = self.inbox.folders[f].unread.saturating_sub(1);
@@ -620,13 +700,141 @@ mod tests {
             limit: PAGE,
             pin: None,
             want: None,
+            notification_target: None,
             seen: HashSet::new(),
             failed: Vec::new(),
             _events: Task::ready(()),
+            notifications: crate::notifications::Service::new().0,
+            _notification_events: Task::ready(()),
             due: None,
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    fn incoming(v: &MainWindow, uid: u32) -> lagom_core::store::MessageSummary {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let live = v.live.as_ref().unwrap();
+        let a = live.account().unwrap();
+        let folder = live.store.save_folder(&a.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let summary = MessageSummary { account: a.id.clone(), folder, uid, date: uid as i64, ..Default::default() };
+        let id = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
+        live.store.message(id).unwrap().summary
+    }
+
+    #[gpui::test]
+    fn notifications_respect_focus_setting_and_changes_while_permission_waits(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let (service, mut events) = crate::notifications::Service::new();
+        let m = view.update(cx, |v, _| {
+            v.live.as_mut().unwrap().notifications = service;
+            incoming(v, 1)
+        });
+        view.update_in(cx, |_, window, _| window.activate_window());
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            assert!(window.is_window_active());
+            v.on_events(vec![Event::NewMail(vec![m.clone()])], window, cx);
+        });
+        assert!(events.try_recv().is_err());
+        cx.deactivate_window();
+        view.update_in(cx, |v, window, cx| {
+            v.toggle_notifications(cx);
+            assert!(!v.panes.notifications);
+            v.on_events(vec![Event::NewMail(vec![m.clone()])], window, cx);
+        });
+        assert!(events.try_recv().is_err());
+        view.update_in(cx, |v, window, cx| {
+            v.toggle_notifications(cx);
+            v.on_events(vec![Event::NewMail(vec![m.clone()])], window, cx);
+        });
+        assert!(matches!(events.try_recv(), Ok(crate::notifications::Event::Authorized(true))));
+        view.update_in(cx, |v, window, cx| {
+            v.live.as_ref().unwrap().store.snooze(m.id, Some(i64::MAX)).unwrap();
+            v.on_notification(crate::notifications::Event::Authorized(true), window, cx);
+            assert_eq!(v.live.as_ref().unwrap().notifications.posted_count(), 0);
+        });
+        // A later new message uses the existing authorization, without another prompt.
+        view.update_in(cx, |v, window, cx| {
+            let m = incoming(v, 2);
+            v.on_events(vec![Event::NewMail(vec![m])], window, cx);
+            assert_eq!(v.live.as_ref().unwrap().notifications.posted_count(), 1);
+            v.on_notification(crate::notifications::Event::Failed("fixture notification error"), window, cx);
+        });
+        assert!(events.try_recv().is_err());
+        assert!(toast(&view, cx).contains("fixture notification error"));
+    }
+
+    #[gpui::test]
+    fn inactive_inbox_does_not_mark_new_mail_read(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        cx.deactivate_window();
+        let id = view.update(cx, |v, cx| {
+            let id = incoming(v, 1).id;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            id
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.inbox.mail[v.inbox.current().unwrap()].unread));
+        assert!(rx.try_recv().is_err());
+        view.update_in(cx, |_, window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(matches!(rx.try_recv(), Ok(Cmd::MarkSeen(read)) if read == id));
+    }
+
+    #[gpui::test]
+    fn notification_click_switches_account_pins_old_message_and_summary_opens_inbox(cx: &mut TestAppContext) {
+        use crate::notifications::Target;
+        let (view, cx, _rx) = window(cx);
+        let target = view.update(cx, |v, cx| {
+            let live = v.live.as_mut().unwrap();
+            let a = live.accounts[0].clone();
+            let second = Account::new("other@example.test".into(), a.imap, a.smtp).unwrap();
+            live.store.save_account(&second).unwrap();
+            live.accounts.push(second.clone());
+            live.current = 1;
+            let first = incoming(v, 1).id;
+            for uid in 2..=210 { incoming(v, uid); }
+            v.live.as_mut().unwrap().current = 0;
+            v.open_settings(cx);
+            Target { account: second.id, message: Some(first) }
+        });
+        view.update_in(cx, |v, window, cx| {
+            v.on_notification(crate::notifications::Event::Clicked(target.clone()), window, cx);
+            assert!(matches!(v.page, Page::Mail));
+            assert_eq!(v.live.as_ref().unwrap().current, 1);
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, target.message);
+            assert_eq!(v.live.as_ref().unwrap().pin, target.message);
+            v.on_notification(crate::notifications::Event::Clicked(Target { message: None, ..target }), window, cx);
+            assert!(v.inbox.open.is_none());
+            assert!(v.live.as_ref().unwrap().pin.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn notification_click_waits_for_pending_moves_and_preserves_compose(cx: &mut TestAppContext) {
+        use crate::notifications::Target;
+        let (view, cx, _rx) = window(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Unfinished fixture draft");
+        let target = view.update(cx, |v, _| {
+            let m = incoming(v, 1);
+            v.live.as_mut().unwrap().ops.insert(1, Op::Undo);
+            Target { account: m.account, message: Some(m.id) }
+        });
+        view.update_in(cx, |v, window, cx| {
+            v.on_notification(crate::notifications::Event::Clicked(target.clone()), window, cx);
+            assert!(v.live.as_ref().unwrap().notification_target.is_some());
+            assert!(v.compose.is_some());
+            v.on_events(vec![Event::Op { op: 1, error: None }], window, cx);
+            assert!(v.live.as_ref().unwrap().notification_target.is_none());
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, target.message);
+            assert!(v.compose.is_none());
+            assert_eq!(v.drafts.len(), 1);
+            assert_eq!(v.drafts[0].read(cx).body_text(cx), "Unfinished fixture draft");
+            assert!(!v.hold_exit(cx));
+        });
     }
 
     #[gpui::test]

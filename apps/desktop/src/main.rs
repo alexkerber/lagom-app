@@ -10,6 +10,7 @@ mod main_window;
 mod markdown;
 mod motion;
 mod settings;
+mod notifications;
 mod sync;
 #[cfg(target_os = "macos")]
 mod menus;
