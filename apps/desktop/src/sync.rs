@@ -370,19 +370,9 @@ impl Worker {
             while let Ok(cmd) = rx.try_recv() {
                 self.quick(cmd).await;
             }
-            let before = self.store.folder(folder.id)?;
-            let mut session = self.take(account).await?;
-            let result = session.sync_folder(&mut self.store, folder.id, DEFAULT_LIMIT).await;
-            self.give(&account.id, session, &result);
+            let result = self.sync_folder(account, folder.id).await;
             match result {
                 Ok(()) => {
-                    if folder.role == FolderRole::Inbox {
-                        match self.new_mail(&before) {
-                            Ok(messages) if !messages.is_empty() => self.emit(Event::NewMail(messages)),
-                            Ok(_) => {},
-                            Err(e) => { first.get_or_insert(e); },
-                        }
-                    }
                     self.emit(Event::Changed);
                 },
                 Err(e) if e.is_account_wide() => return Err(e),
@@ -394,10 +384,22 @@ impl Worker {
         first.map_or(Ok(()), Err)
     }
 
-    fn new_mail(&self, before: &lagom_core::store::Folder) -> lagom_core::Result<Vec<lagom_core::store::MessageSummary>> {
+    async fn sync_folder(&mut self, account: &Account, folder: i64) -> lagom_core::Result<()> {
+        let before = self.store.folder(folder)?;
+        let mut session = self.take(account).await?;
+        let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
+        self.give(&account.id, session, &result);
+        result?;
+        self.notify_new_mail(&before)
+    }
+
+    fn notify_new_mail(&self, before: &lagom_core::store::Folder) -> lagom_core::Result<()> {
+        if before.role != FolderRole::Inbox { return Ok(()); }
         let after = self.store.folder(before.id)?;
         let messages = self.store.messages_since(before.id, before.last_uid)?;
-        Ok(crate::notifications::new_mail(before, &after, messages))
+        let messages = crate::notifications::new_mail(before, &after, messages);
+        if !messages.is_empty() { self.emit(Event::NewMail(messages)); }
+        Ok(())
     }
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {
@@ -407,6 +409,7 @@ impl Worker {
         }
         let message = self.store.message(id)?.summary;
         let account = self.account(&message.account)?;
+        let before: Vec<_> = self.store.folders(&account.id, now())?.into_iter().filter(|f| f.role == FolderRole::Inbox).collect();
         let mut session = self.take(&account).await?;
         let store = &mut self.store;
         let result = async {
@@ -439,10 +442,12 @@ impl Worker {
         }
         .await;
         self.give(&account.id, session, &result);
+        // A move can finish the Inbox sync before a later folder fails.
+        let notified = before.iter().try_for_each(|folder| self.notify_new_mail(folder));
         if let Some(target) = result?.filter(|_| !message.message_id.is_empty()) {
             follow(&mut self.moved, id, message.folder, &message.message_id, target);
         }
-        Ok(())
+        notified
     }
 
     /// The current store id of a message the UI knew as `id`. The core drops a moved row; the
@@ -452,10 +457,7 @@ impl Worker {
         let Some((folder, message_id)) = self.moved.get(&id).cloned() else { return Ok(id) };
         if self.store.find_message(folder, &message_id)?.is_none() {
             let account = self.account(&self.store.folder(folder)?.account)?;
-            let mut session = self.take(&account).await?;
-            let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
-            self.give(&account.id, session, &result);
-            result?;
+            self.sync_folder(&account, folder).await?;
         }
         self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
     }
@@ -754,3 +756,7 @@ mod greenmail {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+#[path = "sync/notification_tests.rs"]
+mod notification_tests;

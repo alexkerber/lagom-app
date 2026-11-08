@@ -69,7 +69,13 @@ impl Service {
     pub fn show(&mut self, messages: Vec<MessageSummary>) {
         if messages.is_empty() { return; }
         if self.authorized {
-            if let Some(notice) = notice(&messages) { self.platform.show(notice); }
+            let mut accounts = std::collections::BTreeMap::<_, Vec<_>>::new();
+            for message in messages {
+                accounts.entry(message.account.clone()).or_default().push(message);
+            }
+            for messages in accounts.values() {
+                if let Some(notice) = notice(messages) { self.platform.show(notice); }
+            }
         } else if !self.requested || !self.pending.is_empty() {
             self.pending.extend(messages);
             if !self.requested {
@@ -169,6 +175,27 @@ mod tests {
         assert!(events.try_recv().is_err());
         assert_eq!(service.platform.notices.borrow().len(), 2);
     }
+    #[test]
+    fn pending_permission_groups_notifications_by_account() {
+        let (mut service, _) = Service::new();
+        service.show(vec![message(11)]);
+        let mut other = message(12);
+        other.account = "other".into();
+        let mut third = other.clone();
+        third.id = 13;
+        service.show(vec![other, third]);
+        let pending = service.authorized(true);
+        service.show(pending);
+        let notices = service.platform.notices.borrow();
+        assert_eq!(notices.len(), 2);
+        let first = notices.iter().find(|n| n.target.account == "fixture").unwrap();
+        assert_eq!(first.body, "Subject");
+        assert_eq!(first.target.message, Some(11));
+        let other = notices.iter().find(|n| n.target.account == "other").unwrap();
+        assert_eq!(other.body, "2 new messages");
+        assert_eq!(other.target.message, None);
+    }
+
     #[test]
     fn denied_permission_discards_pending_mail_without_prompting_again() {
         let (mut service, mut events) = Service::new();

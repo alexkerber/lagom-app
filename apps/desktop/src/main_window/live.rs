@@ -292,7 +292,7 @@ impl MainWindow {
             if !ids.insert(m.id) || live.seen.contains(&m.id) || live.ops.values().any(|op| {
                 matches!(op, Op::Move(id) if self.inbox.mail.get(*id).is_some_and(|row| row.store == Some(m.id)))
             }) { return None; }
-            let current = live.store.message(m.id).ok()?.summary;
+            let current = live.store.message_summary(m.id).ok()?;
             let folder = live.store.folder(current.folder).ok()?;
             (!current.seen && current.snoozed_until.is_none() && folder.role == lagom_core::store::FolderRole::Inbox)
                 .then_some(current)

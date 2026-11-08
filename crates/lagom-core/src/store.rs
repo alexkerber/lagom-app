@@ -398,6 +398,9 @@ impl Store {
         let rows = stmt.query_map(params![folder, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+    pub fn message_summary(&self, id: i64) -> Result<MessageSummary> {
+        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.id=?1"), [id], summary_row).optional()?.ok_or(Error::NotFound)
+    }
     pub fn message(&self, id: i64) -> Result<Message> {
         self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(18)?,body_html:r.get(19)? })).optional()?.ok_or(Error::NotFound)
     }
@@ -556,6 +559,24 @@ mod mail_tests {
             body_html: None,
         }
     }
+    #[test]
+    fn message_summary_revalidates_metadata_without_reading_bodies() {
+        let (_temp, s, a, inbox) = setup();
+        let id = s.save_message(&mail(&a, inbox, 1)).unwrap();
+        let mut expected = s.message(id).unwrap().summary;
+        // Invalid body types make accidental body decoding fail deterministically.
+        s.db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [id]).unwrap();
+        assert!(s.message(id).is_err());
+        assert_eq!(s.message_summary(id).unwrap(), expected);
+        s.set_flags(inbox, 1, true, false).unwrap();
+        s.snooze(id, Some(1000)).unwrap();
+        expected.seen = true;
+        expected.snoozed_until = Some(1000);
+        assert_eq!(s.message_summary(id).unwrap(), expected);
+        s.delete_message(id).unwrap();
+        assert!(matches!(s.message_summary(id), Err(Error::NotFound)));
+    }
+
     #[test]
     fn messages_since_uses_folder_and_uid_not_date_or_read_state() {
         let (_temp, s, a, inbox) = setup();
