@@ -181,7 +181,7 @@ async fn bounded_initial_sync_multipart_and_idle() {
         );
         external.append("INBOX", None, None, raw).await.unwrap();
     }
-    let raw=b"From: Alice <alice@example.com>\r\nSubject: Multipart\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>H=E4lsning</p>\r\n--x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=a.pdf\r\n\r\nAttachment bytes must not be fetched\r\n--x--\r\n";
+    let raw=b"From: Alice <alice@example.com>\r\nSubject: Multipart\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: multipart/alternative; boundary=y\r\n\r\n--y\r\nContent-Type: text/plain\r\n\r\n[Image] Plain part\r\n--y\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<style>p{color:red}</style><p>H=E4lsning</p>\r\n--y--\r\n--x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=a.pdf\r\n\r\nAttachment bytes must not be fetched\r\n--x--\r\n";
     external.append("INBOX", None, None, raw).await.unwrap();
     let mut imap = ImapSync::login(&account, "test").await.unwrap();
     imap.sync(&mut store, 2).await.unwrap();
@@ -192,8 +192,10 @@ async fn bounded_initial_sync_multipart_and_idle() {
     let mime = messages.iter().find(|m| m.subject == "Multipart").unwrap();
     assert!(mime.has_attachments);
     let body = store.message(mime.id).unwrap();
-    assert!(body.body_text.contains("Hälsning"));
-    assert!(body.body_html.is_some());
+    // Both parts of multipart/alternative; the snippet comes from the HTML.
+    assert!(body.body_text.contains("Plain part"));
+    assert!(body.body_html.unwrap().contains("Hälsning"));
+    assert_eq!(mime.snippet, "Hälsning");
     assert!(!body.body_text.contains("Attachment bytes"));
     let idle = ImapSync::login(&account, "test").await.unwrap();
     let change = async {

@@ -7,7 +7,7 @@ use crate::{
     Error, Result,
 };
 use async_imap::{
-    imap_proto::{BodyStructure, MessageSection, SectionPath},
+    imap_proto::{BodyStructure, ContentEncoding, SectionPath},
     types::{Capabilities, Fetch, Flag, NameAttribute},
     Client, Session,
 };
@@ -356,7 +356,7 @@ impl ImapSync {
             let query = if picks[0].0.is_empty() {
                 "(UID BODY.PEEK[TEXT])".to_owned()
             } else {
-                let items: Vec<String> = picks.iter().map(|p| section(&p.0)).map(|s| format!("BODY.PEEK[{s}.MIME] BODY.PEEK[{s}]")).collect();
+                let items: Vec<String> = picks.iter().map(|p| format!("BODY.PEEK[{}]", section(&p.0))).collect();
                 format!("(UID {})", items.join(" "))
             };
             let bodies = net(async {
@@ -372,13 +372,8 @@ impl ImapSync {
             };
             message = mime::parse(header)?;
             let mut total = 0;
-            for (path, html, _) in picks.iter().copied() {
-                let headers = if path.is_empty() {
-                    header
-                } else {
-                    body.section(&SectionPath::Part(path.clone(), Some(MessageSection::Mime)))
-                        .ok_or(Error::Network("MIME part headers missing"))?
-                };
+            for (path, html, _, part_headers) in picks.iter().copied() {
+                let headers = if path.is_empty() { header } else { part_headers.as_bytes() };
                 let text = if path.is_empty() {
                     body.text()
                 } else {
@@ -623,7 +618,7 @@ fn text_parts(
     body: &BodyStructure<'_>,
     path: &[u32],
     depth: usize,
-    parts: &mut Vec<(Vec<u32>, bool, u32)>,
+    parts: &mut Vec<(Vec<u32>, bool, u32, String)>,
     attachments: &mut bool,
 ) -> Result<()> {
     if depth > 32 {
@@ -655,10 +650,23 @@ fn text_parts(
             if common.ty.subtype.eq_ignore_ascii_case("plain")
                 || common.ty.subtype.eq_ignore_ascii_case("html") =>
         {
+            // The part's headers from BODYSTRUCTURE: some servers answer `n.m.MIME` with the
+            // parent's headers. Server strings lose CR and LF so they stay one header each.
+            let clean = |v: &str| v.replace(['\r', '\n', '"', '\\'], "");
+            let params: String = common.ty.params.iter().flatten().map(|(k, v)| format!("; {}=\"{}\"", clean(k), clean(v))).collect();
+            let encoding = match &other.transfer_encoding {
+                ContentEncoding::SevenBit => "7bit".into(),
+                ContentEncoding::EightBit => "8bit".into(),
+                ContentEncoding::Binary => "binary".into(),
+                ContentEncoding::Base64 => "base64".into(),
+                ContentEncoding::QuotedPrintable => "quoted-printable".into(),
+                ContentEncoding::Other(e) => clean(e),
+            };
             parts.push((
                 path.to_vec(),
                 !common.ty.subtype.eq_ignore_ascii_case("plain"),
                 other.octets,
+                format!("Content-Type: text/{}{params}\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n", clean(&common.ty.subtype)),
             ));
         }
         _ => {
