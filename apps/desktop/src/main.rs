@@ -43,6 +43,7 @@ impl AssetSource for Assets {
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "icons/link.svg" => include_bytes!("../assets/icons/link.svg"),
             "icons/pop-out.svg" => include_bytes!("../assets/icons/pop-out.svg"),
+            "app-icon.png" => include_bytes!("../../../brand/app-icon/export/lagom-512.png"),
             "icons/list-bullets.svg" => include_bytes!("../assets/icons/list-bullets.svg"),
             "icons/list-numbers.svg" => include_bytes!("../assets/icons/list-numbers.svg"),
             "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
