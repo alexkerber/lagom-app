@@ -9,6 +9,7 @@ enum Op {
     Move(usize),
     /// Undo of a move: on failure only a message.
     Undo,
+    CreateFolder { account: String, name: String },
 }
 
 pub struct Live {
@@ -124,6 +125,43 @@ impl Live {
 }
 
 impl MainWindow {
+    pub(super) fn validate_folder_name(&self, name: &str) -> Result<(), String> {
+        let local = self.inbox.folders.iter().filter(|f| !f.gone).map(|f| f.full.as_str());
+        if let Some(live) = &self.live {
+            let account = live.account().ok_or("Add an account before creating folders")?;
+            let server = live.store.folders(&account.id, now()).map_err(|e| e.to_string())?;
+            if server.is_empty() {
+                return Err("Sync folders before creating a folder".into());
+            }
+            folders::validate_name(name, server.iter().filter_map(|f| f.delimiter.as_deref()), server.iter().map(|f| f.name.as_str()).chain(local))
+        } else {
+            folders::validate_name(name, std::iter::once("/"), local)
+        }.map_err(str::to_string)
+    }
+
+    pub(super) fn create_folder(&mut self, name: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        self.validate_folder_name(name)?;
+        self.toast = None;
+        self.inbox.create_folder(name);
+        self.all_folders = true;
+        self.folder_scroll.scroll_to_bottom();
+        if let Some(live) = &mut self.live {
+            let account = live.account().unwrap().id.clone();
+            let op = live.op(Op::CreateFolder { account: account.clone(), name: name.into() });
+            if !live.bridge.send(Cmd::CreateFolder { op, account, name: name.into() }) {
+                self.worker_gone(cx);
+            }
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    fn folder_failed(&mut self, account: &str, name: &str) {
+        if self.live.as_ref().and_then(Live::account).is_some_and(|a| a.id == account) {
+            self.inbox.remove_pending_folder(name);
+        }
+    }
+
     /// Reads the store for the account and list on screen. Waits while moves are in flight, so
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
@@ -224,6 +262,10 @@ impl MainWindow {
                     let Some(done) = self.live.as_mut().and_then(|l| l.ops.remove(&op)) else { continue };
                     match (done, error) {
                         (_, None) => {}
+                        (Op::CreateFolder { account, name }, Some(e)) => {
+                            self.folder_failed(&account, &name);
+                            self.notify(format!("Could not create folder: {e}"), cx);
+                        }
                         (Op::Move(id), Some(e)) => {
                             self.inbox.back(id);
                             if let Some((what, id, ix)) = self.inbox.revert(id) {
@@ -279,6 +321,7 @@ impl MainWindow {
                     }
                 }
                 Op::Undo => {}
+                Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
         self.notify("Mail stopped working. Restart Lagom; pending sends are saved in the outbox.", cx);
@@ -388,6 +431,7 @@ impl MainWindow {
             return;
         }
         live.current = ix;
+        self.folder_name = None;
         live.limit = PAGE;
         live.pin = None;
         // Folder indices belong to one account; history does too.
@@ -602,12 +646,13 @@ mod tests {
         });
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         let (bridge, rx) = crate::sync::Bridge::detached();
-        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}-{}", std::process::id(), std::thread::current().id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
         let account = Account::new("me@lagom.test".into(), config.clone(), config).unwrap();
         let store = Rc::new(Store::open(dir.join("t.sqlite3")).unwrap());
         store.save_account(&account).unwrap();
+        store.save_folder(&account.id, "INBOX", Some("/"), lagom_core::store::FolderRole::Inbox).unwrap();
         let live = Live {
             bridge,
             store,
@@ -627,6 +672,130 @@ mod tests {
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn folder_creation_waits_for_the_accounts_namespace(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let live = v.live.as_mut().unwrap();
+            let mut account = live.accounts[0].clone();
+            account.id = "unlisted-account".into();
+            live.store.save_account(&account).unwrap();
+            live.accounts.push(account.clone());
+            v.switch_account(1, cx);
+            let n = v.inbox.folders.len();
+            assert_eq!(v.create_folder("Parent/Child", cx), Err("Sync folders before creating a folder".into()));
+            assert_eq!(v.inbox.folders.len(), n);
+            assert!(rx.try_recv().is_err());
+            assert!(v.live.as_ref().unwrap().ops.is_empty());
+            v.live.as_ref().unwrap().store.save_folder(&account.id, "INBOX", None, lagom_core::store::FolderRole::Inbox).unwrap();
+            v.create_folder("Parent/Child", cx).unwrap();
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::CreateFolder { name, .. } if name == "Parent/Child"));
+        });
+    }
+
+    #[gpui::test]
+    fn folder_creation_is_optimistic_and_adopted_without_duplicates(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let f = view.update(cx, |v, cx| {
+            v.create_folder("Taxes", cx).unwrap();
+            let f = v.inbox.folders.len() - 1;
+            assert!(v.inbox.folders[f].listed());
+            assert!(v.all_folders);
+            assert!(v.create_folder("taxes", cx).is_err());
+            v.reload(cx);
+            assert!(v.inbox.folders[f].listed());
+            assert!(v.live.as_ref().unwrap().stale);
+            f
+        });
+        let Cmd::CreateFolder { op, account, name } = rx.try_recv().unwrap() else { panic!("create command") };
+        assert_eq!(name, "Taxes");
+        assert!(rx.try_recv().is_err());
+        let id = view.update_in(cx, |v, window, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            let id = store.save_folder(&account, &name, Some("/"), lagom_core::store::FolderRole::Other).unwrap();
+            v.on_events(vec![Event::Op { op, error: None }, Event::Changed], window, cx);
+            id
+        });
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.folders[f].store, Some(id));
+            assert_eq!(v.inbox.folders.iter().filter(|f| f.full == "Taxes" && f.listed()).count(), 1);
+            assert!(v.live.as_ref().unwrap().ops.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn failed_folder_creation_removes_the_row_and_allows_retry(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            v.create_folder("Taxes", cx).unwrap();
+            v.inbox.open(Some(v.inbox.folders.len() - 1));
+        });
+        let Cmd::CreateFolder { op, .. } = rx.try_recv().unwrap() else { panic!("create command") };
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::Op { op, error: Some("refused".into()) }], window, cx);
+            assert!(!v.inbox.folders.last().unwrap().listed());
+            assert_eq!(v.inbox.open, None);
+            assert!(v.live.as_ref().unwrap().ops.is_empty());
+        });
+        assert!(toast(&view, cx).contains("Could not create folder: refused"));
+        view.update(cx, |v, cx| v.create_folder("Taxes", cx).unwrap());
+        let Cmd::CreateFolder { op, account, .. } = rx.try_recv().unwrap() else { panic!("retry command") };
+        view.update_in(cx, |v, window, cx| {
+            let id = v.live.as_ref().unwrap().store.save_folder(&account, "Taxes", None, lagom_core::store::FolderRole::Other).unwrap();
+            v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            assert_eq!(v.inbox.folders.last().unwrap().store, Some(id));
+            assert_eq!(v.inbox.folders.iter().filter(|f| f.full == "Taxes" && f.listed()).count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn stopped_worker_rolls_back_pending_folders(cx: &mut TestAppContext) {
+        let (view, cx, rx) = window(cx);
+        view.update(cx, |v, cx| v.create_folder("Pending", cx).unwrap());
+        drop(rx);
+        view.update(cx, |v, cx| {
+            v.create_folder("Disconnected", cx).unwrap();
+            assert!(v.inbox.folders.iter().filter(|f| ["Pending", "Disconnected"].contains(&f.full.as_str())).all(|f| !f.listed()));
+            assert!(v.live.as_ref().unwrap().ops.is_empty());
+        });
+        assert!(toast(&view, cx).contains("Mail stopped working"));
+    }
+
+    #[gpui::test]
+    fn folder_failure_does_not_remove_another_accounts_folder(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| v.create_folder("Taxes", cx).unwrap());
+        let Cmd::CreateFolder { op, .. } = rx.try_recv().unwrap() else { panic!("create command") };
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_mut().unwrap();
+            let mut other = live.accounts[0].clone();
+            other.id = "other-account".into();
+            live.store.save_account(&other).unwrap();
+            live.store.save_folder(&other.id, "INBOX", Some("/"), lagom_core::store::FolderRole::Inbox).unwrap();
+            live.accounts.push(other);
+            v.switch_account(1, cx);
+            v.create_folder("Taxes", cx).unwrap();
+            v.on_events(vec![Event::Op { op, error: Some("refused".into()) }], window, cx);
+            assert!(v.inbox.folders.last().unwrap().listed());
+        });
+    }
+
+    #[gpui::test]
+    fn folder_validation_includes_hidden_server_folders_and_delimiters(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            live.store.save_folder(&live.accounts[0].id, "INBOX", Some("."), lagom_core::store::FolderRole::Inbox).unwrap();
+            let n = v.inbox.folders.len();
+            for name in ["", "  ", "inbox", "Parent.Child"] {
+                assert!(v.create_folder(name, cx).is_err(), "{name:?}");
+            }
+            assert_eq!(v.inbox.folders.len(), n);
+            assert!(rx.try_recv().is_err());
+            v.create_folder("Parent/Child", cx).unwrap();
+        });
     }
 
     #[gpui::test]

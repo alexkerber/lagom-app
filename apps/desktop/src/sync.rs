@@ -52,6 +52,7 @@ pub enum Cmd {
     SyncInbox(String),
     /// `id` is the store row the UI saw. The worker follows it through earlier moves.
     Op { op: u64, id: i64, act: Act },
+    CreateFolder { op: u64, account: String, name: String },
     MarkSeen(i64),
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
@@ -237,6 +238,11 @@ impl Worker {
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
             }
+            Cmd::CreateFolder { op, account, name } => {
+                let error = self.create_folder(&account, &name).await.err().map(|e| e.to_string());
+                self.emit(Event::Op { op, error });
+                self.emit(Event::Changed);
+            }
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| e.to_string());
                 self.emit(Event::Downloaded(result));
@@ -407,12 +413,7 @@ impl Worker {
                     Some(folder)
                 }
                 Act::NewFolder(name) => {
-                    // Also undo into a folder ⌘K created: it exists by now, so it is not made twice.
-                    let known = store.folders(&account.id, now())?.into_iter().find(|f| f.name == name).map(|f| f.id);
-                    let folder = match known {
-                        Some(folder) => folder,
-                        None => session.create_folder(store, &name).await?,
-                    };
+                    let folder = ensure_folder(&mut session, store, &account.id, &name).await?;
                     session.move_message(store, id, folder).await?;
                     Some(folder)
                 }
@@ -426,6 +427,19 @@ impl Worker {
             follow(&mut self.moved, id, message.folder, &message.message_id, target);
         }
         Ok(())
+    }
+
+    async fn create_folder(&mut self, account: &str, name: &str) -> lagom_core::Result<()> {
+        let folders = self.store.folders(account, now())?;
+        if folders.is_empty() {
+            return Err(Error::Invalid("Sync folders before creating a folder"));
+        }
+        crate::folders::validate_name(name, folders.iter().filter_map(|f| f.delimiter.as_deref()), folders.iter().map(|f| f.name.as_str())).map_err(Error::Invalid)?;
+        let account = self.account(account)?;
+        let mut session = self.take(&account).await?;
+        let result = ensure_folder(&mut session, &self.store, &account.id, name).await;
+        self.give(&account.id, session, &result);
+        result.map(|_| ())
     }
 
     /// The current store id of a message the UI knew as `id`. The core drops a moved row; the
@@ -533,6 +547,14 @@ impl Worker {
     }
 }
 
+async fn ensure_folder(session: &mut ImapSync, store: &Store, account: &str, name: &str) -> lagom_core::Result<i64> {
+    // Moves and undo can reach a folder before the UI has received its store id.
+    match store.folders(account, now())?.into_iter().find(|f| f.name == name) {
+        Some(folder) => Ok(folder.id),
+        None => session.create_folder(store, name).await,
+    }
+}
+
 fn role(store: &Store, account: &str, role: FolderRole) -> Option<i64> {
     store.folders(account, 0).ok()?.into_iter().find(|f| f.role == role).map(|f| f.id)
 }
@@ -552,6 +574,87 @@ fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn folder_command_does_not_create_after_failed_initial_listing() {
+        use lagom_core::account::{Security, ServerConfig};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read, mut write) = socket.into_split();
+            let mut read = BufReader::new(read);
+            write.write_all(b"* OK fixture\r\n").await.unwrap();
+            let mut creates = 0;
+            loop {
+                let mut line = String::new();
+                if read.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                let response = if command.starts_with("LOGIN ") {
+                    format!("{tag} OK login\r\n")
+                } else if command == "CAPABILITY" {
+                    format!("* CAPABILITY IMAP4rev1 SPECIAL-USE\r\n{tag} OK capability\r\n")
+                } else if command == "LIST \"\" \"*\" RETURN (SPECIAL-USE)" {
+                    format!("* LIST () \"/\" \"INBOX\"\r\n{tag} NO listing failed\r\n")
+                } else if command.starts_with("CREATE ") {
+                    creates += 1;
+                    format!("{tag} NO unexpected create\r\n")
+                } else {
+                    panic!("unexpected fixture command: {command}");
+                };
+                write.write_all(response.as_bytes()).await.unwrap();
+            }
+            creates
+        });
+        let path = std::env::temp_dir().join(format!("lagom-unlisted-folder-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
+        let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        worker.store.save_account(&account).unwrap();
+        let mut session = ImapSync::login(&account, "fixture").await.unwrap();
+        assert!(session.list_folders(&worker.store).await.is_err());
+        assert!(worker.store.folders(&account.id, now()).unwrap().is_empty());
+        worker.sessions.insert(account.id.clone(), session);
+        worker.quick(Cmd::CreateFolder { op: 42, account: account.id, name: "Parent/Child".into() }).await;
+        let Some(Event::Op { op: 42, error }) = out.recv().await else { panic!("expected folder result") };
+        assert!(matches!(out.recv().await, Some(Event::Changed)));
+        drop(worker);
+        let creates = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(creates, 0, "CREATE must wait for a known namespace");
+        assert_eq!(error.as_deref(), Some("Sync folders before creating a folder"));
+    }
+
+    #[tokio::test]
+    async fn folder_command_reports_validation_errors_without_connecting() {
+        use lagom_core::account::{Security, ServerConfig};
+        let path = std::env::temp_dir().join(format!("lagom-folder-worker-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
+        let server = ServerConfig { host: "127.0.0.1".into(), port: 3143, security: Security::Plain, username: "test@lagom.test".into() };
+        let account = Account::new("test@lagom.test".into(), server.clone(), server).unwrap();
+        worker.store.save_account(&account).unwrap();
+        worker.store.save_folder(&account.id, "INBOX", Some("."), FolderRole::Inbox).unwrap();
+        for (name, expected) in [
+            ("", "Enter a folder name"),
+            ("  ", "Enter a folder name"),
+            ("inbox", "A folder with this name already exists"),
+            ("Parent.Child", "Folder names cannot contain the hierarchy delimiter"),
+        ] {
+            worker.quick(Cmd::CreateFolder { op: 42, account: account.id.clone(), name: name.into() }).await;
+            let Some(Event::Op { op: 42, error }) = out.recv().await else { panic!("expected folder result") };
+            assert_eq!(error.as_deref(), Some(expected), "{name:?}");
+            assert!(matches!(out.recv().await, Some(Event::Changed)));
+        }
+        assert_eq!(worker.store.folders(&account.id, now()).unwrap().len(), 1);
+        assert!(worker.sessions.is_empty());
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[tokio::test]
     async fn discovery_and_sign_in_cancellation_commands() {

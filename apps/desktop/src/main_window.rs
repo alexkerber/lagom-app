@@ -21,6 +21,7 @@ use crate::folders::{self, Folder, Kind};
 use crate::mail::{self, LaterWhen, Mail, INBOX_LEN, LATER_SAMPLE};
 use crate::motion::spring;
 use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
 actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow]);
@@ -246,6 +247,8 @@ pub struct MainWindow {
     page: Page,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
+    folder_name: Option<Entity<TextInput>>,
+    folder_scroll: ScrollHandle,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -336,6 +339,8 @@ impl MainWindow {
             live,
             page: Page::Mail,
             all_folders: false,
+            folder_name: None,
+            folder_scroll: ScrollHandle::new(),
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -444,6 +449,7 @@ impl MainWindow {
         self.release(false, cx);
         // The overlay takes ⌘Z, so the toast's Undo would not work while it is open.
         self.toast = None;
+        self.folder_name = None;
         // The open folder stays listed, so its name never offers "New folder". Moving there is a no-op.
         let targets = folders::tree(&self.inbox.folders, true)
             .into_iter()
@@ -458,7 +464,16 @@ impl MainWindow {
         cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
             let f = match target {
                 MoveTo::Folder(f) => *f,
-                MoveTo::New(name) => this.inbox.create_folder(name),
+                MoveTo::New(name) => {
+                    let name = name.trim();
+                    if let Err(e) = this.validate_folder_name(name) {
+                        this.notify(e, cx);
+                        return;
+                    }
+                    this.all_folders = true;
+                    this.folder_scroll.scroll_to_bottom();
+                    this.inbox.create_folder(name)
+                }
             };
             this.act(Move::Folder(f), cx);
         })
@@ -1140,7 +1155,7 @@ impl MainWindow {
         let current = accounts.iter().find(|a| a.2).map_or(SharedString::from("Lagom"), |a| a.0.clone());
         let on_mail = matches!(self.page, Page::Mail);
         let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
-        let mut account_rows = div().flex().flex_col().gap(px(2.)).child(heading("Accounts"));
+        let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
         for (i, (name, address, active)) in accounts.into_iter().enumerate() {
             account_rows = account_rows.child(account(i, name, address, active).on_click(cx.listener(move |this, _, _, cx| this.switch_account(i, cx))));
         }
@@ -1160,6 +1175,7 @@ impl MainWindow {
             .child(
                 pressable(div().id("account-switcher"), t, false)
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .gap(px(10.))
                     .h(px(40.))
@@ -1174,6 +1190,7 @@ impl MainWindow {
                 div()
                     .id("search")
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .gap(px(6.))
                     .h(px(28.))
@@ -1192,6 +1209,7 @@ impl MainWindow {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
+                    .flex_shrink_0()
                     .child(
                         nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
@@ -1209,6 +1227,8 @@ impl MainWindow {
             .child(
                 pressable(div().id("settings"), t, in_settings)
                     .flex()
+                    .flex_shrink_0()
+                    .debug_selector(|| "settings".into())
                     .items_center()
                     .h(px(SIDEBAR_ROW))
                     .px(px(10.))
@@ -1220,18 +1240,52 @@ impl MainWindow {
             )
     }
 
+    fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay_open(cx) { return; }
+        let input = self.folder_name.get_or_insert_with(|| {
+            let input = cx.new(|cx| TextInput::new(window, cx).placeholder("Folder name").bordered());
+            cx.subscribe_in(&input, window, |this, input, event: &TextInputEvent, window, cx| {
+                match event {
+                    TextInputEvent::Enter => {
+                        let name = input.read(cx).text().trim().to_string();
+                        if let Err(e) = this.create_folder(&name, cx) {
+                            this.notify(e, cx);
+                            return;
+                        }
+                    }
+                    TextInputEvent::Escape => {}
+                    TextInputEvent::Changed => return,
+                }
+                this.folder_name = None;
+                window.focus(&this.focus);
+                cx.notify();
+            }).detach();
+            input
+        });
+        window.focus(&gpui::Focusable::focus_handle(input, cx));
+        cx.notify();
+    }
+
     /// The "Folders" group: the nav row style, subfolders indented, "N more" past six rows.
     fn folder_group(&self, heading: Div, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let all = &self.inbox.folders;
         let row = |id: ElementId, active: bool| {
-            pressable(div().id(id), t, active).flex().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
+            pressable(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
-        // shortcut: "+" and "New folder" do nothing yet; ⌘K "move <name>" creates a folder. Wire
-        // them to an inline name field once the app has text inputs.
-        let group = div().flex().flex_col().gap(px(2.)).child(heading.child(icon("icons/plus.svg", t.ink2, 14.)));
+        let add = pressable(div().id("add-folder"), t, false).size(px(20.)).flex().items_center().justify_center().rounded(px(radius::KEY))
+            .child(icon("icons/plus.svg", t.ink2, 14.))
+            .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
+        #[cfg(test)]
+        let add = add.debug_selector(|| "add-folder".into());
+        let group = div().flex().flex_col().min_h(px(0.)).gap(px(2.)).child(heading.flex_shrink_0().child(add))
+            .children(self.folder_name.as_ref().map(|input| div().flex_shrink_0().px(px(10.)).child(input.clone())));
         if !all.iter().any(Folder::listed) {
-            return group.child(row("new-folder".into(), false).text_color(t.ink2).child(icon("icons/plus.svg", t.ink2, 16.)).child("New folder"));
+            let new = row("new-folder".into(), false).text_color(t.ink2).child(icon("icons/plus.svg", t.ink2, 16.)).child("New folder")
+                .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
+            #[cfg(test)]
+            let new = new.debug_selector(|| "new-folder".into());
+            return group.when(self.folder_name.is_none(), |group| group.child(new));
         }
         // Once any folder has subfolders, every row keeps a chevron slot, so the icons line up.
         let nested = all.iter().any(|f| f.parent.is_some() && f.listed());
@@ -1239,7 +1293,8 @@ impl MainWindow {
         let shown = folders::shown(rows.len(), self.all_folders);
         let slot = || div().size(px(12.)).flex_shrink_0();
         let active_icon = if self.window_active { t.sel_focus } else { t.ink2 };
-        let mut group = group;
+        let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
+            .overflow_y_scroll().track_scroll(&self.folder_scroll);
         for &(f, depth) in &rows[..shown] {
             let unread = self.inbox.unread(f);
             let active = self.inbox.open == Some(f);
@@ -1253,8 +1308,9 @@ impl MainWindow {
                     cx.notify();
                 }))
             });
-            group = group.child(
+            list = list.child(
                 row(("folder", f).into(), active)
+                    .debug_selector(move || format!("folder-{f}"))
                     .pl(px(10. + 22. * depth as f32))
                     .text_color(color)
                     .when(active, |d| d.bg(t.sel))
@@ -1270,7 +1326,7 @@ impl MainWindow {
             );
         }
         if shown < rows.len() {
-            group = group.child(
+            list = list.child(
                 row("folders-more".into(), false)
                     .text_color(t.ink2)
                     .when(nested, |d| d.child(slot()))
@@ -1282,7 +1338,7 @@ impl MainWindow {
                     })),
             );
         }
-        group
+        group.child(list)
     }
 
     fn message_list(&self, height: f32, cx: &mut Context<Self>) -> Div {
@@ -2179,6 +2235,13 @@ impl Inbox {
         self.folders.len() - 1
     }
 
+    fn remove_pending_folder(&mut self, name: &str) {
+        if let Some(f) = self.folders.iter().position(|f| f.store.is_none() && !f.gone && f.full == name) {
+            self.folders[f].gone = true;
+            if self.open == Some(f) { self.open(None); }
+        }
+    }
+
     fn unread(&self, f: usize) -> usize {
         self.folders[f].unread
     }
@@ -2736,6 +2799,98 @@ mod dispatch {
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
         view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    #[gpui::test]
+    fn inline_folder_name_enter_escape_and_validation(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let n = view.read_with(cx, |v, _| v.inbox.folders.len());
+        view.update_in(cx, |v, window, cx| v.new_folder(window, cx));
+        cx.simulate_input("Cancelled");
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |v, _| {
+            assert!(v.folder_name.is_none());
+            assert_eq!(v.inbox.folders.len(), n);
+        });
+        view.update_in(cx, |v, window, cx| v.new_folder(window, cx));
+        cx.simulate_keystrokes("enter");
+        assert!(view.read_with(cx, |v, _| v.folder_name.is_some() && v.inbox.folders.len() == n));
+        cx.simulate_input("  Taxes  ");
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |v, _| {
+            assert!(v.folder_name.is_none());
+            assert_eq!(v.inbox.folders.len(), n + 1);
+            assert_eq!(v.inbox.folders.last().unwrap().name, "Taxes");
+            assert!(v.all_folders);
+            assert!(v.toast.is_none());
+        });
+        view.update_in(cx, |v, window, cx| v.new_folder(window, cx));
+        cx.simulate_input("taxes");
+        cx.simulate_keystrokes("enter");
+        assert!(view.read_with(cx, |v, _| v.folder_name.is_some() && v.inbox.folders.len() == n + 1));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("j");
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.selected), 1);
+    }
+
+    #[gpui::test]
+    fn new_folder_stays_reachable_with_many_folders(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, _| {
+            v.inbox = Inbox::new(0, 0);
+            v.inbox.folders = (0..100).map(|i| Folder::new(&format!("Folder {i}"), None, &[])).collect();
+        });
+        cx.simulate_resize(gpui::size(px(1440.), px(700.)));
+        frame(cx);
+        let add = cx.debug_bounds("add-folder").unwrap().center();
+        cx.simulate_click(add, Default::default());
+        cx.simulate_input("New folder");
+        cx.simulate_keystrokes("enter");
+        frame(cx);
+        let new = cx.debug_bounds("folder-100").unwrap();
+        assert_eq!(new.size.height, px(SIDEBAR_ROW));
+        assert!(new.top() >= px(0.) && new.bottom() <= px(700.), "new folder outside the window: {new:?}");
+        cx.simulate_click(new.center(), Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.open), Some(100));
+        cx.simulate_event(ScrollWheelEvent {
+            position: new.center(),
+            delta: ScrollDelta::Lines(gpui::point(0., 1000.)),
+            ..Default::default()
+        });
+        frame(cx);
+        let first = cx.debug_bounds("folder-0").unwrap();
+        assert_eq!(first.size.height, px(SIDEBAR_ROW));
+        assert!(first.top() >= px(0.) && first.bottom() <= px(700.));
+        cx.simulate_click(first.center(), Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.open), Some(0));
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input("move Palette folder");
+        cx.simulate_keystrokes("enter");
+        frame(cx);
+        let new = cx.debug_bounds("folder-101").unwrap();
+        let settings = cx.debug_bounds("settings").unwrap();
+        assert_eq!(new.size.height, px(SIDEBAR_ROW));
+        assert!(new.top() > add.y && new.bottom() <= settings.top());
+        assert!(settings.bottom() <= px(700.));
+        cx.simulate_click(new.center(), Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.open), Some(101));
+        cx.simulate_click(settings.center(), Default::default());
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(_))));
+    }
+
+    #[gpui::test]
+    fn both_sidebar_buttons_open_the_folder_field(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, _| v.inbox = Inbox::new(0, 0));
+        for button in ["add-folder", "new-folder"] {
+            frame(cx);
+            let at = cx.debug_bounds(button).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_input("New folder");
+            assert_eq!(view.read_with(cx, |v, cx| v.folder_name.as_ref().unwrap().read(cx).text().to_string()), "New folder");
+            cx.simulate_keystrokes("escape");
+            assert!(view.read_with(cx, |v, _| v.folder_name.is_none()));
+        }
     }
 
     fn large_list(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext) {
