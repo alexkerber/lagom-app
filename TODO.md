@@ -98,7 +98,8 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.
 - [x] `lagom-cli` and disposable GreenMail integration coverage.
 - [x] Outbox in the store: persist drafts and pending sends; retry temporary failures on sync with exponential backoff (1 min–1 h), stop permanent failures, and require deliberate retry for uncertain delivery. Failed sends offer Send again and atomic return to draft. Checkpoint SMTP and Sent APPEND separately; CLI sends leave no queue entries. Quit needs no network wait or unsent-mail warning.
-- [ ] Gmail/Microsoft OAuth2 (XOAUTH2). Outlook.com requires OAuth2; the preset alone does not enable password login.
+- [x] Google OAuth2 (XOAUTH2), including same-account re-login from the sidebar/account rows, refresh-token replacement and sync/outbox resumption. Release client IDs can be embedded with `scripts/build-release.sh` and git-ignored `.env.oauth`.
+- [ ] Microsoft OAuth2: flow and XOAUTH2 implemented; configure the Entra app registration and verify provider acceptance.
 - [ ] JMAP.
 - [ ] Push beyond IMAP IDLE.
 - [x] HTML rendering on macOS and Windows (`feat/html-mail`): one wry web view per window, page JavaScript off, a strict CSP, no navigation, links to the system browser, "Load remote images" per message. Linux shows the text part.
@@ -112,7 +113,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
 - [ ] Desktop: try by hand with a real account. Only GreenMail, tests and screenshots cover it; nobody has clicked or typed in the live window.
 - [ ] Notifications for new mail.
-- [ ] Outlook preset: password login will fail until OAuth2 lands; the form says so in its note only.
+- [ ] Outlook preset: password login is unsupported; use Microsoft browser sign-in after configuring the Entra registration. Replace the password form with the provider sign-in action during onboarding.
 - [ ] Bodies over 4 MiB are stored as headers with a "not downloaded" body; fetch on demand.
 - [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).
 - [x] Message list virtualisation: visible rows plus overscan; height animation, selection glide, swipe, keyboard scrolling and paging covered by headless tests. Undo plus swipe keeps row heights consistent; spring-back keeps its progress across off-screen rows. 10,000-row measurement in `docs/performance.md`.

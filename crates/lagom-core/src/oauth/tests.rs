@@ -111,6 +111,54 @@ impl CredentialBuilderApi for Memory {
         self
     }
 }
+fn memory() -> &'static Memory {
+    static MEMORY: OnceLock<Memory> = OnceLock::new();
+    MEMORY.get_or_init(|| {
+        let memory = Memory::default();
+        keyring::set_default_credential_builder(Box::new(memory.clone()));
+        memory
+    })
+}
+
+#[tokio::test]
+async fn reauthentication_preserves_account_and_rejects_another_identity_before_writing() {
+    let memory = memory();
+    for provider in [Provider::Google, Provider::Microsoft] {
+        let (imap, smtp) = provider.servers("fixture@example.com");
+        let mut account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        account.auth = Auth::OAuth(provider);
+        account.display_name = "Custom label".into();
+        account.set_password("old-refresh").unwrap();
+        let token = |email: &str| Token {
+            access_token: "new-access".into(), expires_in: 3600, token_type: "Bearer".into(),
+            refresh_token: Some("reauth-fixture-refresh".into()),
+            id_token: Some(jwt(&serde_json::json!({"email": email, "name": "Provider label"}).to_string())),
+        };
+        let mut wrong = token("other@example.com");
+        wrong.refresh_token = Some("must-not-save".into());
+        assert!(matches!(complete_sign_in(provider, Some(&account), &mut wrong).await,
+            Err(Error::Invalid("Sign in with the same email address as this account"))));
+        assert_eq!(&*account.password().unwrap(), "old-refresh");
+        assert!(!memory.0.lock().unwrap().values().any(|value| value == "must-not-save"));
+        assert!(cache(&account.id).lock().await.is_none());
+        let mut missing = token(&account.email);
+        missing.refresh_token = None;
+        assert!(matches!(complete_sign_in(provider, Some(&account), &mut missing).await, Err(Error::ReauthRequired)));
+        assert_eq!(&*account.password().unwrap(), "old-refresh");
+        let other_provider = if provider == Provider::Google { Provider::Microsoft } else { Provider::Google };
+        assert!(complete_sign_in(other_provider, Some(&account), &mut token(&account.email)).await.is_err());
+        let signed = complete_sign_in(provider, Some(&account), &mut token("FIXTURE@example.com")).await.unwrap();
+        assert_eq!(signed.account, account);
+        assert_eq!(&*account.password().unwrap(), "reauth-fixture-refresh");
+        assert_eq!(cache(&account.id).lock().await.as_ref().unwrap().token.as_str(), "new-access");
+        assert_eq!(memory.0.lock().unwrap().values().filter(|value| *value == "reauth-fixture-refresh").count(), 1);
+        assert!(complete_sign_in(provider, Some(&account), &mut wrong).await.is_err());
+        assert_eq!(&*account.password().unwrap(), "reauth-fixture-refresh");
+        assert_eq!(cache(&account.id).lock().await.as_ref().unwrap().token.as_str(), "new-access");
+        account.delete_password().unwrap();
+    }
+}
+
 async fn request(
     socket: tokio::net::TcpStream,
 ) -> (BufReader<tokio::net::TcpStream>, String, String) {
@@ -138,7 +186,7 @@ async fn respond(stream: &mut (impl AsyncWriteExt + Unpin), status: &str, body: 
 }
 #[tokio::test]
 async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
-    keyring::set_default_credential_builder(Box::new(Memory::default()));
+    memory();
     for provider in [Provider::Google, Provider::Microsoft] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -230,7 +278,7 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
                 }
             }
         });
-        let signed = sign_in_with(provider, config(), |url| {
+        let signed = sign_in_with(provider, config(), None, |url| {
             let url = url.to_owned();
             tokio::spawn(async move {
                 http(Duration::from_secs(3))
@@ -287,7 +335,7 @@ async fn dropping_sign_in_closes_the_listener() {
     let mut redirect = None;
     let mut config = Provider::Google.config();
     config.id = "test".into();
-    let mut flow = Box::pin(sign_in_with(Provider::Google, config, |url| {
+    let mut flow = Box::pin(sign_in_with(Provider::Google, config, None, |url| {
         redirect = Url::parse(url)
             .unwrap()
             .query_pairs()

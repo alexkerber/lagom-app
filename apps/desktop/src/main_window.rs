@@ -1163,7 +1163,9 @@ impl MainWindow {
         let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
         for (i, (name, address, active)) in accounts.into_iter().enumerate() {
-            account_rows = account_rows.child(account(i, name, address, active).on_click(cx.listener(move |this, _, _, cx| this.switch_account(i, cx))));
+            account_rows = account_rows.child(div().flex().flex_col()
+                .child(account(i, name, address, active).on_click(cx.listener(move |this, _, _, cx| this.switch_account(i, cx))))
+                .children(self.reauth_control(i, "account-reauth", cx)));
         }
         let in_settings = matches!(self.page, Page::Settings(_));
 
@@ -1192,6 +1194,7 @@ impl MainWindow {
                     .child(div().flex_1().min_w(px(0.)).one_line().child(current))
                     .child(icon("icons/chevron.svg", t.ink2, 14.)),
             )
+            .children(self.live.as_ref().and_then(|live| self.reauth_control(live.current, "sidebar-reauth", cx)))
             .child(
                 div()
                     .id("search")
