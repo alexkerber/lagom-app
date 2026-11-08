@@ -38,7 +38,7 @@
 - [x] Window drags by its top edge on macOS (verified by hand).
 
 - [ ] Sort mail into custom folders (must-have). Sidebar group and ⌘K "move <folder>" work on sample data (`feat/folders`); real IMAP/Gmail sync is still open.
-- [ ] Folders: the "+" in the heading and the "New folder" row do nothing yet. Wire them to an inline name field; ⌘K "move <name>" creates the folder on the server today.
+- [x] Folders: the heading "+" and "New folder" open an inline name field (Enter creates, Esc cancels). Shares server creation with ⌘K "move <name>"; optimistic row, rollback/toast on failure, empty/delimiter/duplicate validation and headless tests.
 - [x] Snooze, shown as "Later" in the UI (must-have). Local only: L/← until tomorrow 08:00; ⌘K offers 18:00, tomorrow 08:00 and Monday 08:00; due mail returns to Inbox (`feat/real-mail`).
 - [x] Swipe a row with two fingers (trackpad, Magic Mouse) to Done or Later; Esc springs it back.
 - [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (`feat/folders`).
