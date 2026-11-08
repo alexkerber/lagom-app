@@ -76,8 +76,11 @@ fn motion() -> Animation {
 }
 
 /// Linear progress for animators that apply `spring` themselves (GPUI's easing must stay in 0..=1).
+/// Rows that leave, come back or spring back: long enough to read the motion (see `motion::spring`).
+const SPRING: Duration = Duration::from_millis(280);
+
 fn springy() -> Animation {
-    Animation::new(MOTION)
+    Animation::new(SPRING)
 }
 
 /// The selection highlight on its way between rows: y positions inside the list.
@@ -656,8 +659,8 @@ impl MainWindow {
 
     /// Finished ghosts paint nothing; drop them, so the next render and `select` agree on the rows.
     fn prune(&mut self) {
-        self.ghosts.retain(|g| g.at.elapsed() < MOTION * 2);
-        self.entering.retain(|g| g.at.elapsed() < MOTION * 2);
+        self.ghosts.retain(|g| g.at.elapsed() < SPRING * 2);
+        self.entering.retain(|g| g.at.elapsed() < SPRING * 2);
     }
 
     fn select(&mut self, f: impl FnOnce(&mut Inbox), cx: &mut Context<Self>) {
@@ -1148,8 +1151,27 @@ impl MainWindow {
             None => div().into_any_element(),
         }];
         let dragging = self.mouse_swiping();
+        // Only rows near the viewport or the selection get text; the rest are empty boxes of the
+        // same height. Shaping ~500 rows on every animation frame made E, L and the arrows stutter
+        // (Alex 2026-11-08). One element per row stays, so `scroll_to_item` indices still hold.
+        let top = -f32::from(self.scroll.offset().y);
+        let view = f32::from(self.scroll.bounds().size.height).max(1200.);
+        let (first, last) = ((top / ROW_H) as isize - 8, ((top + view) / ROW_H) as isize + 8);
+        let (sel, span) = (self.inbox.selected as isize, (view / ROW_H) as isize + 8);
+        let near = |i: usize, id: usize| {
+            let i = i as isize;
+            (first..=last).contains(&i)
+                || (sel - span..=sel + span).contains(&i)
+                || self.entering.iter().any(|g| g.id == id)
+                || self.swipe.offset(id).is_some()
+                || self.spring.is_some_and(|s| s.0 == id)
+        };
         for (i, &id) in self.inbox.list().iter().enumerate() {
             rows.extend(ghosts_at(i));
+            if !near(i, id) {
+                rows.push(div().flex_shrink_0().h(px(ROW_H)).into_any_element());
+                continue;
+            }
             let selected = i == self.inbox.selected;
             let el = row(&self.inbox.mail[id], selected && gliding.is_none())
                 .id(("row", id))
