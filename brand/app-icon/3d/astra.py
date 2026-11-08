@@ -162,7 +162,7 @@ bpy.ops.object.modifier_apply(modifier=cut.name)
 bpy.data.objects.remove(slot,do_unlink=True)
 polished = material('Polished steel edge', (.65,.69,.72), .16, 1)
 blade.data.materials.append(polished)
-bevel(blade,.006,6)
+bevel(blade,.011,8)
 blade.modifiers[0].material=1
 blade.modifiers[0].harden_normals=True
 blade.modifiers[1].keep_sharp=True
@@ -178,27 +178,44 @@ def between(name,a,b,radius,mat):
     o.name=name
     o.rotation_euler=direction.to_track_quat('Z','Y').to_euler()
     o.data.materials.append(mat)
-    bevel(o,.045,5)
+    bevel(o,.075,8)
     for p in o.data.polygons: p.use_smooth=True
     return o
 
-between('Raised steel neck',(0,.70,.47),(0,1.32,.77),.115,steel)
+# A flattened root rolls smoothly into the round rising neck.
+neck_profile=[(.66,.478,.18,.016),(.70,.485,.17,.025),(.76,.50,.145,.045),
+              (.83,.53,.12,.075),(.92,.575,.108,.095),(1.05,.64,.108,.105),
+              (1.18,.71,.11,.11),(1.32,.77,.115,.115)]
+verts=[]
+for y,z,rx,rz in neck_profile:
+    for j in range(64):
+        a=2*math.pi*j/64
+        verts.append((rx*math.cos(a),y,z+rz*math.sin(a)))
+faces=[(i*64+j,i*64+(j+1)%64,(i+1)*64+(j+1)%64,(i+1)*64+j)
+       for i in range(len(neck_profile)-1) for j in range(64)]
+neck=mesh('Flowing pressed neck',verts,faces,steel)
+sub=neck.modifiers.new('Smooth neck transition','SUBSURF'); sub.levels=2
+for face in neck.data.polygons: face.use_smooth=True
 between('Steel ferrule',(0,1.18,.70),(0,1.48,.86),.19,steel)
 between('Walnut grip',(0,1.43,.83),(0,2.92,1.53),.205,wood)
 between('End cap',(0,2.90,1.52),(0,2.97,1.55),.19,steel)
 
-# Sheet crosses the aperture, then relaxes onto the blade toward its tip.
-profile=[(.27,.36),(.20,.46),(.10,.61),(-.06,.70),(-.27,.68),(-.54,.56),(-.83,.52),(-1.12,.56)]
-v=[]
-for y,z in profile:
-    for x in (-.69,.69): v.append((x,y,z))
-strip=mesh('Single shaved letter',v,[(2*i,2*i+1,2*i+3,2*i+2) for i in range(len(profile)-1)],white)
-sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=3
+# The letter emerges through the slot and coils 1.25 turns above the blade.
+profile=[(.20,.43),(.17,.61),(.13,.81)]
+def curl(t, offset=0):
+    radius=.43-.18*t/(2.5*math.pi)+offset
+    return (-.30+radius*math.cos(t), .98+radius*math.sin(t))
+profile += [curl(2.5*math.pi*i/160) for i in range(161)]
+v=[(x,y,z) for y,z in profile for x in (-.69,.69)]
+strip=mesh('Single curled letter',v,[(2*i,2*i+1,2*i+3,2*i+2) for i in range(len(profile)-1)],white)
+sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=2
 solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.008
-for p in strip.data.polygons: p.use_smooth=True
-# Printed lines follow the quiet, nearly flat part; intentionally no glyphs.
-for i,(y,z) in enumerate([(-.55,.563),(-.67,.538),(-.79,.529),(-.91,.54)]):
-    line('Subtle letter rule',[(-.48,y,z+.009),(.40 if i<3 else .10,y,z+.009)],ink,.008)
+for face in strip.data.polygons: face.use_smooth=True
+# Rules sit on the outer face of the spiral, with no letters or glyphs.
+for i,t in enumerate([.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
+    y,z=curl(t,.009)
+    line('Curled letter rule',[(-.48,y,z),(.40 if i%4!=3 else .12,y,z)],ink,.007)
+subject=list(scene.objects)
 
 # Orthographic camera and broad softboxes: no external textures or environment maps.
 bpy.ops.object.camera_add(location=(5,-8,14))
@@ -214,6 +231,32 @@ for name,loc,power,sz,color in [
     o=bpy.context.object; o.name=name; o.data.energy=power; o.data.shape='RECTANGLE'
     o.data.size=sz; o.data.size_y=sz*.65; o.data.color=color
     o.rotation_euler=(Vector((0,0,.3))-o.location).to_track_quat('-Z','Y').to_euler()
+
+# Frame evaluated subject geometry at 650 px, independently of the 824 px plate.
+bpy.context.view_layer.update()
+deps=bpy.context.evaluated_depsgraph_get()
+view=cam.matrix_world.inverted()
+points=[]
+for obj in subject:
+    evaluated=obj.evaluated_get(deps)
+    geometry=evaluated.to_mesh()
+    if geometry:
+        points.extend(view @ evaluated.matrix_world @ v.co for v in geometry.vertices)
+        evaluated.to_mesh_clear()
+lo=Vector((min(p.x for p in points),min(p.y for p in points),0))
+hi=Vector((max(p.x for p in points),max(p.y for p in points),0))
+scale=650/(max(hi.x-lo.x,hi.y-lo.y)*1024/cam.data.ortho_scale)
+center=(lo+hi)/2
+root=bpy.data.objects.new('Optically centered subject',None)
+scene.collection.objects.link(root)
+for obj in subject: obj.parent=root
+root.scale=(scale,)*3
+# Camera-space origin is the framing target, not the world origin.
+rotation=cam.rotation_euler.to_matrix()
+target=Vector((0,.55,.35))
+root.location=target*(1-scale)+rotation @ Vector((-scale*center.x,-scale*center.y,0))
+assert 1 < scale < 1.5
+print('Subject maximum extent: 650 px; scale',round(scale,4),flush=True)
 
 # A camera-facing rounded square keeps the macOS silhouette inside the 824 px grid.
 plate_mat=material('Icon plate',(.79,.76,.68),.62)
