@@ -177,15 +177,16 @@ impl MainWindow {
             self.close_palette(window, cx);
         }
         if !self.inbox.list().contains(&id) {
-            let from = match self.inbox.items.contains(&id) {
-                true => Some(None),
-                false => self.inbox.folders.iter().position(|f| f.items.contains(&id)).map(Some),
-            };
-            match (from, self.inbox.mail[id].store) {
-                (Some(from), _) => self.open_box(from, cx),
-                // Past the loaded page, such as an older ⌘K hit: load its list as ⌘K does.
-                (None, Some(store)) => self.open_found(store, cx),
-                (None, None) => {}
+            match (self.inbox.mail[id].store.filter(|_| self.live.is_some()), self.inbox.items.contains(&id)) {
+                // Real mail: find and pin it by store id, as ⌘K does. A folder's cached rows may
+                // hold it while its next read, a page from the top, would not (an older ⌘K hit).
+                (Some(store), _) => self.open_found(store, cx),
+                (None, true) => self.open_box(None, cx),
+                (None, false) => {
+                    if let Some(f) = self.inbox.folders.iter().position(|f| f.items.contains(&id)) {
+                        self.open_box(Some(f), cx);
+                    }
+                }
             }
         }
         match self.inbox.list().iter().position(|&i| i == id) {
