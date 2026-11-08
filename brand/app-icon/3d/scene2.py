@@ -97,6 +97,81 @@ if concept == "osthyvel":
     rod((0.05, 0.5, top + 0.04), (0.05, 1.05, top + 0.35), 0.05, steel)
     rod((0.05, 1.05, top + 0.35), (0.05, 2.05, top + 0.6), 0.18, mat(FALU, 0.35))
     target = Vector((-0.15, 0.25, 0.55)); cam = (5.2, -5.4, 4.9)
+elif concept == "osthyvel2":
+    for i in range(9):  # the backlog: a ream of paper
+        box((2.1, 1.5, 0.1), (0, 0, 0.05 + 0.1 * i), CREAM if i % 2 else "#EFE7D6", bevel=0.012, rough=0.75)
+    T = 0.9; steel = metal("#C4C7CA")
+    def hw(x):  # half width of the blade along its length: broad spade, tapering to the neck
+        return 0.52 if x <= -0.35 else 0.52 - (x + 0.35) / 0.6 * 0.34
+    def poly(pts):
+        bm = bmesh.new(); vs = [bm.verts.new((x, y, T + 0.02)) for x, y in pts]; bm.faces.new(vs)
+        me = bpy.data.meshes.new("blade"); bm.to_mesh(me); o = bpy.data.objects.new("blade", me); sc.collection.objects.link(o)
+        o.modifiers.new("t", "SOLIDIFY").thickness = 0.028; b = o.modifiers.new("b", "BEVEL"); b.width = 0.008; b.segments = 3
+        o.data.materials.append(steel); return o
+    r = 0.12  # rounded front corners
+    front = [(-0.92 + r - r * math.cos(a), sgn * (0.52 - r + r * math.sin(a))) for sgn in (-1,) for a in [i * math.pi / 12 for i in range(7)]]
+    lip = [(-0.62, -0.52)] + [(-0.92 + r - r * math.sin(a), -(0.52 - r) - r * math.cos(a)) for a in [i * math.pi / 12 for i in range(7)]][::-1]
+    lip = [(-0.62, -0.52), (-0.80, -0.52)] + [(-0.92 + r - r * math.sin(a), -(0.52 - r) - r * math.cos(a)) for a in [i * math.pi / 12 for i in range(1, 7)]] + \
+          [(-0.92 + r - r * math.sin(a), (0.52 - r) + r * math.cos(a)) for a in [i * math.pi / 12 for i in range(6, 0, -1)]] + [(-0.80, 0.52), (-0.62, 0.52)]
+    poly(lip)
+    poly([(-0.62, 0.40), (-0.55, 0.40), (-0.55, 0.52), (-0.62, 0.52)])
+    poly([(-0.62, -0.52), (-0.55, -0.52), (-0.55, -0.40), (-0.62, -0.40)])
+    rear = [(-0.55, -0.52), (-0.35, -0.52), (0.25, -hw(0.25)), (0.25, hw(0.25)), (-0.35, 0.52), (-0.55, 0.52)]
+    poly(rear)
+    rod((0.22, 0, T + 0.035), (0.62, 0, T + 0.16), 0.06, steel)
+    rod((0.6, 0, T + 0.15), (1.95, 0, T + 0.45), 0.15, mat(FALU, 0.32))
+    # The slice rises out of the slot and curls back over the blade.
+    bm = bmesh.new(); x0, z0, r0, w = -0.585, T + 0.05, 0.2, 0.38; prev = None
+    for k in range(121):
+        t = k / 120 * 1.7 * math.pi; rr = r0 * (1 - 0.3 * t / math.pi)
+        x = x0 + rr * math.sin(t); z = z0 + r0 - rr * math.cos(t)
+        a, b = bm.verts.new((x, -w, z)), bm.verts.new((x, w, z))
+        if prev: bm.faces.new((prev[0], prev[1], b, a))
+        prev = (a, b)
+    me = bpy.data.meshes.new("slice"); bm.to_mesh(me); sl = bpy.data.objects.new("slice", me); sc.collection.objects.link(sl)
+    sl.modifiers.new("t", "SOLIDIFY").thickness = 0.012; sl.data.materials.append(mat("#FFF8EA", 0.55))
+    for p in me.polygons: p.use_smooth = True
+    target = Vector((0.25, 0, 0.75)); cam = (-2.6, -5.6, 5.0)
+elif concept == "osthyvel3":
+    # A Swedish block cheese: yellow cut faces, falu-red wax on the outside.
+    T = 0.78
+    box((1.75, 1.3, T), (-0.05, 0.05, T / 2), "#F2C661", bevel=0.03, rough=0.6)
+    box((0.05, 1.32, T + 0.01), (-0.95, 0.05, T / 2), FALU, bevel=0.02, rough=0.3)
+    box((1.8, 0.05, T + 0.01), (-0.05, 0.72, T / 2), FALU, bevel=0.02, rough=0.3); steel = metal("#C4C7CA")
+    def hw(x):  # half width of the blade along its length: broad spade, tapering to the neck
+        return 0.52 if x <= -0.35 else 0.52 - (x + 0.35) / 0.6 * 0.34
+    def poly(pts):
+        bm = bmesh.new(); vs = [bm.verts.new((x, y, T + 0.02)) for x, y in pts]; bm.faces.new(vs)
+        me = bpy.data.meshes.new("blade"); bm.to_mesh(me); o = bpy.data.objects.new("blade", me); sc.collection.objects.link(o)
+        o.modifiers.new("t", "SOLIDIFY").thickness = 0.028; b = o.modifiers.new("b", "BEVEL"); b.width = 0.008; b.segments = 3
+        o.data.materials.append(steel); return o
+    r = 0.12  # rounded front corners
+    front = [(-0.92 + r - r * math.cos(a), sgn * (0.52 - r + r * math.sin(a))) for sgn in (-1,) for a in [i * math.pi / 12 for i in range(7)]]
+    lip = [(-0.62, -0.52)] + [(-0.92 + r - r * math.sin(a), -(0.52 - r) - r * math.cos(a)) for a in [i * math.pi / 12 for i in range(7)]][::-1]
+    lip = [(-0.62, -0.52), (-0.80, -0.52)] + [(-0.92 + r - r * math.sin(a), -(0.52 - r) - r * math.cos(a)) for a in [i * math.pi / 12 for i in range(1, 7)]] + \
+          [(-0.92 + r - r * math.sin(a), (0.52 - r) + r * math.cos(a)) for a in [i * math.pi / 12 for i in range(6, 0, -1)]] + [(-0.80, 0.52), (-0.62, 0.52)]
+    poly(lip)
+    poly([(-0.62, 0.40), (-0.55, 0.40), (-0.55, 0.52), (-0.62, 0.52)])
+    poly([(-0.62, -0.52), (-0.55, -0.52), (-0.55, -0.40), (-0.62, -0.40)])
+    rear = [(-0.55, -0.52), (-0.35, -0.52), (0.25, -hw(0.25)), (0.25, hw(0.25)), (-0.35, 0.52), (-0.55, 0.52)]
+    poly(rear)
+    rod((0.22, 0, T + 0.035), (0.62, 0, T + 0.16), 0.06, steel)
+    rod((0.6, 0, T + 0.15), (1.95, 0, T + 0.45), 0.15, mat("#B8865A", 0.55))
+    # The slice rises out of the slot and curls back over the blade.
+    bm = bmesh.new(); x0, z0, r0, w = -0.585, T + 0.05, 0.34, 0.37; prev = None
+    for k in range(121):
+        t = k / 120 * 0.95 * math.pi; rr = r0 * (1 - 0.25 * t / math.pi)
+        x = x0 + rr * math.sin(t); z = z0 + r0 - rr * math.cos(t)
+        a, b = bm.verts.new((x, -w, z)), bm.verts.new((x, w, z))
+        if prev: bm.faces.new((prev[0], prev[1], b, a))
+        prev = (a, b)
+    me = bpy.data.meshes.new("slice"); bm.to_mesh(me); sl = bpy.data.objects.new("slice", me); sc.collection.objects.link(sl)
+    sl.modifiers.new("t", "SOLIDIFY").thickness = 0.01
+    cm = mat("#F6D27A", 0.45); cb = cm.node_tree.nodes["Principled BSDF"]
+    cb.inputs["Subsurface Weight"].default_value = 0.4; cb.inputs["Subsurface Radius"].default_value = (0.2, 0.15, 0.05)
+    sl.data.materials.append(cm)
+    for p in me.polygons: p.use_smooth = True
+    target = Vector((0.35, 0.05, 0.75)); cam = (-2.2, -5.0, 4.4)
 elif concept == "kladnypa":
     for i, (c, rz, dx) in enumerate([(BLUE, 7, -0.12), (MUSTARD, -4, 0.1), (CREAM, 0, 0)]):
         box((2.0, 1.5, 0.03), (dx, -0.25, 0.02 + 0.035 * i), c, rot=(0, 0, rz), bevel=0.008, rough=0.7)
@@ -118,6 +193,6 @@ else:  # kam
         box((0.36, 1.0, 0.025), (sx + math.sin(math.radians(rz)) * -0.5, -1.35, 0.03), c, rot=(0, 0, rz), bevel=0.006, rough=0.65)
     target = Vector((0, -0.15, 0.1)); cam = (1.2, -3.8, 6.6)
 
-bpy.ops.object.camera_add(location=cam); c = bpy.context.object; sc.camera = c; c.data.lens = 70
+bpy.ops.object.camera_add(location=cam); c = bpy.context.object; sc.camera = c; c.data.lens = 62
 c.rotation_euler = (target - c.location).to_track_quat("-Z", "Y").to_euler()
 sc.render.filepath = out; bpy.ops.render.render(write_still=True)

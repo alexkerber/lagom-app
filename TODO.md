@@ -68,6 +68,11 @@ Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
 - [ ] Shortcuts: only ⌘K for now, no G + letter per folder.
 - [ ] Drag a message onto a folder, and a swipe to "Move to": not yet.
 
+## Product line (Alex 2026-11-08)
+
+- Supersnabb: mail, meetings and todos in one app. Open source, so people can add to it. No AI in the app (too bloated).
+- [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
+
 ## Calendar (Alex 2026-11-06)
 
 Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions for Alex are in its last section.
