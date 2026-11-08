@@ -2239,21 +2239,21 @@ mod dispatch {
     fn palette_takes_letters_backspace_and_undo(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let n = inbox_len(&view, cx);
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.simulate_input("elrj");
         cx.simulate_keystrokes("backspace left right");
         let palette = view.read_with(cx, |v, _| v.palette.clone()).expect("palette open");
         assert_eq!(palette.read_with(cx, |p, cx| p.query(cx)), "elr");
         // None of e, l, r, j, ⌫, ←, → reached the inbox.
         assert_eq!(inbox_len(&view, cx), n);
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         assert_eq!(palette.read_with(cx, |p, cx| p.query(cx)), "");
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |v, _| v.palette.is_none()));
         // Without a field, the same keys act on the inbox again.
         cx.simulate_keystrokes("e");
         assert_eq!(inbox_len(&view, cx), n - 1);
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         assert_eq!(inbox_len(&view, cx), n);
     }
 
@@ -2268,7 +2268,7 @@ mod dispatch {
         cx.simulate_keystrokes("r");
         cx.simulate_input("Hi there");
         assert_eq!(body(&view, cx), "Hi there");
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         assert_eq!(body(&view, cx), "");
         cx.simulate_input("Hello");
         cx.simulate_keystrokes("enter");
@@ -2363,7 +2363,7 @@ mod dispatch {
         cx.simulate_keystrokes("e");
         assert_eq!(inbox_len(&view, cx), n - 1);
         // ⌘Z undoes the send first: the sheet comes back.
-        cx.simulate_keystrokes("cmd-z");
+        cx.simulate_keystrokes("secondary-z");
         assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.sending.is_empty()));
         assert_eq!(inbox_len(&view, cx), n - 1);
     }
