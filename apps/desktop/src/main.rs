@@ -5,6 +5,7 @@ mod empty_inbox;
 mod folders;
 mod mail;
 mod main_window;
+mod markdown;
 mod motion;
 mod settings;
 mod sync;
@@ -38,6 +39,9 @@ impl AssetSource for Assets {
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
+            "icons/link.svg" => include_bytes!("../assets/icons/link.svg"),
+            "icons/list-bullets.svg" => include_bytes!("../assets/icons/list-bullets.svg"),
+            "icons/list-numbers.svg" => include_bytes!("../assets/icons/list-numbers.svg"),
             "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
             _ => return Ok(None),
         };

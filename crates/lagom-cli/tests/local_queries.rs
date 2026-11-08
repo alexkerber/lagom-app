@@ -100,3 +100,64 @@ fn body_file_is_read_as_utf8_before_account_access() {
         assert!(String::from_utf8_lossy(&output.stderr).contains(error));
     }
 }
+
+#[test]
+fn tasks_work_without_accounts_and_include_done_on_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("tasks.db");
+    assert_eq!(run(&db, &["tasks", "lists"]), "1\tWork\n2\tPrivate\n");
+    let added = run(&db, &["tasks", "add", "wOrK", "  CLI task  "]);
+    assert_eq!(added, "1\t \tCLI task\n");
+    assert_eq!(run(&db, &["tasks", "list", "1"]), added);
+    assert_eq!(run(&db, &["tasks", "done", "1"]), "Updated 1\n");
+    assert!(run(&db, &["tasks", "list", "Work"]).is_empty());
+    assert_eq!(run(&db, &["tasks", "list", "WORK", "--done"]), "1\tx\tCLI task\n");
+    assert!(run(&db, &["tasks", "list", "Private", "--done"]).is_empty());
+    assert!(Store::open(&db).unwrap().accounts().unwrap().is_empty());
+}
+
+#[test]
+fn tasks_from_mail_use_default_or_selected_list_without_network_or_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("mail-tasks.db");
+    let store = Store::open(&db).unwrap();
+    let (i, o) = presets::servers("cli@gmail.com").unwrap();
+    let account = Account::new("cli@gmail.com".into(), i, o).unwrap();
+    store.save_account(&account).unwrap();
+    let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    let id = store.save_message(&Message {
+        summary: MessageSummary { account: account.id.clone(), folder, uid: 1, message_id: "<cli@test>".into(), subject: "Reply tomorrow".into(), ..Default::default() },
+        ..Default::default()
+    }).unwrap().to_string();
+    assert_eq!(run(&db, &["tasks", "from-mail", &id]), "1\t \tReply tomorrow\n");
+    assert_eq!(run(&db, &["tasks", "from-mail", &id, "--list", "pRiVaTe"]), "2\t \tReply tomorrow\n");
+    assert_eq!(run(&db, &["tasks", "from-mail", &id, "--list", "2"]), "3\t \tReply tomorrow\n");
+    let tasks = store.tasks_for_mail(&account.id, "<cli@test>").unwrap();
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks.iter().map(|t| t.list).collect::<Vec<_>>(), [1, 2, 2]);
+    assert!(tasks.iter().all(|t| t.mail_subject.as_deref() == Some("Reply tomorrow")));
+}
+
+#[test]
+fn tasks_reject_missing_ambiguous_and_invalid_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("errors.db");
+    let store = Store::open(&db).unwrap();
+    store.add_task_list("WORK").unwrap();
+    for (args, error) in [
+        (vec!["tasks", "list", "work"], "ambiguous"),
+        (vec!["tasks", "list", "missing"], "missing"),
+        (vec!["tasks", "add", "1", "  "], "title cannot be empty"),
+        (vec!["tasks", "done", "999"], "not found"),
+        (vec!["tasks", "from-mail", "999"], "not found"),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+            .arg("--database").arg(&db).args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(error), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    // Numeric ids remain usable when names are ambiguous or look like another id.
+    store.add_task_list("1").unwrap();
+    assert!(run(&db, &["tasks", "add", "1", "By id"]).contains("By id"));
+    assert_eq!(store.tasks(1, false).unwrap().len(), 1);
+}

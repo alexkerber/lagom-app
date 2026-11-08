@@ -309,11 +309,15 @@ impl MainWindow {
             "settings" => this.page = Page::Settings(None),
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(true, window, cx),
-            // A written reply with a word selected, and Cc open with its focus ring.
-            "compose-text" | "compose-cc" => {
+            // A written reply with a word selected, Cc open with its focus ring, and live Markdown.
+            "compose-text" | "compose-cc" | "compose-md" | "compose-md-bar" => {
                 this.open_compose(true, window, cx);
                 if let Some(c) = this.compose.clone() {
-                    c.update(cx, |c, cx| if screen == "compose-text" { c.sample(cx) } else { c.add_cc(window, cx) });
+                    c.update(cx, |c, cx| match screen.as_str() {
+                        "compose-text" => c.sample(cx),
+                        "compose-cc" => c.add_cc(window, cx),
+                        s => c.sample_markdown(s == "compose-md-bar", cx),
+                    });
                 }
             }
             // Selects the last inbox row once the list has a layout, as J would; the list scrolls to it
