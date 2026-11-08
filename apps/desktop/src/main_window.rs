@@ -927,7 +927,10 @@ pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> impl IntoElement 
 
 fn app_mark() -> gpui::Img {
     // The app icon as the Dock shows it. Its plate fills 824 of 1024 px, so 26 px draws a ~21 px tile.
-    gpui::img("app-icon.png").size(px(26.)).flex_shrink_0()
+    // Named as embedded: GPUI would read the bare string "app-icon.png" as a URI host and fetch it.
+    gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded("app-icon.png".into())))
+        .size(px(26.))
+        .flex_shrink_0()
 }
 
 /// One line that ends in "…" when it does not fit. GPUI's `truncate()` measures nowrap text once,
