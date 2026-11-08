@@ -24,6 +24,9 @@
 
 ## Mail (v1)
 
+- [x] Send Markdown mail (lists, bold/italic, links, headings, quotes, code), compose shortcuts and file insertion, CLI `--body-file` (`feat/markdown-compose`).
+- [ ] Show Markdown styling live in the composer (bold text bold, markers dimmed).
+
 - [x] Main window, Concept D, light and dark (static sample data).
 - [x] Native macOS menu bar: lagom, File, View, Window, Help.
 - [x] Edit menu: Undo, Redo, Cut, Copy, Paste, Select All. A focused text field handles them; Undo falls back to the inbox (`feat/text-input`).

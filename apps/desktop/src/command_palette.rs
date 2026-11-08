@@ -31,6 +31,7 @@ pub enum Run {
     Delete,
     Reply,
     Compose,
+    InsertFile,
     Sync,
     Settings,
     AddAccount,
@@ -63,6 +64,7 @@ const COMMANDS: &[Command] = &[
     Command { section: "Actions", label: "Delete", hint: Hint::Key("⌫"), action: Action::Run(Run::Delete) },
     Command { section: "Actions", label: "Reply", hint: Hint::Key("R"), action: Action::Run(Run::Reply) },
     Command { section: "Actions", label: "New message", hint: Hint::Key("C"), action: Action::Run(Run::Compose) },
+    Command { section: "Mail", label: "Insert file…", hint: Hint::Note("Markdown"), action: Action::Run(Run::InsertFile) },
     Command { section: "Mail", label: "Sync now", hint: Hint::Note("IMAP"), action: Action::Run(Run::Sync) },
     Command { section: "Mail", label: "Settings", hint: Hint::Key("⌘,"), action: Action::Run(Run::Settings) },
     Command { section: "Mail", label: "Add account", hint: Hint::Note("IMAP"), action: Action::Run(Run::AddAccount) },
@@ -150,6 +152,7 @@ pub type Search = Rc<dyn Fn(&str) -> Vec<(i64, String)>>;
 
 pub struct CommandPalette {
     input: Entity<TextInput>,
+    composing: bool,
     selected: usize,
     folders: Vec<(usize, String)>,
     // Subject of the message a move would take.
@@ -184,6 +187,7 @@ impl Focusable for CommandPalette {
 impl CommandPalette {
     pub fn new(
         query: &str,
+        composing: bool,
         folders: Vec<(usize, String)>,
         subject: Option<String>,
         search: Option<Search>,
@@ -201,7 +205,7 @@ impl CommandPalette {
             TextInputEvent::Enter => this.run(this.matches(cx), cx),
             TextInputEvent::Escape => cx.emit(DismissEvent),
         });
-        let mut this = Self { input, selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
+        let mut this = Self { input, composing, selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
         this.find_hits(cx);
         this
     }
@@ -210,7 +214,7 @@ impl CommandPalette {
     fn find_hits(&mut self, cx: &App) {
         let query = self.input.read(cx).text();
         self.hits = match &self.search {
-            Some(search) if !query.trim().is_empty() && move_query(query).is_none() && commands(query).is_empty() => search(query),
+            Some(search) if !self.composing && !query.trim().is_empty() && move_query(query).is_none() && commands(query).is_empty() => search(query),
             _ => Vec::new(),
         };
     }
@@ -221,7 +225,12 @@ impl CommandPalette {
     }
 
     fn matches(&self, cx: &App) -> Vec<Item> {
-        matches(self.input.read(cx).text(), &self.folders, &self.hits)
+        let query = self.input.read(cx).text();
+        if self.composing {
+            commands(query).into_iter().filter(|item| item.action == Action::Run(Run::InsertFile)).collect()
+        } else {
+            matches(query, &self.folders, &self.hits)
+        }
     }
 
     /// Enter or a click: the selected item runs and the palette closes.
@@ -412,6 +421,17 @@ impl Render for CommandPalette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn compose_palette_offers_file_insertion_only(cx: &mut gpui::TestAppContext) {
+        let (palette, cx) = cx.add_window_view(|window, cx| CommandPalette::new("", true, vec![], None, None, window, cx));
+        palette.read_with(cx, |p, cx| {
+            let items = p.matches(cx);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, "Insert file…");
+            assert_eq!(items[0].action, Action::Run(Run::InsertFile));
+        });
+    }
 
     #[test]
     fn find_ignores_case_and_returns_byte_range() {
