@@ -118,13 +118,8 @@ fn motion() -> Animation {
     Animation::new(MOTION).with_easing(ease_out_quint())
 }
 
-/// Linear progress for animators that apply `spring` themselves (GPUI's easing must stay in 0..=1).
 /// Rows that leave, come back or spring back: long enough to read the motion (see `motion::spring`).
 const SPRING: Duration = Duration::from_millis(280);
-
-fn springy() -> Animation {
-    Animation::new(SPRING)
-}
 
 /// The selection highlight on its way between rows: y positions inside the list.
 #[derive(Clone, Copy)]
@@ -234,8 +229,8 @@ pub struct MainWindow {
     under: Option<usize>,
     // Last pointer position while the left button is down on a row: a click, or a mouse swipe.
     drag: Option<Point<Pixels>>,
-    // (message id, offset it springs back from, seq) for a swipe that did not reach the threshold.
-    spring: Option<(usize, f32, usize)>,
+    // (message id, offset it springs back from, start) survives rows leaving the viewport.
+    spring: Option<(usize, f32, Instant)>,
     // (move it was, move it is, seq) for the colour behind a swiped row. See `retint`.
     tint: (Option<Move>, Option<Move>, usize),
     // The toast: its text, whether it offers Undo, and its timer. Dropping the task cancels it.
@@ -818,23 +813,7 @@ impl MainWindow {
         let ix = self.inbox.list().iter().position(|&i| i == id);
         match (what.filter(|_| act), ix) {
             (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
-            _ => {
-                self.seq += 1;
-                let seq = self.seq;
-                self.spring = Some((id, dx, seq));
-                // Done springing, the row is an ordinary row again (its own fill, copies in a glide).
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(SPRING).await;
-                    this.update(cx, |this, cx| {
-                        if this.spring.is_some_and(|s| s.2 == seq) {
-                            this.spring = None;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
+            _ => self.spring = Some((id, dx, Instant::now())),
         }
         cx.notify();
     }
@@ -843,11 +822,16 @@ impl MainWindow {
     fn prune(&mut self) {
         self.ghosts.retain(|g| g.at.elapsed() < SPRING);
         self.entering.retain(|g| g.at.elapsed() < SPRING);
+        self.spring = self.spring.filter(|s| s.2.elapsed() < SPRING);
     }
 
     fn row_layout(&self, now: Instant) -> RowLayout {
         let mut changes: Vec<_> = self.ghosts.iter().map(|g| (g.ix, ROW_H * row_scale(g.progress(now)))).collect();
         for g in &self.entering {
+            // Swipe and spring-back render at full height instead of playing the entry motion.
+            if self.swipe.offset(g.id).is_some() || self.spring.is_some_and(|s| s.0 == g.id) {
+                continue;
+            }
             if let Some(ix) = self.inbox.list().iter().position(|&id| id == g.id) {
                 changes.push((ix, ROW_H * (row_scale(1. - g.progress(now)) - 1.)));
             }
@@ -1451,17 +1435,15 @@ impl MainWindow {
                     }
                 }))
                 .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
+            #[cfg(test)]
+            let el = el.debug_selector(move || format!("row-{id}"));
             // Under the fingers the row follows dx; after a short swipe it springs back from it.
-            let spring_back = self.spring.filter(|s| s.0 == id).map(|(_, dx, seq)| (dx, Some(seq)));
-            if let Some((dx, seq)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring_back) {
+            let spring_back = self.spring.filter(|s| s.0 == id).map(|(_, dx, at)| (dx, Some(at)));
+            if let Some((dx, at)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring_back) {
                 // Opaque, so the action behind shows only where the row has moved away.
                 let el = el.relative().bg(if selected { sel_bg } else { t.bg });
-                let el = match seq {
-                    None => el.left(px(dx)).into_any_element(),
-                    Some(seq) => el
-                        .with_animation(("spring", seq), springy(), move |el, d| el.left(px(dx * (1. - spring(d)))))
-                        .into_any_element(),
-                };
+                let p = at.map_or(0., |at| spring(now.saturating_duration_since(at).as_secs_f32() / SPRING.as_secs_f32()));
+                let el = el.left(px(dx * (1. - p)));
                 // The colour of the move the row would make, cross-faded from the last one so a
                 // change of state never cuts hard. The row itself never waits for it.
                 let (from, to, tint) = self.tint;
@@ -1859,8 +1841,8 @@ impl Render for MainWindow {
             self.reveal_row(self.inbox.selected);
         }
         self.prune();
-        // Off-screen motion still changes spacer heights and must request frames.
-        if !self.ghosts.is_empty() || !self.entering.is_empty() {
+        // Off-screen motion must still advance and finish, even without an animated element.
+        if !self.ghosts.is_empty() || !self.entering.is_empty() || self.spring.is_some() {
             window.request_animation_frame();
         }
         self.open_current(cx);
@@ -2878,6 +2860,74 @@ mod dispatch {
         view.update(cx, |v, cx| v.open_box(Some(0), cx));
         frame(cx);
         assert_eq!(view.read_with(cx, |v, _| v.scroll.offset().y), px(0.));
+    }
+
+    #[gpui::test]
+    fn virtual_undo_swipe_keeps_last_row_height(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        let at = Instant::now() + Duration::from_secs(60);
+        view.update(cx, |v, cx| {
+            v.inbox.selected = 9999;
+            v.act(Move::Done, cx);
+            v.undo(cx);
+            v.entering[0].at = at;
+            v.swipe = Swipe::Row { id: 9999, dx: 60. };
+        });
+        for released in [false, true] {
+            view.update(cx, |v, cx| {
+                if released { v.release(false, cx); }
+                let layout = v.row_layout(at + Duration::from_millis(70));
+                assert!((layout.bottom() - layout.y(9999) - ROW_H).abs() < 0.1,
+                    "a swiped or springing row renders at full height after Undo");
+            });
+            frame(cx);
+            selected_in_view(&view, cx);
+            view.read_with(cx, |v, _| {
+                let height = f32::from(v.scroll.bounds().size.height);
+                let expected = row_y(10_000) + LIST_PAD - height;
+                assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn virtual_spring_keeps_progress_when_remounted(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        let rest = cx.debug_bounds("row-0").unwrap().left();
+        view.update(cx, |v, cx| {
+            v.swipe = Swipe::Row { id: 0, dx: 60. };
+            v.release(false, cx);
+        });
+        frame(cx);
+        // Only a lower time bound matters: a delayed frame may have settled completely.
+        std::thread::sleep(SPRING / 2);
+        frame(cx);
+        let before = cx.debug_bounds("row-0").unwrap().left() - rest;
+        assert!(f32::from(before).abs() < 10.);
+        view.update(cx, |v, _| v.scroll.set_offset(gpui::point(px(0.), px(-row_y(5000)))));
+        frame(cx);
+        view.read_with(cx, |v, _| {
+            let visible = v.row_layout(Instant::now()).visible(-f32::from(v.scroll.offset().y), 600.);
+            assert!(!visible.contains(&0));
+        });
+        assert!(children(&view, cx) < 15);
+        view.update(cx, |v, _| v.scroll.set_offset(Point::default()));
+        frame(cx);
+        let after = cx.debug_bounds("row-0").unwrap().left() - rest;
+        assert!(f32::from(after).abs() < 10., "spring restarted at {after:?}, was {before:?}");
+        view.update(cx, |v, cx| {
+            v.swipe = Swipe::Row { id: 0, dx: 60. };
+            v.release(false, cx);
+            v.spring.as_mut().unwrap().2 = Instant::now() - SPRING;
+            v.scroll.set_offset(gpui::point(px(0.), px(-row_y(5000))));
+        });
+        frame(cx);
+        assert!(view.read_with(cx, |v, _| v.spring.is_none()), "spring finishes off screen");
+        view.update(cx, |v, _| v.scroll.set_offset(Point::default()));
+        frame(cx);
+        assert_eq!(cx.debug_bounds("row-0").unwrap().left(), rest);
     }
 
     #[gpui::test]
