@@ -77,11 +77,7 @@ impl Mail {
             while let Some(event) = events.recv().await {
                 let mut batch = vec![event];
                 while let Ok(more) = events.try_recv() { batch.push(more); }
-                if cx.update(|cx| {
-                    if let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<MainWindow>()) {
-                        handle.update(cx, |this, window, cx| this.on_events(batch, window, cx)).ok();
-                    }
-                }).is_err() { return; }
+                if cx.update(|cx| Self::dispatch(batch, cx)).is_err() { return; }
             }
             cx.update(|cx| {
                 if let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<MainWindow>()) {
@@ -91,6 +87,42 @@ impl Mail {
         });
         cx.set_global(Self { store: Rc::new(store), bridge, next_op: Rc::new(std::cell::Cell::new(0)), _events: task });
     }
+
+    fn dispatch(events: Vec<Event>, cx: &mut App) {
+        if let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<MainWindow>()) {
+            handle.update(cx, |this, window, cx| this.on_events(events, window, cx)).ok();
+        } else {
+            let messages = events.into_iter().filter_map(|event| match event {
+                Event::NewMail(messages) => Some(messages),
+                _ => None,
+            }).flatten().collect();
+            notify_without_window(messages, cx);
+        }
+    }
+}
+
+pub(crate) fn notify_without_window(messages: Vec<lagom_core::store::MessageSummary>, cx: &mut App) {
+    if messages.is_empty() { return; }
+    let Some(mail) = cx.try_global::<Mail>() else { return };
+    let store = mail.store.clone();
+    match Panes::load(&store.path().with_file_name("window.json"), 1440.) {
+        Ok(panes) if panes.notifications => show_mail(&store, messages, cx),
+        Ok(_) => {},
+        Err(error) => eprintln!("Could not read notification preferences: {error}"),
+    }
+}
+
+fn show_mail(store: &Store, messages: Vec<lagom_core::store::MessageSummary>, cx: &mut App) {
+    // Permission prompts and queued events can outlive a read, snooze or move.
+    let mut ids = HashSet::new();
+    let messages = messages.into_iter().filter_map(|m| {
+        if !ids.insert(m.id) { return None; }
+        let current = store.message_summary(m.id).ok()?;
+        let folder = store.folder(current.folder).ok()?;
+        (!current.seen && current.snoozed_until.is_none() && folder.role == lagom_core::store::FolderRole::Inbox)
+            .then_some(current)
+    }).collect();
+    cx.global_mut::<crate::notifications::State>().service.show(messages);
 }
 
 impl Live {
@@ -296,18 +328,12 @@ impl MainWindow {
     fn notify_mail(&mut self, messages: Vec<lagom_core::store::MessageSummary>, window: &Window, cx: &mut Context<Self>) {
         if !self.panes.notifications || window.is_window_active() { return; }
         let Some(live) = &mut self.live else { return };
-        // Permission prompts and queued UI events can outlive a read, snooze or move.
-        let mut ids = HashSet::new();
-        let messages = messages.into_iter().filter_map(|m| {
-            if !ids.insert(m.id) || live.seen.contains(&m.id) || live.ops.values().any(|op| {
+        let messages = messages.into_iter().filter(|m| {
+            !live.seen.contains(&m.id) && !live.ops.values().any(|op| {
                 matches!(op, Op::Move(id) if self.inbox.mail.get(*id).is_some_and(|row| row.store == Some(m.id)))
-            }) { return None; }
-            let current = live.store.message_summary(m.id).ok()?;
-            let folder = live.store.folder(current.folder).ok()?;
-            (!current.seen && current.snoozed_until.is_none() && folder.role == lagom_core::store::FolderRole::Inbox)
-                .then_some(current)
+            })
         }).collect();
-        cx.global_mut::<crate::notifications::State>().service.show(messages);
+        show_mail(&live.store, messages, cx);
     }
 
     pub(crate) fn on_notification(&mut self, event: crate::notifications::Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -855,6 +881,83 @@ mod tests {
             assert!(Instant::now() < deadline, "reopened window must receive worker completions");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[gpui::test]
+    fn new_mail_posts_after_main_window_closes(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let (message, store, bridge) = view.update(cx, |v, _| {
+            let message = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            (message, live.store.clone(), live.bridge.clone())
+        });
+        cx.cx.update(|cx| {
+            cx.set_global(Mail { store: store.clone(), bridge, next_op: Rc::new(std::cell::Cell::new(0)), _events: Task::ready(()) });
+            crate::notifications::init(cx, |cx| crate::open_main_window(false, cx));
+        });
+        let weak = view.downgrade();
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+        cx.cx.update(|cx| Mail::dispatch(vec![Event::Changed, Event::NewMail(vec![message.clone()])], cx));
+        cx.run_until_parked();
+        cx.cx.update(|cx| {
+            assert!(cx.windows().is_empty(), "new mail and permission must not reopen the window");
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 1, "new mail must notify without a main window");
+        });
+        let sender = cx.cx.update(|cx| cx.global::<crate::notifications::State>().service.event_sender());
+        sender.send(crate::notifications::Event::Clicked(crate::notifications::Target {
+            account: message.account, message: Some(message.id),
+        })).unwrap();
+        cx.run_until_parked();
+        cx.cx.update(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            let reopened = cx.windows()[0].downcast::<MainWindow>().unwrap().read(cx).unwrap();
+            assert_eq!(reopened.inbox.mail[reopened.inbox.current().unwrap()].store, Some(message.id));
+        });
+    }
+
+    #[gpui::test]
+    fn closed_window_notifications_respect_setting_and_revalidation(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let (message, store, bridge) = view.update(cx, |v, _| {
+            let message = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            (message, live.store.clone(), live.bridge.clone())
+        });
+        cx.cx.update(|cx| {
+            cx.set_global(Mail { store: store.clone(), bridge, next_op: Rc::new(std::cell::Cell::new(0)), _events: Task::ready(()) });
+            crate::notifications::init(cx, |_| panic!("new mail must not reopen a window"));
+        });
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        cx.run_until_parked();
+        let path = store.path().with_file_name("window.json");
+        let mut panes = Panes::new(1440.);
+        panes.notifications = false;
+        panes.save(&path).unwrap();
+        cx.cx.update(|cx| Mail::dispatch(vec![Event::NewMail(vec![message.clone()])], cx));
+        cx.run_until_parked();
+        cx.cx.update(|cx| assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 0));
+
+        panes.notifications = true;
+        panes.save(&path).unwrap();
+        cx.cx.update(|cx| Mail::dispatch(vec![Event::NewMail(vec![message.clone()])], cx));
+        store.snooze(message.id, Some(i64::MAX)).unwrap();
+        cx.run_until_parked();
+        cx.cx.update(|cx| assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 0, "permission must revalidate pending mail"));
+
+        store.snooze(message.id, None).unwrap();
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [message.id]).unwrap();
+        assert!(store.message(message.id).is_err());
+        cx.cx.update(|cx| Mail::dispatch(vec![Event::NewMail(vec![message])], cx));
+        cx.run_until_parked();
+        cx.cx.update(|cx| {
+            assert!(cx.windows().is_empty());
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 1, "authorized delivery must read only metadata");
+        });
     }
 
     #[gpui::test]

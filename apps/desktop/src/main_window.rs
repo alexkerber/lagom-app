@@ -156,6 +156,7 @@ mod html;
 mod live;
 mod popout;
 pub use live::Live;
+pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
 /// What fills the main panel.

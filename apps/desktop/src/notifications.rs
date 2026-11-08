@@ -77,7 +77,8 @@ pub fn init(cx: &mut gpui::App, reopen: impl Fn(&mut gpui::App) -> anyhow::Resul
                 if let Some(window) = window {
                     window.update(cx, |view, window, cx| view.on_notification(event, window, cx)).ok();
                 } else if let Event::Authorized(allowed) = event {
-                    cx.global_mut::<State>().service.authorized(allowed);
+                    let pending = cx.global_mut::<State>().service.authorized(allowed);
+                    crate::main_window::notify_without_window(pending, cx);
                 } else if let Event::Failed(error) = event {
                     eprintln!("{error}");
                 }
