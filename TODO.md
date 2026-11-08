@@ -58,7 +58,7 @@
 - [x] Selection contrast raised and the sidebar frosted denser. Real blur radius needs native code.
 - [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
 - [x] Typeface: the system font (SF Pro on macOS) is the UI default. `LAGOM_UI_FONT=inter` switches back.
-- [ ] Message list: virtualise (visible rows only) when real mail arrives; it renders every row now.
+- [x] Message list: visible rows plus two-row overscan, with animated-height spacers.
 
 ## Folders: open questions
 
@@ -114,7 +114,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Outlook preset: password login will fail until OAuth2 lands; the form says so in its note only.
 - [ ] Bodies over 4 MiB are stored as headers with a "not downloaded" body; fetch on demand.
 - [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).
-- [ ] Message list virtualisation: the list reads 200 rows per page and renders them all.
+- [x] Message list virtualisation: visible rows plus overscan; height animation, selection glide, swipe, keyboard scrolling and paging covered by headless tests. Undo plus swipe keeps row heights consistent; spring-back keeps its progress across off-screen rows. 10,000-row measurement in `docs/performance.md`.
 - [ ] Store reads on the UI thread: each reload runs account-wide count queries. Codex measured about 37 ms at 100k rows (Python SQLite, not the app). Build the snapshot on the worker before large mailboxes.
 - [ ] Undo of Done or Delete on a message in Later puts it back in its folder but not on Later: the server move drops the local snooze.
 - [ ] A server MOVE that succeeds but whose follow-up folder sync fails shows as "Not moved"; the next sync shows the truth.

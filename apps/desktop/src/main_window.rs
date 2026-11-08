@@ -118,13 +118,8 @@ fn motion() -> Animation {
     Animation::new(MOTION).with_easing(ease_out_quint())
 }
 
-/// Linear progress for animators that apply `spring` themselves (GPUI's easing must stay in 0..=1).
 /// Rows that leave, come back or spring back: long enough to read the motion (see `motion::spring`).
 const SPRING: Duration = Duration::from_millis(280);
-
-fn springy() -> Animation {
-    Animation::new(SPRING)
-}
 
 /// The selection highlight on its way between rows: y positions inside the list.
 #[derive(Clone, Copy)]
@@ -176,10 +171,49 @@ struct Ghost {
     id: usize,
     ix: usize,
     what: Move,
-    seq: usize,
     at: Instant,
     // Where a swipe let go of the row, so the exit motion starts there. 0 for E and L.
     dx: f32,
+}
+
+impl Ghost {
+    fn progress(&self, now: Instant) -> f32 {
+        spring(now.saturating_duration_since(self.at).as_secs_f32() / SPRING.as_secs_f32())
+    }
+}
+
+fn row_scale(p: f32) -> f32 {
+    1. - ((p - 0.3) / 0.7).clamp(0., 1.)
+}
+
+struct RowLayout {
+    len: usize,
+    // Height changes after each index: exiting ghosts add space, entering rows subtract it.
+    changes: Vec<(usize, f32)>,
+}
+
+impl RowLayout {
+    fn y(&self, ix: usize) -> f32 {
+        row_y(ix) + self.changes.iter().filter(|&&(i, _)| i < ix).map(|&(_, h)| h).sum::<f32>()
+    }
+
+    fn bottom(&self) -> f32 {
+        row_y(self.len) + self.changes.iter().map(|&(_, h)| h).sum::<f32>()
+    }
+
+    fn index_at(&self, y: f32) -> usize {
+        let (mut lo, mut hi) = (0, self.len);
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            if self.y(mid) <= y { lo = mid; } else { hi = mid - 1; }
+        }
+        lo
+    }
+
+    fn visible(&self, top: f32, height: f32) -> std::ops::Range<usize> {
+        let overscan = 2. * ROW_H;
+        self.index_at(top - overscan)..(self.index_at(top + height + overscan) + 1).min(self.len)
+    }
 }
 
 pub struct MainWindow {
@@ -195,8 +229,8 @@ pub struct MainWindow {
     under: Option<usize>,
     // Last pointer position while the left button is down on a row: a click, or a mouse swipe.
     drag: Option<Point<Pixels>>,
-    // (message id, offset it springs back from, seq) for a swipe that did not reach the threshold.
-    spring: Option<(usize, f32, usize)>,
+    // (message id, offset it springs back from, start) survives rows leaving the viewport.
+    spring: Option<(usize, f32, Instant)>,
     // (move it was, move it is, seq) for the colour behind a swiped row. See `retint`.
     tint: (Option<Move>, Option<Move>, usize),
     // The toast: its text, whether it offers Undo, and its timer. Dropping the task cancels it.
@@ -608,7 +642,6 @@ impl MainWindow {
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
         // The list changes height under the highlight; rows paint the selection until it settles.
         self.glide = None;
-        self.seq += 1;
         for g in &mut self.ghosts {
             if g.ix > ix {
                 g.ix -= 1;
@@ -616,7 +649,7 @@ impl MainWindow {
         }
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
-        self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx });
+        self.ghosts.push(Ghost { id, ix, what, at: Instant::now(), dx });
         self.server(what, id, when, cx);
         self.close_popouts(Some(id), cx);
         // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
@@ -670,7 +703,6 @@ impl MainWindow {
             self.swipe = Swipe::Idle;
             self.clear_motion();
         }
-        self.seq += 1;
         self.ghosts.retain(|g| g.id != id);
         // Otherwise a finished spring on this row would hide the undo motion.
         self.spring = self.spring.filter(|s| s.0 != id);
@@ -679,11 +711,10 @@ impl MainWindow {
                 g.ix += 1;
             }
         }
-        self.entering.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx: 0. });
+        self.entering.push(Ghost { id, ix, what, at: Instant::now(), dx: 0. });
         // The row comes back where it was, which may be scrolled off, or in another list.
         if self.inbox.selected == ix {
-            let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
-            self.scroll.scroll_to_item(1 + ix + ghosts);
+            self.reveal_row(ix);
         }
         cx.notify();
     }
@@ -782,31 +813,41 @@ impl MainWindow {
         let ix = self.inbox.list().iter().position(|&i| i == id);
         match (what.filter(|_| act), ix) {
             (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
-            _ => {
-                self.seq += 1;
-                let seq = self.seq;
-                self.spring = Some((id, dx, seq));
-                // Done springing, the row is an ordinary row again (its own fill, copies in a glide).
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(SPRING).await;
-                    this.update(cx, |this, cx| {
-                        if this.spring.is_some_and(|s| s.2 == seq) {
-                            this.spring = None;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
+            _ => self.spring = Some((id, dx, Instant::now())),
         }
         cx.notify();
     }
 
     /// Finished ghosts paint nothing; drop them, so the next render and `select` agree on the rows.
     fn prune(&mut self) {
-        self.ghosts.retain(|g| g.at.elapsed() < SPRING * 2);
-        self.entering.retain(|g| g.at.elapsed() < SPRING * 2);
+        self.ghosts.retain(|g| g.at.elapsed() < SPRING);
+        self.entering.retain(|g| g.at.elapsed() < SPRING);
+        self.spring = self.spring.filter(|s| s.2.elapsed() < SPRING);
+    }
+
+    fn row_layout(&self, now: Instant) -> RowLayout {
+        let mut changes: Vec<_> = self.ghosts.iter().map(|g| (g.ix, ROW_H * row_scale(g.progress(now)))).collect();
+        for g in &self.entering {
+            // Swipe and spring-back render at full height instead of playing the entry motion.
+            if self.swipe.offset(g.id).is_some() || self.spring.is_some_and(|s| s.0 == g.id) {
+                continue;
+            }
+            if let Some(ix) = self.inbox.list().iter().position(|&id| id == g.id) {
+                changes.push((ix, ROW_H * (row_scale(1. - g.progress(now)) - 1.)));
+            }
+        }
+        RowLayout { len: self.inbox.list().len(), changes }
+    }
+
+    fn reveal_row(&self, ix: usize) {
+        let now = Instant::now();
+        let y = self.row_layout(now).y(ix)
+            + self.ghosts.iter().filter(|g| g.ix == ix).map(|g| ROW_H * row_scale(g.progress(now))).sum::<f32>();
+        let top = -f32::from(self.scroll.offset().y);
+        let height = f32::from(self.scroll.bounds().size.height);
+        // Reserve the full row for Undo, even while it is still expanding.
+        let top = if y < top { y } else { top.max(y + ROW_H - height) };
+        self.scroll.set_offset(gpui::point(px(0.), px(-top.max(0.))));
     }
 
     fn select(&mut self, f: impl FnOnce(&mut Inbox), cx: &mut Context<Self>) {
@@ -822,9 +863,7 @@ impl MainWindow {
             self.seq += 1;
             Glide::new(self.glide, row_y(before), row_y(ix), Instant::now(), self.seq)
         });
-        // Child 0 is the highlight; ghosts at or before `ix` sit in front of the row.
-        let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
-        self.scroll.scroll_to_item(1 + ix + ghosts);
+        self.reveal_row(ix);
         self.near_end(cx);
         cx.notify();
     }
@@ -836,11 +875,11 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
         return row; // At rest: keep the selection background.
     }
     // Slide first, then close the gap. Padding shrinks too, or the row keeps 20 px.
-    let collapse = ((p - 0.3) / 0.7).clamp(0., 1.);
+    let scale = row_scale(p);
     let row = row
         .relative()
-        .h(px(ROW_H * (1. - collapse)))
-        .py(px(ROW_PAD * (1. - collapse)))
+        .h(px(ROW_H * scale))
+        .py(px(ROW_PAD * scale))
         .overflow_hidden()
         // The spring overshoots a little past 0 and 1; position follows it, opacity stops at the ends.
         .opacity((1. - p).clamp(0., 1.));
@@ -890,17 +929,14 @@ fn behind(t: Theme, what: Option<Move>, right: bool) -> Div {
 
 /// A row that leaves (or comes back) over the colour of its move, so E, L and ⌫ look like a swipe.
 /// The colour fades with the row; at rest (p = 0) it is gone, as resting rows are not opaque.
-fn with_behind(row: AnyElement, t: Theme, what: Move, seq: usize, p: impl Fn(f32) -> f32 + 'static) -> AnyElement {
+fn with_behind(row: AnyElement, t: Theme, what: Move, p: f32) -> AnyElement {
     let right = !matches!(what, Move::Later | Move::Delete);
     div()
         .relative()
         .flex_shrink_0()
         .overflow_hidden()
         .rounded(px(radius::CONTROL))
-        .child(behind(t, Some(what), right).with_animation(("behind", seq), springy(), move |el, d| {
-            let p = p(d);
-            el.opacity(if p > 0. { (1. - p).max(0.) } else { 0. })
-        }))
+        .child(behind(t, Some(what), right).opacity(if p > 0. { (1. - p).max(0.) } else { 0. }))
         .child(row)
         .into_any_element()
 }
@@ -1279,7 +1315,7 @@ impl MainWindow {
         group
     }
 
-    fn message_list(&self, cx: &mut Context<Self>) -> Div {
+    fn message_list(&self, height: f32, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         // The focused list in the active window selects in the accent with white text; otherwise grey.
         let (sel_bg, sel_ink, sel_ink2, dot) = if self.list_focused {
@@ -1331,26 +1367,26 @@ impl MainWindow {
                 )
         };
         let theme = self.theme;
+        let now = Instant::now();
+        let layout = self.row_layout(now);
+        let top = (-f32::from(self.scroll.offset().y)).clamp(0., (layout.bottom() + LIST_PAD - height).max(0.));
+        self.scroll.set_offset(gpui::point(px(0.), px(-top)));
+        let visible = layout.visible(top, height);
         let ghosts_at = |ix: usize| {
             self.ghosts.iter().filter(move |g| g.ix == ix).map(move |g| {
                 let (what, dx) = (g.what, g.dx);
-                let el = row(&self.inbox.mail[g.id], false, false)
-                    .with_animation(("ghost", g.seq), springy(), move |el, d| away(el, theme, what, spring(d), dx))
-                    .into_any_element();
-                with_behind(el, theme, what, g.seq, spring)
+                let p = g.progress(now);
+                let el = away(row(&self.inbox.mail[g.id], false, false), theme, what, p, dx).into_any_element();
+                with_behind(el, theme, what, p)
             })
         };
         // The selection highlight glides between rows while nothing else moves the list.
         let gliding = self.glide.filter(|_| self.ghosts.is_empty() && self.entering.is_empty());
         // One reading of the clock per frame: the highlight, its copies below and the row colours
         // agree. Each with_animation would start when its element first appears instead.
-        let now = Instant::now();
         let (landed, fill_y) = gliding.map_or((true, 0.), |g| (g.landed(now), g.y(now)));
-        // shortcut: renders every row, fine for the sample inbox. Virtualise (uniform_list or
-        // gpui::list, docs/performance.md rule 3) when real mail arrives; rows leaving and
-        // coming back change height, which uniform_list cannot lay out.
         let mut rows: Vec<AnyElement> = vec![match gliding {
-            // First child, so it paints under the rows. `child_ix` counts it.
+            // First child, so it paints under the rows.
             Some(g) => {
                 let fill = div()
                     .absolute()
@@ -1371,27 +1407,11 @@ impl MainWindow {
         }];
         let dragging = self.mouse_swiping();
         // White text waits for the gliding fill to arrive; until then its copies below show it.
-        // Only rows near the viewport or the selection get text; the rest are empty boxes of the
-        // same height. Shaping ~500 rows on every animation frame made E, L and the arrows stutter.
-        // One element per row stays, so `scroll_to_item` indices still hold.
-        let top = -f32::from(self.scroll.offset().y);
-        let view = f32::from(self.scroll.bounds().size.height).max(1200.);
-        let (first, last) = ((top / ROW_H) as isize - 8, ((top + view) / ROW_H) as isize + 8);
-        let (sel, span) = (self.inbox.selected as isize, (view / ROW_H) as isize + 8);
-        let near = |i: usize, id: usize| {
-            let i = i as isize;
-            (first..=last).contains(&i)
-                || (sel - span..=sel + span).contains(&i)
-                || self.entering.iter().any(|g| g.id == id)
-                || self.swipe.offset(id).is_some()
-                || self.spring.is_some_and(|s| s.0 == id)
-        };
-        for (i, &id) in self.inbox.list().iter().enumerate() {
+        let spacer = |height| div().flex_shrink_0().h(px(height)).into_any_element();
+        rows.push(spacer(layout.y(visible.start) - LIST_PAD));
+        for i in visible.clone() {
+            let id = self.inbox.list()[i];
             rows.extend(ghosts_at(i));
-            if !near(i, id) {
-                rows.push(div().flex_shrink_0().h(px(ROW_H)).into_any_element());
-                continue;
-            }
             let selected = i == self.inbox.selected;
             // A row under the fingers or springing back paints its own fill and gets no copy.
             let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
@@ -1415,17 +1435,15 @@ impl MainWindow {
                     }
                 }))
                 .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
+            #[cfg(test)]
+            let el = el.debug_selector(move || format!("row-{id}"));
             // Under the fingers the row follows dx; after a short swipe it springs back from it.
-            let spring_back = self.spring.filter(|s| s.0 == id).map(|(_, dx, seq)| (dx, Some(seq)));
-            if let Some((dx, seq)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring_back) {
+            let spring_back = self.spring.filter(|s| s.0 == id).map(|(_, dx, at)| (dx, Some(at)));
+            if let Some((dx, at)) = self.swipe.offset(id).map(|dx| (dx, None)).or(spring_back) {
                 // Opaque, so the action behind shows only where the row has moved away.
                 let el = el.relative().bg(if selected { sel_bg } else { t.bg });
-                let el = match seq {
-                    None => el.left(px(dx)).into_any_element(),
-                    Some(seq) => el
-                        .with_animation(("spring", seq), springy(), move |el, d| el.left(px(dx * (1. - spring(d)))))
-                        .into_any_element(),
-                };
+                let p = at.map_or(0., |at| spring(now.saturating_duration_since(at).as_secs_f32() / SPRING.as_secs_f32()));
+                let el = el.left(px(dx * (1. - p)));
                 // The colour of the move the row would make, cross-faded from the last one so a
                 // change of state never cuts hard. The row itself never waits for it.
                 let (from, to, tint) = self.tint;
@@ -1449,10 +1467,9 @@ impl MainWindow {
             rows.push(match self.entering.iter().find(|g| g.id == id) {
                 Some(g) => {
                     let what = g.what;
-                    let el = el
-                        .with_animation(("enter", g.seq), springy(), move |el, d| away(el, theme, what, 1. - spring(d), 0.))
-                        .into_any_element();
-                    with_behind(el, theme, what, g.seq, |d| 1. - spring(d))
+                    let p = 1. - g.progress(now);
+                    let el = away(el, theme, what, p, 0.).into_any_element();
+                    with_behind(el, theme, what, p)
                 }
                 // At rest. No hover fill, as in native lists; a press tints, the selection keeps its fill.
                 None => {
@@ -1461,7 +1478,10 @@ impl MainWindow {
                 }
             });
         }
-        rows.extend(ghosts_at(self.inbox.list().len()));
+        if visible.end == layout.len {
+            rows.extend(ghosts_at(layout.len));
+        }
+        rows.push(spacer(if visible.end == layout.len { 0. } else { layout.bottom() - layout.y(visible.end) }));
         // The eased fill reaches the selected row long before the glide ends, but row text turns
         // white only then, and the row it leaves turns dark at once. Until it lands, copies of the
         // rows it crosses, in selection colours, show through the fill, clipped to each row: text
@@ -1469,7 +1489,8 @@ impl MainWindow {
         if let Some(g) = gliding.filter(|_| !landed) {
             // The fill starts on one row, or across two after a glide was cut short.
             let from = ((g.from - LIST_PAD) / ROW_H).floor() as isize;
-            let (lo, hi) = (from.min(sel).max(first).max(0), (from + 1).max(sel).min(last));
+            let sel = self.inbox.selected as isize;
+            let (lo, hi) = (from.min(sel).max(visible.start as isize), (from + 1).max(sel).min(visible.end as isize - 1));
             for ix in (lo..=hi).map(|i| i as usize) {
                 let Some(&id) = self.inbox.list().get(ix) else { continue };
                 // A row under the fingers moves sideways; a copy would stay put over it.
@@ -1556,6 +1577,7 @@ impl MainWindow {
                     .justify_between()
                     .gap(px(8.))
                     .h(px(HEADER_H))
+                    .flex_shrink_0()
                     .px(px(16.))
                     .border_b_1()
                     .border_color(t.line)
@@ -1573,7 +1595,8 @@ impl MainWindow {
                 {
                     let mut list = div()
                         .id("rows")
-                        .flex_1()
+                        .h(px(height))
+                        .flex_shrink_0()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .flex()
@@ -1813,7 +1836,15 @@ fn reading_view(
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        // Reveal the final height before pruning, even if a late frame skipped the expansion.
+        if self.entering.iter().any(|g| Some(g.id) == self.inbox.current()) {
+            self.reveal_row(self.inbox.selected);
+        }
         self.prune();
+        // Off-screen motion must still advance and finish, even without an animated element.
+        if !self.ghosts.is_empty() || !self.entering.is_empty() || self.spring.is_some() {
+            window.request_animation_frame();
+        }
         self.open_current(cx);
         self.window_active = window.is_window_active();
         self.list_focused = self.window_active && self.focus.is_focused(window);
@@ -1822,6 +1853,8 @@ impl Render for MainWindow {
         self.web_frame(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
+        let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
+        let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - HEADER_H).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
             Page::Settings(_) => "Settings".into(),
@@ -1841,7 +1874,7 @@ impl Render for MainWindow {
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
-            Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(cx)).child(self.reading_pane(cx)),
+            Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(list_height, cx)).child(self.reading_pane(cx)),
         };
         // Toasts sit bottom-centre in the reading pane, above its reply field, so they never cover
         // the list or the divider. A spacer the list's width stands in for the list.
@@ -1925,10 +1958,10 @@ impl Render for MainWindow {
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
-                    .my(px(8.))
+                    .mt(px(panel_top))
+                    .mb(px(8.))
                     .mr(px(8.))
-                    .when(welcome, |d| d.ml(px(8.)).mt(px(36.)))
-                    .when(!welcome && self.panes.sidebar_hidden && cfg!(target_os = "macos"), |d| d.mt(px(36.)))
+                    .when(welcome, |d| d.ml(px(8.)))
                     .bg(t.bg)
                     .border_1()
                     .border_color(t.line)
@@ -2343,6 +2376,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn virtual_ranges_include_partial_rows_and_trailing_ghosts() {
+        let empty = RowLayout { len: 0, changes: Vec::new() };
+        assert_eq!(empty.visible(0., 600.), 0..0);
+        assert_eq!(empty.bottom(), LIST_PAD);
+        let layout = RowLayout { len: 10_000, changes: Vec::new() };
+        assert_eq!(layout.visible(row_y(5000) + ROW_H / 2., 5. * ROW_H), 4998..5008);
+        assert_eq!(layout.visible(row_y(9999), 5. * ROW_H), 9997..10_000);
+        let moving = RowLayout { len: 10, changes: vec![(0, -ROW_H), (1, ROW_H / 2.), (10, ROW_H / 4.)] };
+        assert_eq!(moving.y(1), LIST_PAD);
+        assert!((moving.y(2) - LIST_PAD - 1.5 * ROW_H).abs() < 0.001);
+        assert!((moving.bottom() - LIST_PAD - 9.75 * ROW_H).abs() < 0.001);
+        assert_eq!(moving.index_at(moving.y(10) + ROW_H / 8.), 10);
+    }
+
+    #[test]
     fn held_arrow_key_highlight_keeps_up() {
         let t0 = Instant::now();
         let single = Glide::new(None, row_y(0), row_y(1), t0, 0);
@@ -2683,6 +2731,267 @@ mod dispatch {
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
         view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    fn large_list(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, _| {
+            v.inbox.mail = vec![Mail { from: "Sender".into(), subject: "Subject".into(), snippet: "Preview".into(), ..Mail::default() }; 10_000];
+            v.inbox.items = (0..10_000).collect();
+        });
+        cx.simulate_resize(gpui::size(px(1440.), px(600.)));
+        (view, cx)
+    }
+
+    fn frame(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    fn children(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
+        view.read_with(cx, |v, _| (0..).take_while(|&i| v.scroll.bounds_for_item(i).is_some()).count())
+    }
+
+    #[gpui::test]
+    fn ten_thousand_message_rows(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        let mut elapsed = Duration::ZERO;
+        for sample in 0..11 {
+            let start = Instant::now();
+            frame(cx);
+            if sample > 0 { elapsed += start.elapsed(); }
+        }
+        let count = children(&view, cx);
+        eprintln!("10,000 messages: {} row elements, mean full frame {:?} (10 frames, debug, headless)", count - 3, elapsed / 10);
+        assert!((5..=12).contains(&(count - 3)), "{count} children");
+        for ix in [5000, 9999, 0] {
+            view.update(cx, |v, cx| {
+                v.scroll.set_offset(gpui::point(px(0.), px(-row_y(ix))));
+                cx.notify();
+            });
+            frame(cx);
+            assert!(children(&view, cx) <= 15);
+            view.read_with(cx, |v, _| {
+                let height = f32::from(v.scroll.bounds().size.height);
+                let expected = row_y(10_000) + LIST_PAD - height;
+                assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
+            });
+        }
+    }
+
+    fn selected_in_view(view: &Entity<MainWindow>, cx: &mut VisualTestContext) {
+        view.read_with(cx, |v, _| {
+            let layout = v.row_layout(Instant::now());
+            let top = -f32::from(v.scroll.offset().y);
+            let height = f32::from(v.scroll.bounds().size.height);
+            let visible = layout.visible(top, height);
+            assert!(visible.contains(&v.inbox.selected));
+            let child = 2 + v.inbox.selected - visible.start;
+            let bounds = v.scroll.bounds_for_item(child).unwrap();
+            let y = f32::from(bounds.top() - v.scroll.bounds().top()) - top;
+            assert!(y >= -1. && y + ROW_H <= height + 1., "selected y {y}, height {height}");
+        });
+    }
+
+    #[gpui::test]
+    fn virtual_rows_keep_navigation_swipe_and_resize(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        view.update(cx, |v, cx| v.select(|inbox| inbox.select(5000), cx));
+        frame(cx);
+        selected_in_view(&view, cx);
+        cx.simulate_keystrokes("down");
+        frame(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.selected), 5001);
+        selected_in_view(&view, cx);
+        assert!(children(&view, cx) < 30, "glide copies stay in the viewport");
+        cx.simulate_keystrokes("up");
+        frame(cx);
+        selected_in_view(&view, cx);
+
+        let at = view.read_with(cx, |v, _| {
+            let y = row_y(v.inbox.selected) + ROW_H / 2.;
+            v.scroll.bounds().origin + v.scroll.offset() + gpui::point(px(50.), px(y))
+        });
+        cx.simulate_mouse_down(at, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at + gpui::point(px(60.), px(0.)), MouseButton::Left, Default::default());
+        assert!(view.read_with(cx, |v, _| v.swipe.offset(5000).is_some()));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| matches!(v.swipe, Swipe::Idle)));
+
+        let before = view.read_with(cx, |v, _| v.scroll.offset().y);
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(gpui::point(0., -30.)),
+            ..Default::default()
+        });
+        frame(cx);
+        assert!(view.read_with(cx, |v, _| v.scroll.offset().y) < before);
+        assert!(children(&view, cx) < 30);
+
+        view.update(cx, |v, cx| v.select(|inbox| inbox.select(9999), cx));
+        frame(cx);
+        selected_in_view(&view, cx);
+        cx.simulate_resize(gpui::size(px(1440.), px(1000.)));
+        frame(cx);
+        selected_in_view(&view, cx);
+        assert!(children(&view, cx) < 40);
+        view.update(cx, |v, cx| {
+            v.inbox.items.truncate(20);
+            v.inbox.selected = 19;
+            v.clear_motion();
+            cx.notify();
+        });
+        frame(cx);
+        selected_in_view(&view, cx);
+        view.update(cx, |v, cx| {
+            v.act(Move::Done, cx);
+            v.ghosts[0].at = Instant::now() - SPRING;
+        });
+        frame(cx);
+        view.update(cx, |v, cx| v.undo(cx));
+        frame(cx);
+        // A late frame must reveal the restored last row even if its motion has ended.
+        view.update(cx, |v, _| v.entering[0].at = Instant::now() - SPRING);
+        frame(cx);
+        selected_in_view(&view, cx);
+        view.update(cx, |v, cx| v.open_box(Some(0), cx));
+        frame(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.scroll.offset().y), px(0.));
+    }
+
+    #[gpui::test]
+    fn virtual_undo_swipe_keeps_last_row_height(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        let at = Instant::now() + Duration::from_secs(60);
+        view.update(cx, |v, cx| {
+            v.inbox.selected = 9999;
+            v.act(Move::Done, cx);
+            v.undo(cx);
+            v.entering[0].at = at;
+            v.swipe = Swipe::Row { id: 9999, dx: 60. };
+        });
+        for released in [false, true] {
+            view.update(cx, |v, cx| {
+                if released { v.release(false, cx); }
+                let layout = v.row_layout(at + Duration::from_millis(70));
+                assert!((layout.bottom() - layout.y(9999) - ROW_H).abs() < 0.1,
+                    "a swiped or springing row renders at full height after Undo");
+            });
+            frame(cx);
+            selected_in_view(&view, cx);
+            view.read_with(cx, |v, _| {
+                let height = f32::from(v.scroll.bounds().size.height);
+                let expected = row_y(10_000) + LIST_PAD - height;
+                assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn virtual_spring_keeps_progress_when_remounted(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        let rest = cx.debug_bounds("row-0").unwrap().left();
+        view.update(cx, |v, cx| {
+            v.swipe = Swipe::Row { id: 0, dx: 60. };
+            v.release(false, cx);
+        });
+        frame(cx);
+        // Only a lower time bound matters: a delayed frame may have settled completely.
+        std::thread::sleep(SPRING / 2);
+        frame(cx);
+        let before = cx.debug_bounds("row-0").unwrap().left() - rest;
+        assert!(f32::from(before).abs() < 10.);
+        view.update(cx, |v, _| v.scroll.set_offset(gpui::point(px(0.), px(-row_y(5000)))));
+        frame(cx);
+        view.read_with(cx, |v, _| {
+            let visible = v.row_layout(Instant::now()).visible(-f32::from(v.scroll.offset().y), 600.);
+            assert!(!visible.contains(&0));
+        });
+        assert!(children(&view, cx) < 15);
+        view.update(cx, |v, _| v.scroll.set_offset(Point::default()));
+        frame(cx);
+        let after = cx.debug_bounds("row-0").unwrap().left() - rest;
+        assert!(f32::from(after).abs() < 10., "spring restarted at {after:?}, was {before:?}");
+        view.update(cx, |v, cx| {
+            v.swipe = Swipe::Row { id: 0, dx: 60. };
+            v.release(false, cx);
+            v.spring.as_mut().unwrap().2 = Instant::now() - SPRING;
+            v.scroll.set_offset(gpui::point(px(0.), px(-row_y(5000))));
+        });
+        frame(cx);
+        assert!(view.read_with(cx, |v, _| v.spring.is_none()), "spring finishes off screen");
+        view.update(cx, |v, _| v.scroll.set_offset(Point::default()));
+        frame(cx);
+        assert_eq!(cx.debug_bounds("row-0").unwrap().left(), rest);
+    }
+
+    #[gpui::test]
+    fn virtual_row_offsets_follow_motion_even_off_screen(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        let now = Instant::now();
+        view.update(cx, |v, cx| {
+            v.act_at(0, Move::Done, 0., cx);
+            v.ghosts[0].at = now;
+            for step in [0., 0.25, 0.5, 1., 2.] {
+                let at = now + SPRING.mul_f32(step);
+                let height = ROW_H * row_scale(spring(step));
+                let layout = v.row_layout(at);
+                assert!((layout.y(5000) - row_y(5000) - height).abs() < 0.05);
+                assert!((layout.bottom() - row_y(9999) - height).abs() < 0.1);
+            }
+            v.undo(cx);
+            v.entering[0].at = now;
+            v.act_at(1, Move::Done, 0., cx);
+            v.ghosts[0].at = now;
+            let layout = v.row_layout(now);
+            assert!((layout.y(1) - LIST_PAD).abs() < 0.01);
+            assert!((layout.y(2) - row_y(2)).abs() < 0.01);
+            assert!(layout.visible(row_y(5000), 530.).len() <= 12);
+            let settled = v.row_layout(now + SPRING);
+            assert_eq!(settled.y(5000), row_y(5000));
+            assert_eq!(settled.bottom(), row_y(9999));
+            // A move above an entering row shifts its index; its id still locates it.
+            v.clear_motion();
+            v.act_at(1, Move::Done, 0., cx);
+            v.undo(cx);
+            v.entering[0].at = now;
+            v.act_at(0, Move::Done, 0., cx);
+            v.ghosts[0].at = now;
+            assert_eq!(v.entering[0].ix, 1);
+            assert!((v.row_layout(now).y(1) - row_y(1)).abs() < 0.01);
+        });
+        view.update(cx, |v, cx| {
+            v.clear_motion();
+            v.act_at(0, Move::Done, 0., cx);
+            v.ghosts[0].at = Instant::now() + Duration::from_secs(60);
+            v.inbox.selected = 5000;
+            v.scroll.set_offset(gpui::point(px(0.), px(-row_y(5000))));
+        });
+        frame(cx);
+        view.read_with(cx, |v, _| {
+            let height = f32::from(v.scroll.bounds().size.height);
+            let expected = row_y(v.inbox.list().len() + 1) + LIST_PAD - height;
+            assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
+        });
+        assert!(children(&view, cx) <= 15);
+        view.update(cx, |v, cx| {
+            v.undo(cx);
+            v.entering[0].at = Instant::now() + Duration::from_secs(60);
+            v.inbox.selected = 5000;
+            v.scroll.set_offset(Point::default());
+        });
+        frame(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.scroll.bounds_for_item(2).unwrap().size.height, px(0.));
+            let height = f32::from(v.scroll.bounds().size.height);
+            let expected = row_y(v.inbox.list().len() - 1) + LIST_PAD - height;
+            assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
+        });
     }
 
     #[gpui::test]
