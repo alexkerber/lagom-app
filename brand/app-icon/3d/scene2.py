@@ -192,7 +192,7 @@ elif concept == "osthyvel4":
     # Blade outline: rounded tab at the neck, flaring to a broad end with rounded corners.
     outer = arc(-0.17, 0, 0.13, 90, 270) + [(0.0, -0.13), (0.14, -0.22)] + arc(1.17, -0.345, 0.18, 270, 360) + \
             arc(1.17, 0.345, 0.18, 0, 90) + [(0.14, 0.22), (0.0, 0.13)]
-    slot = arc(1.0, -0.30, 0.045, 180, 360) + arc(1.0, 0.30, 0.045, 0, 180)
+    slot = arc(0.42, -0.2, 0.04, 180, 360) + arc(0.42, 0.2, 0.04, 0, 180)  # near the neck, as on real slicers
     cu = bpy.data.curves.new("blade", "CURVE"); cu.dimensions = "2D"; cu.fill_mode = "BOTH"
     cu.extrude = 0.012; cu.bevel_depth = 0.004
     for pts in (outer, slot):
@@ -208,18 +208,20 @@ elif concept == "osthyvel4":
     nt.links.new(wv.outputs["Fac"], ramp.inputs["Fac"]); nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"]); b.inputs["Roughness"].default_value = 0.5
     rod((-0.62, 0, T + 0.1), (-1.72, 0, T + 0.27), 0.12, wood)
     rod((-1.72, 0, T + 0.27), (-1.8, 0, T + 0.282), 0.12, steel)
-    # One thin sheet comes up through the slot and curls back towards the handle.
-    bm = bmesh.new(); x0, z0, r0, w = 1.0, T + 0.03, 0.2, 0.29; prev = None
-    for k in range(121):
-        t = k / 120 * 1.25 * math.pi; rr = r0 * (1 - 0.28 * t / math.pi)
-        x = x0 - rr * math.sin(t); z = z0 + r0 - rr * math.cos(t)
+    # One thin sheet comes up through the slot, lies on the broad end and curls at the tip.
+    z0, w = T + 0.032, 0.19
+    path = [(0.40, z0 - 0.03), (0.44, z0 + 0.005)] + [(0.44 + 0.5 * k / 20, z0 + 0.012 + 0.03 * (k / 20) ** 2) for k in range(1, 21)]
+    cx, cz, r = 0.94, z0 + 0.042 + 0.13, 0.13
+    path += [(cx + r * math.sin(t), cz - r * math.cos(t)) for t in (k / 30 * 1.2 * math.pi for k in range(1, 31))]
+    bm = bmesh.new(); prev = None
+    for x, z in path:
         a, b2 = bm.verts.new((x, -w, z)), bm.verts.new((x, w, z))
         if prev: bm.faces.new((prev[0], prev[1], b2, a))
         prev = (a, b2)
     me = bpy.data.meshes.new("slice"); bm.to_mesh(me); sl = bpy.data.objects.new("slice", me); sc.collection.objects.link(sl)
     sl.modifiers.new("t", "SOLIDIFY").thickness = 0.008; sl.data.materials.append(mat("#FFFBF2", 0.6))
     for p in me.polygons: p.use_smooth = True
-    target = Vector((-0.2, 0.05, 0.5)); cam = (-2.2, -4.4, 6.9)
+    target = Vector((-0.15, 0.0, 0.5)); cam = (-1.6, -3.0, 8.2)
 elif concept == "kladnypa":
     for i, (c, rz, dx) in enumerate([(BLUE, 7, -0.12), (MUSTARD, -4, 0.1), (CREAM, 0, 0)]):
         box((2.0, 1.5, 0.03), (dx, -0.25, 0.02 + 0.035 * i), c, rot=(0, 0, rz), bevel=0.008, rough=0.7)
