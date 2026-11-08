@@ -3546,6 +3546,7 @@ dependencies = [
  "lettre",
  "log",
  "mail-parser",
+ "nom 8.0.0",
  "pulldown-cmark",
  "quick-xml",
  "rusqlite",

@@ -16,6 +16,7 @@ keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync
 zeroize = "1"
 
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+nom = "8"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt", "macros", "sync"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"

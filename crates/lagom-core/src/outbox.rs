@@ -292,18 +292,26 @@ mod tests {
 
     #[test]
     fn v5_migration_preserves_mail_and_stops_ambiguous_retries() {
-        let (dir, store, account, interrupted) = queued();
-        assert!(store.claim_send(&interrupted, 0).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("mail.db")).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql")] {
+            db.execute_batch(schema).unwrap();
+        }
+        let store = Store { db };
+        let (imap, smtp) = crate::presets::servers("sender@gmail.com").unwrap();
+        let account = Account::new("sender@example.com".into(), imap, smtp).unwrap();
+        store.save_account(&account).unwrap();
+        let draft = Draft { id: "interrupted".into(), account: account.id.clone(), text: "keep me".into(), ..Default::default() };
         let mail = Outgoing { to: vec!["recipient@example.com".into()], ..Default::default() };
-        let failed = store.enqueue(&account, &mail, 0).unwrap();
-        let submitted = store.enqueue(&account, &mail, 0).unwrap();
-        store.db.execute("UPDATE outbox SET error='may have been sent' WHERE id=?1", [&failed]).unwrap();
-        store.submitted(&submitted).unwrap();
-        store.db.execute_batch("ALTER TABLE outbox DROP COLUMN state;
-            ALTER TABLE outbox DROP COLUMN attempts;
-            ALTER TABLE outbox DROP COLUMN copied;
-            ALTER TABLE drafts DROP COLUMN revision;
-            PRAGMA user_version=5;").unwrap();
+        let interrupted = "interrupted";
+        let failed = "failed";
+        let submitted = "submitted";
+        for id in [interrupted, failed, submitted] {
+            store.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,started,submitted,error)
+                VALUES (?1,?2,?3,?4,?5,0,?6,?7,?8)",
+                params![id, account.id, encode(&mail).unwrap(), b"fixture MIME".as_slice(), encode(&draft).unwrap(),
+                    id == interrupted, id == submitted, (id == failed).then_some("may have been sent")]).unwrap();
+        }
         drop(store);
         let store = Store::open(dir.path().join("mail.db")).unwrap();
         store.recover_outbox().unwrap();

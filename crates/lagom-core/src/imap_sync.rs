@@ -4,6 +4,7 @@ mod guard;
 use guard::Guarded;
 use crate::{
     account::{Account, Auth, Security, ServerConfig},
+    attachment::{self, Attachment},
     mime, presets,
     store::{Folder, FolderRole, Message, Store},
     Error, Result,
@@ -23,6 +24,9 @@ use tokio_rustls::{
     rustls::{self, pki_types::ServerName},
     TlsConnector,
 };
+
+mod bounded;
+use bounded::{Bounded, MAX_LITERAL};
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send + Debug {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + Debug> Io for T {}
@@ -61,7 +65,7 @@ async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
         .await?,
     )))
 }
-async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Wire>> {
+async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Bounded<Wire>>> {
     config.validate()?;
     let socket = net_as(
         "could not reach the IMAP server",
@@ -72,9 +76,9 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
     if config.security == Security::Plain && !socket.peer_addr()?.ip().is_loopback() {
         return Err(Error::Invalid("unencrypted peer must be loopback"));
     }
-    let client: Client<Wire> = match config.security {
+    let client: Client<Bounded<Wire>> = match config.security {
         Security::Tls => {
-            let mut client = Client::new(tls(socket, &config.host).await?);
+            let mut client = Client::new(Bounded::new(tls(socket, &config.host).await?));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
@@ -86,10 +90,10 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
                 return Err(Error::Network("IMAP greeting missing"));
             }
             net(client.run_command_and_check_ok("STARTTLS", None)).await?;
-            Client::new(tls(client.into_inner().inner, &config.host).await?)
+            Client::new(Bounded::new(tls(client.into_inner().inner, &config.host).await?))
         }
         Security::Plain => {
-            let mut client = Client::new(Box::new(Guarded::new(socket)) as Wire);
+            let mut client = Client::new(Bounded::new(Box::new(Guarded::new(socket)) as Wire));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
@@ -121,7 +125,7 @@ impl async_imap::Authenticator for Xoauth2 {
 
 pub struct ImapSync {
     account: Account,
-    session: Session<Wire>,
+    session: Session<Bounded<Wire>>,
     capabilities: Capabilities,
 }
 impl ImapSync {
@@ -265,6 +269,11 @@ impl ImapSync {
                 self.fetch_message(store, &folder, uid).await?;
             }
         }
+        for uid in store.missing_attachments(id, limit)? {
+            if present.contains(&uid) {
+                self.fetch_message(store, &folder, uid).await?;
+            }
+        }
         let query =
             if let (Some(previous), Some(_)) = (folder.highest_modseq, mailbox.highest_modseq) {
                 format!("(UID FLAGS MODSEQ) (CHANGEDSINCE {previous})")
@@ -328,19 +337,17 @@ impl ImapSync {
         let header = fetch
             .header()
             .ok_or(Error::Network("IMAP message header missing"))?;
+        let body = fetch.bodystructure().ok_or(Error::Network("IMAP BODYSTRUCTURE missing"))?;
+        let mut parts = Vec::new();
+        let mut attachments = Vec::new();
+        text_parts(body, &[], 0, false, &mut parts, &mut attachments);
         // Only the first 256 KiB were fetched: keep what parses and go on, so one message
         // never stops the folder's later UIDs.
         if header.len() >= 262144 {
             let message = mime::metadata_only(header).unwrap_or_else(|_| mime::placeholder());
-            return self.save(store, folder, uid, fetch, message, false);
+            return self.save(store, folder, uid, fetch, message, &attachments);
         }
         let mut message;
-        let body = fetch
-            .bodystructure()
-            .ok_or(Error::Network("IMAP BODYSTRUCTURE missing"))?;
-        let mut parts = Vec::new();
-        let mut attachments = false;
-        text_parts(body, &[], 0, &mut parts, &mut attachments);
         // The first text part (search, and the reading pane where HTML does not render) and the
         // first HTML part (the rendered view), in one fetch.
         // shortcut: further inline parts are not combined; combine them when needed.
@@ -350,7 +357,7 @@ impl ImapSync {
             message = mime::parse(header)?;
         } else {
             if picks.iter().map(|p| p.2 as usize).sum::<usize>() > mime::MAX_MIME_BYTES {
-                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, attachments);
+                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments);
             }
             let section = |path: &[u32]| path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
             // GreenMail emits malformed partial text responses; check octets before full part fetch.
@@ -384,7 +391,7 @@ impl ImapSync {
                 .ok_or(Error::Network("MIME text part missing"))?;
                 total += headers.len() + text.len();
                 if headers.len() >= 65536 || total > mime::MAX_MIME_BYTES {
-                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, attachments);
+                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments);
                 }
                 let mut raw = headers.to_vec();
                 if !raw.ends_with(b"\r\n") {
@@ -409,10 +416,10 @@ impl ImapSync {
             }
             message.summary.snippet = mime::snippet(&message.body_text, message.body_html.as_deref());
         }
-        self.save(store, folder, uid, fetch, message, attachments)
+        self.save(store, folder, uid, fetch, message, &attachments)
     }
     /// Fills the IMAP-side fields of a parsed message and stores it.
-    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: bool) -> Result<()> {
+    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: &[Attachment]) -> Result<()> {
         let (seen, flagged) = flags(fetch);
         let m = &mut message.summary;
         m.account = self.account.id.clone();
@@ -427,7 +434,7 @@ impl ImapSync {
         }
         m.seen = seen;
         m.flagged = flagged;
-        m.has_attachments = attachments;
+        m.has_attachments = !attachments.is_empty();
         m.size = fetch.size.unwrap_or_default();
         if m.date == 0 {
             m.date = fetch
@@ -435,8 +442,47 @@ impl ImapSync {
                 .map(|d| d.timestamp())
                 .unwrap_or_default();
         }
-        store.save_message(&message)?;
+        store.save_synced_message(&message, attachments)?;
         Ok(())
+    }
+    pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
+        let message = store.message(id)?.summary;
+        let part = store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
+        let path = section.split('.').map(|s| s.parse::<u32>().ok().filter(|n| *n > 0))
+            .collect::<Option<Vec<_>>>().ok_or(Error::Invalid("invalid attachment section"))?;
+        // shortcut: buffer encoded parts up to 64 MiB; stream to disk when larger attachments are needed.
+        if part.size as usize > MAX_LITERAL {
+            return Err(Error::Invalid("attachment exceeds 64 MiB"));
+        }
+        // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
+        self.session.get_mut().remaining = Some(part.size as usize + 65536);
+        let before = store.folder(message.folder)?.uidvalidity;
+        let (folder, _) = self.select(store, message.folder).await?;
+        if folder.uidvalidity != before {
+            return Err(Error::Invalid("mailbox changed; resync before download"));
+        }
+        let path = SectionPath::Part(path, None);
+        let query = format!("(UID BODY.PEEK[{section}])");
+        let fetched = net(async {
+            let mut stream = self.session.uid_fetch(message.uid.to_string(), query).await?;
+            let mut found = None;
+            while let Some(fetch) = stream.try_next().await? {
+                if found.is_none() && fetch.uid == Some(message.uid) && fetch.section(&path).is_some() {
+                    found = Some(fetch);
+                }
+            }
+            Ok::<_, async_imap::error::Error>(found)
+        }).await?;
+        self.session.get_mut().remaining = None;
+        let bytes = fetched.as_ref().and_then(|f| f.section(&path))
+            .ok_or(Error::Network("attachment part missing"))?;
+        if bytes.len() > MAX_LITERAL {
+            return Err(Error::Invalid("attachment exceeds 64 MiB"));
+        }
+        if bytes.len() != part.size as usize {
+            return Err(Error::Network("attachment size changed or download incomplete"));
+        }
+        attachment::decode(bytes, &part.encoding)
     }
     pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
         let message = store.message(id)?.summary;
@@ -616,37 +662,68 @@ fn role(name: &str, attrs: &[NameAttribute<'_>]) -> FolderRole {
     }
     FolderRole::from_name(name)
 }
+fn encoding_name(encoding: &ContentEncoding<'_>) -> String {
+    match encoding {
+        ContentEncoding::SevenBit => "7bit".into(),
+        ContentEncoding::EightBit => "8bit".into(),
+        ContentEncoding::Binary => "binary".into(),
+        ContentEncoding::Base64 => "base64".into(),
+        ContentEncoding::QuotedPrintable => "quoted-printable".into(),
+        ContentEncoding::Other(value) => value.to_string(),
+    }
+}
+fn attachment_filename(common: &async_imap::imap_proto::BodyContentCommon<'_>) -> Option<String> {
+    // Let the MIME parser decode RFC 2231 continuations and encoded words too.
+    let params = |values: &async_imap::imap_proto::BodyParams<'_>| values.iter().flatten().map(|(k, v)| {
+        let key = k.replace(['\r', '\n', '"', '\\'], "");
+        let value = v.replace(['\r', '\n'], "").replace('\\', "\\\\").replace('"', "\\\"");
+        format!("; {key}=\"{value}\"")
+    }).collect::<String>();
+    let disposition = common.disposition.as_ref().map(|d| params(&d.params)).unwrap_or_default();
+    let header = format!("Content-Type: application/octet-stream{}\r\nContent-Disposition: attachment{disposition}\r\n\r\nx", params(&common.ty.params));
+    let message = mail_parser::MessageParser::default().parse(header.as_bytes())?;
+    let name = message.attachments().next()?.attachment_name().filter(|s| !s.is_empty()).map(str::to_owned);
+    name
+}
 fn text_parts(
     body: &BodyStructure<'_>,
     path: &[u32],
     depth: usize,
+    attached_parent: bool,
     parts: &mut Vec<(Vec<u32>, bool, u32, String)>,
-    attachments: &mut bool,
+    attachments: &mut Vec<Attachment>,
 ) {
-    if depth > 32 {
-        *attachments = true;
-        return;
-    }
     let common = match body {
         BodyStructure::Basic { common, .. }
         | BodyStructure::Text { common, .. }
         | BodyStructure::Message { common, .. }
         | BodyStructure::Multipart { common, .. } => common,
     };
-    if common
-        .disposition
-        .as_ref()
-        .is_some_and(|d| d.ty.eq_ignore_ascii_case("attachment"))
-    {
-        *attachments = true;
-        return;
+    let filename = attachment_filename(common);
+    // The parser caps recursion at 40; deeper text branches remain downloadable attachments.
+    let attached = attached_parent || depth > 32 || filename.is_some() || common.disposition.as_ref().is_some_and(|d| d.ty.eq_ignore_ascii_case("attachment"));
+    if let BodyStructure::Basic { other, .. } | BodyStructure::Text { other, .. } | BodyStructure::Message { other, .. } = body {
+        let readable = matches!(body, BodyStructure::Text { .. }) &&
+            (common.ty.subtype.eq_ignore_ascii_case("plain") || common.ty.subtype.eq_ignore_ascii_case("html"));
+        if attached || !readable {
+            let section = if path.is_empty() { "1".into() } else { path.iter().map(u32::to_string).collect::<Vec<_>>().join(".") };
+            attachments.push(Attachment {
+                filename: filename.unwrap_or_else(|| if matches!(body, BodyStructure::Message { .. }) { format!("message-{section}.eml") } else { format!("attachment-{section}") }),
+                section,
+                mime_type: format!("{}/{}", common.ty.ty, common.ty.subtype).to_ascii_lowercase(),
+                size: other.octets,
+                encoding: encoding_name(&other.transfer_encoding),
+            });
+            return;
+        }
     }
     match body {
         BodyStructure::Multipart { bodies, .. } => {
+            // shortcut: attached multipart containers expose leaf files; add container downloads when needed.
             for (index, child) in bodies.iter().enumerate() {
                 let mut next = path.to_vec();
                 next.push(index as u32 + 1);
-                text_parts(child, &next, depth + 1, parts, attachments);
+                text_parts(child, &next, depth + 1, attached, parts, attachments);
             }
         }
         BodyStructure::Text { other, .. }
@@ -657,14 +734,7 @@ fn text_parts(
             // parent's headers. Server strings lose CR and LF so they stay one header each.
             let clean = |v: &str| v.replace(['\r', '\n', '"', '\\'], "");
             let params: String = common.ty.params.iter().flatten().map(|(k, v)| format!("; {}=\"{}\"", clean(k), clean(v))).collect();
-            let encoding = match &other.transfer_encoding {
-                ContentEncoding::SevenBit => "7bit".into(),
-                ContentEncoding::EightBit => "8bit".into(),
-                ContentEncoding::Binary => "binary".into(),
-                ContentEncoding::Base64 => "base64".into(),
-                ContentEncoding::QuotedPrintable => "quoted-printable".into(),
-                ContentEncoding::Other(e) => clean(e),
-            };
+            let encoding = clean(&encoding_name(&other.transfer_encoding));
             parts.push((
                 path.to_vec(),
                 !common.ty.subtype.eq_ignore_ascii_case("plain"),
@@ -672,14 +742,41 @@ fn text_parts(
                 format!("Content-Type: text/{}{params}\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n", clean(&common.ty.subtype)),
             ));
         }
-        _ => {
-            *attachments = true;
-        }
+        _ => {}
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn parsed_parts(structure: &str) -> (Vec<(Vec<u32>, bool, u32, String)>, Vec<Attachment>) {
+        use async_imap::imap_proto::{AttributeValue, Response};
+        let wire = format!("* 1 FETCH (BODYSTRUCTURE {structure})\r\n");
+        let (_, Response::Fetch(_, attrs)) = Response::parse(wire.as_bytes()).unwrap() else { panic!("fetch") };
+        let body = attrs.iter().find_map(|a| match a { AttributeValue::BodyStructure(b) => Some(b), _ => None }).unwrap();
+        let (mut text, mut attachments) = (Vec::new(), Vec::new());
+        text_parts(body, &[], 0, false, &mut text, &mut attachments);
+        (text, attachments)
+    }
+
+    #[test]
+    fn attachment_sections_names_and_encodings() {
+        let (text, parts) = parsed_parts(r#"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1)(("TEXT" "HTML" NIL NIL NIL "8BIT" 8 1)("TEXT" "PLAIN" NIL NIL NIL "QUOTED-PRINTABLE" 12 1 NIL ("ATTACHMENT" ("FILENAME*0*" "utf-8''r%C3%A4" "FILENAME*1*" "ksm%C3%B6rg%C3%A5s.txt")))("IMAGE" "PNG" ("NAME" "picture.png") NIL NIL "BASE64" 16 NIL ("INLINE" NIL)) "MIXED")("APPLICATION" "PDF" NIL NIL NIL "BINARY" 30) "MIXED")"#);
+        assert_eq!(text.iter().map(|p| (&p.0, p.1)).collect::<Vec<_>>(), [(&vec![1], false), (&vec![2, 1], true)]);
+        assert_eq!(parts.iter().map(|p| (p.section.as_str(), p.filename.as_str(), p.mime_type.as_str(), p.size, p.encoding.as_str())).collect::<Vec<_>>(), [
+            ("2.2", "räksmörgås.txt", "text/plain", 12, "quoted-printable"),
+            ("2.3", "picture.png", "image/png", 16, "base64"),
+            ("3", "attachment-3", "application/pdf", 30, "binary"),
+        ]);
+        let (text, parts) = parsed_parts(r#"("APPLICATION" "PDF" NIL NIL NIL "BASE64" 8 NIL ("ATTACHMENT" ("FILENAME" "=?UTF-8?Q?r=C3=A4ksm=C3=B6rg=C3=A5s.pdf?=")))"#);
+        assert!(text.is_empty());
+        assert_eq!((&*parts[0].section, &*parts[0].filename), ("1", "räksmörgås.pdf"));
+        let (text, parts) = parsed_parts(r#"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1) "MIXED" NIL ("ATTACHMENT" ("FILENAME" "bundle")))"#);
+        assert!(text.is_empty());
+        assert_eq!(parts[0].section, "1");
+        let (text, parts) = parsed_parts(r#"("MESSAGE" "RFC822" NIL NIL NIL "7BIT" 100 (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1) 3)"#);
+        assert!(text.is_empty());
+        assert_eq!((&*parts[0].section, &*parts[0].filename, &*parts[0].mime_type), ("1", "message-1.eml", "message/rfc822"));
+    }
 
     #[test]
     fn text_parts_skip_excessive_nesting_and_keep_siblings() {
@@ -695,10 +792,14 @@ mod tests {
                 panic!("expected BODYSTRUCTURE");
             };
             let mut parts = Vec::new();
-            let mut attachments = false;
-            text_parts(body, &[], 0, &mut parts, &mut attachments);
+            let mut attachments = Vec::new();
+            text_parts(body, &[], 0, false, &mut parts, &mut attachments);
             assert_eq!(parts.len(), if depth == 32 { 2 } else { 1 });
-            assert_eq!(attachments, depth > 32);
+            assert_eq!(!attachments.is_empty(), depth > 32);
+            if depth > 32 {
+                assert_eq!(attachments[0].section, vec!["1"; depth].join("."));
+                assert_eq!(attachments[0].size, 4);
+            }
             assert_eq!(parts.last().unwrap().0, vec![2]);
             if depth == 32 {
                 assert_eq!(parts[0].0, vec![1; depth]);
@@ -751,6 +852,48 @@ mod tests {
 mod protocol_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[tokio::test]
+    async fn understated_attachment_is_rejected_before_reading_the_literal() {
+        let (client, server) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            for response in ["", "* CAPABILITY IMAP4rev1\r\n", "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n"] {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+                let tag = line.split_whitespace().next().unwrap();
+                server.get_mut().write_all(format!("{response}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            assert!(line.contains("UID FETCH 1 (UID BODY.PEEK[1])"));
+            server.get_mut().write_all(b"* 1 FETCH (UID 1 BODY[1] {268435456}\r\n").await.unwrap();
+            // Withhold the body: rejection must not wait for, or allocate, the literal.
+            line.clear();
+            server.read_line(&mut line).await.unwrap();
+        });
+        let config = ServerConfig { host: "localhost".into(), port: 3143, security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+        store.save_account(&account).unwrap();
+        let inbox = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        store.reset_uidvalidity(inbox, 7).unwrap();
+        let message = Message { summary: crate::store::MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, ..Default::default()
+        }, ..Default::default() };
+        store.save_synced_message(&message, &[Attachment {
+            section: "1".into(), size: 1024, encoding: "binary".into(), ..Default::default()
+        }]).unwrap();
+        let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
+        let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
+        let capabilities = session.capabilities().await.unwrap();
+        let mut imap = ImapSync { account, session, capabilities };
+        let result = tokio::time::timeout(Duration::from_secs(2), imap.fetch_attachment(&mut store, id, "1")).await;
+        drop(imap);
+        server.await.unwrap();
+        assert!(result.expect("must reject the literal header without waiting for its body").is_err());
+    }
+
     #[tokio::test]
     async fn condstore_special_use_and_uidvalidity_guard() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -810,8 +953,8 @@ mod protocol_tests {
             .save_folder(&account.id, "INBOX", Some("/"), FolderRole::Inbox)
             .unwrap();
         store.reset_uidvalidity(inbox, 7).unwrap();
-        let id = store
-            .save_message(&crate::store::Message {
+        store
+            .save_synced_message(&crate::store::Message {
                 summary: crate::store::MessageSummary {
                     account: account.id.clone(),
                     folder: inbox,
@@ -819,8 +962,9 @@ mod protocol_tests {
                     ..Default::default()
                 },
                 ..Default::default()
-            })
+            }, &[])
             .unwrap();
+        let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
         store
             .finish_sync(inbox, &[1].into_iter().collect(), 1, Some(2), Some(10))
             .unwrap();

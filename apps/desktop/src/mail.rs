@@ -2,7 +2,7 @@
 //! Later times and reply headers. Plain Rust, so tests run without a window.
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone};
-use lagom_core::store::MessageSummary;
+use lagom_core::{attachment::Attachment, store::MessageSummary};
 
 /// One message in the list and the reading pane.
 /// A folder a message can be in. `New`: one ⌘K is creating, known by its full name until the
@@ -32,8 +32,7 @@ pub struct Mail {
     pub html: Option<gpui::SharedString>,
     /// "Load remote images" was clicked for this message.
     pub remote: bool,
-    /// (label, detail) of the attachment line.
-    pub attachment: Option<(String, String)>,
+    pub attachments: Vec<Attachment>,
     pub unread: bool,
     /// Local store row id. `None` in demo mode.
     pub store: Option<i64>,
@@ -58,8 +57,7 @@ impl Mail {
             body: Vec::new(),
             html: None,
             remote: false,
-            // shortcut: attachments are detected, not downloaded. Add download with lagom-core.
-            attachment: m.has_attachments.then(|| ("Attachments".into(), "not downloaded yet".into())),
+            attachments: Vec::new(),
             unread: !m.seen,
             store: Some(m.id),
             folder: Place::Folder(m.folder),
@@ -230,7 +228,7 @@ struct Sample {
     subject: &'static str,
     snippet: &'static str,
     body: &'static [&'static str],
-    attachment: Option<(&'static str, &'static str)>,
+    attachment: Option<(&'static str, u32)>,
     unread: bool,
 }
 
@@ -248,17 +246,17 @@ pub const LATER_SAMPLE: usize = 2;
 const SAMPLE: &[Sample] = &[
     m!("Ingrid Holm", "ingrid@holm.example", "09:42", "Board meeting moved to Thursday", "Thursday at 16:00 works for everyone except the projector.",
         ["Hi,", "Thursday at 16:00 works for everyone except the projector, which has asked to be replaced. I will bring a laptop instead.", "The minutes from last time are attached. Please read them before the meeting, not during it.", "Ingrid"],
-        Some(("minutes-oct.pdf", "212 KB")), true),
+        Some(("minutes-oct.pdf", 212 * 1024)), true),
     m!("Johan Ek", "johan@ek.example", "08:57", "Invoice 2026-114", "Attached. Same as last month, minus the coffee machine.",
         ["Hi,", "Invoice 2026-114 is attached. Same as last month, minus the coffee machine, which we now own.", "Thirty days, as usual.", "Johan"],
-        Some(("invoice-2026-114.pdf", "48 KB")), true),
+        Some(("invoice-2026-114.pdf", 48 * 1024)), true),
     m!("Build bot", "ci@lagom.example", "08:15", "Nightly build passed", "All tests green. Nothing to see here.",
         ["Nightly build 1147 passed on macOS, Linux and Windows.", "All tests green. Nothing to see here."], None, false),
     m!("Maja Lind", "maja@lind.example", "Yesterday", "Lunch Thursday?", "Somewhere with a lunch special. You choose, I will complain.",
         ["Lunch on Thursday? Somewhere with a lunch special.", "You choose, I will complain. It is tradition.", "Maja"], None, true),
     m!("Housing co-op", "board@coop.example", "Yesterday", "Laundry room schedule, December", "The new schedule is on the door. It is also attached.",
         ["Hello neighbours,", "The December laundry schedule is on the door. It is also attached, for those who never pass the door.", "The board"],
-        Some(("laundry-december.pdf", "96 KB")), false),
+        Some(("laundry-december.pdf", 96 * 1024)), false),
     m!("Tickets", "no-reply@tickets.example", "Tue", "Stockholm C → Göteborg C, 14 Nov", "Coach 3, seat 41. Quiet carriage.",
         ["Your journey on 14 November: Stockholm C 07:10, Göteborg C 10:05.", "Coach 3, seat 41. Quiet carriage."], None, false),
     // Long on purpose: the list must end sender, subject and preview in "…", never mid-glyph.
@@ -269,7 +267,7 @@ const SAMPLE: &[Sample] = &[
     m!("Coffee roastery", "orders@roastery.example", "Mon", "Order 4411 has shipped", "Two bags of the Ethiopian, ground for filter.",
         ["Order 4411 has shipped: two bags of the Ethiopian, ground for filter.", "It should arrive on Thursday."], None, true),
     m!("Bike shop", "service@bikeshop.example", "3 Nov", "Service receipt", "New chain, new brake pads, same squeak.",
-        ["Thanks for your visit.", "New chain and new brake pads. We could not find the squeak."], Some(("receipt-881.pdf", "31 KB")), true),
+        ["Thanks for your visit.", "New chain and new brake pads. We could not find the squeak."], Some(("receipt-881.pdf", 31 * 1024)), true),
     m!("Hardware store", "receipts@hardware.example", "1 Nov", "Your receipt", "One ladder, one ladder hook.",
         ["Your receipt: one ladder, one ladder hook.", "Keep it for the three-year warranty."], None, true),
     m!("Maja Lind", "maja@lind.example", "Oct", "Photos from Lisbon", "Mostly tiles. A few of us, in front of tiles.",
@@ -280,12 +278,12 @@ const SAMPLE: &[Sample] = &[
         ["Your journey on 16 November: Göteborg C 17:05, Stockholm C 20:00.", "Coach 5, seat 12. Quiet carriage again."], None, true),
     m!("Johan Ek", "johan@ek.example", "Sep", "Folder icons", "Stroke 1.5, like the rest. Sketches attached.",
         ["Folder icons, stroke 1.5 like the rest of the set.", "Sketches attached. The open folder is the hard one.", "Johan"],
-        Some(("folder-icons.png", "640 KB")), false),
+        Some(("folder-icons.png", 640 * 1024)), false),
     m!("Seed shop", "hello@seeds.example", "Aug", "Spring catalogue", "Forty kinds of tomato. You need two.",
         ["The spring catalogue is here.", "Forty kinds of tomato. You need two."], None, false),
     m!("Housing co-op", "board@coop.example", "Oct", "Annual meeting minutes", "The bike room stays. The sauna gets a new door.",
         ["Hello neighbours,", "The minutes from the annual meeting are attached. The bike room stays. The sauna gets a new door.", "The board"],
-        Some(("annual-meeting.pdf", "180 KB")), true),
+        Some(("annual-meeting.pdf", 180 * 1024)), true),
     m!("This Week in Rust", "twir@rust.example", "Thu", "Issue 571", "Crate of the week, a few RFCs and a lot of PRs.",
         ["Issue 571: crate of the week, a few RFCs and a lot of merged PRs.", "Read it on the web, or not at all."], None, true),
     m!("Kitchen notes", "notes@kitchen.example", "Wed", "Soup season", "Six soups that freeze well, and one that does not.",
@@ -348,7 +346,7 @@ pub fn demo() -> Vec<Mail> {
             subject: s.subject.into(),
             snippet: s.snippet.into(),
             body: s.body.iter().map(|p| p.to_string()).collect(),
-            attachment: s.attachment.map(|(a, b)| (a.into(), b.into())),
+            attachments: s.attachment.map(|(name, size)| Attachment { filename: name.into(), size, ..Default::default() }).into_iter().collect(),
             unread: s.unread,
             ..Default::default()
         })

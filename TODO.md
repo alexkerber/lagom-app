@@ -107,7 +107,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] HTML: mail synced before `feat/html-mail` has no stored HTML part (multipart mail kept only its text part). Refetch bodies once, or on open.
 - [ ] HTML: check on Windows (WebView2: do app scripts run with page scripts off, so links and Esc work?).
 - [ ] HTML: wide newsletters scroll sideways in a narrow pane; Apple Mail scales them to fit.
-- [ ] Attachment download.
+- [x] Attachment download: BODYSTRUCTURE metadata, on-demand decoding on the worker, bounded incoming bytes, Windows-safe length-limited unique Downloads files and reveal; backfill all unclassified cached messages. Attachment schema v7 follows drafts/outbox v5–v6, with data-preserving upgrade fixtures from v4, v5 and v6. FETCH selection requires both the UID and requested BODY section, including preceding FLAGS-only responses. Fixture regressions and GreenMail coverage. Encoded parts over 64 MiB need streaming.
 - [ ] Threading UI.
 - [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
 - [ ] Desktop: try by hand with a real account. Only GreenMail, tests and screenshots cover it; nobody has clicked or typed in the live window.

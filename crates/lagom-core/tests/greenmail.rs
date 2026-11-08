@@ -197,6 +197,10 @@ async fn bounded_initial_sync_multipart_and_idle() {
     assert!(body.body_html.unwrap().contains("Hälsning"));
     assert_eq!(mime.snippet, "Hälsning");
     assert!(!body.body_text.contains("Attachment bytes"));
+    let attachments = store.attachments(mime.id).unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!((&*attachments[0].section, &*attachments[0].filename, &*attachments[0].mime_type), ("2", "a.pdf", "application/pdf"));
+    assert_eq!(imap.fetch_attachment(&mut store, mime.id, "2").await.unwrap(), b"Attachment bytes must not be fetched");
     let idle = ImapSync::login(&account, "test").await.unwrap();
     let change = async {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
