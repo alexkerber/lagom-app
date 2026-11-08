@@ -176,6 +176,25 @@ fn set(looks: &mut [Look], r: Range<usize>, f: fn(&mut Look)) {
     looks[r].iter_mut().for_each(f);
 }
 
+/// A drag between two source offsets, as the pointer maps them: at hidden syntax a pointer
+/// maps before it, which suits the selection's end. Its start moves past the syntax, so a drag
+/// over a hidden-bold word selects the word, not one of its markers.
+pub fn drag(swaps: &[Swap], from: usize, to: usize) -> (usize, usize) {
+    let past = |mut offset: usize| {
+        for (r, with) in swaps {
+            if with.is_empty() && r.start == offset {
+                offset = r.end;
+            }
+        }
+        offset
+    };
+    match to.cmp(&from) {
+        std::cmp::Ordering::Equal => (from, to),
+        std::cmp::Ordering::Greater => (past(from).min(to), to),
+        std::cmp::Ordering::Less => (from, past(to).min(from)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +265,11 @@ mod tests {
         assert_eq!(to_shown(&s, 11), 9);
         assert_eq!(from_shown(&s, 9), 11);
         assert_eq!(from_shown(&s, 7), 11);
+        // A drag over the shown "b" selects "b" both ways, without a hidden marker.
+        let (from, to) = (from_shown(&s, 2), from_shown(&s, 3));
+        assert_eq!(drag(&s, from, to), (4, 5));
+        assert_eq!(drag(&s, to, from), (5, 4));
+        assert_eq!(drag(&s, from, from), (2, 2));
         for offset in [0, 2, 5, 8, text.len()] {
             assert_eq!(from_shown(&s, to_shown(&s, offset)), offset, "{offset}");
         }

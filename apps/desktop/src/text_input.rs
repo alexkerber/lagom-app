@@ -126,6 +126,8 @@ struct Edit {
     new: String,
     sel: Range<usize>,
     reversed: bool,
+    /// The selection a formatting edit leaves, which redo restores; else the caret after `new`.
+    after: Option<Range<usize>>,
 }
 
 impl Edit {
@@ -211,17 +213,25 @@ impl Buffer {
         }
     }
 
+    /// Selects after a formatting edit, and keeps that selection for redo.
+    fn select_edited(&mut self, start: usize, end: usize) {
+        self.select(start, end);
+        if let Some(e) = self.undo.last_mut() {
+            e.after = Some(start..end);
+        }
+    }
+
     fn wrap(&mut self, marker: &str) {
         let n = marker.len();
         if let Some(outer) = self.wrapping(marker) {
             let inner = self.text[outer.start + n..outer.end - n].to_string();
             self.replace(Some(outer.clone()), &inner, false);
-            self.select(outer.start, outer.start + inner.len());
+            self.select_edited(outer.start, outer.start + inner.len());
         } else {
             let sel = self.selection();
             let wrapped = format!("{marker}{}{marker}", &self.text[sel.clone()]);
             self.replace(Some(sel.clone()), &wrapped, false);
-            self.select(sel.start + n, sel.end + n);
+            self.select_edited(sel.start + n, sel.end + n);
         }
     }
 
@@ -232,7 +242,7 @@ impl Buffer {
         let label = self.text[sel.clone()].to_string();
         self.replace(Some(sel.clone()), &format!("[{label}]({URL})"), false);
         let url = sel.start + label.len() + "](".len() + 1;
-        self.select(url, url + URL.len());
+        self.select_edited(url, url + URL.len());
     }
 
     fn list_enter(&mut self) {
@@ -277,9 +287,10 @@ impl Buffer {
         }).collect::<Vec<_>>().join("\n");
         self.replace(Some(start..end), &replacement, false);
         if sel.is_empty() {
-            self.move_to(sel.start.saturating_add_signed(first_delta).clamp(start, start + replacement.len()));
+            let caret = sel.start.saturating_add_signed(first_delta).clamp(start, start + replacement.len());
+            self.select_edited(caret, caret);
         } else {
-            self.select(start, start + replacement.len());
+            self.select_edited(start, start + replacement.len());
         }
     }
 
@@ -350,6 +361,7 @@ impl Buffer {
             new: new.to_string(),
             sel: self.sel.clone(),
             reversed: self.reversed,
+            after: None,
         };
         self.text.replace_range(range.clone(), new);
         let caret = range.start + new.len();
@@ -389,7 +401,7 @@ impl Buffer {
         let Some(e) = self.redo.pop() else { return false };
         self.text.replace_range(e.at..e.at + e.old.len(), &e.new);
         let caret = e.at + e.new.len();
-        self.sel = caret..caret;
+        self.sel = e.after.clone().unwrap_or(caret..caret);
         self.reversed = false;
         self.marked = None;
         self.join = false;
@@ -540,6 +552,8 @@ pub struct TextInput {
     /// Caret affinity at a wrap boundary: (offset, row start) after ⌘← on a wrapped row.
     row_start: Option<(usize, Point<Pixels>)>,
     selecting: bool,
+    /// Where a drag or shift-click selection starts, as the pointer mapped it.
+    drag_from: usize,
     focused: bool,
     caret_on: bool,
     shown: Option<Shown>,
@@ -591,6 +605,7 @@ impl TextInput {
             goal_x: None,
             row_start: None,
             selecting: false,
+            drag_from: 0,
             caret_on: true,
             shown: None,
             md: None,
@@ -859,7 +874,14 @@ impl TextInput {
                 self.buffer.select(w.start, w.end);
             }
             3.. => self.buffer.select(0, self.text().len()),
-            _ => self.go_to(offset, e.modifiers.shift),
+            _ if e.modifiers.shift => {
+                self.drag_from = self.buffer.anchor();
+                self.drag_to_offset(offset);
+            }
+            _ => {
+                self.drag_from = offset;
+                self.buffer.move_to(offset);
+            }
         }
         self.selecting = e.click_count < 2;
         self.goal_x = None;
@@ -867,8 +889,15 @@ impl TextInput {
     }
 
     fn drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.buffer.select_to(self.offset_at(position));
+        self.drag_to_offset(self.offset_at(position));
         self.moved(cx);
+    }
+
+    /// Selects from where the drag started, keeping hidden syntax out of the selection's ends.
+    fn drag_to_offset(&mut self, offset: usize) {
+        let swaps = self.layout.as_ref().map_or_else(|| Rc::from([]), |l| l.swaps.clone());
+        let (anchor, caret) = markdown::drag(&swaps, self.drag_from, offset);
+        self.buffer.select(anchor, caret);
     }
 
     fn on_scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1396,6 +1425,27 @@ mod tests {
         assert_eq!((b.text(), b.selection()), ("Åsa__", 5..5));
         b.wrap("_");
         assert_eq!((b.text(), b.selection()), ("Åsa", 4..4));
+    }
+
+    #[test]
+    fn link_selects_the_url_and_redo_restores_formatting_selections() {
+        let mut b = Buffer::new("se här");
+        b.select(3, b.text().len());
+        b.link();
+        assert_eq!((b.text(), &b.text()[b.selection()]), ("se [här](https://)", "https://"));
+        b.undo();
+        assert!(b.redo());
+        assert_eq!(&b.text()[b.selection()], "https://");
+        b.undo();
+        b.wrap("**");
+        b.undo();
+        b.redo();
+        assert_eq!((b.text(), &b.text()[b.selection()]), ("se **här**", "här"));
+        // Typing still redoes to the caret after the text.
+        let mut b = typed("ab");
+        b.undo();
+        b.redo();
+        assert_eq!(b.selection(), 2..2);
     }
 
     #[test]
