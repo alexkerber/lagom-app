@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+mod icon;
 mod accounts;
 mod command_palette;
 mod compose;
@@ -90,5 +92,7 @@ fn main() {
         )
         .expect("open main window");
         cx.activate(true);
+        #[cfg(target_os = "macos")]
+        icon::install();
     });
 }
