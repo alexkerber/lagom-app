@@ -23,7 +23,7 @@ use crate::motion::spring;
 use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
@@ -54,6 +54,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("alt-secondary-s", ToggleSidebar, ctx),
         KeyBinding::new("escape", Cancel, keys),
+        KeyBinding::new("secondary-o", OpenInWindow, ctx),
+    ]);
+    // A message window takes the keys that act on its message. Esc does nothing there.
+    let message = Some("MessageWindow && !TextInput");
+    cx.bind_keys([
+        KeyBinding::new("e", Done, message),
+        KeyBinding::new("l", Later, message),
+        KeyBinding::new("secondary-backspace", DeleteMessage, message),
+        KeyBinding::new("backspace", DeleteMessage, message),
+        KeyBinding::new("delete", DeleteMessage, message),
+        KeyBinding::new("secondary-r", Reply, message),
+        KeyBinding::new("r", Reply, message),
     ]);
 }
 
@@ -134,7 +146,9 @@ fn row_y(ix: usize) -> f32 {
 
 mod html;
 mod live;
+mod popout;
 pub use live::Live;
+use popout::MessageWindow;
 
 /// What fills the main panel.
 enum Page {
@@ -207,6 +221,8 @@ pub struct MainWindow {
     title: SharedString,
     // The web view for HTML mail.
     web: html::Web,
+    // Messages open in their own windows: (message id, window).
+    popouts: Vec<(usize, gpui::WindowHandle<MessageWindow>)>,
     _appearance: gpui::Subscription,
     _activation: gpui::Subscription,
 }
@@ -291,6 +307,7 @@ impl MainWindow {
             resize: None,
             title: SharedString::default(),
             web: html::Web::default(),
+            popouts: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         };
@@ -314,6 +331,13 @@ impl MainWindow {
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
+            // A message window over the main window: plain text, or the HTML newsletter.
+            "popout" | "popout-html" => {
+                if screen == "popout-html" {
+                    this.inbox.select(INBOX_LEN - 1);
+                }
+                cx.defer_in(window, |this, window, cx| this.open_popout(window, cx));
+            }
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(true, window, cx),
             // A written reply with a word selected, Cc open with its focus ring, and live Markdown.
@@ -440,6 +464,11 @@ impl MainWindow {
     /// `reply`: to the selected message. One draft at a time: R and C bring back a draft that
     /// Esc closed, whichever message is selected.
     fn open_compose(&mut self, reply: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.compose_for(self.inbox.current().filter(|_| reply), window, cx);
+    }
+
+    /// `reply`: to this message id. See `open_compose`.
+    fn compose_for(&mut self, reply: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.toast = None;
         let compose = match self.drafts.pop() {
@@ -448,7 +477,7 @@ impl MainWindow {
                 compose
             }
             None => {
-                let m = self.inbox.current().filter(|_| reply).map(|id| &self.inbox.mail[id]);
+                let m = reply.map(|id| &self.inbox.mail[id]);
                 let to = m.map_or("", |m| m.address.as_str());
                 let subject = m.map_or(String::new(), |m| mail::reply_subject(&m.subject));
                 let headers = m.map(|m| mail::reply_headers(&m.message_id, &m.thread_key));
@@ -574,6 +603,7 @@ impl MainWindow {
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx });
         self.server(what, id, when, cx);
+        self.close_popouts(Some(id), cx);
         // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
         if what == Move::Delete {
             self.notify("Deleted", cx);
@@ -1349,7 +1379,14 @@ impl MainWindow {
                 // Arrow at rest, as in native lists.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.
                 .when(dragging, |d| d.cursor(CursorStyle::ClosedHand))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, _| this.press(id, e.position)))
+                // A double-click opens the message in its own window instead of starting a swipe.
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| match e.click_count {
+                    2 => {
+                        this.select(|inbox| inbox.select(i), cx);
+                        this.open_popout(window, cx);
+                    }
+                    _ => this.press(id, e.position),
+                }))
                 // Runs before the window's mouse up ends the drag: a dragged row is not a click.
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.swipe.offset(id).is_none() {
@@ -1496,33 +1533,11 @@ impl MainWindow {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
         let m = &self.inbox.mail[id];
-        let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
-        let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
-        // HTML mail: GPUI draws the header as for text mail; the web view covers only the body
-        // area below it and scrolls the mail itself. The text shows while an overlay hides it.
+        // HTML mail: the web view covers only the body. The text shows while an overlay hides it.
         let web = html::SUPPORTED && m.html.is_some();
         let text = !web || self.palette.is_some() || self.compose.is_some();
         // Toasts sit just above the reply field; the web view would cover them.
         let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count();
-        let attachment = || m.attachment.clone().map(|(name, kb)| {
-            div().flex().child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .px(px(14.))
-                    .py(px(10.))
-                    .rounded(px(radius::ATTACHMENT))
-                    .border_1()
-                    .border_color(t.line)
-                    .bg(t.subtle)
-                    .text_size(px(size::SNIPPET))
-                    .line_height(relative(LEADING))
-                    .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                    .child(mono(kb, t.ink2)),
-            )
-        });
-
         div()
             .flex_1()
             .min_w(px(0.))
@@ -1530,15 +1545,8 @@ impl MainWindow {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(HEADER_H))
-                    .flex_shrink_0()
+                toolbar(t)
                     .px(px(16.))
-                    .border_b_1()
-                    .border_color(t.line)
                     .child(
                         // Pine green, like the Done swipe.
                         button(t, "Done", Some(t.swipe_done))
@@ -1557,109 +1565,185 @@ impl MainWindow {
                     })
                     // shortcut: no Forward button until forwarding exists.
                     .child(div().flex_1())
-                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2)),
-            )
-            .child(
-                div()
-                    .id(("reading", id))
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .max_w(px(760.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(20.))
-                    .pt(px(24.))
-                    .px(px(32.))
-                    .pb(px(20.))
+                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .child(
-                                div()
-                                    .text_size(px(size::SUBJECT))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(m.subject.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .child(
-                                        div()
-                                            .size(px(32.))
-                                            .rounded_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(t.subtle)
-                                            .border_1()
-                                            .border_color(t.line)
-                                            .text_size(px(size::SMALL))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(initials.to_uppercase()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(1.))
-                                            .min_w(px(0.))
-                                            .child(div().font_weight(FontWeight::SEMIBOLD).child(m.from.clone()))
-                                            .child(
-                                                div()
-                                                    .text_size(px(size::SMALL))
-                                                    .text_color(t.ink2)
-                                                    .one_line()
-                                                    .child(format!("{} → {to}", m.address)),
-                                            ),
-                                    )
-                                    .child(mono(m.time.clone(), t.ink2)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .text_size(px(size::BODY))
-                            .line_height(relative(READING_LEADING))
-                            // Until the body loads (one store read), the snippet stands in.
-                            .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
-                            .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
-                            // The web view's place: the rest of the pane, less room for toasts.
-                            .when(web, |d| {
-                                d.flex_1().min_h(px(0.)).relative().child(
-                                    div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(self.web_slot()),
-                                )
-                            })
-                            .when(!web, |d| d.children(attachment())),
-                    )
-                    .when(web, |d| d.children(attachment()))
-                    .when(!web, |d| d.child(div().flex_1()))
-                    .child(
-                        div()
-                            .id("reply-box")
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .justify_between()
-                            .h(px(36.))
-                            .px(px(12.))
-                            .rounded(px(radius::CONTROL))
-                            .border_1()
-                            .border_color(t.line)
-                            .bg(t.raised)
-                            .text_color(t.ink2)
-                            .on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))
-                            .child(format!("Reply to {}", m.from)),
+                        icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
                     ),
             )
+            .child(reading_view(t, id, m, text, self.web.slot(), toasts, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
     }
+}
+
+/// The bar above a message: buttons on a macOS toolbar's height.
+fn toolbar(t: &Theme) -> Div {
+    div().flex().items_center().gap(px(8.)).h(px(HEADER_H)).flex_shrink_0().border_b_1().border_color(t.line)
+}
+
+/// A borderless glyph button with a tooltip, as in a macOS toolbar.
+fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
+    let theme = *t;
+    pressable(div().id(id), t, false)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.))
+        .rounded(px(radius::CONTROL))
+        .child(icon(path, t.ink2, 16.))
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
+}
+
+struct Tip(Theme, &'static str);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.0;
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(radius::CONTROL))
+            .border_1()
+            .border_color(t.line)
+            .bg(t.raised)
+            .text_color(t.ink)
+            .text_size(px(size::SMALL))
+            .font_family(font::ui())
+            .shadow_md()
+            .child(self.1)
+    }
+}
+
+/// One message below its toolbar: the trusted header in GPUI, the body as text (`text`) or the
+/// web view's `slot`, the attachment and the reply field. The reading pane and message windows
+/// both show this. `toasts`: room the web view leaves for toasts above the reply field.
+fn reading_view(
+    t: &Theme,
+    id: usize,
+    m: &Mail,
+    text: bool,
+    slot: impl IntoElement,
+    toasts: usize,
+    on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let web = html::SUPPORTED && m.html.is_some();
+    let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
+    let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
+    let attachment = || m.attachment.clone().map(|(name, kb)| {
+        div().flex().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(14.))
+                .py(px(10.))
+                .rounded(px(radius::ATTACHMENT))
+                .border_1()
+                .border_color(t.line)
+                .bg(t.subtle)
+                .text_size(px(size::SNIPPET))
+                .line_height(relative(LEADING))
+                .child(div().font_weight(FontWeight::MEDIUM).child(name))
+                .child(mono(kb, t.ink2)),
+        )
+    });
+    div()
+        .id(("reading", id))
+        .flex_1()
+        .min_h(px(0.))
+        .overflow_y_scroll()
+        .max_w(px(760.))
+        .flex()
+        .flex_col()
+        .gap(px(20.))
+        .pt(px(24.))
+        .px(px(32.))
+        .pb(px(20.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .text_size(px(size::SUBJECT))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(m.subject.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .size(px(32.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(t.subtle)
+                                .border_1()
+                                .border_color(t.line)
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(initials.to_uppercase()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .min_w(px(0.))
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(m.from.clone()))
+                                .child(
+                                    div()
+                                        .text_size(px(size::SMALL))
+                                        .text_color(t.ink2)
+                                        .one_line()
+                                        .child(format!("{} → {to}", m.address)),
+                                ),
+                        )
+                        .child(mono(m.time.clone(), t.ink2)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .text_size(px(size::BODY))
+                .line_height(relative(READING_LEADING))
+                // Until the body loads (one store read), the snippet stands in.
+                .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
+                .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
+                // The web view's place: the rest of the pane, less room for toasts.
+                .when(web, |d| {
+                    d.flex_1().min_h(px(0.)).relative().child(
+                        div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot),
+                    )
+                })
+                .when(!web, |d| d.children(attachment())),
+        )
+        .when(web, |d| d.children(attachment()))
+        .when(!web, |d| d.child(div().flex_1()))
+        .child(
+            div()
+                .id("reply-box")
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_between()
+                .h(px(36.))
+                .px(px(12.))
+                .rounded(px(radius::CONTROL))
+                .border_1()
+                .border_color(t.line)
+                .bg(t.raised)
+                .text_color(t.ink2)
+                .on_click(on_reply)
+                .child(format!("Reply to {}", m.from)),
+        )
 }
 
 impl Render for MainWindow {
@@ -1727,7 +1811,7 @@ impl Render for MainWindow {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web_unfocus()))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
@@ -1750,6 +1834,7 @@ impl Render for MainWindow {
             }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
+            .on_action(cx.listener(|this, _: &OpenInWindow, window, cx| if !this.overlay_open(cx) { this.open_popout(window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(cx) }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
@@ -2750,6 +2835,64 @@ mod dispatch {
         assert_eq!(inbox_len(&view, cx), 0);
         cx.simulate_keystrokes("c");
         assert!(view.read_with(cx, |v, _| v.compose.is_some()));
+    }
+
+    /// The middle of list row `ix`, below the window margin and the list header.
+    fn row_at(view: &Entity<MainWindow>, ix: usize, cx: &mut VisualTestContext) -> gpui::Point<Pixels> {
+        let x = view.read_with(cx, |v, _| v.sidebar_w + v.list_w / 2.);
+        gpui::point(px(x), px(8. + 1. + HEADER_H + row_y(ix) + ROW_H / 2.))
+    }
+
+    fn windows(cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, cx| cx.windows().len())
+    }
+
+    #[gpui::test]
+    fn double_click_opens_a_message_window_once(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.run_until_parked();
+        // A single click selects and opens nothing.
+        let at = row_at(&view, 2, cx);
+        cx.simulate_click(at, Default::default());
+        assert_eq!((view.read_with(cx, |v, _| v.inbox.selected), windows(cx)), (2, 1));
+        // The second press of a double-click opens the message, and starts no swipe.
+        let at = row_at(&view, 3, cx);
+        cx.simulate_click(at, Default::default());
+        cx.simulate_event(MouseDownEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.simulate_event(MouseUpEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 2);
+        assert!(view.read_with(cx, |v, _| v.inbox.selected == 3 && v.swipe == Swipe::Idle && v.drag.is_none()));
+        assert_eq!(view.read_with(cx, |v, _| v.popouts.iter().map(|p| p.0).collect::<Vec<_>>()), [3]);
+        // The same message again comes to the front instead; ⌘O opens the selection too.
+        cx.simulate_event(MouseDownEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 2);
+        view.update_in(cx, |v, window, _| window.focus(&v.focus));
+        cx.simulate_keystrokes("j secondary-o");
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 3);
+    }
+
+    #[gpui::test]
+    fn done_in_a_message_window_moves_it_and_closes_the_window(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let n = inbox_len(&view, cx);
+        cx.simulate_keystrokes("j secondary-o");
+        cx.run_until_parked();
+        let (id, popout) = view.read_with(cx, |v, _| v.popouts[0]);
+        assert_eq!((id, windows(cx)), (1, 2));
+        // Another message selected and another list on screen: Done still moves message 1.
+        cx.simulate_keystrokes("j");
+        view.update(cx, |v, cx| v.open_box(Some(0), cx));
+        popout.update(cx, |p, _, cx| p.act(Move::Done, cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 1);
+        assert!(view.read_with(cx, |v, _| v.inbox.open.is_none() && !v.inbox.items.contains(&1) && v.popouts.is_empty()));
+        assert_eq!(inbox_len(&view, cx), n - 1);
+        // Undo in the main window puts it back; the window stays closed.
+        view.update(cx, |v, cx| v.undo(cx));
+        assert_eq!((inbox_len(&view, cx), windows(cx)), (n, 1));
     }
 
     #[gpui::test]

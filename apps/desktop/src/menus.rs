@@ -67,6 +67,7 @@ pub fn init(cx: &mut App) {
             name: "Message".into(),
             items: vec![
                 MenuItem::action("New Message", crate::main_window::NewMessage),
+                MenuItem::action("Open in New Window", crate::main_window::OpenInWindow),
                 MenuItem::action("Reply", crate::main_window::Reply),
                 MenuItem::action("Delete", crate::main_window::DeleteMessage),
                 MenuItem::separator(),

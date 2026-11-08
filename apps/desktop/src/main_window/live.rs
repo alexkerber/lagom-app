@@ -141,6 +141,7 @@ impl MainWindow {
         live.current = live.current.min(live.accounts.len().saturating_sub(1));
         let Some(account) = live.account().map(|a| a.id.clone()) else {
             self.inbox = Inbox::live();
+            self.close_popouts(None, cx);
             return;
         };
         let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
@@ -234,6 +235,7 @@ impl MainWindow {
                             live.current = live.accounts.iter().position(|a| a.id == id).unwrap_or(0);
                         }
                         self.inbox = Inbox::live();
+                        self.close_popouts(None, cx);
                         self.clear_motion();
                         window.focus(&self.focus);
                         read = true;
@@ -404,6 +406,7 @@ impl MainWindow {
         live.pin = None;
         // Folder indices belong to one account; history does too.
         self.inbox = Inbox::live();
+        self.close_popouts(None, cx);
         self.clear_motion();
         self.page = Page::Mail;
         self.reload(cx);
@@ -520,6 +523,7 @@ impl MainWindow {
         live.accounts.retain(|a| a.id != id);
         live.current = 0;
         self.inbox = Inbox::live();
+        self.close_popouts(None, cx);
         self.clear_motion();
         self.page = Page::Settings(None);
         cx.notify();
