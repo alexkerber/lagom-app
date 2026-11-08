@@ -925,27 +925,12 @@ pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> impl IntoElement 
     svg().path(path).size(px(s)).flex_shrink_0().text_color(color)
 }
 
-fn app_mark(t: &Theme) -> Div {
-    // 22 px app icon: accent tile, white bar, accent dot (1024 master scaled).
-    div()
-        .size(px(22.))
+fn app_mark() -> gpui::Img {
+    // The app icon as the Dock shows it. Its plate fills 824 of 1024 px, so 26 px draws a ~21 px tile.
+    // Named as embedded: GPUI would read the bare string "app-icon.png" as a URI host and fetch it.
+    gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded("app-icon.png".into())))
+        .size(px(26.))
         .flex_shrink_0()
-        .rounded(px(4.9))
-        .bg(t.accent)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .w(px(13.75))
-                .h(px(3.8))
-                .rounded_full()
-                .bg(gpui::white())
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(div().size(px(2.)).rounded_full().bg(t.accent)),
-        )
 }
 
 /// One line that ends in "…" when it does not fit. GPUI's `truncate()` measures nowrap text once,
@@ -1175,7 +1160,7 @@ impl MainWindow {
                     .px(px(8.))
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(app_mark(t))
+                    .child(app_mark())
                     .child(div().flex_1().min_w(px(0.)).one_line().child(current))
                     .child(icon("icons/chevron.svg", t.ink2, 14.)),
             )
