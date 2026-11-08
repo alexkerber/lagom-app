@@ -8,7 +8,7 @@ use crate::{
     Error, Result,
 };
 use lettre::{
-    message::{header, Mailbox},
+    message::{header, Mailbox, MultiPart, SinglePart},
     transport::smtp::{
         authentication::{Credentials, Mechanism},
         client::{Tls, TlsParameters},
@@ -91,10 +91,42 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
     if !outgoing.references.is_empty() {
         message = message.references(outgoing.references.join(" "));
     }
-    message
-        .header(header::ContentType::TEXT_PLAIN)
-        .body(outgoing.text.clone())
-        .map_err(|_| Error::Invalid("could not construct message"))
+    let result = match markdown_html(&outgoing.text) {
+        Some(html) => message.multipart(MultiPart::alternative()
+            .singlepart(SinglePart::plain(outgoing.text.clone()))
+            .singlepart(SinglePart::html(html))),
+        None => message.header(header::ContentType::TEXT_PLAIN).body(outgoing.text.clone()),
+    };
+    result.map_err(|_| Error::Invalid("could not construct message"))
+}
+/// Render only parser-generated markup; images become their labels so mail loads no resources.
+fn markdown_html(source: &str) -> Option<String> {
+    use pulldown_cmark::{html, Event, Parser, Tag, TagEnd};
+    let mut formatted = false;
+    let mut links = Vec::new();
+    let events = Parser::new(source).filter_map(|event| {
+        if matches!(&event, Event::Start(tag) if !matches!(tag, Tag::Paragraph))
+            || matches!(&event, Event::Code(_) | Event::HardBreak | Event::Rule | Event::Html(_) | Event::InlineHtml(_)) {
+            formatted = true;
+        }
+        match event {
+            Event::Html(text) | Event::InlineHtml(text) => Some(Event::Text(text)),
+            Event::Start(Tag::HtmlBlock | Tag::Image { .. }) | Event::End(TagEnd::HtmlBlock | TagEnd::Image) => None,
+            Event::Start(Tag::Link { ref dest_url, .. }) => {
+                let allowed = url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
+                links.push(allowed);
+                allowed.then_some(event)
+            }
+            Event::End(TagEnd::Link) => links.pop().unwrap_or(false).then_some(event),
+            event => Some(event),
+        }
+    });
+    let mut body = String::new();
+    html::push_html(&mut body, events);
+    formatted.then(|| format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.45\">{}</body></html>",
+        body.replace("<blockquote>", "<blockquote style=\"margin:0 0 0 12px;padding-left:12px;border-left:3px solid #ccc\">")
+    ))
 }
 /// Whole-step deadlines. lettre's own timeout bounds the TCP connect, not a server that
 /// answers and then stalls; without these the worker, and a quit waiting on it, would hang.
@@ -232,6 +264,63 @@ mod tests {
     fn account() -> Account {
         let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
         Account::new("a@gmail.com".into(), i, s).unwrap()
+    }
+
+    fn parts(text: &str) -> (String, Option<String>) {
+        let message = compose(&account(), &Outgoing { to: vec!["b@example.com".into()], text: text.into(), ..Default::default() }).unwrap();
+        let raw = message.formatted();
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        let wire = String::from_utf8_lossy(&raw);
+        assert!(wire.contains("multipart/alternative"));
+        assert!(wire.contains("text/plain"));
+        assert!(wire.contains("text/html"));
+        (parsed.body_text(0).unwrap().replace("\r\n", "\n"), parsed.body_html(0).map(|h| h.replace("\r\n", "\n")))
+    }
+    #[test]
+    fn markdown_styles_and_plain_source() {
+        for (source, expected) in [
+            ("- ett\n- två", "<ul>"),
+            ("- ett\n  - två", "<ul>\n<li>ett\n<ul>"),
+            ("1. ett\n2. två", "<ol>"),
+            ("**fet** och _kursiv_", "<strong>fet</strong> och <em>kursiv</em>"),
+            ("[Lagom](https://example.com)", "href=\"https://example.com\""),
+            ("# Rubrik", "<h1>Rubrik</h1>"),
+            ("> citat", "border-left:3px solid #ccc"),
+            ("`kod`", "<code>kod</code>"),
+            ("```rust\nlet x = 1;\n```", "<pre><code"),
+            ("**Åäö – hälsningar**", "<strong>Åäö – hälsningar</strong>"),
+        ] {
+            let (plain, html) = parts(source);
+            assert_eq!(plain.replace("\r\n", "\n"), source);
+            assert!(html.as_ref().unwrap().contains(expected), "{html:?}");
+        }
+    }
+    #[test]
+    fn markdown_escapes_html_and_drops_unsafe_links_and_images() {
+        let html = markdown_html("<script>alert(1)</script>\n\n<b>hej</b>").unwrap();
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&lt;b&gt;hej&lt;/b&gt;"));
+        assert!(!html.contains("<script>"));
+        for target in ["javascript:alert(1)", "data:text/html,evil", "file:///tmp/a", "//example.com", "/relative"] {
+            let html = markdown_html(&format!("[etikett]({target})")).unwrap();
+            assert!(html.contains("etikett"));
+            assert!(!html.contains("<a "), "{html}");
+        }
+        for target in ["http://example.com", "HTTPS://example.com", "mailto:a@example.com"] {
+            assert!(markdown_html(&format!("[etikett]({target})")).unwrap().contains("<a "));
+        }
+        assert!(!markdown_html("![bild](https://example.com/pixel)").unwrap().contains("<img"));
+    }
+    #[test]
+    fn plain_body_stays_single_part() {
+        let source = "Hej Åsa!\nEn rad till.\n\nHälsningar, Örjan";
+        assert!(markdown_html(source).is_none());
+        let message = compose(&account(), &Outgoing { to: vec!["b@example.com".into()], text: source.into(), ..Default::default() }).unwrap();
+        let raw = message.formatted();
+        assert!(!String::from_utf8_lossy(&raw).contains("multipart/alternative"));
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.parts().len(), 1);
+        assert_eq!(parsed.body_text(0).unwrap().replace("\r\n", "\n"), source);
     }
 
     #[tokio::test]
