@@ -1,4 +1,4 @@
-//! HTML mail in the reading pane. One platform web view per window (WKWebView on macOS, WebView2
+//! HTML mail in the reading view. One platform web view per window (WKWebView on macOS, WebView2
 //! on Windows) covers the body area under the GPUI header. The trusted header (subject, sender,
 //! date) never goes into the web view: mail CSS such as `position:fixed` paints over anything in
 //! the same document, so the document holds only the CSP, the theme CSS and the mail.
@@ -137,77 +137,97 @@ pub(super) struct Web {
     place: Rc<std::cell::Cell<Option<(Bounds<Pixels>, f32)>>>,
 }
 
+/// A window with a mail web view: the main window and each message window.
+pub(super) trait WebHost: 'static {
+    fn web(&mut self) -> &mut Web;
+    /// Where the keys go when Esc leaves the web view.
+    fn keys(&self) -> FocusHandle;
+}
+
+impl WebHost for MainWindow {
+    fn web(&mut self) -> &mut Web {
+        &mut self.web
+    }
+
+    fn keys(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl MainWindow {
-    /// Before a frame: load the selected HTML message, and show the web view once it has loaded.
-    /// Overlays draw in GPUI, under any native view, so the web view hides while one is open.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
+    /// Before a frame: the selected HTML message. Overlays draw in GPUI, under any native view,
+    /// so the web view hides while one is open.
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
+        let want = self.inbox.current().filter(|_| matches!(self.page, Page::Mail) && !empty).map(|id| (id, &self.inbox.mail[id]));
+        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
+        self.web.frame(want, &self.theme, overlay, window, cx);
+    }
+}
+
+impl Web {
+    /// Before a frame: load `want` if it is HTML, and show the web view once it has loaded.
+    /// `overlay`: something in GPUI covers the body, so the web view hides.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
+    pub(super) fn frame<T: WebHost>(&mut self, want: Option<(usize, &Mail)>, theme: &Theme, overlay: bool, window: &mut Window, cx: &mut Context<T>) {
         if !SUPPORTED {
             return;
         }
-        let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
-        let want = self
-            .inbox
-            .current()
-            .filter(|_| matches!(self.page, Page::Mail) && !empty)
-            .and_then(|id| self.inbox.mail[id].html.as_ref().map(|h| (id, h.len())));
-        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
-        let Some((id, len)) = want else {
+        let Some((id, m, html)) = want.and_then(|(id, m)| m.html.as_ref().map(|h| (id, m, h))) else {
             // A cold web content process takes about a second to start: start it with the window,
             // on an empty page, so the first HTML message opens as fast as the rest.
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            if self.web.view.is_none() {
-                self.web.view = self.web_create(window, cx).map(Rc::new);
-                if let Some(view) = &self.web.view {
-                    self.web.ours.set(view.load_html("<!DOCTYPE html><title></title>").is_ok());
+            if self.view.is_none() {
+                self.view = Self::create(self.ours.clone(), theme, window, cx).map(Rc::new);
+                if let Some(view) = &self.view {
+                    self.ours.set(view.load_html("<!DOCTYPE html><title></title>").is_ok());
                 }
             }
             // Plain text: the next HTML message waits for its own load, never shows a stale one.
-            self.web.shown = None;
-            self.web.ready = false;
-            self.web_visible(false);
+            self.shown = None;
+            self.ready = false;
+            self.set_visible(false);
             return;
         };
-        let key = (id, len, self.inbox.mail[id].remote, self.theme.dark);
-        if self.web.shown != Some(key) {
+        let key = (id, html.len(), m.remote, theme.dark);
+        if self.shown != Some(key) {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                if self.web.view.is_none() {
-                    self.web.view = self.web_create(window, cx).map(Rc::new);
+                if self.view.is_none() {
+                    self.view = Self::create(self.ours.clone(), theme, window, cx).map(Rc::new);
                 }
-                let Some(view) = self.web.view.clone() else { return };
-                let m = &self.inbox.mail[id];
-                let doc = document(m.html.as_ref().map_or("", |h| h.as_ref()), &self.theme, m.remote);
-                self.web.ours.set(true);
-                let _ = view.set_background_color(rgba8(self.theme.bg));
+                let Some(view) = self.view.clone() else { return };
+                let doc = document(html, theme, m.remote);
+                self.ours.set(true);
+                let _ = view.set_background_color(rgba8(theme.bg));
                 if view.load_html(&doc).is_err() {
-                    self.web.ours.set(false);
+                    self.ours.set(false);
                 }
             }
-            self.web.shown = Some(key);
-            self.web.has_remote = has_remote(self.inbox.mail[id].html.as_ref().map_or("", |h| h.as_ref()));
+            self.shown = Some(key);
+            self.has_remote = has_remote(html);
             // Shown already: the previous message stays until this one has loaded, no flash.
-            self.web.ready &= self.web.visible;
+            self.ready &= self.visible;
         }
-        self.web_visible(self.web.ready && !overlay);
+        self.set_visible(self.ready && !overlay);
     }
 
-    fn web_visible(&mut self, visible: bool) {
-        if self.web.visible == visible {
+    fn set_visible(&mut self, visible: bool) {
+        if self.visible == visible {
             return;
         }
-        self.web.visible = visible;
+        self.visible = visible;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(view) = &self.web.view {
+        if let Some(view) = &self.view {
             let _ = view.set_visible(visible);
         }
     }
 
     /// The element that keeps the web view over the body area: its bounds every frame.
-    pub(super) fn web_slot(&self) -> impl IntoElement {
+    pub(super) fn slot(&self) -> impl IntoElement {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let view = self.web.view.clone();
-        let place = self.web.place.clone();
+        let view = self.view.clone();
+        let place = self.place.clone();
         gpui::canvas(
             move |bounds, window, _| {
                 let now = Some((bounds, window.scale_factor()));
@@ -232,22 +252,22 @@ impl MainWindow {
 
     /// A click anywhere in GPUI takes the keys back from the web view. GPUI's view does not take
     /// first responder on a click by itself.
-    pub(super) fn web_unfocus(&self) {
+    pub(super) fn unfocus(&self) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(view) = &self.web.view {
+        if let Some(view) = &self.view {
             let _ = view.focus_parent();
         }
     }
 
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-    fn web_event(&mut self, msg: Msg, window: &mut Window, cx: &mut Context<Self>) {
+    fn event<T: WebHost>(host: &mut T, msg: Msg, window: &mut Window, cx: &mut Context<T>) {
         match msg {
-            Msg::Loaded => self.web.ready = true,
+            Msg::Loaded => host.web().ready = true,
             Msg::Open(url) if link_allowed(&url) => cx.open_url(&url),
             Msg::Open(_) => {}
             Msg::Escape => {
-                self.web_unfocus();
-                window.focus(&self.focus);
+                host.web().unfocus();
+                window.focus(&host.keys());
             }
         }
         cx.notify();
@@ -256,20 +276,19 @@ impl MainWindow {
     /// The web view, hidden and unfocused, with page scripts, navigation and downloads off and
     /// nothing kept on disk.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn web_create(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<wry::WebView> {
+    fn create<T: WebHost>(ours: Rc<std::cell::Cell<bool>>, theme: &Theme, window: &mut Window, cx: &mut Context<T>) -> Option<wry::WebView> {
         // GPUI's test windows have no native handle.
         if cfg!(test) {
             return None;
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ours = self.web.ours.clone();
         let (load_tx, ipc_tx) = (tx.clone(), tx);
         let view = wry::WebViewBuilder::new()
             .with_javascript_disabled()
             .with_incognito(true)
             .with_focused(false)
             .with_visible(false)
-            .with_background_color(rgba8(self.theme.bg))
+            .with_background_color(rgba8(theme.bg))
             .with_initialization_script(BRIDGE)
             .with_navigation_handler(move |_| ours.replace(false))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
@@ -292,7 +311,7 @@ impl MainWindow {
             .ok()?;
         cx.spawn_in(window, async move |this, cx| {
             while let Some(msg) = rx.recv().await {
-                if this.update_in(cx, |this, window, cx| this.web_event(msg, window, cx)).is_err() {
+                if this.update_in(cx, |this, window, cx| Self::event(this, msg, window, cx)).is_err() {
                     break;
                 }
             }
