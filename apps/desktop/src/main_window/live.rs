@@ -18,7 +18,7 @@ pub struct Live {
     pub(super) current: usize,
     sync: HashMap<String, SyncState>,
     ops: HashMap<u64, Op>,
-    next_op: u64,
+    next_op: Rc<std::cell::Cell<u64>>,
     /// A store change arrived while moves were in flight; read again once they finish.
     stale: bool,
     /// Rows per list read. Grows when the selection nears the end.
@@ -31,7 +31,6 @@ pub struct Live {
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
-    _events: Task<()>,
     /// Wakes the window when the next message on Later is due.
     due: Option<(i64, Task<()>)>,
 }
@@ -61,41 +60,61 @@ pub fn short_name(a: &Account) -> String {
     a.email.rsplit_once('@').map_or(a.email.clone(), |(_, d)| d.to_string())
 }
 
-impl Live {
-    pub fn start(window: &mut Window, cx: &mut Context<MainWindow>) -> lagom_core::Result<Self> {
-        let path = Store::default_path()?;
-        let store = Store::open(&path)?;
-        let (bridge, mut events) = crate::sync::start(path);
-        let task = cx.spawn_in(window, async move |this, cx| {
+// Closing a window must not recover or replace an in-flight mail worker.
+struct Mail {
+    store: Rc<Store>,
+    bridge: Bridge,
+    next_op: Rc<std::cell::Cell<u64>>,
+    _events: Task<()>,
+}
+
+impl gpui::Global for Mail {}
+
+impl Mail {
+    fn start(store: Store, cx: &mut App) {
+        let (bridge, mut events) = crate::sync::start(store.path().to_path_buf());
+        let task = cx.spawn(async move |cx| {
             while let Some(event) = events.recv().await {
-                // Several changes in a row read the store once.
                 let mut batch = vec![event];
-                while let Ok(more) = events.try_recv() {
-                    batch.push(more);
-                }
-                if this.update_in(cx, |this, window, cx| this.on_events(batch, window, cx)).is_err() {
-                    return;
-                }
+                while let Ok(more) = events.try_recv() { batch.push(more); }
+                if cx.update(|cx| {
+                    if let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<MainWindow>()) {
+                        handle.update(cx, |this, window, cx| this.on_events(batch, window, cx)).ok();
+                    }
+                }).is_err() { return; }
             }
-            // The worker stopped: nothing will answer the commands still pending.
-            this.update(cx, |this, cx| this.worker_gone(cx)).ok();
+            cx.update(|cx| {
+                if let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<MainWindow>()) {
+                    handle.update(cx, |this, _, cx| this.worker_gone(cx)).ok();
+                }
+            }).ok();
         });
+        cx.set_global(Self { store: Rc::new(store), bridge, next_op: Rc::new(std::cell::Cell::new(0)), _events: task });
+    }
+}
+
+impl Live {
+    pub fn start(cx: &mut Context<MainWindow>) -> lagom_core::Result<Self> {
+        if !cx.has_global::<Mail>() {
+            Mail::start(Store::open_default()?, cx);
+        }
+        let mail = cx.global::<Mail>();
+        let store = mail.store.clone();
         Ok(Self {
-            bridge,
+            bridge: mail.bridge.clone(),
             accounts: store.accounts()?,
             failed: store.failed_outbox()?,
-            store: Rc::new(store),
+            store,
             current: 0,
             sync: HashMap::new(),
             ops: HashMap::new(),
-            next_op: 0,
+            next_op: mail.next_op.clone(),
             stale: false,
             limit: PAGE,
             pin: None,
             want: None,
             notification_target: None,
             seen: HashSet::new(),
-            _events: task,
             due: None,
         })
     }
@@ -119,9 +138,10 @@ impl Live {
     }
 
     fn op(&mut self, op: Op) -> u64 {
-        self.next_op += 1;
-        self.ops.insert(self.next_op, op);
-        self.next_op
+        let id = self.next_op.get() + 1;
+        self.next_op.set(id);
+        self.ops.insert(id, op);
+        id
     }
 }
 
@@ -693,7 +713,7 @@ mod tests {
             current: 0,
             sync: HashMap::new(),
             ops: HashMap::new(),
-            next_op: 0,
+            next_op: Rc::new(std::cell::Cell::new(0)),
             stale: false,
             limit: PAGE,
             pin: None,
@@ -701,7 +721,6 @@ mod tests {
             notification_target: None,
             seen: HashSet::new(),
             failed: Vec::new(),
-            _events: Task::ready(()),
             due: None,
         }
     }
@@ -757,6 +776,85 @@ mod tests {
         });
         assert!(events.try_recv().is_err());
         assert!(toast(&view, cx).contains("fixture notification error"));
+    }
+
+    #[gpui::test]
+    fn reopening_reuses_worker_and_preserves_in_flight_outbox(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("lagom-reopen-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        cx.update(|cx| {
+            bind_keys(cx);
+            crate::text_input::bind_keys(cx);
+            Mail::start(Store::open(dir.join("mail.sqlite3")).unwrap(), cx);
+            crate::notifications::init(cx, |cx| crate::open_main_window(false, cx));
+        });
+        let first = cx.update(|cx| crate::open_main_window(false, cx).unwrap());
+        let (bridge, old_op, weak) = first.update(cx, |view, _, cx| {
+            let live = view.live.as_mut().unwrap();
+            (live.bridge.clone(), live.op(Op::Undo), cx.entity().downgrade())
+        }).unwrap();
+        first.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+        let reopened = cx.update(|cx| crate::open_main_window(false, cx).unwrap());
+        let store = reopened.update(cx, |view, _, _| {
+            let live = view.live.as_mut().unwrap();
+            assert!(bridge.same_worker(&live.bridge), "Dock reopen must reuse the running worker");
+            assert!(live.op(Op::Undo) > old_op, "old completions must not match new operations");
+            live.ops.clear();
+            live.store.clone()
+        }).unwrap();
+
+        // Pause the real worker before adding fixtures so it cannot contact a server or keychain.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        assert!(bridge.send(Cmd::Pause(ready_tx, resume_rx)));
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "sender@example.com".into() };
+        let account = Account::new("sender@example.com".into(), config.clone(), config).unwrap();
+        store.save_account(&account).unwrap();
+        let draft = lagom_core::outbox::Draft {
+            id: "<in-flight@example.com>".into(), account: account.id.clone(),
+            to: "recipient@example.com".into(), text: "Original mail".into(), ..Default::default()
+        };
+        store.save_draft(&draft).unwrap();
+        let mail = lagom_core::smtp::Outgoing {
+            to: vec![draft.to.clone()], text: draft.text.clone(), message_id: Some(draft.id.clone()), ..Default::default()
+        };
+        let id = store.enqueue(&account, &mail, 0).unwrap();
+        assert!(store.claim_send(&id, i64::MAX).unwrap());
+        reopened.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let sender = cx.update(|cx| cx.global::<crate::notifications::State>().service.event_sender());
+        sender.send(crate::notifications::Event::Clicked(crate::notifications::Target { account: account.id.clone(), message: None })).unwrap();
+        cx.run_until_parked();
+        let handle = cx.update(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            cx.windows()[0].downcast::<MainWindow>().unwrap()
+        });
+        let op = handle.update(cx, |view, window, cx| {
+            let live = view.live.as_ref().unwrap();
+            assert!(bridge.same_worker(&live.bridge), "notification reopen must reuse the worker");
+            assert!(Rc::ptr_eq(&store, &live.store));
+            assert_eq!(store.pending(&id).unwrap().state, "ready", "reopen must not recover an active send");
+            view.edit_failed(&id, window, cx);
+            assert!(view.compose.is_none());
+            assert_eq!(store.pending(&id).unwrap().mail.text, "Original mail");
+            assert!(store.drafts().unwrap().is_empty());
+            assert!(!store.retry_send(&id, i64::MAX).unwrap());
+            assert!(!store.claim_send(&id, i64::MAX).unwrap());
+            view.live.as_mut().unwrap().op(Op::Undo)
+        }).unwrap();
+        assert!(bridge.send(Cmd::Op { op, id: -1, act: Act::Snooze(None) }));
+        store.delete_account(&account.id).unwrap();
+        resume_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if handle.read_with(cx, |view, _| view.live.as_ref().unwrap().ops.is_empty()).unwrap() { break; }
+            assert!(Instant::now() < deadline, "reopened window must receive worker completions");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[gpui::test]

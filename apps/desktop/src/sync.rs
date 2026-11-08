@@ -37,6 +37,8 @@ pub enum Act {
 }
 
 pub enum Cmd {
+    #[cfg(test)]
+    Pause(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
     /// Onboarding API; the UI consumes OpenUrl on its own thread.
     #[allow(dead_code)]
     SignIn(Provider),
@@ -108,6 +110,9 @@ impl Bridge {
         let (tx, rx) = unbounded_channel();
         (Self(tx), rx)
     }
+
+    #[cfg(test)]
+    pub fn same_worker(&self, other: &Self) -> bool { self.0.same_channel(&other.0) }
 
     /// False when the worker has stopped (it could not open the store, or it panicked).
     #[must_use]
@@ -217,6 +222,11 @@ impl Worker {
     /// Commands that a running sync handles between folders, so a triage key never waits long.
     async fn quick(&mut self, cmd: Cmd) {
         match cmd {
+            #[cfg(test)]
+            Cmd::Pause(ready, resume) => {
+                ready.send(()).unwrap();
+                resume.recv().expect("resume fixture worker");
+            }
             Cmd::SignIn(provider) => {
                 let events = self.events.clone();
                 self.sign_in = Some(Box::pin(oauth::sign_in(provider, move |url| {

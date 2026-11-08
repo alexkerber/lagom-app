@@ -286,7 +286,7 @@ impl MainWindow {
         let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
             true => (None, None),
-            false => match Live::start(window, cx) {
+            false => match Live::start(cx) {
                 Ok(live) => (Some(live), None),
                 Err(e) => (None, Some(format!("Could not open the mail store: {e}"))),
             },
@@ -298,7 +298,8 @@ impl MainWindow {
         let viewport = f32::from(window.viewport_size().width);
         // Demo mode never resolves a store path or reads/writes preferences.
         let preferences = if demo { Ok(None) } else {
-            Store::default_path().map(|p| Some(p.with_file_name("window.json")))
+            live.as_ref().map(|live| live.store.path().to_path_buf())
+                .map_or_else(Store::default_path, Ok).map(|p| Some(p.with_file_name("window.json")))
         };
         let mut preference_problem = None;
         let preferences_path = match preferences {
