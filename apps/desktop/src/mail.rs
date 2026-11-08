@@ -28,6 +28,10 @@ pub struct Mail {
     pub snippet: String,
     /// Paragraphs. Empty for store mail until the reading pane loads the body.
     pub body: Vec<String>,
+    /// The HTML part, loaded with the body. Platforms with a web view render it.
+    pub html: Option<gpui::SharedString>,
+    /// "Load remote images" was clicked for this message.
+    pub remote: bool,
     /// (label, detail) of the attachment line.
     pub attachment: Option<(String, String)>,
     pub unread: bool,
@@ -49,8 +53,11 @@ impl Mail {
             address: m.from_address.clone(),
             time: when(m.date, now),
             subject: if m.subject.is_empty() { "(no subject)".into() } else { m.subject.clone() },
-            snippet: m.snippet.clone(),
+            // Snippets stored before the core dropped invisible padding.
+            snippet: lagom_core::mime::clean_snippet(&m.snippet),
             body: Vec::new(),
+            html: None,
+            remote: false,
             // shortcut: attachments are detected, not downloaded. Add download with lagom-core.
             attachment: m.has_attachments.then(|| ("Attachments".into(), "not downloaded yet".into())),
             unread: !m.seen,
@@ -302,11 +309,39 @@ pub fn demo_accounts() -> Vec<lagom_core::account::Account> {
         .collect()
 }
 
+/// An HTML newsletter for the demo: a table layout with inline styles, a `<style>` block, a
+/// data: image, a remote image that stays blocked, and links.
+const NEWSLETTER: &str = r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Lagom 0.4</title>
+<style>@media only screen and (max-width: 600px) { .container { width: 100% !important; } } .btn:hover { opacity: .9 }</style></head>
+<body style="margin:0;background:#f4f2ee">
+<div style="display:none;max-height:0;overflow:hidden">Threads open faster and there are fewer settings. &#847; &zwnj; &nbsp; &#847; &zwnj; &nbsp;</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f2ee"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" class="container" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;font-family:Helvetica,Arial,sans-serif;color:#1d1d1b">
+<tr><td style="padding:28px 32px 8px"><img width="40" height="40" alt="Lagom" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MCA0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiByeD0iOSIgZmlsbD0iI0IwM0EyRSIvPjxyZWN0IHg9IjEwIiB5PSIxOCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjQiIHJ4PSIyIiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjAiIGN5PSIyOSIgcj0iMyIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg==" style="display:block;border-radius:9px"></td></tr>
+<tr><td style="padding:8px 32px 0;font-size:26px;line-height:32px;font-weight:bold">Version 0.4 is out</td></tr>
+<tr><td style="padding:12px 32px 0;font-size:15px;line-height:23px;color:#4a4a46">Threads open faster and there are fewer settings. The list keeps up with a hundred thousand messages, and search finds old mail at once.</td></tr>
+<tr><td style="padding:20px 32px 0"><img width="496" height="160" alt="[Remote image: blocked]" src="https://images.example.com/lagom-0.4-banner.png" style="display:block;width:100%;height:auto;background:#ece9e3;border-radius:8px;color:#8a877f;font-size:13px"></td></tr>
+<tr><td style="padding:20px 32px 0"><table role="presentation" cellpadding="0" cellspacing="0"><tr>
+<td width="50%" valign="top" style="padding-right:12px;font-size:14px;line-height:21px"><b>Faster threads</b><br>Opening a long thread no longer waits for every message.</td>
+<td width="50%" valign="top" style="padding-left:12px;font-size:14px;line-height:21px"><b>Fewer settings</b><br>Eleven settings are gone. Nobody will miss them.</td></tr></table></td></tr>
+<tr><td style="padding:24px 32px 28px"><a class="btn" href="https://lagom.example/changelog" style="display:inline-block;background:#b03a2e;color:#ffffff;text-decoration:none;font-size:14px;font-weight:bold;padding:10px 18px;border-radius:8px">Read the changelog</a></td></tr>
+</table>
+<p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a877f;margin:16px 0 0">You get this because you use Lagom. <a href="https://lagom.example/unsubscribe" style="color:#8a877f">Unsubscribe</a> · <a href="mailto:releases@lagom.example" style="color:#8a877f">Write to us</a></p>
+</td></tr></table></body></html>"##;
+
+/// Simple HTML, as a phone or webmail writes it: no colours of its own.
+const SIMPLE_HTML: &str = r#"<div dir="ltr"><div>Lunch on Thursday? Somewhere with a <b>lunch special</b>.</div><div><br></div><div>You choose, I will complain. It is <a href="https://en.wikipedia.org/wiki/Tradition">tradition</a>.</div><div><br></div><div>Maja</div></div>"#;
+
 /// The sample mail for `LAGOM_DEMO=1`, screenshots and tests.
 pub fn demo() -> Vec<Mail> {
     SAMPLE
         .iter()
         .map(|s| Mail {
+            html: match s.address {
+                "releases@lagom.example" => Some(NEWSLETTER.into()),
+                "maja@lind.example" if s.subject.starts_with("Lunch") => Some(SIMPLE_HTML.into()),
+                _ => None,
+            },
             from: s.from.into(),
             address: s.address.into(),
             time: s.time.into(),

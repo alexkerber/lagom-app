@@ -25,6 +25,11 @@ serde_json = "1"
 # Live Markdown styling in Compose, with the parser the send path uses. Already in Cargo.lock.
 pulldown-cmark = { version = "0.13", default-features = false }
 
+# HTML mail in the reading pane: WKWebView on macOS, WebView2 on Windows. Linux shows the text
+# part (see html_view.rs), so no WebKitGTK.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+wry = { version = "0.57", default-features = false }
+
 [dev-dependencies]
 # GPUI's TestAppContext, to drive key dispatch in tests.
 gpui = { version = "0.2.2", features = ["test-support"] }
