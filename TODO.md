@@ -65,6 +65,8 @@ Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
 
 ## Calendar (Alex 2026-11-06)
 
+Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions for Alex are in its last section.
+
 - [ ] Agenda next to the inbox: Google and Microsoft calendars.
 - [ ] Create a meeting from the app with Google Meet or Zoom attached, without opening Gmail or Google Calendar.
 
