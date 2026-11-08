@@ -1,4 +1,4 @@
-"""Procedural studio icon. Blender -b -P icon.py -- icon.png"""
+"""Blender -b -P icon.py -- icon.png [--take2] (renders A/B/C concepts)."""
 import bpy
 import math
 import random
@@ -7,6 +7,7 @@ from pathlib import Path
 from mathutils import Vector
 
 out = Path(sys.argv[sys.argv.index('--') + 1]).resolve()
+take2 = '--take2' in sys.argv
 assert out.suffix == '.png'
 random.seed(17)
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -37,7 +38,7 @@ def material(name, color, rough=.4, metal=0, grain=None):
     bs.inputs['Metallic'].default_value = metal
     if metal:
         bs.inputs['Anisotropic'].default_value = .72
-    if grain:
+    if grain and not take2:
         coord = n.new('ShaderNodeTexCoord')
         mapping = n.new('ShaderNodeVectorMath')
         mapping.operation = 'MULTIPLY'
@@ -115,21 +116,21 @@ def line(name, points, mat, width=.008):
 
 
 # A loose stack: real thickness, visible folded envelope backs, and two task cards.
-for i in range(9):
+for i in range(2 if take2 else 9):
     angle = [-.16,.12,-.23,.07,.19,-.08,.13,-.04,.025][i]
     x = [.03,-.22,.16,-.1,.12,-.19,.05,-.03,0][i]
     y = .2 + (i%3-.8)*.11
-    z = .07 + i*.038
-    mat = red if i == 1 else green if i == 4 else paper if i%2 else white
+    z = .29 + i*.06 if take2 else .07 + i*.038
+    mat = white if take2 else red if i == 1 else green if i == 4 else paper if i%2 else white
     obj = box('Envelope' if i not in (1,4) else 'Task card', (x,y,z), (2.55,1.85,.03), mat, .035, angle)
-    if i in (6,8):
+    if i in ((1,) if take2 else (6,8)):
         def pt(a,b):
             return (x+a*math.cos(angle)-b*math.sin(angle),y+a*math.sin(angle)+b*math.cos(angle),z+.018)
-        line('Envelope flap', [pt(-1.19,.82),pt(0,-.02),pt(1.19,.82)], seam,.006)
+        line('Envelope flap', [pt(-1.19,.82),pt(0,-.02),pt(1.19,.82)], seam,.018 if take2 else .006)
         line('Envelope lower folds', [pt(-1.19,-.82),pt(-.37,-.23)], seam,.004)
         line('Envelope lower folds', [pt(1.19,-.82),pt(.37,-.23)], seam,.004)
 # A visible task corner, with empty boxes rather than letters or logos.
-for j in range(3):
+for j in range(0 if take2 else 3):
     y = -.15+j*.21
     line('Task checkbox', [(1.08,y,.278),(1.19,y,.278),(1.19,y+.10,.278),(1.08,y+.10,.278),(1.08,y,.278)], ink,.006)
 
@@ -197,8 +198,9 @@ neck=mesh('Flowing pressed neck',verts,faces,steel)
 sub=neck.modifiers.new('Smooth neck transition','SUBSURF'); sub.levels=2
 for face in neck.data.polygons: face.use_smooth=True
 between('Steel ferrule',(0,1.18,.70),(0,1.48,.86),.19,steel)
-between('Walnut grip',(0,1.43,.83),(0,2.92,1.53),.205,wood)
-between('End cap',(0,2.90,1.52),(0,2.97,1.55),.19,steel)
+between('Walnut grip',(0,1.43,.83),(0,2.50,1.34) if take2 else (0,2.92,1.53),.24 if take2 else .205,wood)
+if not take2:
+    between('End cap',(0,2.90,1.52),(0,2.97,1.55),.19,steel)
 
 # The letter emerges through the slot and coils 1.25 turns above the blade.
 profile=[(.20,.43),(.17,.61),(.13,.81)]
@@ -212,9 +214,9 @@ sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=2
 solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.008
 for face in strip.data.polygons: face.use_smooth=True
 # Rules sit on the outer face of the spiral, with no letters or glyphs.
-for i,t in enumerate([.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
+for i,t in enumerate([.8, 1.4, 2.0] if take2 else [.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
     y,z=curl(t,.009)
-    line('Curled letter rule',[(-.48,y,z),(.40 if i%4!=3 else .12,y,z)],ink,.007)
+    line('Curled letter rule',[(-.48,y,z),(.40 if i%4!=3 else .12,y,z)],ink,.030 if take2 else .007)
 subject=list(scene.objects)
 
 # Orthographic camera and broad softboxes: no external textures or environment maps.
@@ -255,7 +257,7 @@ root.scale=(scale,)*3
 rotation=cam.rotation_euler.to_matrix()
 target=Vector((0,.55,.35))
 root.location=target*(1-scale)+rotation @ Vector((-scale*center.x,-scale*center.y,0))
-assert 1 < scale < 1.5
+assert 1 < scale < 1.8
 print('Subject maximum extent: 660 px; scale',round(scale,4),flush=True)
 
 # A camera-facing rounded square keeps the macOS silhouette inside the 824 px grid.
@@ -273,17 +275,38 @@ plate.location=Vector((0,.55,.35)) + cam.rotation_euler.to_matrix() @ Vector((0,
 assert len(outline)==256 and .025 <= thickness <= .0375
 assert max(abs(x) for x,y in outline if y>0) > max(abs(x) for x,y in outline if y<-1.3)
 assert len(profile)>3 and scene.render.resolution_x==1024
-for variant,color in [('light',(.79,.76,.68)),('dark',(.027,.035,.032))]:
-    plate_mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value=(*color,1)
-    scene.render.filepath=str(out.with_name(out.stem+'-'+variant+'.png'))
+if take2:
+    nodes, links = plate_mat.node_tree.nodes, plate_mat.node_tree.links
+    coord = nodes.new('ShaderNodeTexCoord')
+    separate = nodes.new('ShaderNodeSeparateXYZ')
+    gradient = nodes.new('ShaderNodeValToRGB')
+    links.new(coord.outputs['Generated'], separate.inputs[0])
+    links.new(separate.outputs['Y'], gradient.inputs[0])
+    links.new(gradient.outputs[0], nodes.get('Principled BSDF').inputs['Base Color'])
+    nodes.get('Principled BSDF').inputs['Roughness'].default_value = .32
+    ink.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.12,.17,.22,1)
+    for variant, color, grip in [
+        ('A', (.43,.035,.022), (.045,.022,.016)),
+        ('B', (.012,.065,.34), (.16,.065,.025)),
+        ('C', (.038,.032,.029), (.43,.035,.022))]:
+        gradient.color_ramp.elements[0].color = (*(v*.65 for v in color),1)
+        gradient.color_ramp.elements[1].color = (*(v*1.35 for v in color),1)
+        wood.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (*grip,1)
+        scene.render.filepath = str(out.with_name('take2-'+variant+'.png'))
+        bpy.ops.render.render(write_still=True)
+    assert all(out.with_name('take2-'+v+'.png').exists() for v in 'ABC')
+else:
+    for variant,color in [('light',(.79,.76,.68)),('dark',(.027,.035,.032))]:
+        plate_mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value=(*color,1)
+        scene.render.filepath=str(out.with_name(out.stem+'-'+variant+'.png'))
+        bpy.ops.render.render(write_still=True)
+    # The main asset is an isolated transparent object; the thumbnail previews the light icon.
+    plate.hide_render=True
+    scene.render.filepath=str(out)
     bpy.ops.render.render(write_still=True)
-# The main asset is an isolated transparent object; the thumbnail previews the light icon.
-plate.hide_render=True
-scene.render.filepath=str(out)
-bpy.ops.render.render(write_still=True)
-image=bpy.data.images.load(str(out.with_name(out.stem+'-light.png')))
-assert len(image.pixels) == 1024 * 1024 * 4
-image.pixels[0]  # Load pixels before changing the source path.
-image.scale(32,32)
-image.filepath_raw=str(out.with_name(out.stem+'-32.png')); image.save()
-assert all(out.with_name(out.stem+s+'.png').exists() for s in ('','-light','-dark','-32'))
+    image=bpy.data.images.load(str(out.with_name(out.stem+'-light.png')))
+    assert len(image.pixels) == 1024 * 1024 * 4
+    image.pixels[0]  # Load pixels before changing the source path.
+    image.scale(32,32)
+    image.filepath_raw=str(out.with_name(out.stem+'-32.png')); image.save()
+    assert all(out.with_name(out.stem+s+'.png').exists() for s in ('','-light','-dark','-32'))
