@@ -69,7 +69,11 @@ impl Render for MessageWindow {
         // One message's text and HTML: cheap to clone, and the main window stays free to change.
         let Some(m) = main.inbox.mail.get(self.id).cloned() else { return div() };
         let id = self.id;
-        let in_trash = main.inbox.trash.contains(&id);
+        let in_trash = if m.store.is_some() {
+            main.inbox.folders.iter().any(|f| f.kind == Kind::Trash && !f.gone && f.store.map(mail::Place::Folder).as_ref() == Some(&m.folder))
+        } else {
+            main.inbox.trash.contains(&id)
+        };
         self.web.frame(Some((id, &m)), &t, false, window, cx);
         let web = html::SUPPORTED && m.html.is_some();
         let this = cx.entity().downgrade();

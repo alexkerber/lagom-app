@@ -968,6 +968,7 @@ pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Statefu
 pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
     let base = div()
         .id(label)
+        .debug_selector(move || label.into())
         .flex()
         .items_center()
         .h(px(28.))
@@ -1574,12 +1575,14 @@ impl MainWindow {
                         let controls = div().flex().gap(px(8.));
                         if self.emptying_trash() {
                             controls.child(mono("Emptying…", t.ink2))
+                        } else if !self.can_empty_trash() {
+                            controls.child(mono("Updating…", t.ink2))
                         } else if self.confirm_empty_trash {
                             controls
                                 .child(button(t, "Delete all", Some(t.danger)).on_click(cx.listener(|this, _, _, cx| this.empty_trash(cx))))
                                 .child(button(t, "Cancel", None).on_click(cx.listener(|this, _, _, cx| { this.confirm_empty_trash = false; cx.notify(); })))
                         } else {
-                            controls.child(button(t, "Empty Trash", None).on_click(cx.listener(|this, _, _, cx| { this.confirm_empty_trash = true; cx.notify(); })))
+                            controls.child(button(t, "Empty Trash", None).on_click(cx.listener(|this, _, _, cx| { this.confirm_empty_trash = this.can_empty_trash(); cx.notify(); })))
                         }
                     } else { filter }),
             )
