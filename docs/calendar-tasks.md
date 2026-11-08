@@ -105,10 +105,10 @@ Each slice ships on its own. New `Cmd`s go in `apps/desktop/src/sync.rs`, the UI
 7. **Time zones and RRULE editing.** Editing "this event vs the whole series" is part of the L size in slice d.
 
 ### Critical files
-- /Users/alex/Developer/lagom-app-worktrees/oauth/crates/lagom-core/src/oauth.rs
-- /Users/alex/Developer/lagom-app-worktrees/oauth/crates/lagom-core/src/store.rs
-- /Users/alex/Developer/lagom-app-worktrees/oauth/crates/lagom-core/src/schema_v3.sql (pattern for the new schema_v4.sql)
-- /Users/alex/Developer/lagom-app-worktrees/oauth/apps/desktop/src/sync.rs
-- /Users/alex/Developer/lagom-app-worktrees/oauth/apps/desktop/src/main_window.rs
+- crates/lagom-core/src/oauth.rs
+- crates/lagom-core/src/store.rs
+- crates/lagom-core/src/schema_v3.sql (pattern for the new schema_v4.sql)
+- apps/desktop/src/sync.rs
+- apps/desktop/src/main_window.rs
 
 I did not check any provider docs live: scope names, quotas, Testing-mode limits, Zoom PKCE support and Microsoft refreshing across resources all come from memory. The biggest risk is the shared token cache and the fixed refresh scope in `oauth.rs`, which break as soon as a second scope set or resource is added.

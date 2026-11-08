@@ -2,7 +2,7 @@
 
 /// Damping ratio and stiffness, per animation duration: under 1 % overshoot, and the motion
 /// spreads over the whole duration (40 % at a quarter, 87 % at a half). The old 0.75/9.5 was done
-/// after a third, so at 60 Hz a row jumped in 2–4 frames (Alex 2026-11-08: "hackar").
+/// after a third, so at 60 Hz a row jumped in 2–4 frames.
 const ZETA: f32 = 0.85;
 const OMEGA: f32 = 5.5;
 

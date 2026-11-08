@@ -5,10 +5,10 @@
 - [ ] Domain. `lagom.app`, `lagom.com` and `lagom.io` are taken (RDAP, 2026-11-06). Free on that date: `lagom-mail.com/.app/.io`, `lagomhq.com/.app/.io`, `lagommail.app/.io`, and `.se` for lagom-app, lagommail, lagom-mail and lagomhq.
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42. Web pass done 2026-11-08: `docs/trademark-check.md` (medium risk, official databases still to search by hand).
-- [ ] App icon: three concepts in `brand/app-icon/` (sheet.png). Alex picks one.
+- [ ] App icon: three concepts in `brand/app-icon/` (sheet.png). The maintainer picks one.
 - [x] Brand concept: Concept D "Butik" from Claude design.
 - [x] Exact colour tokens from Claude design, in `apps/desktop/src/theme.rs` (from ConceptD and MainWindowD).
-- [ ] Website: switch `site/` to the exact tokens and drop the parts Alex rejected (0 kr cards, info strip, pill buttons).
+- [ ] Website: switch `site/` to the exact tokens and drop the rejected parts (0 kr cards, info strip, pill buttons).
 - [x] Website in `site/`, Concept D, deployed with GitHub Pages.
 - [ ] Website: point the domain at GitHub Pages.
 
@@ -31,56 +31,56 @@
 - [x] Native macOS menu bar: lagom, File, View, Window, Help.
 - [x] Edit menu: Undo, Redo, Cut, Copy, Paste, Select All. A focused text field handles them; Undo falls back to the inbox (`feat/text-input`).
 - [ ] Command palette, compose and empty inbox: structure from B, dressed in D tokens.
-- [ ] Typeface trial: Hauora Sans against Inter (Alex 2026-11-06).
-- [ ] Performance: CI that measures the budgets in `docs/performance.md` (Alex 2026-11-06: "the most optimised mail app").
+- [ ] Typeface trial: Hauora Sans against Inter.
+- [ ] Performance: CI that measures the budgets in `docs/performance.md` (goal: the most optimised mail app).
 - [ ] Liquid Glass spike: native `NSGlassEffectView` behind the GPUI sidebar on macOS 26+, blur fallback.
-- [x] Window drags by its top edge on macOS (Alex verified by hand, 2026-11-06).
+- [x] Window drags by its top edge on macOS (verified by hand).
 
-- [ ] Sort mail into custom folders (Alex 2026-11-06: one of the two must-have features). Sidebar group and ⌘K "move <folder>" work on sample data (`feat/folders`); real IMAP/Gmail sync is still open.
+- [ ] Sort mail into custom folders (must-have). Sidebar group and ⌘K "move <folder>" work on sample data (`feat/folders`); real IMAP/Gmail sync is still open.
 - [ ] Folders: the "+" in the heading and the "New folder" row do nothing yet. Wire them to an inline name field; ⌘K "move <name>" creates the folder on the server today.
-- [x] Snooze, shown as "Later" in the UI (Alex 2026-11-06: the other must-have feature). Local only: L/← until tomorrow 08:00; ⌘K offers 18:00, tomorrow 08:00 and Monday 08:00; due mail returns to Inbox (`feat/real-mail`).
-- [x] Swipe a row with two fingers (trackpad, Magic Mouse) to Done or Later; Esc springs it back (Alex 2026-11-06).
-- [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (Alex 2026-11-06, `feat/folders`).
+- [x] Snooze, shown as "Later" in the UI (must-have). Local only: L/← until tomorrow 08:00; ⌘K offers 18:00, tomorrow 08:00 and Monday 08:00; due mail returns to Inbox (`feat/real-mail`).
+- [x] Swipe a row with two fingers (trackpad, Magic Mouse) to Done or Later; Esc springs it back.
+- [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (`feat/folders`).
 - [ ] Swipe: try it by hand on a trackpad, a Magic Mouse and a mouse drag (incl. release outside the window), including the 245 px delete stage and the colour fade; tests cover only the state logic.
 - [ ] Swipe: haptic tick at each threshold. GPUI 0.2.2 has no API for `NSHapticFeedbackManager`.
 - [ ] Trash: a sidebar entry to open it and empty it. Delete only moves to an in-memory Trash now.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
-- [x] Swipe: drag a row with the mouse, same stages as the trackpad (Alex 2026-11-06: "ska kunna dra med musen också"). Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
+- [x] Swipe: drag a row with the mouse, same stages as the trackpad. Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
 - [x] Compose: Esc keeps the draft in memory and R brings it back; Send and ⌘⌫ end it (`feat/text-input`).
 - [x] Text input: `TextInput` (single and multi-line, selection, word and line keys, clipboard, undo, IME, password mode) in compose and the palette (`feat/text-input`).
 - [ ] Text input: try by hand. Typing, an IME (Japanese, Pinyin), dead keys, mouse and double-click selection, drag past the edge, scrolling a long body, the Edit menu. Tests cover the editing model and GPUI key dispatch only.
 - [ ] Text input: caret, accent selection and focus ring are not in a screenshot yet. GPUI blurs fields in an inactive window, and the capture window was inactive.
 - [ ] Compose: save the draft to Drafts via `lagom-core`; it lives in memory now and is lost on quit.
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
-- [x] Feel (Alex 2026-11-06: "de känns så kalla"): hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).
+- [x] Feel: hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).
 - [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.
-- [x] Selection contrast raised and the sidebar frosted denser (Alex 2026-11-08). Real blur radius needs native code.
+- [x] Selection contrast raised and the sidebar frosted denser. Real blur radius needs native code.
 - [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
-- [x] Typeface: the system font (SF Pro on macOS) is the UI default, chosen by Alex 2026-11-06. `LAGOM_UI_FONT=inter` switches back.
+- [x] Typeface: the system font (SF Pro on macOS) is the UI default. `LAGOM_UI_FONT=inter` switches back.
 - [ ] Message list: virtualise (visible rows only) when real mail arrives; it renders every row now.
 
 ## Folders: open questions
 
-Defaults in the code until Alex answers (Figma "Lagom · Folders", frame 7):
+Defaults in the code until the maintainer decides (Figma "Lagom · Folders", frame 7):
 
 - [ ] Gmail labels and IMAP folders: shown the same way for now. A Gmail message can have several labels.
 - [ ] Folders per account (default) or merged across accounts.
 - [ ] Shortcuts: only ⌘K for now, no G + letter per folder.
 - [ ] Drag a message onto a folder, and a swipe to "Move to": not yet.
 
-## Product line (Alex 2026-11-08)
+## Product line
 
-- Supersnabb: mail, meetings and todos in one app. Open source, so people can add to it. No AI in the app (too bloated).
+- Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
 
-## Calendar (Alex 2026-11-06)
+## Calendar
 
-Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions for Alex are in its last section.
+Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last section.
 
 - [ ] Agenda next to the inbox: Google and Microsoft calendars.
 - [ ] Create a meeting from the app with Google Meet or Zoom attached, without opening Gmail or Google Calendar.
 
-## Tasks (Alex 2026-11-06)
+## Tasks
 
 - [ ] Task list on the start screen. Lists "Work" and "Private", plus custom lists.
 - [ ] Turn a mail into a task in one key press. The task links back to the mail.
