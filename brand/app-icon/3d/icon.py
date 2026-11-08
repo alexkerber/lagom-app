@@ -1,4 +1,4 @@
-"""Blender -b -P icon.py -- icon.png [--take2] (renders A/B/C concepts)."""
+"""Blender -b -P icon.py -- icon.png [--take2 | --take3] (renders concept variants)."""
 import bpy
 import math
 import random
@@ -7,7 +7,8 @@ from pathlib import Path
 from mathutils import Vector
 
 out = Path(sys.argv[sys.argv.index('--') + 1]).resolve()
-take2 = '--take2' in sys.argv
+take3 = '--take3' in sys.argv
+take2 = '--take2' in sys.argv or take3
 assert out.suffix == '.png'
 random.seed(17)
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -38,7 +39,7 @@ def material(name, color, rough=.4, metal=0, grain=None):
     bs.inputs['Metallic'].default_value = metal
     if metal:
         bs.inputs['Anisotropic'].default_value = .72
-    if grain and not take2:
+    if grain and (not take2 or (take3 and name == 'Brushed stainless')):
         coord = n.new('ShaderNodeTexCoord')
         mapping = n.new('ShaderNodeVectorMath')
         mapping.operation = 'MULTIPLY'
@@ -285,16 +286,52 @@ if take2:
     links.new(gradient.outputs[0], nodes.get('Principled BSDF').inputs['Base Color'])
     nodes.get('Principled BSDF').inputs['Roughness'].default_value = .32
     ink.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.12,.17,.22,1)
-    for variant, color, grip in [
-        ('A', (.43,.035,.022), (.045,.022,.016)),
-        ('B', (.012,.065,.34), (.16,.065,.025)),
-        ('C', (.038,.032,.029), (.43,.035,.022))]:
-        gradient.color_ramp.elements[0].color = (*(v*.65 for v in color),1)
-        gradient.color_ramp.elements[1].color = (*(v*1.35 for v in color),1)
-        wood.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (*grip,1)
-        scene.render.filepath = str(out.with_name('take2-'+variant+'.png'))
-        bpy.ops.render.render(write_still=True)
-    assert all(out.with_name('take2-'+v+'.png').exists() for v in 'ABC')
+    if take3:
+        # Suppress pale softbox reflections on the red tile, retaining contact shadows.
+        bs = nodes.get('Principled BSDF')
+        bs.inputs['Roughness'].default_value = 1
+        bs.inputs['Specular IOR Level'].default_value = 0
+        gradient.color_ramp.elements[0].color = (.24,.009,.005,1)
+        gradient.color_ramp.elements[1].color = (.37,.020,.010,1)
+        wood.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.045,.022,.016,1)
+        for variant, zoom, anchor in [
+            ('1', 2.65, (0,-.12,.68)),
+            ('2', 4.0, (0,-.02,.93)),
+            ('3', 2.65, (0,-.12,.68))]:
+            for obj in subject:
+                obj.hide_render = (variant != '3' and obj.name.startswith(('Envelope','Task'))) or (variant == '2' and obj.name.startswith(('Flowing','Steel ferrule','Walnut grip')))
+            root.scale = (zoom,)*3
+            root.location = target - zoom*Vector(anchor)
+            plate.location = target + rotation @ Vector((0,0,-3.5))
+            scene.render.filepath = str(out.with_name('take3-'+variant+'.png'))
+            bpy.ops.render.render(write_still=True)
+            # Clip the zoomed subject to the same rounded 824 px tile silhouette.
+            rendered = bpy.data.images.load(scene.render.filepath, check_existing=False)
+            pixels = list(rendered.pixels)
+            for y in range(1024):
+                for x in range(1024):
+                    dx, dy = max(abs(x+.5-512)-282,0), max(abs(y+.5-512)-282,0)
+                    coverage = max(0,min(1,130.5-math.hypot(dx,dy)))
+                    pixels[(y*1024+x)*4+3] *= coverage
+                    if coverage == 0:
+                        pixels[(y*1024+x)*4:(y*1024+x)*4+3] = (0,0,0)
+            rendered.pixels = pixels
+            rendered.filepath_raw = scene.render.filepath
+            rendered.save()
+            bpy.data.images.remove(rendered)
+        assert all(out.with_name('take3-'+v+'.png').exists() for v in '123')
+    else:
+        for variant, color, grip in [
+            ('A', (.43,.035,.022), (.045,.022,.016)),
+            ('B', (.012,.065,.34), (.16,.065,.025)),
+            ('C', (.038,.032,.029), (.43,.035,.022))]:
+            gradient.color_ramp.elements[0].color = (*(v*.65 for v in color),1)
+            gradient.color_ramp.elements[1].color = (*(v*1.35 for v in color),1)
+            wood.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (*grip,1)
+            scene.render.filepath = str(out.with_name('take2-'+variant+'.png'))
+            bpy.ops.render.render(write_still=True)
+        assert all(out.with_name('take2-'+v+'.png').exists() for v in 'ABC')
+
 else:
     for variant,color in [('light',(.79,.76,.68)),('dark',(.027,.035,.032))]:
         plate_mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value=(*color,1)

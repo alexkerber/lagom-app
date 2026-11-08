@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 mkdir -p brand/app-icon/export
-scratch=$(mktemp -d)
+mkdir -p target
+scratch=$(mktemp -d "$PWD/target/icon-export.XXXXXX")
 trap 'rm -f "$scratch"/*; rmdir "$scratch"' EXIT
 cat > "$scratch/export.swift" <<'SWIFT'
 import AppKit
