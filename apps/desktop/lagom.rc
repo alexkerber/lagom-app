@@ -1,0 +1,2 @@
+// shortcut: GPUI 0.2.2 has no runtime icon setter and loads resource 1 for its windows, revisit when it exposes an icon API.
+1 ICON "../../brand/app-icon/export/lagom.ico"

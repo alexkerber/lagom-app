@@ -3507,6 +3507,7 @@ dependencies = [
  "anyhow",
  "block2",
  "chrono",
+ "embed-resource",
  "gpui",
  "lagom-core",
  "notify-rust",
@@ -3520,6 +3521,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "unicode-segmentation",
+ "windows 0.61.3",
  "wry",
  "zeroize",
 ]

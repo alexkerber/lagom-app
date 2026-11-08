@@ -170,6 +170,7 @@ pub fn recipients(field: &str) -> Vec<String> {
 /// The list the UI shows, as the store has it now.
 pub enum View {
     Inbox,
+    Trash,
     Folder(i64),
     Later,
 }
@@ -195,12 +196,16 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
     let folders = store.folders(account, now)?;
     let counts = store.counts(account, now)?;
     let inbox_id = folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox).map(|f| f.id);
+    let view = match view {
+        View::Trash => folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Trash).map_or(View::Trash, |f| View::Folder(f.id)),
+        view => view,
+    };
     let mut inbox = match inbox_id {
         Some(id) => store.list_messages(id, now, limit, 0)?,
         None => Vec::new(),
     };
     let mut open = match view {
-        View::Inbox => Vec::new(),
+        View::Inbox | View::Trash => Vec::new(),
         View::Folder(id) => store.list_messages(id, now, limit, 0)?,
         View::Later => store.later(account, now, limit, 0)?,
     };
