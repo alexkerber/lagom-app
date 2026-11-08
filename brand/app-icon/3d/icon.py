@@ -1,4 +1,4 @@
-"""Blender -b -P icon.py -- icon.png [--take2 | --take3 | --take4 | --take5] (renders concept variants)."""
+"""Blender -b -P icon.py -- icon.png [--take2 | --take3 | --take4 | --take5 | --take6] (renders concept variants)."""
 import bpy
 import math
 import random
@@ -7,7 +7,8 @@ from pathlib import Path
 from mathutils import Vector, Matrix
 
 out = Path(sys.argv[sys.argv.index('--') + 1]).resolve()
-take5 = '--take5' in sys.argv
+take6 = '--take6' in sys.argv
+take5 = '--take5' in sys.argv or take6
 take4 = '--take4' in sys.argv or take5
 take3 = '--take3' in sys.argv or take4
 take2 = '--take2' in sys.argv or take3
@@ -119,7 +120,7 @@ def line(name, points, mat, width=.008):
 
 
 # A loose stack: real thickness, visible folded envelope backs, and two task cards.
-for i in range(2 if take2 else 9):
+for i in range(0 if take6 else 2 if take2 else 9):
     angle = [-.16,.12,-.23,.07,.19,-.08,.13,-.04,.025][i]
     x = [.03,-.22,.16,-.1,.12,-.19,.05,-.03,0][i]
     y = .2 + (i%3-.8)*.11
@@ -136,6 +137,16 @@ for i in range(2 if take2 else 9):
 for j in range(0 if take2 else 3):
     y = -.15+j*.21
     line('Task checkbox', [(1.08,y,.278),(1.19,y,.278),(1.19,y+.10,.278),(1.08,y+.10,.278),(1.08,y,.278)], ink,.006)
+
+if take6:
+    stack_fold = material('Stack folds',(.20,.22,.21),.9)
+    for i in range(5):
+        x = [-.06,.05,-.04,.06,0][i]
+        y = -.60 + [.03,-.04,.02,-.02,0][i]
+        z = .10+i*.08
+        box('Mail bundle', (x,y,z), (3.20,2.80,.055), white if i%2 else paper,.035)
+        if i == 4:
+            line('Front envelope flap',[(x-1.48,-1.25,z+.031),(x,-1.87,z+.031),(x+1.48,-1.25,z+.031)],stack_fold,.015)
 
 # Shoulder-wide blade with a narrow rounded nose. The handle points toward +Y.
 outline = [(-.18,.86),(-.30,.69),(-.94,.55),(-1.16,.38),(-1.16,.15),
@@ -222,13 +233,17 @@ def curl(t, offset=0):
     return (-.30+radius*math.cos(t), .98+radius*math.sin(t))
 profile += [curl(2.5*math.pi*i/160) for i in range(161)]
 def envelope_point(x,t,offset=0):
+    if take6:
+        angle = 2.25*math.pi*t
+        radius = .43-.16*t+offset
+        return (x,-.36+radius*math.cos(angle),.96+radius*math.sin(angle))
     return (x, .20-1.42*t, .49+.12*math.sin(math.pi*t)+.13*t**8+offset)
 if take5:
-    profile = [envelope_point(0,i/80)[1:] for i in range(81)]
+    profile = ([(.20,.44),(.16,.62),(.11,.80)] if take6 else []) + [envelope_point(0,i/80)[1:] for i in range(81)]
     white.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.93,.87,.73,1)
 v=[(x,y,z) for y,z in profile for x in ((-.78,.78) if take5 else (-.58,.58))]
 strip_faces=[(2*i,2*i+1,2*i+3,2*i+2) for i in range(len(profile)-1)]
-strip=mesh('Single curled letter',v,[tuple(reversed(f)) for f in strip_faces] if take5 else strip_faces,white)
+strip=mesh('Single curled letter',v,[tuple(reversed(f)) for f in strip_faces] if take5 and not take6 else strip_faces,white)
 sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=2
 solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.016 if take5 else .008
 for face in strip.data.polygons: face.use_smooth=True
@@ -247,8 +262,8 @@ if take4 and not take5:
 if take5:
     fold = material('Envelope crease',(.22,.20,.17),.9)
     for side in (-1,1):
-        line('Letter V fold',[envelope_point(side*.72*(1-i/40),.06+.56*i/40,.008) for i in range(41)],fold,.009)
-        line('Letter bottom fold',[envelope_point(side*(.72-.47*i/30),.98-.31*i/30,.008) for i in range(31)],fold,.006)
+        line('Letter V fold',[envelope_point(side*.72*(1-i/40),(.06+.24*i/40 if take6 else .06+.56*i/40),.024 if take6 else .008) for i in range(41)],fold,.009)
+        if not take6: line('Letter bottom fold',[envelope_point(side*(.72-.47*i/30),.98-.31*i/30,.008) for i in range(31)],fold,.006)
     stamp_mat = material('Blue postage',(.015,.055,.12),.8)
     corners = [(.44,.13),(.70,.13),(.70,.34),(.44,.34)]
     border=[]
@@ -261,10 +276,16 @@ if take5:
     stamp=mesh('Postage stamp',[envelope_point(.57,.235,.024)]+border,
                [(0,i+1,(i+1)%len(border)+1) for i in range(len(border))],stamp_mat)
     for face in stamp.data.polygons: face.use_smooth=True
+if take6:
+    pivot = Vector((0,-.36,.96))
+    transform = Matrix.Translation(pivot) @ Matrix.Rotation(math.radians(15),4,'Y') @ Matrix.Translation(-pivot)
+    for obj in scene.objects:
+        if obj.name.startswith(('Single curled letter','Letter V fold')):
+            obj.matrix_world = transform @ obj.matrix_world
 subject=list(scene.objects)
 
 # Orthographic camera and broad softboxes: no external textures or environment maps.
-bpy.ops.object.camera_add(location=(0,-5,18) if take4 else (5,-8,14))
+bpy.ops.object.camera_add(location=(0,-8,18) if take6 else (0,-5,18) if take4 else (5,-8,14))
 cam=bpy.context.object
 cam.rotation_euler=(Vector((0,.55,.35))-cam.location).to_track_quat('-Z','Y').to_euler()
 cam.data.type='ORTHO'; cam.data.ortho_scale=7.5
@@ -341,20 +362,25 @@ if take2:
             links.new(gradient.outputs[0], bs.inputs['Emission Color'])
             bs.inputs['Emission Strength'].default_value = .65
             ink.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.065,.065,.065,1)
-        frames = [('1',2.18,(0,-.35,.65)),('2',2.18,(0,-.35,.65))] if take4 else [
+        frames = [(v,1.55,(0,-.70,.65)) for v in 'ABCD'] if take6 else [('1',2.18,(0,-.35,.65)),('2',2.18,(0,-.35,.65))] if take4 else [
             ('1', 2.65, (0,-.12,.68)),
             ('2', 4.0, (0,-.02,.93)),
             ('3', 2.65, (0,-.12,.68))]
         for variant, zoom, anchor in frames:
             for obj in subject:
                 obj.hide_render = (variant != '3' and obj.name.startswith(('Envelope','Task'))) or (not take4 and variant == '2' and obj.name.startswith(('Flowing','Steel ferrule','Walnut grip')))
+            if take6:
+                color = {'A':(.013,.147,.076),'B':(.028,.093,.392),
+                         'C':(.76,.365,.044),'D':(.005,.091,.117)}[variant]
+                gradient.color_ramp.elements[0].color = (*(v*.78 for v in color),1)
+                gradient.color_ramp.elements[1].color = (*(v*1.2 for v in color),1)
             root.scale = (zoom,)*3
             if take5:
-                stamp.hide_render = variant == '2'
+                stamp.hide_render = take6 or variant == '2'
             root.rotation_euler.z = math.radians(-10) if take4 and not take5 and variant == '2' else 0
             root.location = target - zoom*(root.rotation_euler.to_matrix() @ Vector(anchor))
             plate.location = target + rotation @ Vector((0,0,-3.5))
-            scene.render.filepath = str(out.with_name(('take5-' if take5 else 'take4-' if take4 else 'take3-')+variant+'.png'))
+            scene.render.filepath = str(out.with_name(('take6-' if take6 else 'take5-' if take5 else 'take4-' if take4 else 'take3-')+variant+'.png'))
             bpy.ops.render.render(write_still=True)
             # Clip the zoomed subject to the same rounded 824 px tile silhouette.
             rendered = bpy.data.images.load(scene.render.filepath, check_existing=False)
@@ -370,7 +396,7 @@ if take2:
             rendered.filepath_raw = scene.render.filepath
             rendered.save()
             bpy.data.images.remove(rendered)
-        assert all(out.with_name(('take5-' if take5 else 'take4-' if take4 else 'take3-')+v+'.png').exists() for v in ('12' if take4 else '123'))
+        assert all(out.with_name(('take6-' if take6 else 'take5-' if take5 else 'take4-' if take4 else 'take3-')+v+'.png').exists() for v in ('ABCD' if take6 else '12' if take4 else '123'))
     else:
         for variant, color, grip in [
             ('A', (.43,.035,.022), (.045,.022,.016)),
