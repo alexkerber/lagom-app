@@ -172,6 +172,54 @@ elif concept == "osthyvel3":
     sl.data.materials.append(cm)
     for p in me.polygons: p.use_smooth = True
     target = Vector((0.35, 0.05, 0.75)); cam = (-2.2, -5.0, 4.4)
+elif concept == "osthyvel4":
+    # The backlog: envelopes with a few coloured task cards, slightly messy.
+    layers = [("#F3ECDD", 3, 0, 0), (MUSTARD, -6, 0.12, -0.05), ("#FBF7EE", 2, 0, 0), ("#EFE6D2", -2, 0, 0),
+              (PINE, 5, -0.1, 0.08), ("#FBF7EE", -1, 0, 0), (BLUE, -4, 0.08, 0.1), ("#F3ECDD", 1, 0, 0), ("#FBF7EE", 0, 0, 0)]
+    for i, (c, rz, dx, dy) in enumerate(layers):
+        box((2.1, 1.5, 0.07), (0.55 + dx, dy, 0.035 + 0.075 * i), c, rot=(0, 0, rz), bevel=0.012, rough=0.7)
+    T = 0.075 * len(layers) + 0.005
+    # Envelope flap on the top envelope: a shallow pyramid from the far edge, so the stack reads as mail.
+    bm = bmesh.new(); z = T - 0.003
+    vs = [bm.verts.new(p) for p in ((-0.5, 0.75, z), (1.6, 0.75, z), (0.55, -0.02, z + 0.025))]
+    bm.faces.new(vs); me = bpy.data.meshes.new("flap"); bm.to_mesh(me)
+    fl = bpy.data.objects.new("flap", me); sc.collection.objects.link(fl)
+    fl.modifiers.new("t", "SOLIDIFY").thickness = 0.01; fl.modifiers.new("b", "BEVEL").width = 0.006
+    fl.data.materials.append(mat("#F3ECDD", 0.7))
+    steel = metal("#CBCDCF"); steel.node_tree.nodes["Principled BSDF"].inputs["Roughness"].default_value = 0.34
+    def arc(cx, cy, r, a0, a1, n=10):
+        return [(cx + r * math.cos(math.radians(a0 + (a1 - a0) * k / n)), cy + r * math.sin(math.radians(a0 + (a1 - a0) * k / n))) for k in range(n + 1)]
+    # Blade outline: rounded tab at the neck, flaring to a broad end with rounded corners.
+    outer = arc(-0.17, 0, 0.13, 90, 270) + [(0.0, -0.13), (0.14, -0.22)] + arc(1.17, -0.345, 0.18, 270, 360) + \
+            arc(1.17, 0.345, 0.18, 0, 90) + [(0.14, 0.22), (0.0, 0.13)]
+    slot = arc(1.0, -0.30, 0.045, 180, 360) + arc(1.0, 0.30, 0.045, 0, 180)
+    cu = bpy.data.curves.new("blade", "CURVE"); cu.dimensions = "2D"; cu.fill_mode = "BOTH"
+    cu.extrude = 0.012; cu.bevel_depth = 0.004
+    for pts in (outer, slot):
+        sp = cu.splines.new("POLY"); sp.points.add(len(pts) - 1); sp.use_cyclic_u = True
+        for p, (x, y) in zip(sp.points, pts): p.co = (x, y, 0, 1)
+    bl = bpy.data.objects.new("blade", cu); sc.collection.objects.link(bl); bl.location = (0, 0, T + 0.016); cu.materials.append(steel)
+    # Neck, steel ferrule, wooden handle, end cap: in line with the blade, rising a little off the stack.
+    rod((-0.2, 0, T + 0.02), (-0.34, 0, T + 0.06), 0.07, steel)
+    rod((-0.3, 0, T + 0.055), (-0.62, 0, T + 0.1), 0.115, steel)
+    wood = bpy.data.materials.new("wood"); wood.use_nodes = True; nt = wood.node_tree; b = nt.nodes["Principled BSDF"]
+    wv = nt.nodes.new("ShaderNodeTexWave"); wv.inputs["Scale"].default_value = 9; wv.inputs["Distortion"].default_value = 6
+    ramp = nt.nodes.new("ShaderNodeValToRGB"); ramp.color_ramp.elements[0].color = hexc("#8E5226"); ramp.color_ramp.elements[1].color = hexc("#B9773F")
+    nt.links.new(wv.outputs["Fac"], ramp.inputs["Fac"]); nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"]); b.inputs["Roughness"].default_value = 0.5
+    rod((-0.62, 0, T + 0.1), (-1.72, 0, T + 0.27), 0.12, wood)
+    rod((-1.72, 0, T + 0.27), (-1.8, 0, T + 0.282), 0.12, steel)
+    # One thin sheet comes up through the slot and curls back towards the handle.
+    bm = bmesh.new(); x0, z0, r0, w = 1.0, T + 0.03, 0.2, 0.29; prev = None
+    for k in range(121):
+        t = k / 120 * 1.25 * math.pi; rr = r0 * (1 - 0.28 * t / math.pi)
+        x = x0 - rr * math.sin(t); z = z0 + r0 - rr * math.cos(t)
+        a, b2 = bm.verts.new((x, -w, z)), bm.verts.new((x, w, z))
+        if prev: bm.faces.new((prev[0], prev[1], b2, a))
+        prev = (a, b2)
+    me = bpy.data.meshes.new("slice"); bm.to_mesh(me); sl = bpy.data.objects.new("slice", me); sc.collection.objects.link(sl)
+    sl.modifiers.new("t", "SOLIDIFY").thickness = 0.008; sl.data.materials.append(mat("#FFFBF2", 0.6))
+    for p in me.polygons: p.use_smooth = True
+    target = Vector((-0.2, 0.05, 0.5)); cam = (-2.2, -4.4, 6.9)
 elif concept == "kladnypa":
     for i, (c, rz, dx) in enumerate([(BLUE, 7, -0.12), (MUSTARD, -4, 0.1), (CREAM, 0, 0)]):
         box((2.0, 1.5, 0.03), (dx, -0.25, 0.02 + 0.035 * i), c, rot=(0, 0, rz), bevel=0.008, rough=0.7)
