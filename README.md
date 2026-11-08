@@ -20,13 +20,14 @@ One repository holds all apps, so the core and every app change in the same comm
 
 ## Smoke test
 
-Run `./scripts/smoke.sh` to build the release app, run workspace tests, and
-capture every demo screen in light and dark themes. Visual checks require macOS,
-a graphical session, Swift, and Screen Recording permission for the terminal.
-Only the app processes started by the script are stopped.
+Run `./scripts/smoke.sh` to build the release app and run workspace tests.
+Add `--visual` to also capture every demo screen in light and dark themes. This
+opens app windows one after another, so do not type while it runs. Visual checks
+require macOS, a graphical session, Swift, and Screen Recording permission for
+the terminal. Only the app processes started by the script are stopped.
 
 Results, logs, and screenshots land in `target/smoke/`, with a browser grid at
 `target/smoke/index.html` and a contact sheet at `target/smoke/sheet.png`.
 Install `rsvg-convert` with `brew install librsvg` to generate the PNG sheet;
 otherwise that sheet is skipped with a warning.
-Use `--quick` to skip tests or `--no-visual` to check only the build and tests.
+Use `--quick` to skip tests.

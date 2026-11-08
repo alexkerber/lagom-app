@@ -3,30 +3,45 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 quick=0
-visual=1
+visual=0
 for arg do
     case "$arg" in
         --quick) quick=1 ;;
+        --visual) visual=1 ;;
         --no-visual) visual=0 ;;
-        *) printf 'Usage: %s [--quick] [--no-visual]\n' "$0" >&2; exit 2 ;;
+        *) printf 'Usage: %s [--quick] [--visual]\n' "$0" >&2; exit 2 ;;
     esac
 done
-mkdir -p target/smoke || exit 1
+export TMPDIR="$PWD/target/smoke/tmp"
+mkdir -p "$TMPDIR" || exit 1
 out=target/smoke
 failed=0
 pid=
+own_child() {
+    kill -0 "$pid" 2>/dev/null &&
+        [ "$(ps -o ppid= -p "$pid" | tr -d ' ')" = "$$" ]
+}
 cleanup() {
     if [ -n "$pid" ]; then
-        kill "$pid" 2>/dev/null || :
-        sleep 1
-        kill -KILL "$pid" 2>/dev/null || :
+        if own_child; then
+            kill "$pid" 2>/dev/null || :
+            sleep 1
+            if own_child; then
+                case "$(ps -o comm= -p "$pid")" in
+                    lagom|*/lagom) kill -KILL "$pid" 2>/dev/null || : ;;
+                esac
+            fi
+        fi
         wait "$pid" 2>/dev/null || :
         pid=
     fi
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap cleanup 0
+interrupted=0
+launching=0
+trap 'interrupted=129; [ "$launching" = 1 ] || exit "$interrupted"' HUP
+trap 'interrupted=130; [ "$launching" = 1 ] || exit "$interrupted"' INT
+trap 'interrupted=143; [ "$launching" = 1 ] || exit "$interrupted"' TERM
 result() {
     printf '%s %s (%ss)\n' "$1" "$2" "$(($(date +%s) - start))"
     if [ "$1" = FAIL ]; then failed=1; fi
@@ -49,7 +64,7 @@ else
 fi
 if [ "$visual" = 0 ]; then
     start=$(date +%s)
-    result WARN 'visual smoke skipped (--no-visual)'
+    result WARN 'visual smoke skipped (pass --visual; it opens app windows)'
     exit "$failed"
 fi
 start=$(date +%s)
@@ -92,9 +107,12 @@ for screen in $screens; do
         rm -f "$png"
         launch_screen=$screen
         if [ "$screen" = inbox ]; then launch_screen=; fi
+        launching=1
         LAGOM_DEMO=1 LAGOM_SCREEN="$launch_screen" LAGOM_THEME="$theme" \
             ./target/release/lagom >"$out/$screen-$theme.log" 2>&1 &
         pid=$!
+        launching=0
+        if [ "$interrupted" != 0 ]; then exit "$interrupted"; fi
         ok=0
         if window=$("$out/window-id" "$pid"); then
             sleep 2
@@ -116,6 +134,9 @@ done
 start=$(date +%s)
 rows=0
 for screen in $screens; do rows=$((rows + 1)); done
+# Keep this outside an if condition so set -e catches every failed write.
+(
+set -e
 {
     printf '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="%s">\n' "$((rows * 360 + 40))"
     printf '<rect width="100%%" height="100%%" fill="#eee"/><g font-family="sans-serif" font-size="16" fill="#222">\n'
@@ -133,7 +154,7 @@ for screen in $screens; do rows=$((rows + 1)); done
         y=$((y + 360))
     done
     printf '</g></svg>\n'
-} >"$out/sheet.svg"
+} >"$out/sheet.svg.tmp"
 {
     printf '<!doctype html><html lang="en"><meta charset="utf-8"><title>Smoke test</title>\n'
     printf '<style>body{font:16px sans-serif;background:#eee;color:#222}table{border-spacing:12px}img{width:480px;max-width:45vw}th{text-align:left}</style>\n'
@@ -150,9 +171,14 @@ for screen in $screens; do rows=$((rows + 1)); done
         printf '</tr>\n'
     done
     printf '</tbody></table></html>\n'
-} >"$out/index.html"
+} >"$out/index.html.tmp"
+)
+generated=$?
 # Assert that both grids contain every screen before reporting success.
-if [ "$(grep -c '^<tr><th>' "$out/index.html")" -eq "$rows" ] &&
+if [ "$generated" -eq 0 ] &&
+    mv "$out/sheet.svg.tmp" "$out/sheet.svg" &&
+    mv "$out/index.html.tmp" "$out/index.html" &&
+    [ "$(grep -c '^<tr><th>' "$out/index.html")" -eq "$rows" ] &&
     [ "$(grep -c '<text x="20"' "$out/sheet.svg")" -eq "$((rows + 1))" ]; then
     result PASS "browser grid: $out/index.html"
 else
@@ -161,8 +187,9 @@ fi
 start=$(date +%s)
 rm -f "$out/sheet.png"
 if ! command -v rsvg-convert >/dev/null 2>&1; then
-    result WARN 'PNG sheet skipped; install rsvg-convert with brew install librsvg'
-elif rsvg-convert "$out/sheet.svg" -o "$out/sheet.png" >"$out/sheet.log" 2>&1 && [ -s "$out/sheet.png" ]; then
+    result WARN 'PNG sheet skipped (rsvg-convert missing, not a failure); install rsvg-convert with brew install librsvg'
+elif rsvg-convert "$out/sheet.svg" -o "$out/sheet.png.tmp" >"$out/sheet.log" 2>&1 && [ -s "$out/sheet.png.tmp" ] &&
+    mv "$out/sheet.png.tmp" "$out/sheet.png"; then
     result PASS "contact sheet: $out/sheet.png"
 else
     result FAIL "contact sheet; see $out/sheet.log"
