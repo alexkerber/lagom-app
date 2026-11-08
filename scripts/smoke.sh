@@ -98,7 +98,8 @@ fi
 result PASS 'window probe compilation'
 # Keep in sync with LAGOM_SCREEN in apps/desktop/src (including live account views).
 # popout and popout-html open a second window; the probe captures the first, so they are left out.
-screens='inbox empty palette later folders settings html html-simple move compose compose-text compose-cc compose-md compose-md-bar glide swipe-neutral swipe swipe-later swipe-delete deleted add-account add-account-form'
+# add-account and add-account-form need live accounts, which demo mode does not load.
+screens='inbox empty palette later folders settings html html-simple move compose compose-text compose-cc compose-md compose-md-bar glide swipe-neutral swipe swipe-later swipe-delete deleted'
 for screen in $screens; do
     for theme in light dark; do
         start=$(date +%s)

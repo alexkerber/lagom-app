@@ -21,7 +21,7 @@ One repository holds all apps, so the core and every app change in the same comm
 ## Smoke test
 
 Run `./scripts/smoke.sh` to build the release app and run workspace tests.
-Add `--visual` to also capture every main-window demo screen in light and dark themes. This
+Add `--visual` to also capture the main-window demo screens in light and dark themes. This
 opens app windows one after another, so do not type while it runs. Visual checks
 require macOS, a graphical session, Swift, and Screen Recording permission for
 the terminal. Only the app processes started by the script are stopped.
