@@ -49,6 +49,25 @@ pub(super) fn has_remote(html: &str) -> bool {
     })
 }
 
+/// `<link>` becomes an unknown, inert element. Resource hints (preconnect, dns-prefetch) open
+/// connections that the CSP does not cover; stylesheets are blocked by the CSP anyway.
+fn inert_links(html: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = html.as_bytes();
+    let hit = |i: usize| bytes[i] == b'<' && bytes.get(i + 1..i + 5).is_some_and(|w| w.eq_ignore_ascii_case(b"link"));
+    if !(0..bytes.len()).any(hit) {
+        return html.into();
+    }
+    let mut out = String::with_capacity(html.len() + 16);
+    let mut last = 0;
+    for i in (0..bytes.len()).filter(|&i| hit(i)) {
+        out.push_str(&html[last..=i]);
+        out.push_str("x-");
+        last = i + 1;
+    }
+    out.push_str(&html[last..]);
+    out.into()
+}
+
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -91,7 +110,7 @@ pub(super) fn document(m: &Mail, html: &str, t: &Theme, remote: bool) -> String 
         format!(r#"<div class="att"><span class="name">{}</span><span class="small">{}</span></div>"#, escape(name), escape(kb))
     });
     format!(
-        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta name="color-scheme" content="{scheme}"><style>
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="color-scheme" content="{scheme}"><style>
 html,body{{margin:0;background:{bg};color:{ink};font:13px/1.25 -apple-system,system-ui,"Segoe UI",sans-serif}}
 main{{box-sizing:border-box;max-width:760px;padding:24px 32px 20px}}
 h1{{margin:0;font-size:20px;line-height:25px;font-weight:600}}
@@ -106,6 +125,7 @@ h1{{margin:0;font-size:20px;line-height:25px;font-weight:600}}
 .att .name{{font-weight:500}}
 </style></head><body><main><h1>{subject}</h1><div class="from"><div class="avatar">{initials}</div><div class="who"><div class="name">{from}</div><div class="small addr">{address} → {to}</div></div><div class="small">{time}</div></div><div class="mail"><template shadowrootmode="open"><style>{inner_css}</style>{html}</template></div>{attachment}</main></body></html>"#,
         csp = csp(remote),
+        html = inert_links(html),
         subject = escape(&m.subject),
         initials = escape(&initials.to_uppercase()),
         from = escape(&m.from),
@@ -152,7 +172,9 @@ pub(super) struct Web {
     visible: bool,
     /// The shown mail has remote images.
     pub(super) has_remote: bool,
-    place: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// Bounds and scale factor last applied: a move to a display with another scale needs new
+    /// device-pixel bounds on Windows.
+    place: Rc<std::cell::Cell<Option<(Bounds<Pixels>, f32)>>>,
 }
 
 impl MainWindow {
@@ -227,11 +249,12 @@ impl MainWindow {
         let view = self.web.view.clone();
         let place = self.web.place.clone();
         gpui::canvas(
-            move |bounds, _, _| {
-                if place.get() == Some(bounds) {
+            move |bounds, window, _| {
+                let now = Some((bounds, window.scale_factor()));
+                if place.get() == now {
                     return;
                 }
-                place.set(Some(bounds));
+                place.set(now);
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if let Some(view) = &view {
                     use wry::dpi::{LogicalPosition, LogicalSize};
@@ -362,6 +385,15 @@ mod tests {
         // Simple HTML blends: theme ink, accent links.
         let doc = document(&sample(), "<div dir=ltr>Lunch?</div>", &dark, false);
         assert!(!doc.contains("background:#fff") && doc.contains("a{color:rgba(235,106,85,1)}"));
+    }
+
+    #[test]
+    fn resource_hints_are_inert() {
+        let mail = r#"<LINK rel="preconnect" href="https://t.example"><link rel=dns-prefetch href=//t.example><p>&lt;link</p>"#;
+        let doc = document(&sample(), mail, &Theme::light(DEFAULT_ACCENT), false);
+        assert!(doc.contains(r#"<x-LINK rel="preconnect""#) && doc.contains("<x-link rel=dns-prefetch") && doc.contains("<p>&lt;link</p>"));
+        assert!(!doc.to_ascii_lowercase().contains("<link"));
+        assert!(doc.contains(r#"<meta http-equiv="x-dns-prefetch-control" content="off">"#));
     }
 
     #[test]
