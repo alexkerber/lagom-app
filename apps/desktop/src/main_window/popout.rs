@@ -187,7 +187,7 @@ impl MainWindow {
         if self.palette.is_some() {
             self.close_palette(window, cx);
         }
-        if !self.inbox.list().contains(&id) {
+        if !self.inbox.raw_list().contains(&id) {
             match (self.inbox.mail[id].store.filter(|_| self.live.is_some()), self.inbox.items.contains(&id)) {
                 // Real mail: find and pin it by store id, as ⌘K does. A folder's cached rows may
                 // hold it while its next read, a page from the top, would not (an older ⌘K hit).
@@ -201,7 +201,7 @@ impl MainWindow {
                 }
             }
         }
-        match self.inbox.list().iter().position(|&i| i == id) {
+        match self.inbox.list().iter().position(|&rep| self.inbox.members(rep).contains(&id)) {
             Some(ix) => self.act_at(ix, what, 0., cx),
             None => self.notify("That message is not in a loaded list. Try again after the next sync.", cx),
         }

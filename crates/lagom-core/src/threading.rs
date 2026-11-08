@@ -72,19 +72,19 @@ impl Store {
 }
 
 fn conversation_sql(folder: Option<i64>) -> String {
-    let (index, scope, newer_scope) = if folder.is_some() {
-        ("messages_folder_date", "m.folder=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)",
+    let (index, thread_index, scope, newer_scope) = if folder.is_some() {
+        ("messages_folder_date", "messages_thread_folder", "m.folder=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)",
             "n.folder=?2 AND (n.snoozed_until IS NULL OR n.snoozed_until<=?3)")
     } else {
-        ("messages_later_date", "m.snoozed_until>?3", "n.snoozed_until>?3")
+        ("messages_later_date", "messages_thread", "m.snoozed_until>?3", "n.snoozed_until>?3")
     };
     // Start with the page, then use the thread index; a folder-first join scans the whole mailbox.
     format!("WITH page AS (
         SELECT m.thread_id FROM messages m INDEXED BY {index} WHERE m.account=?1 AND {scope}
-        AND m.id=(SELECT n.id FROM messages n INDEXED BY messages_thread WHERE n.account=m.account AND n.thread_id=m.thread_id AND {newer_scope}
+        AND m.id=(SELECT n.id FROM messages n INDEXED BY {thread_index} WHERE n.account=m.account AND n.thread_id=m.thread_id AND {newer_scope}
             ORDER BY n.date DESC,n.id DESC LIMIT 1)
         ORDER BY m.date DESC,m.id DESC LIMIT ?4)
-        SELECT {SUMMARY_COLUMNS} FROM page CROSS JOIN messages m INDEXED BY messages_thread ON m.account=?1 AND m.thread_id=page.thread_id
+        SELECT {SUMMARY_COLUMNS} FROM page CROSS JOIN messages m INDEXED BY {thread_index} ON m.account=?1 AND m.thread_id=page.thread_id
         WHERE {scope} ORDER BY m.date DESC,m.id DESC")
 }
 
@@ -111,12 +111,12 @@ mod tests {
         }, body_text: "cached body".into(), ..Default::default() }).unwrap();
         s.snooze(id, Some(1000)).unwrap();
         let before = s.message(id).unwrap();
-        s.db.execute_batch("DROP INDEX messages_later_date; PRAGMA user_version=8;").unwrap();
+        s.db.execute_batch("DROP INDEX messages_later_date; DROP INDEX messages_thread_folder; PRAGMA user_version=8;").unwrap();
         drop(s);
         let s = Store::open(dir.path().join("threads.db")).unwrap();
         assert_eq!(s.message(id).unwrap(), before);
         assert_eq!(s.list_conversations(&account, None, 0, 1).unwrap(), [before.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 9);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
     }
 
     #[test]
@@ -158,6 +158,43 @@ mod tests {
             assert_eq!(rows.len(), 399);
             assert!(steps < 100_000, "a page must not process all 100000 messages: {steps} VM steps");
         }
+    }
+
+    #[test]
+    fn v9_upgrade_preserves_threads_and_indexes_folders() {
+        let (dir, s, account, folder) = fixture();
+        let id = s.save_message(&Message { summary: MessageSummary {
+            account: account.clone(), folder, uid: 1, message_id: "root@test".into(), ..Default::default()
+        }, body_text: "cached body".into(), ..Default::default() }).unwrap();
+        let before = s.message(id).unwrap();
+        s.db.execute_batch("DROP INDEX messages_thread_folder; PRAGMA user_version=9;").unwrap();
+        drop(s);
+        let s = Store::open(dir.path().join("threads.db")).unwrap();
+        assert_eq!(s.message(id).unwrap(), before);
+        assert_eq!(s.list_conversations(&account, Some(folder), 0, 1).unwrap(), [before.summary]);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+    }
+
+    #[test]
+    fn conversation_page_does_not_rescan_newer_messages_in_other_folders() {
+        let (_dir, s, account, folder) = fixture();
+        let archive = s.save_folder(&account, "Archive", None, FolderRole::Archive).unwrap();
+        let id = s.save_message(&Message { summary: MessageSummary {
+            account: account.clone(), folder, uid: 1, date: 1, message_id: "root@test".into(), ..Default::default()
+        }, ..Default::default() }).unwrap();
+        s.db.execute("WITH RECURSIVE seq(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM seq WHERE n<4000)
+            INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,thread_id)
+            SELECT account,CASE WHEN n<=2000 THEN folder ELSE ?2 END,n,'','','','','','','',n,'',0,0,0,0,'',thread_id FROM messages,seq WHERE id=?1", params![id, archive]).unwrap();
+        let mut stmt = s.db.prepare(&conversation_sql(Some(folder))).unwrap();
+        let start = std::time::Instant::now();
+        let rows = stmt.query_map(params![account, folder, 0, 200], summary_row).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+        eprintln!("2000 Inbox + 2000 newer Archive messages in one thread: {:?}, {steps} VM steps", start.elapsed());
+        assert_eq!(rows.len(), 2000);
+        assert!(rows.iter().all(|m| m.folder == folder));
+        assert_eq!(rows.first().unwrap().date, 2000);
+        assert_eq!(rows.last().unwrap().id, id);
+        assert!(steps < 500_000, "newer messages in another folder must not be scanned for every candidate: {steps} VM steps");
     }
 
     #[test]

@@ -893,6 +893,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn popout_actions_follow_the_row_after_a_new_reply(cx: &mut TestAppContext) {
+        for what in [Move::Done, Move::Later, Move::Delete] {
+            for away in [false, true] {
+                let (view, cx, mut rx) = window(cx);
+                let (root, mut reply) = view.update(cx, |v, cx| {
+                    let live = v.live.as_ref().unwrap();
+                    let account = &live.accounts[0].id;
+                    let folder = live.store.folders(account, 0).unwrap()[0].id;
+                    let mut m = lagom_core::mime::parse(b"From: sender@example.com\r\nTo: recipient@example.com\r\nMessage-ID: <root@test>\r\n\r\nRoot").unwrap();
+                    m.summary.account = account.clone(); m.summary.folder = folder; m.summary.uid = 1; m.summary.date = 1;
+                    let root = live.store.save_message(&m).unwrap();
+                    v.inbox = Inbox::live(); v.reading_thread = None;
+                    v.reload(cx);
+                    (root, m)
+                });
+                view.update_in(cx, |v, window, cx| v.open_popout(window, cx));
+                let (original, popout) = view.read_with(cx, |v, _| v.popouts[0]);
+                reply.summary.uid = 2; reply.summary.date = 2;
+                reply.summary.message_id = "reply@test".into(); reply.summary.thread_refs = "root@test".into();
+                let reply = view.update_in(cx, |v, window, cx| {
+                    let reply = v.live.as_ref().unwrap().store.save_message(&reply).unwrap();
+                    v.on_events(vec![Event::Changed], window, cx);
+                    v.on_events(vec![Event::Changed], window, cx);
+                    assert_eq!(v.inbox.list().len(), 1);
+                    assert_ne!(v.inbox.current(), Some(original));
+                    assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(reply));
+                    if away { v.open_kind(Kind::Later, cx); }
+                    reply
+                });
+                while rx.try_recv().is_ok() {}
+                popout.update(cx, |p, _, cx| p.act(what, cx)).unwrap();
+                let moved: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|cmd| match cmd { Cmd::Op { id, .. } => Some(id), _ => None }).collect();
+                assert_eq!(moved, [root, reply], "{what:?}, away={away}");
+                view.read_with(cx, |v, _| {
+                    assert!(v.inbox.list().is_empty());
+                    assert!(v.popouts.is_empty());
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
     fn thread_actions_send_every_folder_member_and_undo_them(cx: &mut TestAppContext) {
         use lagom_core::store::FolderRole;
         let (view, cx, mut rx) = window(cx);
