@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -69,6 +69,9 @@ impl Store {
         }
         if version < 3 {
             db.execute_batch(include_str!("schema_v3.sql"))?;
+        }
+        if version < 4 {
+            db.execute_batch(include_str!("schema_v4.sql"))?;
         }
         Ok(Self { db })
     }
@@ -172,7 +175,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 3);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 4);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -571,11 +574,40 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
         assert!(Store::open(path).is_err());
+    }
+    #[test]
+    fn migration_from_v3_seeds_task_lists_and_preserves_mail() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v3.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(include_str!("schema_v1.sql")).unwrap();
+        db.execute_batch(include_str!("schema_v2.sql")).unwrap();
+        db.execute_batch(include_str!("schema_v3.sql")).unwrap();
+        let old = Store { db };
+        let (i, o) = crate::presets::servers("a@gmail.com").unwrap();
+        let a = Account::new("a@gmail.com".into(), i, o).unwrap();
+        old.save_account(&a).unwrap();
+        let f = old.save_folder(&a.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let id = old.save_message(&mail(&a, f, 1)).unwrap();
+        let message = old.message(id).unwrap();
+        let folder = old.folder(f).unwrap();
+        drop(old);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.accounts().unwrap(), [a.clone()]);
+        assert_eq!(s.folder(f).unwrap(), folder);
+        assert_eq!(s.message(id).unwrap(), message);
+        assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 4);
+        let lists = s.task_lists().unwrap();
+        assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
+        assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));
+        drop(s);
+        assert_eq!(Store::open(path).unwrap().task_lists().unwrap(), lists);
     }
     #[test]
     fn deleted_folders_clean_fts_and_ids_are_not_reused() {

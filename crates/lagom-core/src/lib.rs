@@ -8,6 +8,7 @@ pub mod presets;
 pub mod oauth;
 pub mod smtp;
 pub mod store;
+pub mod tasks;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
