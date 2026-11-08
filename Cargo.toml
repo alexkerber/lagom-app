@@ -1,9 +1,13 @@
 [workspace]
 # shortcut: Cargo.lock holds libc at 0.2.189 for GPUI's xattr 0.2.3 on Linux; revisit when GPUI updates xattr.
 resolver = "2"
-members = ["crates/lagom-core", "crates/lagom-cli", "apps/desktop"]
+members = ["crates/lagom-core", "crates/lagom-cli", "apps/desktop", "vendor/imap-proto"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/alexkerber/lagom-app"
+
+[patch.crates-io]
+# shortcut: maintain a local recursion bound; drop this patch when upstream bounds parser recursion.
+imap-proto = { path = "vendor/imap-proto" }

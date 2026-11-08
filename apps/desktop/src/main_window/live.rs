@@ -617,6 +617,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn virtual_list_navigation_loads_the_next_page(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, _rx) = window(cx);
+        cx.simulate_resize(gpui::size(px(1440.), px(600.)));
+        view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let a = &live.accounts[0];
+            live.store.save_account(a).unwrap();
+            let folder = live.store.save_folder(&a.id, "INBOX", Some("/"), FolderRole::Inbox).unwrap();
+            for uid in 1..=220 {
+                let summary = MessageSummary { account: a.id.clone(), folder, uid, subject: format!("Message {uid}"), date: uid as i64, ..Default::default() };
+                live.store.save_message(&Message { summary, body_text: "text".into(), body_html: None }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            assert_eq!(v.inbox.list().len(), PAGE as usize);
+            v.select(|inbox| inbox.select(179), cx);
+        });
+        cx.simulate_keystrokes("down");
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.selected, 180);
+            assert_eq!(v.live.as_ref().unwrap().limit, PAGE * 2);
+            assert_eq!(v.inbox.list().len(), 220);
+            assert!(v.scroll.bounds_for_item(30).is_none());
+            let y = row_y(180) + f32::from(v.scroll.offset().y);
+            assert!(y >= -1. && y + ROW_H <= f32::from(v.scroll.bounds().size.height) + 1.);
+        });
+    }
+
+    #[gpui::test]
     fn a_message_window_moves_an_older_hit_from_a_folder(cx: &mut TestAppContext) {
         use lagom_core::store::{FolderRole, Message, MessageSummary};
         let (view, cx, mut rx) = window(cx);
