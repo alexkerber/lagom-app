@@ -56,14 +56,14 @@ impl Theme {
             ink: rgb(0x111110),
             ink2: rgb(0x5F5F5A),
             line: rgb(0xE6E6E2),
-            sel: rgb(0xEFEFEC),
+            sel: rgb(0xE4E3DE),
             accent: rgb(accent.hex().0),
             accent_ink: rgb(0xFFFFFF),
             swipe_done: rgb(Accent::PineGreen.hex().0),
             swipe_later: rgb(Accent::CatalogueBlue.hex().0),
             danger: rgb(0xC62828),
             hover: Rgba { a: 0.03, ..rgb(0x111110) },
-            press: Rgba { a: 0.075, ..rgb(0x111110) },
+            press: Rgba { a: 0.12, ..rgb(0x111110) },
         }
     }
 
@@ -76,14 +76,15 @@ impl Theme {
             ink: rgb(0xF2F2EE),
             ink2: rgb(0x9B9B95),
             line: rgb(0x262624),
-            sel: rgb(0x1F1F1D),
+            // Alex 2026-11-08: 0x1F1F1D was too mild to find the selected row.
+            sel: rgb(0x2C2C29),
             accent: rgb(accent.hex().1),
             accent_ink: rgb(0x0B0B0A),
             swipe_done: rgb(Accent::PineGreen.hex().1),
             swipe_later: rgb(Accent::CatalogueBlue.hex().1),
             danger: rgb(0xF87171),
             hover: Rgba { a: 0.035, ..rgb(0xF2F2EE) },
-            press: Rgba { a: 0.08, ..rgb(0xF2F2EE) },
+            press: Rgba { a: 0.14, ..rgb(0xF2F2EE) },
         }
     }
 

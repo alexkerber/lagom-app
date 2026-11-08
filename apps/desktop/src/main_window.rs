@@ -1478,9 +1478,13 @@ impl Render for MainWindow {
             }
             Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(cx)).child(self.reading_pane(cx)),
         };
-        // The sidebar shows the blurred window background through a translucent tint.
-        // 0.9 keeps ink2 above 4.5:1 even over a black or white desktop.
-        let tint = Rgba { a: 0.9, ..t.subtle };
+        // The sidebar shows the blurred window background through a frosted tint: a step lighter
+        // than the page in dark mode, so it reads as frost, not a hole. 0.96 hides the desktop's
+        // shapes (Alex 2026-11-08: "för mycket bg genom sidebaren"); only its colour comes through.
+        // shortcut: the blur radius is AppKit's fixed NSVisualEffectView one; a stronger blur needs
+        // native code (see spike/liquid-glass).
+        let frost = if t.dark { gpui::rgb(0x161615) } else { gpui::rgb(0xF3F2EF) };
+        let tint = Rgba { a: 0.96, ..frost };
         div()
             .key_context("MainWindow")
             // Mouse swipe: the root sees every move inside the window; `on_mouse_up_out` catches a
