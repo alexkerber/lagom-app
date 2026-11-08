@@ -92,12 +92,26 @@ impl Panes {
         };
         let result = file.write_all(&bytes).and_then(|_| {
             drop(file);
-            fs::rename(&temp, path)
+            replace(&temp, path)
         });
         if result.is_err() {
             let _ = fs::remove_file(&temp);
         }
         result.map_err(Into::into)
+    }
+}
+
+/// Windows refuses to replace a file another handle has open (a reader, or antivirus), so retry briefly.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match fs::rename(from, to) {
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            result => return result,
+        }
     }
 }
 
