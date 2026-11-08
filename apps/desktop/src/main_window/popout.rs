@@ -69,6 +69,11 @@ impl Render for MessageWindow {
         // One message's text and HTML: cheap to clone, and the main window stays free to change.
         let Some(m) = main.inbox.mail.get(self.id).cloned() else { return div() };
         let id = self.id;
+        let in_trash = if m.store.is_some() {
+            main.inbox.folders.iter().any(|f| f.kind == Kind::Trash && !f.gone && f.store.map(mail::Place::Folder).as_ref() == Some(&m.folder))
+        } else {
+            main.inbox.trash.contains(&id)
+        };
         self.web.frame(Some((id, &m)), &t, false, window, cx);
         let web = html::SUPPORTED && m.html.is_some();
         let this = cx.entity().downgrade();
@@ -101,10 +106,12 @@ impl Render for MessageWindow {
                     // macOS: the traffic lights sit in the toolbar, as in the main window's sidebar.
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
-                    .child(button(&t, "Done", Some(t.swipe_done)).on_click(cx.listener(|this, _, _, cx| this.act(Move::Done, cx))))
+                    .child(button(&t, if in_trash { "Move to Inbox" } else { "Done" }, Some(t.swipe_done))
+                        .on_click(cx.listener(move |this, _, _, cx| this.act(if in_trash { Move::Inbox } else { Move::Done }, cx))))
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
-                    .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
-                    .child(button(&t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx))))
+                    .when(!in_trash, |d| d
+                        .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
+                        .child(button(&t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx)))))
                     .when(web && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.main.update(cx, |main, _, cx| {
@@ -186,6 +193,7 @@ impl MainWindow {
                 // hold it while its next read, a page from the top, would not (an older ⌘K hit).
                 (Some(store), _) => self.open_found(store, cx),
                 (None, true) => self.open_box(None, cx),
+                (None, false) if self.inbox.trash.contains(&id) => self.open_kind(Kind::Trash, cx),
                 (None, false) => {
                     if let Some(f) = self.inbox.folders.iter().position(|f| f.items.contains(&id)) {
                         self.open_box(Some(f), cx);

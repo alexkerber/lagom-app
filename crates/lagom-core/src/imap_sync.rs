@@ -248,12 +248,33 @@ impl ImapSync {
         store.reset_uidvalidity(id, validity)?;
         Ok((store.folder(id)?, mailbox))
     }
+    async fn all_uids(&mut self) -> Result<HashSet<u32>> {
+        use async_imap::imap_proto::{MailboxDatum, Response, Status};
+        // async-imap's search parser discards the tagged status, even after partial results.
+        tokio::time::timeout(TIMEOUT, async {
+            let tag = self.session.run_command("UID SEARCH ALL").await
+                .map_err(|_| Error::Network("IMAP operation failed"))?;
+            let mut uids = HashSet::new();
+            loop {
+                let response = self.session.read_response().await
+                    .map_err(|_| Error::Network("IMAP operation failed"))?
+                    .ok_or(Error::Network("IMAP search interrupted"))?;
+                match response.parsed() {
+                    Response::MailboxData(MailboxDatum::Search(ids)) => uids.extend(ids.iter().copied().filter(|u| *u > 0)),
+                    Response::Done { tag: done, status, .. } if *done == tag => {
+                        return if *status == Status::Ok { Ok(uids) } else { Err(Error::Network("IMAP search failed")) };
+                    }
+                    _ => {}
+                }
+            }
+        }).await.map_err(|_| Error::Network("IMAP operation timed out"))?
+    }
     pub async fn sync_folder(&mut self, store: &mut Store, id: i64, limit: usize) -> Result<()> {
         if limit == 0 {
             return Err(Error::Invalid("sync limit must be positive"));
         }
         let (folder, mailbox) = self.select(store, id).await?;
-        let present = net(self.session.uid_search("ALL")).await?;
+        let present = self.all_uids().await?;
         let mut sorted: Vec<_> = present.iter().copied().filter(|u| *u > 0).collect();
         sorted.sort_unstable();
         let known: HashSet<_> = store.known_uids(id)?.into_iter().collect();
@@ -310,7 +331,7 @@ impl ImapSync {
             }
         }
         // SEARCH again catches expunges that occurred while bodies were fetched.
-        let present = net(self.session.uid_search("ALL")).await?;
+        let present = self.all_uids().await?;
         let saved: HashSet<_> = store.known_uids(id)?.into_iter().collect();
         if candidates
             .iter()
@@ -531,6 +552,10 @@ impl ImapSync {
         if before != source.uidvalidity {
             return Err(Error::Invalid("mailbox changed; resync before operation"));
         }
+        if source.role == FolderRole::Trash {
+            // An interrupted empty may have marked the message; MOVE and COPY preserve flags.
+            net(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
+        }
         if self.capabilities.has_str("MOVE") {
             net(self
                 .session
@@ -544,22 +569,7 @@ impl ImapSync {
                 .session
                 .uid_copy(message.uid.to_string(), &destination.name))
             .await?;
-            net(async {
-                self.session
-                    .uid_store(message.uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
-                    .await?
-                    .try_collect::<Vec<_>>()
-                    .await
-            })
-            .await?;
-            net(async {
-                self.session
-                    .uid_expunge(message.uid.to_string())
-                    .await?
-                    .try_collect::<Vec<_>>()
-                    .await
-            })
-            .await?;
+            self.delete_uids(&message.uid.to_string()).await?;
         }
         // Destination UIDs are assigned by the server. Resync before removing the old local row.
         self.sync_folder(store, target, DEFAULT_LIMIT).await?;
@@ -598,6 +608,31 @@ impl ImapSync {
         }
         let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
         self.move_message(store, id, target).await
+    }
+    async fn delete_uids(&mut self, set: &str) -> Result<()> {
+        // async-imap's STORE/EXPUNGE streams discard tagged NO/BAD replies.
+        net(self.session.run_command_and_check_ok(format!("UID STORE {set} +FLAGS.SILENT (\\Deleted)"))).await?;
+        net(self.session.run_command_and_check_ok(format!("UID EXPUNGE {set}"))).await
+    }
+    pub async fn empty_trash(&mut self, store: &mut Store, id: i64) -> Result<()> {
+        let folder = store.folder(id)?;
+        if folder.account != self.account.id || folder.role != FolderRole::Trash {
+            return Err(Error::Invalid("not this account's Trash folder"));
+        }
+        if !self.capabilities.has_str("UIDPLUS") {
+            return Err(Error::Network("empty Trash requires UIDPLUS"));
+        }
+        let (selected, _) = self.select(store, id).await?;
+        if folder.uidvalidity.is_some() && folder.uidvalidity != selected.uidvalidity {
+            return Err(Error::Invalid("mailbox changed; resync before operation"));
+        }
+        let mut uids: Vec<_> = self.all_uids().await?.into_iter().collect();
+        uids.sort_unstable();
+        // Exact UIDs keep mail arriving during the operation out of the expunge.
+        for chunk in uids.chunks(100) {
+            self.delete_uids(&uid_set(chunk)).await?;
+        }
+        self.sync_folder(store, id, DEFAULT_LIMIT).await
     }
     pub async fn append_sent(&mut self, store: &mut Store, raw: &[u8]) -> Result<i64> {
         let target = self.ensure_role(store, FolderRole::Sent, "Sent").await?;
@@ -852,6 +887,41 @@ mod tests {
 mod protocol_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test(start_paused = true)]
+    async fn search_deadline_includes_all_untagged_responses() {
+        let (client, server) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            for response in ["", "* CAPABILITY IMAP4rev1\r\n"] {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+                let tag = line.split_whitespace().next().unwrap();
+                server.get_mut().write_all(format!("{response}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let (tag, command) = line.trim_end().split_once(' ').unwrap();
+            assert_eq!(command, "UID SEARCH ALL");
+            for _ in 0..3 {
+                tokio::time::sleep(TIMEOUT / 2).await;
+                if server.get_mut().write_all(b"* SEARCH 1\r\n").await.is_err() { return; }
+            }
+            let _ = server.get_mut().write_all(format!("{tag} OK done\r\n").as_bytes()).await;
+        });
+        let config = ServerConfig { host: "localhost".into(), port: 3143, security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
+        let capabilities = session.capabilities().await.unwrap();
+        let mut imap = ImapSync { account, session, capabilities };
+        let start = tokio::time::Instant::now();
+        let result = imap.all_uids().await;
+        assert!(matches!(result, Err(Error::Network("IMAP operation timed out"))), "{result:?}");
+        assert_eq!(start.elapsed(), TIMEOUT);
+        drop(imap);
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn understated_attachment_is_rejected_before_reading_the_literal() {
         let (client, server) = tokio::io::duplex(4096);

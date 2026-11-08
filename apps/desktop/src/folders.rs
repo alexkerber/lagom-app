@@ -38,7 +38,7 @@ impl Folder {
 
     /// Listed in the folder group and as a "Move to" target.
     pub fn listed(&self) -> bool {
-        !self.gone && matches!(self.kind, Kind::Custom | Kind::Trash)
+        !self.gone && self.kind == Kind::Custom
     }
 }
 
@@ -92,7 +92,9 @@ pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
         };
         let name = s.delimiter.as_deref().and_then(|d| s.name.rsplit_once(d)).map_or(s.name.as_str(), |(_, n)| n);
         // An optimistic folder is adopted once the server lists it.
-        let found = folders.iter().position(|f| f.store == Some(s.id)).or_else(|| folders.iter().position(|f| f.store.is_none() && !f.gone && f.kind == Kind::Custom && f.full == s.name));
+        let found = folders.iter().position(|f| f.store == Some(s.id)).or_else(|| folders.iter().position(|f| {
+            f.store.is_none() && !f.gone && ((f.kind == Kind::Custom && f.full == s.name) || (f.kind == Kind::Trash && kind == Kind::Trash))
+        }));
         let i = found.unwrap_or_else(|| {
             folders.push(Folder::new(name, None, &[]));
             folders.len() - 1
@@ -110,10 +112,14 @@ pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
 /// (folder, depth) in tree order. Children of a closed folder are left out unless `all`.
 pub fn tree(folders: &[Folder], all: bool) -> Vec<(usize, usize)> {
     fn walk(folders: &[Folder], parent: Option<usize>, depth: usize, all: bool, out: &mut Vec<(usize, usize)>) {
-        for (f, folder) in folders.iter().enumerate().filter(|(_, x)| x.parent == parent && x.listed()) {
-            out.push((f, depth));
-            if all || folder.open {
-                walk(folders, Some(f), depth + 1, all, out);
+        for (f, folder) in folders.iter().enumerate().filter(|(_, x)| x.parent == parent) {
+            if folder.listed() {
+                out.push((f, depth));
+                if all || folder.open {
+                    walk(folders, Some(f), depth + 1, all, out);
+                }
+            } else {
+                walk(folders, Some(f), depth, all, out);
             }
         }
     }
@@ -123,7 +129,7 @@ pub fn tree(folders: &[Folder], all: bool) -> Vec<(usize, usize)> {
 }
 
 pub fn has_children(folders: &[Folder], f: usize) -> bool {
-    folders.iter().any(|x| x.parent == Some(f) && x.listed())
+    folders.iter().enumerate().any(|(i, x)| x.parent == Some(f) && (x.listed() || has_children(folders, i)))
 }
 
 /// "Travel / Trains".
@@ -192,6 +198,56 @@ mod tests {
         assert!(folders[3].gone && !folders[3].listed());
         assert_eq!((folders.len(), folders[4].parent), (5, None));
         assert_eq!(tree(&folders, true).iter().map(|r| r.0).collect::<Vec<_>>(), [1, 4]);
+    }
+
+    #[test]
+    fn localized_trash_adopts_the_system_entry() {
+        use lagom_core::store::{Folder as F, FolderRole as R};
+        let mut folders = vec![Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) }];
+        let server = F { id: 42, account: "fixture".into(), name: "[Provider]/Bin".into(), delimiter: Some("/".into()), role: R::Trash, uidvalidity: Some(7), uidnext: None, last_uid: 0, highest_modseq: None, unread: 3 };
+        merge(&mut folders, &[server.clone()]);
+        assert_eq!(folders.len(), 1);
+        assert_eq!((folders[0].kind, folders[0].store, folders[0].unread), (Kind::Trash, Some(42), 3));
+        assert!(tree(&folders, true).is_empty());
+        merge(&mut folders, &[server]);
+        assert_eq!(folders.len(), 1);
+    }
+
+    #[test]
+    fn merge_adopts_pending_folder_and_trash_without_reviving_failed_creation() {
+        use lagom_core::store::{Folder as F, FolderRole as R};
+        let mut folders = vec![
+            Folder { gone: true, ..Folder::new("Taxes", None, &[]) },
+            Folder::new("Taxes", None, &[]),
+            Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) },
+        ];
+        let server = |id, name: &str, role| F { id, account: "fixture".into(), name: name.into(), delimiter: Some("/".into()), role, uidvalidity: None, uidnext: None, last_uid: 0, highest_modseq: None, unread: 0 };
+        merge(&mut folders, &[server(1, "Taxes", R::Other), server(2, "[Provider]/Bin", R::Trash)]);
+        assert_eq!(folders.len(), 3);
+        assert!(folders[0].gone && folders[0].store.is_none());
+        assert_eq!(folders[1].store, Some(1));
+        assert_eq!((folders[2].kind, folders[2].store), (Kind::Trash, Some(2)));
+        assert_eq!(tree(&folders, true), [(1, 0)]);
+    }
+
+    #[test]
+    fn hidden_system_parents_keep_custom_children_in_both_trees() {
+        let mut folders = vec![
+            Folder { kind: Kind::Trash, open: false, ..Folder::new("Trash", None, &[]) },
+            Folder::new("Receipts", Some(0), &[]),
+            Folder::new("Old", Some(1), &[]),
+        ];
+        for all in [false, true] {
+            assert_eq!(tree(&folders, all), [(1, 0), (2, 1)]);
+        }
+        assert_eq!(path(&folders, 1), "Trash / Receipts");
+        folders[1].open = false;
+        assert_eq!(tree(&folders, false), [(1, 0)]);
+        assert_eq!(tree(&folders, true), [(1, 0), (2, 1)]);
+        folders.push(Folder::new("Provider", None, &[]));
+        folders[0].parent = Some(3);
+        assert!(has_children(&folders, 3));
+        assert_eq!(tree(&folders, false), [(3, 0), (1, 1)]);
     }
 
     #[test]
