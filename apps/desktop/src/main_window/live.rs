@@ -359,7 +359,10 @@ impl MainWindow {
         let Some(store) = self.inbox.mail[id].store else { return };
         if self.inbox.mail[id].body.is_empty() {
             self.inbox.mail[id].body = match live.store.message(store) {
-                Ok(m) => mail::paragraphs(&m.body_text),
+                Ok(m) => {
+                    self.inbox.mail[id].html = m.body_html.map(Into::into);
+                    mail::paragraphs(&m.body_text)
+                }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
         }

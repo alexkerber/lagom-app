@@ -132,6 +132,7 @@ fn row_y(ix: usize) -> f32 {
     LIST_PAD + ix as f32 * ROW_H
 }
 
+mod html;
 mod live;
 pub use live::Live;
 
@@ -204,6 +205,8 @@ pub struct MainWindow {
     resize: Option<Resize>,
     // The window title last set, so render sets it only when the list changes.
     title: SharedString,
+    // The web view for HTML mail.
+    web: html::Web,
     _appearance: gpui::Subscription,
     _activation: gpui::Subscription,
 }
@@ -287,6 +290,7 @@ impl MainWindow {
             preferences_path,
             resize: None,
             title: SharedString::default(),
+            web: html::Web::default(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         };
@@ -307,6 +311,9 @@ impl MainWindow {
                 this.open_box(first, cx);
             }
             "settings" => this.page = Page::Settings(None),
+            // The HTML newsletter and a simple HTML message.
+            "html" => this.inbox.select(INBOX_LEN - 1),
+            "html-simple" => this.inbox.select(3),
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(true, window, cx),
             // A written reply with a word selected, Cc open with its focus ring, and live Markdown.
@@ -1491,6 +1498,13 @@ impl MainWindow {
         let m = &self.inbox.mail[id];
         let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
         let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
+        // HTML mail: the web view covers the body area and draws header and mail itself. GPUI
+        // draws the same header under it, and the text only while an overlay hides the web view.
+        let web = html::SUPPORTED && m.html.is_some();
+        let text = !web || self.palette.is_some() || self.compose.is_some();
+        // Toasts sit just above the reply field; the web view would cover them.
+        let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count();
+        let slot_bottom = 20. + 36. + 12. + 48. * toasts as f32;
 
         div()
             .flex_1()
@@ -1518,11 +1532,25 @@ impl MainWindow {
                         button(t, "Later", None)
                             .on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     )
+                    .when(web && self.web.has_remote && !m.remote, |d| {
+                        d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
+                            this.inbox.mail[id].remote = true;
+                            cx.notify();
+                        })))
+                    })
                     // shortcut: no Forward button until forwarding exists.
                     .child(div().flex_1())
                     .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2)),
             )
             .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .when(web, |d| d.child(div().absolute().top_0().left_0().right_0().bottom(px(slot_bottom)).child(self.web_slot())))
+                    .child(
                 div()
                     .id(("reading", id))
                     .flex_1()
@@ -1592,8 +1620,8 @@ impl MainWindow {
                             .text_size(px(size::BODY))
                             .line_height(relative(READING_LEADING))
                             // Until the body loads (one store read), the snippet stands in.
-                            .when(m.body.is_empty(), |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
-                            .children(m.body.iter().map(|p| div().child(p.clone())))
+                            .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
+                            .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
                             .children(m.attachment.clone().map(|(name, kb)| {
                                 div()
                                     .flex()
@@ -1633,6 +1661,7 @@ impl MainWindow {
                             .on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))
                             .child(format!("Reply to {}", m.from)),
                     ),
+                    ),
             )
     }
 }
@@ -1646,6 +1675,7 @@ impl Render for MainWindow {
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
+        self.web_frame(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let title = match &self.page {
@@ -1701,6 +1731,7 @@ impl Render for MainWindow {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web_unfocus()))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
@@ -2129,6 +2160,8 @@ impl Inbox {
         match self.by_store.get(&m.id) {
             Some(&id) => {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
+                fresh.html = self.mail[id].html.take();
+                fresh.remote = self.mail[id].remote;
                 fresh.was = std::mem::take(&mut self.mail[id].was);
                 self.mail[id] = fresh;
                 id
