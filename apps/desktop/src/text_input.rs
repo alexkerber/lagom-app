@@ -3,19 +3,21 @@
 //! The editing model, `Buffer`, is plain Rust so tests can drive it without a window.
 
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    div, fill, point, prelude::*, px, relative, size, App, Bounds, BoxShadow, ClipboardItem, Context,
-    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Rgba, ScrollWheelEvent,
-    SharedString, Style, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
-    Window, WrappedLine,
+    anchored, deferred, div, fill, point, prelude::*, px, relative, size, Action, App, Bounds, BoxShadow,
+    ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hsla,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Rgba, ScrollWheelEvent, SharedString, Style, Subscription, Task, TextAlign, TextRun, TextStyle,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::GraphemeCursor;
 
-use crate::main_window::Undo;
+use crate::main_window::{icon, Undo};
+use crate::markdown::{self, Look, Markdown, Swap};
 use crate::theme::{radius, Theme, DEFAULT_ACCENT};
 
 gpui::actions!(
@@ -25,7 +27,7 @@ gpui::actions!(
         SelectRight, SelectUp, SelectDown, WordLeft, WordRight, SelectWordLeft, SelectWordRight,
         LineStart, LineEnd, SelectLineStart, SelectLineEnd, DocStart, DocEnd, SelectDocStart,
         SelectDocEnd, SelectAll, Copy, Cut, Paste, Redo, Enter, Escape, FocusNext, FocusPrev,
-        ShowCharacterPalette, Bold, Italic, Bullets, Numbers
+        ShowCharacterPalette, Bold, Italic, Bullets, Numbers, Link
     ]
 );
 
@@ -124,6 +126,8 @@ struct Edit {
     new: String,
     sel: Range<usize>,
     reversed: bool,
+    /// The selection a formatting edit leaves, which redo restores; else the caret after `new`.
+    after: Option<Range<usize>>,
 }
 
 impl Edit {
@@ -195,23 +199,50 @@ impl Buffer {
         self.select(self.anchor(), offset);
     }
 
-    fn wrap(&mut self, marker: &str) {
-        let sel = self.selection();
-        let n = marker.len();
+    /// The range, markers included, where `marker` already wraps the selection: inside it or
+    /// around it. `wrap` removes those markers, and the format bar shows the button as on.
+    fn wrapping(&self, marker: &str) -> Option<Range<usize>> {
+        let (sel, n) = (self.selection(), marker.len());
         let selected = &self.text[sel.clone()];
         if selected.len() >= n * 2 && selected.starts_with(marker) && selected.ends_with(marker) {
-            let inner = selected[n..selected.len() - n].to_string();
-            self.replace(Some(sel.clone()), &inner, false);
-            self.select(sel.start, sel.start + inner.len());
+            Some(sel)
         } else if sel.start >= n && self.text[..sel.start].ends_with(marker) && self.text[sel.end..].starts_with(marker) {
-            let inner = selected.to_string();
-            self.replace(Some(sel.start - n..sel.end + n), &inner, false);
-            self.select(sel.start - n, sel.end - n);
+            Some(sel.start - n..sel.end + n)
         } else {
-            let wrapped = format!("{marker}{selected}{marker}");
-            self.replace(Some(sel.clone()), &wrapped, false);
-            self.select(sel.start + n, sel.end + n);
+            None
         }
+    }
+
+    /// Selects after a formatting edit, and keeps that selection for redo.
+    fn select_edited(&mut self, start: usize, end: usize) {
+        self.select(start, end);
+        if let Some(e) = self.undo.last_mut() {
+            e.after = Some(start..end);
+        }
+    }
+
+    fn wrap(&mut self, marker: &str) {
+        let n = marker.len();
+        if let Some(outer) = self.wrapping(marker) {
+            let inner = self.text[outer.start + n..outer.end - n].to_string();
+            self.replace(Some(outer.clone()), &inner, false);
+            self.select_edited(outer.start, outer.start + inner.len());
+        } else {
+            let sel = self.selection();
+            let wrapped = format!("{marker}{}{marker}", &self.text[sel.clone()]);
+            self.replace(Some(sel.clone()), &wrapped, false);
+            self.select_edited(sel.start + n, sel.end + n);
+        }
+    }
+
+    /// `[selection](https://)` with the URL selected, so a paste replaces it.
+    fn link(&mut self) {
+        const URL: &str = "https://";
+        let sel = self.selection();
+        let label = self.text[sel.clone()].to_string();
+        self.replace(Some(sel.clone()), &format!("[{label}]({URL})"), false);
+        let url = sel.start + label.len() + "](".len() + 1;
+        self.select_edited(url, url + URL.len());
     }
 
     fn list_enter(&mut self) {
@@ -256,9 +287,10 @@ impl Buffer {
         }).collect::<Vec<_>>().join("\n");
         self.replace(Some(start..end), &replacement, false);
         if sel.is_empty() {
-            self.move_to(sel.start.saturating_add_signed(first_delta).clamp(start, start + replacement.len()));
+            let caret = sel.start.saturating_add_signed(first_delta).clamp(start, start + replacement.len());
+            self.select_edited(caret, caret);
         } else {
-            self.select(start, start + replacement.len());
+            self.select_edited(start, start + replacement.len());
         }
     }
 
@@ -329,6 +361,7 @@ impl Buffer {
             new: new.to_string(),
             sel: self.sel.clone(),
             reversed: self.reversed,
+            after: None,
         };
         self.text.replace_range(range.clone(), new);
         let caret = range.start + new.len();
@@ -368,7 +401,7 @@ impl Buffer {
         let Some(e) = self.redo.pop() else { return false };
         self.text.replace_range(e.at..e.at + e.old.len(), &e.new);
         let caret = e.at + e.new.len();
-        self.sel = caret..caret;
+        self.sel = e.after.clone().unwrap_or(caret..caret);
         self.reversed = false;
         self.marked = None;
         self.join = false;
@@ -422,23 +455,46 @@ pub enum TextInputEvent {
     Escape,
 }
 
+/// The text as painted: bullets in password mode, Markdown with hidden syntax. Rebuilt after an
+/// edit, or when the caret enters or leaves a Markdown span; not per frame.
+#[derive(Clone)]
+struct Shown {
+    text: SharedString,
+    /// One per shown byte; empty for plain text.
+    looks: Rc<[Look]>,
+    swaps: Rc<[Swap]>,
+}
+
 /// Shaped text from the last frame, for hit tests, ↑ ↓ and the IME. Offsets are display offsets.
 struct Layout {
     lines: Vec<WrappedLine>,
-    /// Start offset and top of each line (a paragraph, wrapped).
+    /// Start offset, top and line height of each line (a paragraph, wrapped). Headings are taller.
     starts: Vec<usize>,
     tops: Vec<Pixels>,
+    heights: Vec<Pixels>,
+    /// The body line height.
     line_height: Pixels,
     /// Window position of the text's top left, scroll applied.
     origin: Point<Pixels>,
     height: Pixels,
+    /// How the shown text maps to the source.
+    swaps: Rc<[Swap]>,
 }
 
 impl Layout {
+    fn line(&self, offset: usize) -> usize {
+        self.starts.partition_point(|s| *s <= offset).saturating_sub(1)
+    }
+
+    /// The line height at a display offset.
+    fn height_at(&self, offset: usize) -> Pixels {
+        self.heights.get(self.line(offset)).copied().unwrap_or(self.line_height)
+    }
+
     fn position(&self, offset: usize) -> Point<Pixels> {
-        let i = self.starts.partition_point(|s| *s <= offset).saturating_sub(1);
+        let i = self.line(offset);
         let Some(line) = self.lines.get(i) else { return Point::default() };
-        let p = line.position_for_index(offset - self.starts[i], self.line_height).unwrap_or_default();
+        let p = line.position_for_index(offset - self.starts[i], self.heights[i]).unwrap_or_default();
         point(p.x, p.y + self.tops[i])
     }
 
@@ -446,12 +502,33 @@ impl Layout {
     fn index(&self, p: Point<Pixels>) -> usize {
         let i = self.tops.partition_point(|y| *y <= p.y).saturating_sub(1);
         let Some(line) = self.lines.get(i) else { return 0 };
-        let bottom = line.size(self.line_height).height - self.line_height * 0.5;
+        let h = self.heights[i];
+        let bottom = line.size(h).height - h * 0.5;
         let y = (p.y - self.tops[i]).clamp(px(0.), bottom.max(px(0.)));
-        let ix = line.closest_index_for_position(point(p.x.max(px(0.)), y), self.line_height);
+        let ix = line.closest_index_for_position(point(p.x.max(px(0.)), y), h);
         self.starts[i] + ix.unwrap_or_else(|ix| ix)
     }
 }
+
+/// Heading sizes relative to the body.
+fn heading_scale(level: u8) -> f32 {
+    match level {
+        0 => 1.,
+        1 => 1.4,
+        2 => 1.2,
+        _ => 1.1,
+    }
+}
+
+/// The format bar: five buttons and two separators, in a hairline border.
+const BAR_BUTTON: f32 = 28.;
+const BAR_BUTTON_H: f32 = 24.;
+const BAR_PAD: f32 = 3.;
+const BAR_SEPARATOR: f32 = 9.;
+const BAR_W: f32 = 2. * BAR_PAD + 5. * BAR_BUTTON + 2. * BAR_SEPARATOR + 2.;
+const BAR_H: f32 = 2. * BAR_PAD + BAR_BUTTON_H + 2.;
+/// Space between the bar and the selection.
+const BAR_GAP: f32 = 6.;
 
 const CARET_WIDTH: f32 = 2.;
 /// The caret blinks for 5 s after the last key or click, then stays solid: idle means no timers.
@@ -475,10 +552,19 @@ pub struct TextInput {
     /// Caret affinity at a wrap boundary: (offset, row start) after ⌘← on a wrapped row.
     row_start: Option<(usize, Point<Pixels>)>,
     selecting: bool,
+    /// Where a drag or shift-click selection starts, as the pointer mapped it.
+    drag_from: usize,
     focused: bool,
     caret_on: bool,
-    /// The text as painted (bullets in password mode), rebuilt only after an edit, not per frame.
-    shown: Option<SharedString>,
+    shown: Option<Shown>,
+    /// Markdown fields: styles and hideable syntax, parsed after each edit.
+    md: Option<Markdown>,
+    /// Window position of the format bar, from the last frame's layout.
+    bar_at: Option<Point<Pixels>>,
+    /// Esc closed the format bar; the next caret move brings it back.
+    bar_closed: bool,
+    /// Screenshots: the bar shows without focus, as a capture's window is not key.
+    bar_pinned: bool,
     _blink: Option<Task<()>>,
     _focus: [Subscription; 2],
 }
@@ -519,8 +605,13 @@ impl TextInput {
             goal_x: None,
             row_start: None,
             selecting: false,
+            drag_from: 0,
             caret_on: true,
             shown: None,
+            md: None,
+            bar_at: None,
+            bar_closed: false,
+            bar_pinned: false,
             _blink: None,
             _focus: [on, off],
         }
@@ -532,8 +623,10 @@ impl TextInput {
         self
     }
 
+    /// Live Markdown: styles, hidden syntax and the format bar. Multi-line.
     pub fn markdown(mut self) -> Self {
         self.markdown = true;
+        self.parse();
         self.multiline()
     }
 
@@ -557,7 +650,12 @@ impl TextInput {
     /// Initial text, caret at the end, nothing to undo.
     pub fn with_text(mut self, text: &str) -> Self {
         self.buffer = Buffer::new(&self.clean(text));
+        self.parse();
         self
+    }
+
+    fn parse(&mut self) {
+        self.md = self.markdown.then(|| markdown::parse(self.buffer.text()));
     }
 
     pub fn text(&self) -> &str {
@@ -570,6 +668,11 @@ impl TextInput {
         self.edited(cx);
     }
 
+    /// Screenshots only: show the format bar while the window is not key.
+    pub fn pin_bar(&mut self) {
+        self.bar_pinned = true;
+    }
+
     pub fn select(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.buffer.select(range.start, range.end);
         self.moved(cx);
@@ -580,16 +683,49 @@ impl TextInput {
         if self.multiline { text.replace("\r\n", "\n") } else { text.replace(['\r', '\n'], " ") }
     }
 
-    fn display(&self, offset: usize) -> usize {
-        if self.masked { to_mask(self.text(), offset) } else { offset }
+    /// A text offset in the shown text that `swaps` describes.
+    fn display(&self, swaps: &[Swap], offset: usize) -> usize {
+        if self.masked { to_mask(self.text(), offset) } else { markdown::to_shown(swaps, offset) }
     }
 
-    fn offset(&self, display: usize) -> usize {
-        if self.masked { from_mask(self.text(), display) } else { display.min(self.text().len()) }
+    fn offset(&self, swaps: &[Swap], display: usize) -> usize {
+        if self.masked { from_mask(self.text(), display) } else { markdown::from_shown(swaps, display).min(self.text().len()) }
     }
 
     fn offset_at(&self, position: Point<Pixels>) -> usize {
-        self.layout.as_ref().map_or(0, |l| self.offset(l.index(position - l.origin)))
+        self.layout.as_ref().map_or(0, |l| self.offset(&l.swaps, l.index(position - l.origin)))
+    }
+
+    /// The shown text for this frame. Markdown syntax hides outside the caret's spans; a drag
+    /// keeps the text it started with, so nothing shifts under the pointer.
+    fn shown(&mut self) -> Shown {
+        let swaps = self.md.as_ref().map_or_else(Vec::new, |md| markdown::swaps(md, self.buffer.caret()));
+        if !self.selecting && self.shown.as_ref().is_some_and(|s| *s.swaps != *swaps) {
+            self.shown = None;
+        }
+        let (buffer, md, masked) = (&self.buffer, &self.md, self.masked);
+        self.shown
+            .get_or_insert_with(|| {
+                let t = buffer.text();
+                let (text, looks) = match md {
+                    _ if masked => (mask(t), Vec::new()),
+                    Some(md) => markdown::shown(t, &md.looks, &swaps),
+                    None => (t.to_string(), Vec::new()),
+                };
+                Shown { text: text.into(), looks: looks.into(), swaps: swaps.into() }
+            })
+            .clone()
+    }
+
+    /// The format bar shows for a selection in a focused Markdown field, after a drag ends.
+    fn bar_shows(&self) -> bool {
+        self.markdown && (self.focused || self.bar_pinned) && !self.selecting && !self.bar_closed && !self.buffer.selection().is_empty()
+    }
+
+    /// A Markdown edit from a shortcut or the format bar.
+    fn format(&mut self, edit: fn(&mut Buffer), cx: &mut Context<Self>) {
+        edit(&mut self.buffer);
+        self.edited(cx);
     }
 
     fn wake(&mut self, cx: &mut Context<Self>) {
@@ -615,12 +751,14 @@ impl TextInput {
 
     fn moved(&mut self, cx: &mut Context<Self>) {
         self.row_start = None;
+        self.bar_closed = false;
         self.autoscroll = true;
         self.wake(cx);
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.shown = None;
+        self.parse();
         self.goal_x = None;
         self.moved(cx);
         cx.emit(TextInputEvent::Changed);
@@ -641,13 +779,14 @@ impl TextInput {
         let Some(l) = &self.layout else { return };
         let p = self.caret_at(l);
         let x = *self.goal_x.get_or_insert(p.x);
-        let y = p.y + l.line_height * if down { 1.5 } else { -0.5 };
+        let h = l.height_at(self.display(&l.swaps, self.buffer.caret()));
+        let y = p.y + h * if down { 1.5 } else { -0.5 };
         let target = if y < px(0.) {
             0
         } else if y >= l.height {
             self.text().len()
         } else {
-            self.offset(l.index(point(x, y)))
+            self.offset(&l.swaps, l.index(point(x, y)))
         };
         self.go_to(target, select);
         self.moved(cx);
@@ -660,7 +799,8 @@ impl TextInput {
         };
         let p = self.caret_at(l);
         let x = if end { px(f32::MAX / 2.) } else { px(0.) };
-        let target = self.offset(l.index(point(x, p.y + l.line_height * 0.5)));
+        let h = l.height_at(self.display(&l.swaps, self.buffer.caret()));
+        let target = self.offset(&l.swaps, l.index(point(x, p.y + h * 0.5)));
         let row = point(px(0.), p.y);
         self.go_to(target, select);
         self.goal_x = None;
@@ -677,7 +817,7 @@ impl TextInput {
         let caret = self.buffer.caret();
         match self.row_start {
             Some((at, p)) if at == caret => p,
-            _ => l.position(self.display(caret)),
+            _ => l.position(self.display(&l.swaps, caret)),
         }
     }
 
@@ -734,7 +874,14 @@ impl TextInput {
                 self.buffer.select(w.start, w.end);
             }
             3.. => self.buffer.select(0, self.text().len()),
-            _ => self.go_to(offset, e.modifiers.shift),
+            _ if e.modifiers.shift => {
+                self.drag_from = self.buffer.anchor();
+                self.drag_to_offset(offset);
+            }
+            _ => {
+                self.drag_from = offset;
+                self.buffer.move_to(offset);
+            }
         }
         self.selecting = e.click_count < 2;
         self.goal_x = None;
@@ -742,8 +889,15 @@ impl TextInput {
     }
 
     fn drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.buffer.select_to(self.offset_at(position));
+        self.drag_to_offset(self.offset_at(position));
         self.moved(cx);
+    }
+
+    /// Selects from where the drag started, keeping hidden syntax out of the selection's ends.
+    fn drag_to_offset(&mut self, offset: usize) {
+        let swaps = self.layout.as_ref().map_or_else(|| Rc::from([]), |l| l.swaps.clone());
+        let (anchor, caret) = markdown::drag(&swaps, self.drag_from, offset);
+        self.buffer.select(anchor, caret);
     }
 
     fn on_scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -810,12 +964,13 @@ impl EntityInputHandler for TextInput {
     fn bounds_for_range(&mut self, range: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let l = self.layout.as_ref()?;
         let t = self.text();
-        let start = l.position(self.display(from_utf16(t, range.start)));
-        let end = l.position(self.display(from_utf16(t, range.end)));
+        let first = self.display(&l.swaps, from_utf16(t, range.start));
+        let start = l.position(first);
+        let end = l.position(self.display(&l.swaps, from_utf16(t, range.end)));
         let end = if end.y == start.y { end.x } else { start.x };
         Some(Bounds::from_corners(
             l.origin + start,
-            l.origin + point(end, start.y + l.line_height),
+            l.origin + point(end, start.y + l.height_at(first)),
         ))
     }
 
@@ -829,14 +984,6 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
         let focused = self.focused;
-        let shown = match &self.shown {
-            Some(s) => s.clone(),
-            None => {
-                let t = self.buffer.text();
-                let s: SharedString = if self.masked { mask(t).into() } else { t.to_string().into() };
-                self.shown.insert(s).clone()
-            }
-        };
         div()
             .key_context(if self.markdown { "TextInput multiline markdown" } else if self.multiline { "TextInput multiline" } else { "TextInput" })
             .track_focus(&self.focus)
@@ -884,12 +1031,21 @@ impl Render for TextInput {
                 }
             }))
             .when(self.markdown, |d| d
-                .on_action(cx.listener(|this, _: &Bold, _, cx| { this.buffer.wrap("**"); this.edited(cx); }))
-                .on_action(cx.listener(|this, _: &Italic, _, cx| { this.buffer.wrap("_"); this.edited(cx); }))
-                .on_action(cx.listener(|this, _: &Bullets, _, cx| { this.buffer.toggle_list(false); this.edited(cx); }))
-                .on_action(cx.listener(|this, _: &Numbers, _, cx| { this.buffer.toggle_list(true); this.edited(cx); })))
+                .on_action(cx.listener(|this, _: &Bold, _, cx| this.format(|b| b.wrap("**"), cx)))
+                .on_action(cx.listener(|this, _: &Italic, _, cx| this.format(|b| b.wrap("_"), cx)))
+                .on_action(cx.listener(|this, _: &Link, _, cx| this.format(Buffer::link, cx)))
+                .on_action(cx.listener(|this, _: &Bullets, _, cx| this.format(|b| b.toggle_list(false), cx)))
+                .on_action(cx.listener(|this, _: &Numbers, _, cx| this.format(|b| b.toggle_list(true), cx))))
             .on_action(cx.listener(Self::enter))
-            .on_action(cx.listener(|_, _: &Escape, _, cx| cx.emit(TextInputEvent::Escape)))
+            // Esc closes the format bar first, then whatever holds the field.
+            .on_action(cx.listener(|this, _: &Escape, _, cx| {
+                if this.bar_shows() && this.bar_at.is_some() {
+                    this.bar_closed = true;
+                    cx.notify();
+                } else {
+                    cx.emit(TextInputEvent::Escape);
+                }
+            }))
             .on_action(cx.listener(|_, _: &FocusNext, window, _| window.focus_next()))
             .on_action(cx.listener(|_, _: &FocusPrev, window, _| window.focus_prev()))
             .on_action(cx.listener(|_, _: &ShowCharacterPalette, window, _| window.show_character_palette()))
@@ -917,21 +1073,88 @@ impl Render for TextInput {
             })
             .child(TextElement {
                 input: cx.entity(),
-                shown,
                 placeholder: t.ink2.into(),
                 caret: t.sel_focus.into(),
                 // The accent as a light highlight, as AppKit derives it; unfocused fields grey it.
                 selection: if focused { Rgba { a: 0.3, ..t.sel_focus } } else { t.sel }.into(),
+                secondary: t.ink2.into(),
+                link: t.accent.into(),
+                code: Rgba { a: if t.dark { 0.1 } else { 0.06 }, ..t.ink }.into(),
             })
+            .when_some(self.bar_at.filter(|_| self.bar_shows()), |d, at| {
+                d.child(deferred(anchored().position(at).child(self.format_bar(&t))).with_priority(1))
+            })
+    }
+}
+
+impl TextInput {
+    /// Bold, Italic, Link, Bulleted and Numbered list over the selection. A button sends the same
+    /// action as its shortcut to the field, which keeps focus.
+    fn format_bar(&self, t: &Theme) -> impl IntoElement {
+        let hover = Rgba { a: if t.dark { 0.1 } else { 0.06 }, ..t.ink };
+        let button = |id: &'static str, on: bool, action: Box<dyn Action>| {
+            div()
+                .id(id)
+                .debug_selector(move || format!("format-{id}"))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(BAR_BUTTON))
+                .h(px(BAR_BUTTON_H))
+                .rounded(px(5.))
+                .text_color(if on { t.accent } else { t.ink })
+                .when(on, |d| d.bg(Rgba { a: 0.14, ..t.accent }))
+                .when(!on, |d| d.hover(move |s| s.bg(hover)))
+                .active(move |s| s.bg(t.press))
+                // Keep focus and the selection in the field: no focus change, no caret move.
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_mouse_up(MouseButton::Left, move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+        };
+        let separator = || div().w(px(1.)).h(px(16.)).mx(px((BAR_SEPARATOR - 1.) / 2.)).bg(t.line);
+        let ink = t.ink;
+        div()
+            .id("format-bar")
+            .occlude()
+            .cursor(CursorStyle::Arrow)
+            .flex()
+            .items_center()
+            .w(px(BAR_W))
+            .h(px(BAR_H))
+            .p(px(BAR_PAD))
+            .bg(t.raised)
+            .border_1()
+            .border_color(t.line)
+            .rounded(px(7.))
+            .shadow(vec![BoxShadow {
+                color: Rgba { r: 0., g: 0., b: 0., a: if t.dark { 0.4 } else { 0.12 } }.into(),
+                offset: point(px(0.), px(2.)),
+                blur_radius: px(8.),
+                spread_radius: px(0.),
+            }])
+            .text_size(px(crate::theme::size::BASE))
+            .child(button("bold", self.buffer.wrapping("**").is_some(), Box::new(Bold)).font_weight(FontWeight::BOLD).child("B"))
+            .child(button("italic", self.buffer.wrapping("_").is_some(), Box::new(Italic)).italic().child("I"))
+            .child(separator())
+            .child(button("link", false, Box::new(Link)).child(icon("icons/link.svg", ink, 15.)))
+            .child(separator())
+            .child(button("bullets", false, Box::new(Bullets)).child(icon("icons/list-bullets.svg", ink, 15.)))
+            .child(button("numbers", false, Box::new(Numbers)).child(icon("icons/list-numbers.svg", ink, 15.)))
     }
 }
 
 struct TextElement {
     input: Entity<TextInput>,
-    shown: SharedString,
     placeholder: Hsla,
     caret: Hsla,
     selection: Hsla,
+    /// Markdown: list markers, and syntax at a lower alpha.
+    secondary: Hsla,
+    link: Hsla,
+    /// The fill behind inline code.
+    code: Hsla,
 }
 
 struct Prepaint {
@@ -939,6 +1162,33 @@ struct Prepaint {
     scroll: Pixels,
     caret: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
+    code: Vec<PaintQuad>,
+    bar: Option<Point<Pixels>>,
+}
+
+impl TextElement {
+    fn run(&self, style: &TextStyle, look: Look, marked: bool, len: usize, color: Hsla) -> TextRun {
+        let mut font = style.font();
+        if look.bold {
+            font.weight = FontWeight::BOLD;
+        } else if look.heading > 0 {
+            font.weight = FontWeight::SEMIBOLD;
+        }
+        if look.italic {
+            font.style = FontStyle::Italic;
+        }
+        if look.code && !look.marker {
+            font.family = "Menlo".into();
+        }
+        let color = match look {
+            Look { marker: true, .. } => Hsla { a: 0.45, ..self.secondary },
+            Look { bullet: true, .. } => self.secondary,
+            Look { link: true, .. } => self.link,
+            _ => color,
+        };
+        let underline = marked.then_some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false });
+        TextRun { len, font, color, background_color: None, underline, strikethrough: None }
+    }
 }
 
 impl IntoElement for TextElement {
@@ -969,54 +1219,63 @@ impl Element for TextElement {
     }
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Prepaint {
+        let shown = self.input.update(cx, |input, _| input.shown());
         let input = self.input.read(cx);
         let style = window.text_style();
         let line_height = window.line_height();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let text = input.text();
-        let (shown, color) = if text.is_empty() {
+        let (shown_text, color) = if text.is_empty() {
             (input.placeholder.clone(), self.placeholder)
         } else {
-            (self.shown.clone(), style.color)
+            (shown.text.clone(), style.color)
         };
+        let looks = |i: usize| shown.looks.get(i).copied().unwrap_or_default();
+        let marked = input.buffer.marked.clone().filter(|m| !m.is_empty() && !text.is_empty());
+        let marked = marked.map(|m| input.display(&shown.swaps, m.start)..input.display(&shown.swaps, m.end));
 
-        let run = TextRun { len: shown.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        let runs = match input.buffer.marked.clone().filter(|m| !m.is_empty() && !text.is_empty()) {
-            Some(m) => {
-                let m = input.display(m.start)..input.display(m.end);
-                let underline = UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false };
-                [
-                    TextRun { len: m.start, ..run.clone() },
-                    TextRun { len: m.len(), underline: Some(underline), ..run.clone() },
-                    TextRun { len: shown.len() - m.end, ..run },
-                ]
-                .into_iter()
-                .filter(|r| r.len > 0)
-                .collect()
-            }
-            None => vec![run],
-        };
+        // One shape per paragraph: a heading has its own size and line height.
         let wrap = input.multiline.then_some(bounds.size.width);
-        let lines = window.text_system().shape_text(shown, font_size, &runs, wrap, None).map(|l| l.into_vec()).unwrap_or_default();
-
-        let (mut starts, mut tops) = (Vec::with_capacity(lines.len()), Vec::with_capacity(lines.len()));
+        let (mut lines, mut starts, mut tops, mut heights) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut start, mut height, mut width) = (0, px(0.), px(0.));
-        for line in &lines {
-            starts.push(start);
-            tops.push(height);
-            start += line.len() + 1;
-            height += line.size(line_height).height;
-            width = width.max(line.width());
+        let mut code = Vec::new();
+        for paragraph in shown_text.split('\n') {
+            let end = start + paragraph.len();
+            let scale = if paragraph.is_empty() { 1. } else { heading_scale(looks(start).heading) };
+            let mut runs = Vec::new();
+            let mut i = start;
+            while i < end {
+                let key = |j: usize| (looks(j), marked.as_ref().is_some_and(|m| m.contains(&j)));
+                let (look, under) = key(i);
+                let j = (i + 1..end).find(|j| key(*j) != (look, under)).unwrap_or(end);
+                if look.code && !look.marker {
+                    code.push(i..j);
+                }
+                runs.push(self.run(&style, look, under, j - i, color));
+                i = j;
+            }
+            let h = (line_height * scale).round();
+            let shaped = window.text_system().shape_text(paragraph.to_string().into(), font_size * scale, &runs, wrap, None);
+            for line in shaped.map(|l| l.into_vec()).unwrap_or_default() {
+                starts.push(start);
+                tops.push(height);
+                heights.push(h);
+                height += line.size(h).height;
+                width = width.max(line.width());
+                lines.push(line);
+            }
+            start = end + 1;
         }
-        let mut layout = Layout { lines, starts, tops, line_height, origin: bounds.origin, height };
+        let mut layout = Layout { lines, starts, tops, heights, line_height, origin: bounds.origin, height, swaps: shown.swaps.clone() };
 
         // Keep the caret in view: sideways for one line, up and down for many.
         let sel = input.buffer.selection();
         let caret = input.caret_at(&layout);
+        let caret_h = layout.height_at(input.display(&layout.swaps, input.buffer.caret()));
         let mut scroll = input.scroll;
         if input.multiline {
             if input.autoscroll {
-                scroll = scroll.min(caret.y).max(caret.y + line_height - bounds.size.height);
+                scroll = scroll.min(caret.y).max(caret.y + caret_h - bounds.size.height);
             }
             scroll = scroll.clamp(px(0.), (height - bounds.size.height).max(px(0.)));
             layout.origin.y -= scroll;
@@ -1031,48 +1290,74 @@ impl Element for TextElement {
 
         let o = layout.origin;
         let rect = |x0: Pixels, x1: Pixels, y0: Pixels, y1: Pixels, c: Hsla| fill(Bounds::from_corners(o + point(x0, y0), o + point(x1, y1)), c);
+        let (sel_a, sel_b) = (input.display(&layout.swaps, sel.start), input.display(&layout.swaps, sel.end));
+        let (a, b) = (layout.position(sel_a), layout.position(sel_b));
+        let (ha, hb) = (layout.height_at(sel_a), layout.height_at(sel_b));
         let selection = if sel.is_empty() || text.is_empty() {
             Vec::new()
+        } else if a.y == b.y {
+            vec![rect(a.x, b.x, a.y, a.y + ha, self.selection)]
         } else {
-            let (a, b) = (layout.position(input.display(sel.start)), layout.position(input.display(sel.end)));
-            if a.y == b.y {
-                vec![rect(a.x, b.x, a.y, a.y + line_height, self.selection)]
-            } else {
-                // First row to the right edge, full rows between, last row from the left edge.
-                let right = bounds.size.width.max(width);
-                let mut quads = vec![rect(a.x, right, a.y, a.y + line_height, self.selection)];
-                if b.y > a.y + line_height {
-                    quads.push(rect(px(0.), right, a.y + line_height, b.y, self.selection));
-                }
-                quads.push(rect(px(0.), b.x, b.y, b.y + line_height, self.selection));
-                quads
+            // First row to the right edge, full rows between, last row from the left edge.
+            let right = bounds.size.width.max(width);
+            let mut quads = vec![rect(a.x, right, a.y, a.y + ha, self.selection)];
+            if b.y > a.y + ha {
+                quads.push(rect(px(0.), right, a.y + ha, b.y, self.selection));
             }
+            quads.push(rect(px(0.), b.x, b.y, b.y + hb, self.selection));
+            quads
         };
-        // The caret spans the glyphs, not the whole line height.
-        let caret_h = (font_size * 1.25).min(line_height);
+        // The glyph box of a line: the font size and a little, centred in the line height.
+        let glyphs = |h: Pixels| (h / line_height * font_size * 1.25).min(h);
+        // shortcut: inline code that wraps gets no fill; split it per row if that shows up.
+        let code = code
+            .into_iter()
+            .filter_map(|r| {
+                let (p, q, h) = (layout.position(r.start), layout.position(r.end), layout.height_at(r.start));
+                let top = p.y + (h - glyphs(h)) * 0.5;
+                (p.y == q.y).then(|| rect(p.x - px(2.), q.x + px(2.), top, top + glyphs(h), self.code).corner_radii(px(3.)))
+            })
+            .collect();
         // GPUI blurs a field when its window deactivates, so `focused` also hides the caret then.
         let shows = input.focused && input.caret_on && sel.is_empty();
         let caret = shows.then(|| {
-            let top = caret.y + (line_height - caret_h) * 0.5;
-            fill(Bounds::new(o + point(caret.x, top), size(px(CARET_WIDTH), caret_h)), self.caret)
+            let ch = glyphs(caret_h);
+            let top = caret.y + (caret_h - ch) * 0.5;
+            fill(Bounds::new(o + point(caret.x, top), size(px(CARET_WIDTH), ch)), self.caret)
         });
-        Prepaint { layout, scroll, caret, selection }
+        // Above the selection, centred on it; below it when the field has no room above.
+        let bar = input.bar_shows().then(|| {
+            let (top, bottom) = (o.y + a.y, o.y + b.y + hb);
+            let x = if a.y == b.y { o.x + (a.x + b.x) / 2. } else { bounds.center().x };
+            let x = (x - px(BAR_W / 2.)).clamp(bounds.left(), (bounds.right() - px(BAR_W)).max(bounds.left()));
+            let above = top - px(BAR_H + BAR_GAP);
+            let y = if above >= bounds.top() { above } else { bottom + px(BAR_GAP) };
+            (bottom > bounds.top() && top < bounds.bottom()).then_some(point(x, y))
+        });
+        Prepaint { layout, scroll, caret, selection, code, bar: bar.flatten() }
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), state: &mut Prepaint, window: &mut Window, cx: &mut App) {
         let focus = self.input.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        let layout = std::mem::replace(
-            &mut state.layout,
-            Layout { lines: Vec::new(), starts: Vec::new(), tops: Vec::new(), line_height: px(0.), origin: bounds.origin, height: px(0.) },
-        );
+        let empty = Layout {
+            lines: Vec::new(),
+            starts: Vec::new(),
+            tops: Vec::new(),
+            heights: Vec::new(),
+            line_height: px(0.),
+            origin: bounds.origin,
+            height: px(0.),
+            swaps: Rc::from([]),
+        };
+        let layout = std::mem::replace(&mut state.layout, empty);
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-            for quad in state.selection.drain(..) {
+            for quad in state.code.drain(..).chain(state.selection.drain(..)) {
                 window.paint_quad(quad);
             }
-            for (line, top) in layout.lines.iter().zip(&layout.tops) {
+            for ((line, top), h) in layout.lines.iter().zip(&layout.tops).zip(&layout.heights) {
                 let at = point(layout.origin.x, layout.origin.y + *top);
-                line.paint(at, layout.line_height, TextAlign::Left, None, window, cx).ok();
+                line.paint(at, *h, TextAlign::Left, None, window, cx).ok();
             }
             if let Some(caret) = state.caret.take() {
                 window.paint_quad(caret);
@@ -1098,11 +1383,16 @@ impl Element for TextElement {
             });
         }
 
-        let scroll = state.scroll;
-        self.input.update(cx, |input, _| {
+        let (scroll, bar) = (state.scroll, state.bar);
+        self.input.update(cx, |input, cx| {
             input.layout = Some(layout);
             input.scroll = scroll;
             input.autoscroll = false;
+            // The bar renders from this frame's layout: one more frame when it moved.
+            if input.bar_at != bar {
+                input.bar_at = bar;
+                cx.notify();
+            }
         });
     }
 }
@@ -1135,6 +1425,27 @@ mod tests {
         assert_eq!((b.text(), b.selection()), ("Åsa__", 5..5));
         b.wrap("_");
         assert_eq!((b.text(), b.selection()), ("Åsa", 4..4));
+    }
+
+    #[test]
+    fn link_selects_the_url_and_redo_restores_formatting_selections() {
+        let mut b = Buffer::new("se här");
+        b.select(3, b.text().len());
+        b.link();
+        assert_eq!((b.text(), &b.text()[b.selection()]), ("se [här](https://)", "https://"));
+        b.undo();
+        assert!(b.redo());
+        assert_eq!(&b.text()[b.selection()], "https://");
+        b.undo();
+        b.wrap("**");
+        b.undo();
+        b.redo();
+        assert_eq!((b.text(), &b.text()[b.selection()]), ("se **här**", "här"));
+        // Typing still redoes to the caret after the text.
+        let mut b = typed("ab");
+        b.undo();
+        b.redo();
+        assert_eq!(b.selection(), 2..2);
     }
 
     #[test]

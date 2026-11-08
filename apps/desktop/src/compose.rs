@@ -19,6 +19,8 @@ use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, READING_LEADING};
 
 /// Sample reply for `LAGOM_SCREEN=compose-text`.
 const BODY: &str = "Thursday works. I will read the minutes before the meeting. Probably on the train.\n\nAlex";
+/// Sample Markdown for `LAGOM_SCREEN=compose-md` and `compose-md-bar`.
+const MARKDOWN_BODY: &str = "# Notes for Thursday\n\nThanks for the minutes. A few **quick** points before we meet:\n\n- Read the _draft_ from last week\n- Check `budget.xlsx` on the shared drive\n- See [the plan](https://example.com/plan) for dates\n\n1. Agenda\n2. Budget\n\nAlex";
 /// How long the "Sent" and "Deleted" toasts offer Undo.
 pub(crate) const UNDO_WINDOW: Duration = Duration::from_secs(5);
 /// docs/motion.md: 120–200 ms, ease-out.
@@ -189,6 +191,20 @@ impl Compose {
             body.set_text(BODY, cx);
             let at = BODY.find("minutes").unwrap_or(0);
             body.select(at..at + "minutes".len(), cx);
+        });
+        self.count(cx);
+    }
+
+    /// `LAGOM_SCREEN=compose-md`: a Markdown reply, caret at the end. `select`: a word selected,
+    /// so the format bar shows.
+    pub fn sample_markdown(&mut self, select: bool, cx: &mut Context<Self>) {
+        self.body.update(cx, |body, cx| {
+            body.set_text(MARKDOWN_BODY, cx);
+            if select {
+                let at = MARKDOWN_BODY.find("quick").unwrap_or(0);
+                body.select(at..at + "quick".len(), cx);
+                body.pin_bar();
+            }
         });
         self.count(cx);
     }
@@ -617,6 +633,14 @@ mod tests {
         cx.add_window_view(|window, cx| Compose::new("a@example.com", "b@example.com", "", Some((None, vec![])), window, cx))
     }
 
+    /// A key window, so the body has focus as it would on screen: the format bar needs it.
+    fn open_active(cx: &mut TestAppContext) -> (Entity<Compose>, &mut VisualTestContext) {
+        let (view, cx) = open(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (view, cx)
+    }
+
     #[gpui::test]
     fn bold_and_italic_wrap_toggle_and_undo(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
@@ -634,6 +658,66 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa****");
         cx.simulate_keystrokes("secondary-z");
         assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa");
+    }
+
+    /// Clicks a format bar button, after one more frame so the bar is laid out over the selection.
+    fn click_bar(cx: &mut VisualTestContext, button: &'static str) {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at = cx.debug_bounds(button).unwrap_or_else(|| panic!("{button} not shown")).center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+    }
+
+    #[gpui::test]
+    fn format_bar_does_what_the_shortcuts_do(cx: &mut TestAppContext) {
+        for (button, keys) in [
+            ("format-bold", "secondary-b"),
+            ("format-italic", "secondary-i"),
+            ("format-bullets", "secondary-shift-8"),
+            ("format-numbers", "secondary-shift-7"),
+        ] {
+            let (view, cx) = open_active(cx);
+            cx.simulate_input("Hej Åsa\nrad två");
+            cx.simulate_keystrokes(&format!("secondary-a {keys}"));
+            let by_key = view.read_with(cx, |v, cx| v.body_text(cx));
+            let (view, cx) = open_active(cx);
+            cx.simulate_input("Hej Åsa\nrad två");
+            cx.simulate_keystrokes("secondary-a");
+            click_bar(cx, button);
+            assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), by_key, "{button}");
+        }
+    }
+
+    #[gpui::test]
+    fn format_bar_toggles_bold_off_and_links_the_selection(cx: &mut TestAppContext) {
+        let (view, cx) = open_active(cx);
+        cx.simulate_input("Hej Åsa");
+        cx.simulate_keystrokes("secondary-a");
+        click_bar(cx, "format-bold");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "**Hej Åsa**");
+        // The selection stays on the text, so a second click removes the markers.
+        click_bar(cx, "format-bold");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa");
+        click_bar(cx, "format-link");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "[Hej Åsa](https://)");
+        // The URL is selected: a paste or typing replaces it.
+        cx.simulate_input("https://example.com");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "[Hej Åsa](https://example.com)");
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "[Hej Åsa](https://)");
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_format_bar_before_the_sheet(cx: &mut TestAppContext) {
+        let (view, cx) = open_active(cx);
+        cx.simulate_input("Hej");
+        cx.simulate_keystrokes("secondary-a");
+        click_bar(cx, "format-italic");
+        // The first Esc closes only the bar; the sheet stays open.
+        cx.simulate_keystrokes("escape");
+        assert!(!view.read_with(cx, |v, _| v.keeps_draft()));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.keeps_draft()));
     }
 
     #[gpui::test]

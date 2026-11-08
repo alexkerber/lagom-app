@@ -3319,6 +3319,7 @@ dependencies = [
  "chrono",
  "gpui",
  "lagom-core",
+ "pulldown-cmark",
  "tokio",
  "unicode-segmentation",
  "zeroize",
