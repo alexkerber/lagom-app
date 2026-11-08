@@ -1,13 +1,14 @@
-"""Blender -b -P icon.py -- icon.png [--take2 | --take3] (renders concept variants)."""
+"""Blender -b -P icon.py -- icon.png [--take2 | --take3 | --take4] (renders concept variants)."""
 import bpy
 import math
 import random
 import sys
 from pathlib import Path
-from mathutils import Vector
+from mathutils import Vector, Matrix
 
 out = Path(sys.argv[sys.argv.index('--') + 1]).resolve()
-take3 = '--take3' in sys.argv
+take4 = '--take4' in sys.argv
+take3 = '--take3' in sys.argv or take4
 take2 = '--take2' in sys.argv or take3
 assert out.suffix == '.png'
 random.seed(17)
@@ -162,6 +163,10 @@ cut.operation='DIFFERENCE'
 cut.object=slot
 bpy.ops.object.modifier_apply(modifier=cut.name)
 bpy.data.objects.remove(slot,do_unlink=True)
+if take4:
+    for vertex in blade.data.vertices:
+        vertex.co.z += .035*(1-(vertex.co.x/1.16)**2)
+    blade.data.update()
 polished = material('Polished steel edge', (.65,.69,.72), .16, 1)
 blade.data.materials.append(polished)
 bevel(blade,.011,8)
@@ -169,8 +174,8 @@ blade.modifiers[0].material=1
 blade.modifiers[0].harden_normals=True
 blade.modifiers[1].keep_sharp=True
 for face in blade.data.polygons:
-    face.use_smooth = abs(face.normal.z) < .9
-line('Polished cutting edge',[(-.96,.145,.477),(.96,.145,.477)],polished,.004)
+    face.use_smooth = take4 or abs(face.normal.z) < .9
+line('Polished cutting edge',[(x,.145,.477+(.035*(1-(x/1.16)**2) if take4 else 0)) for x in [-.96+i*1.92/32 for i in range(33)]],polished,.004)
 
 
 def between(name,a,b,radius,mat):
@@ -215,13 +220,21 @@ sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=2
 solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.008
 for face in strip.data.polygons: face.use_smooth=True
 # Rules sit on the outer face of the spiral, with no letters or glyphs.
-for i,t in enumerate([.8, 1.4, 2.0] if take2 else [.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
-    y,z=curl(t,.009)
-    line('Curled letter rule',[(-.48,y,z),(.40 if i%4!=3 else .12,y,z)],ink,.030 if take2 else .007)
+for i,t in enumerate([.7, 1.05, 1.4, 1.75] if take4 else [.8, 1.4, 2.0] if take2 else [.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
+    y,z=curl(t,.012 if take4 else .009)
+    line('Curled letter rule',[(-.48,y,z),([.35,.20,.40,.05][i] if take4 else .40 if i%4!=3 else .12,y,z)],ink,.003 if take4 else .030 if take2 else .007)
+if take4:
+    # Reveal the rolled edge while keeping the slicer itself symmetric.
+    pivot = Vector((0,-.30,.98))
+    turn = Matrix.Rotation(math.radians(18),4,'Y')
+    transform = Matrix.Translation(pivot) @ turn @ Matrix.Translation(-pivot)
+    for obj in scene.objects:
+        if obj.name.startswith(('Single curled letter','Curled letter rule')):
+            obj.matrix_world = transform @ obj.matrix_world
 subject=list(scene.objects)
 
 # Orthographic camera and broad softboxes: no external textures or environment maps.
-bpy.ops.object.camera_add(location=(5,-8,14))
+bpy.ops.object.camera_add(location=(0,-5,18) if take4 else (5,-8,14))
 cam=bpy.context.object
 cam.rotation_euler=(Vector((0,.55,.35))-cam.location).to_track_quat('-Z','Y').to_euler()
 cam.data.type='ORTHO'; cam.data.ortho_scale=7.5
@@ -294,16 +307,22 @@ if take2:
         gradient.color_ramp.elements[0].color = (.24,.009,.005,1)
         gradient.color_ramp.elements[1].color = (.37,.020,.010,1)
         wood.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.045,.022,.016,1)
-        for variant, zoom, anchor in [
+        if take4:
+            links.new(gradient.outputs[0], bs.inputs['Emission Color'])
+            bs.inputs['Emission Strength'].default_value = .65
+            ink.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.065,.065,.065,1)
+        frames = [('1',2.18,(0,-.35,.65)),('2',2.18,(0,-.35,.65))] if take4 else [
             ('1', 2.65, (0,-.12,.68)),
             ('2', 4.0, (0,-.02,.93)),
-            ('3', 2.65, (0,-.12,.68))]:
+            ('3', 2.65, (0,-.12,.68))]
+        for variant, zoom, anchor in frames:
             for obj in subject:
-                obj.hide_render = (variant != '3' and obj.name.startswith(('Envelope','Task'))) or (variant == '2' and obj.name.startswith(('Flowing','Steel ferrule','Walnut grip')))
+                obj.hide_render = (variant != '3' and obj.name.startswith(('Envelope','Task'))) or (not take4 and variant == '2' and obj.name.startswith(('Flowing','Steel ferrule','Walnut grip')))
             root.scale = (zoom,)*3
-            root.location = target - zoom*Vector(anchor)
+            root.rotation_euler.z = math.radians(-10) if take4 and variant == '2' else 0
+            root.location = target - zoom*(root.rotation_euler.to_matrix() @ Vector(anchor))
             plate.location = target + rotation @ Vector((0,0,-3.5))
-            scene.render.filepath = str(out.with_name('take3-'+variant+'.png'))
+            scene.render.filepath = str(out.with_name(('take4-' if take4 else 'take3-')+variant+'.png'))
             bpy.ops.render.render(write_still=True)
             # Clip the zoomed subject to the same rounded 824 px tile silhouette.
             rendered = bpy.data.images.load(scene.render.filepath, check_existing=False)
@@ -319,7 +338,7 @@ if take2:
             rendered.filepath_raw = scene.render.filepath
             rendered.save()
             bpy.data.images.remove(rendered)
-        assert all(out.with_name('take3-'+v+'.png').exists() for v in '123')
+        assert all(out.with_name(('take4-' if take4 else 'take3-')+v+'.png').exists() for v in ('12' if take4 else '123'))
     else:
         for variant, color, grip in [
             ('A', (.43,.035,.022), (.045,.022,.016)),
