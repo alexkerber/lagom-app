@@ -1312,6 +1312,9 @@ impl MainWindow {
             None => div().into_any_element(),
         }];
         let dragging = self.mouse_swiping();
+        // White text waits for the gliding fill to arrive. The glide animates frame by frame,
+        // so the frame it lands on renders this again. One reading, so the row and its copy below agree.
+        let landed = gliding.is_none_or(|g| g.at.elapsed() >= GLIDE);
         // Only rows near the viewport or the selection get text; the rest are empty boxes of the
         // same height. Shaping ~500 rows on every animation frame made E, L and the arrows stutter.
         // One element per row stays, so `scroll_to_item` indices still hold.
@@ -1334,9 +1337,6 @@ impl MainWindow {
                 continue;
             }
             let selected = i == self.inbox.selected;
-            // White text waits for the gliding fill to arrive. The glide animates frame by frame,
-            // so the frame it lands on renders this again.
-            let landed = gliding.is_none_or(|g| g.at.elapsed() >= GLIDE);
             let el = row(&self.inbox.mail[id], selected && gliding.is_none(), selected && landed)
                 .id(("row", id))
                 // Arrow at rest, as in native lists.
@@ -1397,6 +1397,51 @@ impl MainWindow {
             });
         }
         rows.extend(ghosts_at(self.inbox.list().len()));
+        // The eased fill reaches the selected row long before the glide ends, but row text turns
+        // white only then, and the row it leaves turns dark at once. Until it lands, copies of the
+        // rows it crosses, in selection colours, show through the fill, clipped to each row: text
+        // keeps its contrast wherever the fill is. Only rows near the viewport, as above.
+        if let Some(g) = gliding.filter(|_| !landed) {
+            let glide = || Animation::new(GLIDE).with_easing(ease_out_quint());
+            let at = move |d: f32| g.from + (g.to - g.from) * d;
+            // The fill starts on one row, or across two after a glide was cut short.
+            let from = ((g.from - LIST_PAD) / ROW_H).floor() as isize;
+            let (lo, hi) = (from.min(sel).max(first).max(0), (from + 1).max(sel).min(last));
+            for ix in (lo..=hi).map(|i| i as usize) {
+                let Some(&id) = self.inbox.list().get(ix) else { continue };
+                // A row under the fingers moves sideways; a copy would stay put over it.
+                if self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id) {
+                    continue;
+                }
+                let y = row_y(ix);
+                let ink = row(&self.inbox.mail[id], false, true)
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .with_animation((SharedString::from(format!("glide-ink-{ix}")), g.seq), glide(), move |el, d| el.top(px(y - at(d))));
+                let fill = div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .h(px(ROW_H))
+                    .rounded(px(radius::CONTROL))
+                    .overflow_hidden()
+                    .bg(sel_bg)
+                    .child(ink)
+                    .with_animation((SharedString::from(format!("glide-fill-{ix}")), g.seq), glide(), move |el, d| el.top(px(at(d) - y)));
+                rows.push(
+                    div()
+                        .absolute()
+                        .top(px(y))
+                        .left(px(LIST_PAD))
+                        .right(px(LIST_PAD))
+                        .h(px(ROW_H))
+                        .overflow_hidden()
+                        .child(fill)
+                        .into_any_element(),
+                );
+            }
+        }
 
         let filter = div()
             .flex()
