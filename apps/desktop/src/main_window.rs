@@ -1498,13 +1498,30 @@ impl MainWindow {
         let m = &self.inbox.mail[id];
         let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
         let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
-        // HTML mail: the web view covers the body area and draws header and mail itself. GPUI
-        // draws the same header under it, and the text only while an overlay hides the web view.
+        // HTML mail: GPUI draws the header as for text mail; the web view covers only the body
+        // area below it and scrolls the mail itself. The text shows while an overlay hides it.
         let web = html::SUPPORTED && m.html.is_some();
         let text = !web || self.palette.is_some() || self.compose.is_some();
         // Toasts sit just above the reply field; the web view would cover them.
         let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count();
-        let slot_bottom = 20. + 36. + 12. + 48. * toasts as f32;
+        let attachment = || m.attachment.clone().map(|(name, kb)| {
+            div().flex().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .rounded(px(radius::ATTACHMENT))
+                    .border_1()
+                    .border_color(t.line)
+                    .bg(t.subtle)
+                    .text_size(px(size::SNIPPET))
+                    .line_height(relative(LEADING))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(name))
+                    .child(mono(kb, t.ink2)),
+            )
+        });
 
         div()
             .flex_1()
@@ -1543,14 +1560,6 @@ impl MainWindow {
                     .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2)),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .when(web, |d| d.child(div().absolute().top_0().left_0().right_0().bottom(px(slot_bottom)).child(self.web_slot())))
-                    .child(
                 div()
                     .id(("reading", id))
                     .flex_1()
@@ -1622,28 +1631,16 @@ impl MainWindow {
                             // Until the body loads (one store read), the snippet stands in.
                             .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
                             .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
-                            .children(m.attachment.clone().map(|(name, kb)| {
-                                div()
-                                    .flex()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(12.))
-                                            .px(px(14.))
-                                            .py(px(10.))
-                                            .rounded(px(radius::ATTACHMENT))
-                                            .border_1()
-                                            .border_color(t.line)
-                                            .bg(t.subtle)
-                                            .text_size(px(size::SNIPPET))
-                                            .line_height(relative(LEADING))
-                                            .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                                            .child(mono(kb, t.ink2)),
-                                    )
-                            })),
+                            // The web view's place: the rest of the pane, less room for toasts.
+                            .when(web, |d| {
+                                d.flex_1().min_h(px(0.)).relative().child(
+                                    div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(self.web_slot()),
+                                )
+                            })
+                            .when(!web, |d| d.children(attachment())),
                     )
-                    .child(div().flex_1())
+                    .when(web, |d| d.children(attachment()))
+                    .when(!web, |d| d.child(div().flex_1()))
                     .child(
                         div()
                             .id("reply-box")
@@ -1660,7 +1657,6 @@ impl MainWindow {
                             .text_color(t.ink2)
                             .on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))
                             .child(format!("Reply to {}", m.from)),
-                    ),
                     ),
             )
     }

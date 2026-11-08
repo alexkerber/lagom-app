@@ -1,6 +1,7 @@
 //! HTML mail in the reading pane. One platform web view per window (WKWebView on macOS, WebView2
-//! on Windows) covers the pane between its toolbar and the reply field. The document holds the
-//! message header and the mail, so the pane scrolls as one, natively.
+//! on Windows) covers the body area under the GPUI header. The trusted header (subject, sender,
+//! date) never goes into the web view: mail CSS such as `position:fixed` paints over anything in
+//! the same document, so the document holds only the CSP, the theme CSS and the mail.
 //!
 //! Linux shows the text part in GPUI instead: wry's child web view there needs GTK's main loop
 //! and X11, and GPUI runs neither.
@@ -68,70 +69,29 @@ fn inert_links(html: &str) -> std::borrow::Cow<'_, str> {
     out.into()
 }
 
-fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 fn css(c: Rgba) -> String {
     let ch = |v: f32| (v * 255.).round() as u8;
     format!("rgba({},{},{},{})", ch(c.r), ch(c.g), ch(c.b), c.a)
 }
 
-/// The document for one message: the header as the GPUI pane draws it, then the mail in a
-/// shadow root, so its CSS cannot restyle the header.
-// shortcut: a `</template>` in the mail ends the shadow root early; the rest renders unscoped,
-// still under the CSP. Parse the mail into a fragment if that matters.
-pub(super) fn document(m: &Mail, html: &str, t: &Theme, remote: bool) -> String {
-    let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
-    let to = if m.to.is_empty() { "you" } else { &m.to };
-    let card = styled(html);
-    let (bg, ink, ink2, line, subtle, accent) = (css(t.bg), css(t.ink), css(t.ink2), css(t.line), css(t.subtle), css(t.accent));
+/// The web view's document for one mail: the CSP first, then the theme CSS, then the mail as
+/// sent. The mail's own `<html>`, `<head>` and `<body>` merge into this document, as in a
+/// browser; its CSS may restyle anything here, as nothing here is trusted UI.
+pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
+    let (bg, ink, accent) = (css(t.bg), css(t.ink), css(t.accent));
     let scheme = if t.dark { "dark" } else { "light" };
-    // Mail that sets its own colours keeps white paper; in dark mode that is a rounded card.
-    let mail_css = match (card, t.dark) {
-        (true, true) => "background:#fff;color:#000;border-radius:10px;padding:16px;",
-        (true, false) => "color:#000;",
-        (false, _) => "",
+    let base = format!("html{{background:{bg}}}body{{margin:0;font:14px/1.4 -apple-system,system-ui,\"Segoe UI\",sans-serif;overflow-wrap:break-word}}");
+    // Mail that sets its own colours assumes white paper: in dark mode a rounded white card.
+    // Other HTML takes the theme's ink and accent and blends in.
+    let look = match (styled(html), t.dark) {
+        (true, true) => "body{background:#fff;color:#000;border-radius:10px;padding:16px}".to_string(),
+        (true, false) => "body{background:#fff;color:#000}".to_string(),
+        (false, _) => format!("body{{color:{ink}}}a{{color:{accent}}}img{{max-width:100%;height:auto}}"),
     };
-    // Unstyled HTML reads like the plain-text pane: theme ink, accent links, images to width.
-    let inner_css = if card { String::new() } else { format!("a{{color:{accent}}}img{{max-width:100%;height:auto}}") };
-    let attachment = m.attachment.as_ref().map_or(String::new(), |(name, kb)| {
-        format!(r#"<div class="att"><span class="name">{}</span><span class="small">{}</span></div>"#, escape(name), escape(kb))
-    });
     format!(
-        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="color-scheme" content="{scheme}"><style>
-html,body{{margin:0;background:{bg};color:{ink};font:13px/1.25 -apple-system,system-ui,"Segoe UI",sans-serif}}
-main{{box-sizing:border-box;max-width:760px;padding:24px 32px 20px}}
-h1{{margin:0;font-size:20px;line-height:25px;font-weight:600}}
-.from{{display:flex;align-items:center;gap:12px;margin-top:12px}}
-.avatar{{box-sizing:border-box;width:32px;height:32px;flex:none;border-radius:50%;background:{subtle};border:1px solid {line};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600}}
-.who{{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}}
-.name{{font-weight:600}}
-.small{{font-size:11px;color:{ink2};font-variant-numeric:tabular-nums}}
-.addr{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.mail{{display:block;margin-top:20px;font-size:14px;line-height:1.4;overflow-wrap:break-word;{mail_css}}}
-.att{{display:inline-flex;align-items:center;gap:12px;margin-top:12px;padding:10px 14px;border-radius:10px;border:1px solid {line};background:{subtle};font-size:12px}}
-.att .name{{font-weight:500}}
-</style></head><body><main><h1>{subject}</h1><div class="from"><div class="avatar">{initials}</div><div class="who"><div class="name">{from}</div><div class="small addr">{address} → {to}</div></div><div class="small">{time}</div></div><div class="mail"><template shadowrootmode="open"><style>{inner_css}</style>{html}</template></div>{attachment}</main></body></html>"#,
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="color-scheme" content="{scheme}"><style>{base}{look}</style></head>{mail}"#,
         csp = csp(remote),
-        html = inert_links(html),
-        subject = escape(&m.subject),
-        initials = escape(&initials.to_uppercase()),
-        from = escape(&m.from),
-        address = escape(&m.address),
-        to = escape(to),
-        time = escape(&m.time),
+        mail = inert_links(html),
     )
 }
 
@@ -150,7 +110,7 @@ pub(super) enum Msg {
 const BRIDGE: &str = r#"
 addEventListener('click', e => {
   const a = e.composedPath().find(n => (n.tagName === 'A' || n.tagName === 'AREA') && typeof n.href === 'string' && n.href);
-  if (a) { e.preventDefault(); window.ipc.postMessage('open ' + a.href); }
+  if (a) { e.preventDefault(); if (e.isTrusted) window.ipc.postMessage('open ' + a.href); }
 }, true);
 addEventListener('keydown', e => { if (e.key === 'Escape') window.ipc.postMessage('escape'); }, true);
 "#;
@@ -217,7 +177,7 @@ impl MainWindow {
                 }
                 let Some(view) = self.web.view.clone() else { return };
                 let m = &self.inbox.mail[id];
-                let doc = document(m, m.html.as_ref().map_or("", |h| h.as_ref()), &self.theme, m.remote);
+                let doc = document(m.html.as_ref().map_or("", |h| h.as_ref()), &self.theme, m.remote);
                 self.web.ours.set(true);
                 let _ = view.set_background_color(rgba8(self.theme.bg));
                 if view.load_html(&doc).is_err() {
@@ -352,24 +312,16 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
 
-    fn sample() -> Mail {
-        Mail { from: "Ann <b>Bold</b>".into(), address: "ann@example.com".into(), subject: "<script>alert(1)</script>".into(), ..Default::default() }
-    }
-
     #[test]
     fn the_document_blocks_scripts_and_remote_loads() {
-        let doc = document(&sample(), "<p>Hi</p>", &Theme::light(DEFAULT_ACCENT), false);
+        let doc = document("<p>Hi</p>", &Theme::light(DEFAULT_ACCENT), false);
         // The CSP comes before anything from the mail, and allows no network source.
-        let csp = doc.find("Content-Security-Policy").unwrap();
-        assert!(csp < doc.find("<p>Hi</p>").unwrap());
-        assert!(doc.contains("default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'"));
-        assert!(!csp_of(&doc).contains("http"));
+        assert!(doc.find("Content-Security-Policy").unwrap() < doc.find("<p>Hi</p>").unwrap());
+        assert_eq!(csp_of(&doc), "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
         // The wrapper itself loads nothing and runs nothing.
         assert!(!doc.contains("://") && !doc.contains("<script") && !doc.contains("<link"));
-        // Header text is escaped.
-        assert!(doc.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && doc.contains("Ann &lt;b&gt;Bold&lt;/b&gt;"));
         // Remote images, when asked for: images only.
-        let doc = document(&sample(), "", &Theme::light(DEFAULT_ACCENT), true);
+        let doc = document("", &Theme::light(DEFAULT_ACCENT), true);
         assert_eq!(csp_of(&doc), "default-src 'none'; img-src data: cid: https: http:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
     }
 
@@ -379,18 +331,36 @@ mod tests {
     }
 
     #[test]
+    fn mail_cannot_reach_the_header() {
+        // Breaking out of a wrapper, or painting over the viewport, finds no header: the
+        // document is the CSP, the theme CSS and the mail, nothing the app vouches for.
+        for evil in [
+            "</template><h1>Your bank</h1>",
+            "</body><script>alert(1)</script></html><p>after</p>",
+            r#"<div style="position:fixed;inset:0;z-index:2147483647;background:#fff">From: ceo@bank.example</div>"#,
+        ] {
+            let doc = document(evil, &Theme::dark(DEFAULT_ACCENT), false);
+            let head = &doc[..doc.find(evil).unwrap()];
+            assert!(head.ends_with("</head>"), "only the head comes before the mail: {head}");
+            for header in ["<main", "<h1", "avatar", "class=\"from\"", "<template"] {
+                assert!(!head.contains(header), "{header} in {head}");
+            }
+        }
+    }
+
+    #[test]
     fn styled_mail_gets_white_paper_in_dark_mode() {
         let dark = Theme::dark(DEFAULT_ACCENT);
-        assert!(document(&sample(), r##"<table bgcolor="#f4f4f4">"##, &dark, false).contains("background:#fff;color:#000;border-radius:10px"));
+        assert!(document(r##"<table bgcolor="#f4f4f4">"##, &dark, false).contains("body{background:#fff;color:#000;border-radius:10px"));
         // Simple HTML blends: theme ink, accent links.
-        let doc = document(&sample(), "<div dir=ltr>Lunch?</div>", &dark, false);
+        let doc = document("<div dir=ltr>Lunch?</div>", &dark, false);
         assert!(!doc.contains("background:#fff") && doc.contains("a{color:rgba(235,106,85,1)}"));
     }
 
     #[test]
     fn resource_hints_are_inert() {
         let mail = r#"<LINK rel="preconnect" href="https://t.example"><link rel=dns-prefetch href=//t.example><p>&lt;link</p>"#;
-        let doc = document(&sample(), mail, &Theme::light(DEFAULT_ACCENT), false);
+        let doc = document(mail, &Theme::light(DEFAULT_ACCENT), false);
         assert!(doc.contains(r#"<x-LINK rel="preconnect""#) && doc.contains("<x-link rel=dns-prefetch") && doc.contains("<p>&lt;link</p>"));
         assert!(!doc.to_ascii_lowercase().contains("<link"));
         assert!(doc.contains(r#"<meta http-equiv="x-dns-prefetch-control" content="off">"#));
