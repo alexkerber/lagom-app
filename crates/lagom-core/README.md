@@ -1,6 +1,6 @@
 # Lagom mail core
 
-Local-first Rust API; the desktop app is deliberately not wired to it yet.
+Local-first Rust API shared by the desktop app and CLI.
 `Store` exposes plain structs and reads SQLite only. Run network operations on
 an executor outside the UI thread; own each `Store` on its worker thread.
 
@@ -79,7 +79,9 @@ idle CPU budgets remain unmeasured by this work.
 ## CLI
 
 ```sh
-cargo run -p lagom-cli -- add-account you@gmail.com
+cargo run -p lagom-cli -- sign-in google       # or microsoft
+cargo run -p lagom-cli -- discover you@example.com
+cargo run -p lagom-cli -- add-account you@icloud.com
 cargo run -p lagom-cli -- accounts
 cargo run -p lagom-cli -- sync                 # all accounts; or sync <UUID/email>
 cargo run -p lagom-cli -- folders
@@ -118,9 +120,9 @@ Provider settings checked against [Google](https://developers.google.com/workspa
 [Apple](https://support.apple.com/en-ie/102525),
 [Fastmail](https://www.fastmail.help/hc/en-us/articles/1500000278342-Server-names-and-ports)
 and [Microsoft](https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com).
-Outlook.com requires OAuth2, which is deferred; its preset is present but password
-login is not expected to work. App passwords/provider IMAP access must be enabled
-where supported. The CLI does not perform web login or provision credentials.
+Google and Microsoft support browser sign-in through `oauth::sign_in`.
+Outlook password login is not expected to work. App passwords/provider IMAP
+access must be enabled where supported for password accounts.
 
 Dependencies: rusqlite/bundled supplies portable SQLite/FTS5; dirs locates app
 data; keyring uses native credential stores; zeroize clears owned secret buffers;
@@ -140,3 +142,94 @@ Plain `cargo clippy --workspace` fails on an existing desktop
 The desktop is untouched. `cargo clippy --workspace -- -A clippy::approx_constant`
 passes. Existing dependency future-compatibility notices remain for `block`
 and `proc-macro-error2`.
+
+## Sign-in providers
+
+Lagom is a public installed client: browser authorization uses PKCE S256 and a
+five-minute loopback listener. No Lagom server is involved. Refresh tokens use
+the OS keychain, under the account UUID; access tokens are cached only in memory.
+Dropping `oauth::sign_in` cancels it. Never log the authorization URL or tokens.
+
+For Google, create a Google Cloud project, configure the OAuth consent screen,
+and create an OAuth client of type **Desktop app**. Request the restricted Gmail
+scope `https://mail.google.com/` plus `openid email profile`. In **Testing** mode,
+add each tester under test users; Gmail refresh tokens in testing can expire
+after seven days. Production distribution needs Google's verification for the
+restricted scope (and any applicable security assessment). The desktop client
+secret is non-confidential; Lagom sends it when configured. See
+[Google's installed-app guide](https://developers.google.com/identity/protocols/oauth2/native-app).
+
+For Microsoft, register an app in Entra with **Accounts in any organizational
+directory and personal Microsoft accounts**. Add the **Mobile and desktop
+applications** platform, redirect URI `http://localhost`, and enable public
+client flows. Under **Office 365 Exchange Online**, add delegated permissions
+`IMAP.AccessAsUser.All` and `SMTP.Send`; request `offline_access openid email
+profile` too. Do not create a client secret. The `common` endpoint supports both
+account types; organization policy may require admin consent or enabling IMAP
+and authenticated SMTP. See [Microsoft's mail OAuth guide](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth)
+and [loopback redirect rules](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url).
+
+Pass your own registrations at build time; no real IDs are in the source:
+
+```sh
+LAGOM_GOOGLE_CLIENT_ID='<desktop-client-id>' \
+LAGOM_GOOGLE_CLIENT_SECRET='<desktop-client-secret>' \
+LAGOM_MICROSOFT_CLIENT_ID='<application-client-id>' \
+  cargo build --workspace
+```
+
+The same environment variables override compiled values at runtime. An empty
+runtime ID disables that provider; `oauth::available(provider)` lets the UI hide
+its button. The account's email/name come from the token endpoint's ID token;
+Microsoft falls back to `preferred_username` when `email` is absent.
+
+`discover(&str) -> Discovery` first checks known domains, then MX, then Mozilla
+ISPDB. DNS and ISPDB each have a three-second deadline and fail through to the
+next step. `Discovery::Password { preset, help_url }` includes both server
+configurations; iCloud and Fastmail also include an app-password help link.
+ISPDB accepts only TLS/required STARTTLS and supported password authentication;
+otherwise discovery returns `Manual`. MX uses Hickory with system DNS settings;
+quick-xml reuses the workspace XML parser for ISPDB. The [ISPDB format](https://github.com/thunderbird/autoconfig/wiki/Autoconfig-file-reference)
+defines the supported email placeholders.
+
+Desktop worker contract (`apps/desktop/src/sync.rs`):
+
+- `Cmd::SignIn(Provider)` replaces a pending sign-in; `Cmd::CancelSignIn` drops it.
+- `Event::OpenUrl(String)` must go to `cx.open_url` on the UI thread (wired in
+  `main_window/live.rs`). Do not log or persist this URL.
+- `Event::SignedIn(Result<String, String>)` returns the saved account UUID or a
+  sanitized error; `Event::SignInCancelled` also covers provider access denial.
+  Success emits `Changed`, starts IDLE, and queues a normal sync.
+- `Cmd::Discover(String)` replaces pending discovery;
+  `Event::Discovered { email, discovery }` identifies which input produced it.
+- `Event::ReauthRequired(String)` identifies an account whose refresh grant was
+  revoked. Core callers receive the distinct `Error::ReauthRequired`.
+
+The worker owns these futures, so pending sign-in/discovery does not hold up
+other commands. Network work stays off the UI thread. Onboarding buttons and
+presentation of discovery/cancellation belong to the subsequent UI change.
+`ImapSync::login` and `smtp::{send, verify}` retain their password argument for
+existing callers; OAuth accounts ignore that argument and use the memory cache
+and keychain. Only an explicit authentication rejection causes one refresh and
+retry. SMTP never retries an ambiguous submission (`MaybeSent`).
+
+## OAuth validation on 2026-11-07
+
+`cargo build --workspace` and `cargo test --workspace` pass: 99 tests pass,
+with five GreenMail tests and the search benchmark ignored by default. The
+worker's opt-in GreenMail test also skips its network work without its flag.
+OAuth tests run a local fake authorization/token server and real loopback
+callback for both providers, including PKCE/state, JWT identity, refresh-token
+rotation, expiry, concurrent stale-token rejection, invalid_grant, and dropping
+the sign-in future. Scripted IMAP/SMTP peers check XOAUTH2 bytes; discovery
+uses fake MX/ISPDB responses and exercises fallbacks and timeouts. Migration
+fixtures cover old password rows and both OAuth providers. CLI process tests
+cover discovery and missing client IDs; worker tests cover command cancellation.
+
+Core/CLI Clippy passes with `--all-targets -- -D warnings`. Workspace Clippy
+passes with `--all-targets -- -D warnings -A clippy::approx_constant`; without
+the exception it fails on the existing `main_window.rs:67` golden-ratio value.
+No OpenSSL/native-tls occurs in the core dependency tree. Existing dependency
+future-compatibility notices remain for `block` and `proc-macro-error2`.
+Real provider consent, native keychain, Windows/Linux browser launch and release
+performance were not verified; real client IDs are not available in this task.

@@ -25,7 +25,7 @@ gpui::actions!(
         SelectRight, SelectUp, SelectDown, WordLeft, WordRight, SelectWordLeft, SelectWordRight,
         LineStart, LineEnd, SelectLineStart, SelectLineEnd, DocStart, DocEnd, SelectDocStart,
         SelectDocEnd, SelectAll, Copy, Cut, Paste, Redo, Enter, Escape, FocusNext, FocusPrev,
-        ShowCharacterPalette
+        ShowCharacterPalette, Bold, Italic, Bullets, Numbers
     ]
 );
 
@@ -37,7 +37,12 @@ pub fn bind_keys(cx: &mut App) {
     let ctx = Some("TextInput");
     // Single-line fields leave ↑ and ↓ to their parent, so the palette can move its selection.
     let multi = Some("TextInput && multiline");
+    let markdown = Some("TextInput && markdown");
     cx.bind_keys([
+        KeyBinding::new("secondary-b", Bold, markdown),
+        KeyBinding::new("secondary-i", Italic, markdown),
+        KeyBinding::new("secondary-shift-8", Bullets, markdown),
+        KeyBinding::new("secondary-shift-7", Numbers, markdown),
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("shift-backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
@@ -94,6 +99,21 @@ pub enum Motion {
     LineEnd,
     DocStart,
     DocEnd,
+}
+
+/// Prefix bytes (including indentation), and the number for an ordered item.
+fn list_prefix(line: &str) -> Option<(usize, Option<u64>)> {
+    let item = line.trim_start_matches([' ', '\t']);
+    let indent = line.len() - item.len();
+    if item.starts_with("- ") || item.starts_with("* ") {
+        return Some((indent + 2, None));
+    }
+    let digits = item.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=9).contains(&digits) && item[digits..].starts_with(". ") {
+        Some((indent + digits + 2, Some(item[..digits].parse().ok()?)))
+    } else {
+        None
+    }
 }
 
 /// One undo step: `new` replaced `old` at `at`. `sel` is the selection before it.
@@ -173,6 +193,73 @@ impl Buffer {
 
     pub fn select_to(&mut self, offset: usize) {
         self.select(self.anchor(), offset);
+    }
+
+    fn wrap(&mut self, marker: &str) {
+        let sel = self.selection();
+        let n = marker.len();
+        let selected = &self.text[sel.clone()];
+        if selected.len() >= n * 2 && selected.starts_with(marker) && selected.ends_with(marker) {
+            let inner = selected[n..selected.len() - n].to_string();
+            self.replace(Some(sel.clone()), &inner, false);
+            self.select(sel.start, sel.start + inner.len());
+        } else if sel.start >= n && self.text[..sel.start].ends_with(marker) && self.text[sel.end..].starts_with(marker) {
+            let inner = selected.to_string();
+            self.replace(Some(sel.start - n..sel.end + n), &inner, false);
+            self.select(sel.start - n, sel.end - n);
+        } else {
+            let wrapped = format!("{marker}{selected}{marker}");
+            self.replace(Some(sel.clone()), &wrapped, false);
+            self.select(sel.start + n, sel.end + n);
+        }
+    }
+
+    fn list_enter(&mut self) {
+        let sel = self.selection();
+        let start = self.text[..sel.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = self.text[sel.end..].find('\n').map_or(self.text.len(), |i| sel.end + i);
+        let line = &self.text[start..line_end];
+        if let Some((prefix, number)) = list_prefix(line).filter(|(prefix, _)| sel.start >= start + prefix) {
+            if line[prefix..].trim().is_empty() {
+                self.replace(Some(start..line_end), "", false);
+            } else {
+                let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+                let marker = match number {
+                    Some(n) => format!("{}. ", n + 1),
+                    None => line[indent.len()..prefix].to_string(),
+                };
+                let next = format!("\n{indent}{marker}");
+                self.replace(None, &next, false);
+            }
+        } else {
+            self.replace(None, "\n", true);
+        }
+    }
+
+    fn toggle_list(&mut self, ordered: bool) {
+        let sel = self.selection();
+        let start = self.text[..sel.start].rfind('\n').map_or(0, |i| i + 1);
+        let end = if sel.end > sel.start && self.text[..sel.end].ends_with('\n') {
+            sel.end - 1
+        } else {
+            self.text[sel.end..].find('\n').map_or(self.text.len(), |i| sel.end + i)
+        };
+        let lines = &self.text[start..end];
+        let remove = lines.split('\n').all(|line| list_prefix(line).is_some_and(|(_, n)| n.is_some() == ordered));
+        let mut first_delta = 0;
+        let replacement = lines.split('\n').enumerate().map(|(i, line)| {
+            let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+            let old = list_prefix(line).map_or(indent, |(len, _)| len);
+            let marker = if remove { String::new() } else if ordered { format!("{}. ", i + 1) } else { "- ".into() };
+            if i == 0 { first_delta = (indent + marker.len()) as isize - old as isize; }
+            format!("{}{marker}{}", &line[..indent], &line[old..])
+        }).collect::<Vec<_>>().join("\n");
+        self.replace(Some(start..end), &replacement, false);
+        if sel.is_empty() {
+            self.move_to(sel.start.saturating_add_signed(first_delta).clamp(start, start + replacement.len()));
+        } else {
+            self.select(start, start + replacement.len());
+        }
     }
 
     pub fn target(&self, m: Motion) -> usize {
@@ -376,6 +463,7 @@ pub struct TextInput {
     focus: FocusHandle,
     placeholder: SharedString,
     multiline: bool,
+    markdown: bool,
     masked: bool,
     bordered: bool,
     layout: Option<Layout>,
@@ -422,6 +510,7 @@ impl TextInput {
             focus,
             placeholder: SharedString::default(),
             multiline: false,
+            markdown: false,
             masked: false,
             bordered: false,
             layout: None,
@@ -441,6 +530,11 @@ impl TextInput {
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
         self
+    }
+
+    pub fn markdown(mut self) -> Self {
+        self.markdown = true;
+        self.multiline()
     }
 
     /// Password mode: bullets, and no copy or cut.
@@ -593,7 +687,7 @@ impl TextInput {
         }
     }
 
-    fn insert(&mut self, text: &str, join: bool, cx: &mut Context<Self>) {
+    pub(crate) fn insert(&mut self, text: &str, join: bool, cx: &mut Context<Self>) {
         let text = self.clean(text);
         if self.buffer.replace(None, &text, join) {
             self.edited(cx);
@@ -625,7 +719,10 @@ impl TextInput {
     }
 
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
-        if self.multiline { self.insert("\n", true, cx) } else { cx.emit(TextInputEvent::Enter) }
+        if self.markdown {
+            self.buffer.list_enter();
+            self.edited(cx);
+        } else if self.multiline { self.insert("\n", true, cx) } else { cx.emit(TextInputEvent::Enter) }
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -741,7 +838,7 @@ impl Render for TextInput {
             }
         };
         div()
-            .key_context(if self.multiline { "TextInput multiline" } else { "TextInput" })
+            .key_context(if self.markdown { "TextInput multiline markdown" } else if self.multiline { "TextInput multiline" } else { "TextInput" })
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(|this, _: &Backspace, _, cx| this.delete(Motion::Left, cx)))
@@ -786,6 +883,11 @@ impl Render for TextInput {
                     this.edited(cx);
                 }
             }))
+            .when(self.markdown, |d| d
+                .on_action(cx.listener(|this, _: &Bold, _, cx| { this.buffer.wrap("**"); this.edited(cx); }))
+                .on_action(cx.listener(|this, _: &Italic, _, cx| { this.buffer.wrap("_"); this.edited(cx); }))
+                .on_action(cx.listener(|this, _: &Bullets, _, cx| { this.buffer.toggle_list(false); this.edited(cx); }))
+                .on_action(cx.listener(|this, _: &Numbers, _, cx| { this.buffer.toggle_list(true); this.edited(cx); })))
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(|_, _: &Escape, _, cx| cx.emit(TextInputEvent::Escape)))
             .on_action(cx.listener(|_, _: &FocusNext, window, _| window.focus_next()))
@@ -800,11 +902,13 @@ impl Render for TextInput {
                     .h(px(30.))
                     .px(px(10.))
                     .border_1()
-                    .border_color(if focused { t.accent } else { t.line })
+                    .border_color(t.line)
                     .rounded(px(radius::CONTROL))
+                    // Opaque, so the focus ring shows only outside the field, as in AppKit.
+                    .bg(t.raised)
                     .when(focused, |d| {
                         d.shadow(vec![BoxShadow {
-                            color: Rgba { a: 0.25, ..t.accent }.into(),
+                            color: Rgba { a: 0.5, ..t.sel_focus }.into(),
                             offset: point(px(0.), px(0.)),
                             blur_radius: px(0.),
                             spread_radius: px(3.),
@@ -815,9 +919,9 @@ impl Render for TextInput {
                 input: cx.entity(),
                 shown,
                 placeholder: t.ink2.into(),
-                caret: t.accent.into(),
-                // Native fields grey the selection of an unfocused field.
-                selection: if focused { Rgba { a: 0.25, ..t.accent } } else { t.sel }.into(),
+                caret: t.sel_focus.into(),
+                // The accent as a light highlight, as AppKit derives it; unfocused fields grey it.
+                selection: if focused { Rgba { a: 0.3, ..t.sel_focus } } else { t.sel }.into(),
             })
     }
 }
@@ -1013,6 +1117,39 @@ mod tests {
             b.replace(None, &c.to_string(), true);
         }
         b
+    }
+
+    #[test]
+    fn markdown_wrapping_preserves_unicode_selection_and_undo() {
+        let mut b = Buffer::new("**Åsa**");
+        b.select(0, b.text().len());
+        b.wrap("**");
+        assert_eq!((b.text(), b.selection()), ("Åsa", 0..4));
+        b.undo();
+        assert_eq!(b.text(), "**Åsa**");
+        b.select(2, 6);
+        b.wrap("**");
+        assert_eq!((b.text(), b.selection()), ("Åsa", 0..4));
+        b.move_to(4);
+        b.wrap("_");
+        assert_eq!((b.text(), b.selection()), ("Åsa__", 5..5));
+        b.wrap("_");
+        assert_eq!((b.text(), b.selection()), ("Åsa", 4..4));
+    }
+
+    #[test]
+    fn list_toggle_keeps_indentation_and_excludes_the_next_line() {
+        let mut b = Buffer::new("  Åsa\n  Örjan\nslut");
+        let end = b.text().find("slut").unwrap();
+        b.select(0, end);
+        b.toggle_list(false);
+        assert_eq!(b.text(), "  - Åsa\n  - Örjan\nslut");
+        b.toggle_list(true);
+        assert_eq!(b.text(), "  1. Åsa\n  2. Örjan\nslut");
+        b.toggle_list(true);
+        assert_eq!(b.text(), "  Åsa\n  Örjan\nslut");
+        b.undo();
+        assert_eq!(b.text(), "  1. Åsa\n  2. Örjan\nslut");
     }
 
     #[test]

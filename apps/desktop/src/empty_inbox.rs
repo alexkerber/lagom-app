@@ -8,9 +8,6 @@ use gpui::{div, ease_out_quint, prelude::*, px, relative, svg, Animation, Animat
 use crate::main_window::mono;
 use crate::theme::{font, size, Theme};
 
-/// The headline is the one hero size in the app; the design sets it at 56 px.
-const HEADLINE: f32 = 56.0;
-
 /// `status`: the account and its sync state for the footer.
 pub fn view(t: &Theme, status: SharedString) -> Div {
     let content = div()
@@ -36,10 +33,8 @@ pub fn view(t: &Theme, status: SharedString) -> Div {
         )
         .child(
             div()
-                .font_family(font::DISPLAY)
-                .text_size(px(HEADLINE))
+                .text_size(px(size::DISPLAY))
                 .font_weight(FontWeight::BOLD)
-                .line_height(relative(1.))
                 .child("Lagom. Nothing left."),
         )
         .child(

@@ -12,7 +12,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 zeroize = "1"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "process", "sync"] }
 
 [dev-dependencies]
 tempfile = "3"

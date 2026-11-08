@@ -1,5 +1,5 @@
 use crate::{
-    account::{Account, Security, ServerConfig},
+    account::{Account, Auth, Security, ServerConfig},
     Error, Result,
 };
 use rusqlite::{params, Connection, OptionalExtension};
@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -67,15 +67,18 @@ impl Store {
         if version < 2 {
             db.execute_batch(include_str!("schema_v2.sql"))?;
         }
+        if version < 3 {
+            db.execute_batch(include_str!("schema_v3.sql"))?;
+        }
         Ok(Self { db })
     }
     pub fn save_account(&self, account: &Account) -> Result<()> {
         account.validate()?;
-        self.db.execute("INSERT INTO accounts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+        self.db.execute("INSERT INTO accounts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
             ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,email=excluded.email,
             imap_host=excluded.imap_host,imap_port=excluded.imap_port,imap_security=excluded.imap_security,imap_username=excluded.imap_username,
-            smtp_host=excluded.smtp_host,smtp_port=excluded.smtp_port,smtp_security=excluded.smtp_security,smtp_username=excluded.smtp_username",
-            params![account.id,account.display_name,account.email,account.imap.host,account.imap.port,account.imap.security.as_str(),account.imap.username,account.smtp.host,account.smtp.port,account.smtp.security.as_str(),account.smtp.username])?;
+            smtp_host=excluded.smtp_host,smtp_port=excluded.smtp_port,smtp_security=excluded.smtp_security,smtp_username=excluded.smtp_username,auth=excluded.auth",
+            params![account.id,account.display_name,account.email,account.imap.host,account.imap.port,account.imap.security.as_str(),account.imap.username,account.smtp.host,account.smtp.port,account.smtp.security.as_str(),account.smtp.username,account.auth.as_str()])?;
         Ok(())
     }
     /// Removes the account and, by cascade, its folders, messages and search rows.
@@ -100,11 +103,13 @@ impl Store {
                 r.get::<_, u16>(8)?,
                 r.get::<_, String>(9)?,
                 r.get::<_, String>(10)?,
+                r.get::<_, String>(11)?,
             ))
         })?;
         rows.map(|r| {
-            let (id, display_name, email, ih, ip, is, iu, sh, sp, ss, su) = r?;
+            let (id, display_name, email, ih, ip, is, iu, sh, sp, ss, su, auth) = r?;
             Ok(Account {
+                auth: Auth::parse(&auth)?,
                 id,
                 display_name,
                 email,
@@ -149,6 +154,25 @@ mod tests {
         std::env::remove_var("LAGOM_DATA_DIR");
         assert_eq!(default, dir.join("lagom.sqlite3"));
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    #[test]
+    fn auth_migrates_existing_rows_and_roundtrips() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v2.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(include_str!("schema_v1.sql")).unwrap();
+        db.execute_batch(include_str!("schema_v2.sql")).unwrap();
+        db.execute("INSERT INTO accounts VALUES ('old','Alice','a@example.com','imap.example.com',993,'tls','a@example.com','smtp.example.com',587,'starttls','a@example.com')", []).unwrap();
+        drop(db);
+        let store = Store::open(&path).unwrap();
+        let mut account = store.accounts().unwrap().remove(0);
+        assert_eq!(account.auth, Auth::Password);
+        for provider in [crate::oauth::Provider::Google, crate::oauth::Provider::Microsoft] {
+            account.auth = Auth::OAuth(provider);
+            store.save_account(&account).unwrap();
+            assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        }
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 3);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -539,15 +563,15 @@ mod mail_tests {
         db.execute_batch(include_str!("schema_v1.sql")).unwrap();
         let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
         let a = Account::new("a@gmail.com".into(), i, s).unwrap();
-        let s = Store { db };
-        s.save_account(&a).unwrap();
-        drop(s);
+        db.execute("INSERT INTO accounts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![a.id,a.display_name,a.email,a.imap.host,a.imap.port,a.imap.security.as_str(),a.imap.username,a.smtp.host,a.smtp.port,a.smtp.security.as_str(),a.smtp.username]).unwrap();
+        drop(db);
         let s = Store::open(&path).unwrap();
         assert_eq!(s.accounts().unwrap(), vec![a]);
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            2
+            3
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);

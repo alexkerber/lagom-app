@@ -254,7 +254,10 @@ const SAMPLE: &[Sample] = &[
         Some(("laundry-december.pdf", "96 KB")), false),
     m!("Tickets", "no-reply@tickets.example", "Tue", "Stockholm C → Göteborg C, 14 Nov", "Coach 3, seat 41. Quiet carriage.",
         ["Your journey on 14 November: Stockholm C 07:10, Göteborg C 10:05.", "Coach 3, seat 41. Quiet carriage."], None, false),
-    m!("Lagom releases", "releases@lagom.example", "Mon", "Version 0.4 is out", "Faster threads, fewer settings. Changelog inside.",
+    // Long on purpose: the list must end sender, subject and preview in "…", never mid-glyph.
+    m!("Lagom releases and announcements for the desktop and mobile apps", "releases@lagom.example", "Mon",
+        "Version 0.4 is out: faster threads, fewer settings and a calmer list for very large inboxes",
+        "Threads open faster and there are fewer settings. The list keeps up with a hundred thousand messages, search finds old mail at once, and the full changelog is on the site.",
         ["Version 0.4 is out.", "Threads open faster and there are fewer settings. The full changelog is on the site."], None, false),
     m!("Coffee roastery", "orders@roastery.example", "Mon", "Order 4411 has shipped", "Two bags of the Ethiopian, ground for filter.",
         ["Order 4411 has shipped: two bags of the Ethiopian, ground for filter.", "It should arrive on Thursday."], None, true),
@@ -281,6 +284,23 @@ const SAMPLE: &[Sample] = &[
     m!("Kitchen notes", "notes@kitchen.example", "Wed", "Soup season", "Six soups that freeze well, and one that does not.",
         ["Soup season. Six soups that freeze well, and one that does not.", "Start with the lentil one."], None, true),
 ];
+
+/// The sample accounts for `LAGOM_DEMO=1`: the sidebar and Settings list the same two.
+pub fn demo_accounts() -> Vec<lagom_core::account::Account> {
+    use lagom_core::account::{Account, Auth, Security, ServerConfig};
+    let server = |host: &str, port, user: &str| ServerConfig { host: host.into(), port, security: Security::Tls, username: user.into() };
+    [("Home", "you@home.example", "home.example"), ("Work", "you@work.example", "work.example")]
+        .into_iter()
+        .map(|(name, email, domain)| Account {
+            id: name.to_lowercase(),
+            auth: Auth::Password,
+            display_name: name.into(),
+            email: email.into(),
+            imap: server(&format!("imap.{domain}"), 993, email),
+            smtp: server(&format!("smtp.{domain}"), 465, email),
+        })
+        .collect()
+}
 
 /// The sample mail for `LAGOM_DEMO=1`, screenshots and tests.
 pub fn demo() -> Vec<Mail> {

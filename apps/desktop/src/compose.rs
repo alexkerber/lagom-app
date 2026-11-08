@@ -3,19 +3,19 @@
 //! Esc closes and keeps the draft in memory; Send and Discard (⌘⌫) end it.
 //! shortcut: the draft lives in memory only and is lost on quit; save it to Drafts with lagom-core.
 
-use std::time::Duration;
+use std::{io::Read, path::{Path, PathBuf}, time::Duration};
 
 use gpui::{
     div, ease_out_quint, prelude::*, px, relative, Animation, AnimationExt, Context, Div, Entity,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, Rgba, Subscription, Task, Window,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent, PathPromptOptions, Rgba, Subscription, Task, Window,
 };
 
-use crate::main_window::{key_button, mono, pressable};
+use crate::main_window::{button, mono, pressable};
 use crate::motion::spring;
 use crate::mail::recipients;
 use crate::text_input::{TextInput, TextInputEvent};
 use lagom_core::smtp::Outgoing;
-use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
+use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, READING_LEADING};
 
 /// Sample reply for `LAGOM_SCREEN=compose-text`.
 const BODY: &str = "Thursday works. I will read the minutes before the meeting. Probably on the train.\n\nAlex";
@@ -60,6 +60,8 @@ pub struct Compose {
     problem: Option<&'static str>,
     /// After Send, the sheet has finished leaving and no longer renders.
     slid_out: bool,
+    import_error: Option<&'static str>,
+    _error: Option<Task<()>>,
     _count: Option<Task<()>>,
     _dismiss: Option<Task<()>>,
     _appearance: Subscription,
@@ -88,7 +90,7 @@ impl Compose {
         let to = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients").with_text(to));
         let cc = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
         let subject = cx.new(|cx| TextInput::new(window, cx).placeholder("Subject").with_text(subject));
-        let body = cx.new(|cx| TextInput::new(window, cx).multiline().placeholder("Write your message"));
+        let body = cx.new(|cx| TextInput::new(window, cx).markdown().placeholder("Write your message"));
         let fields = [&to, &cc, &subject, &body].map(|f| cx.subscribe_in(f, window, Self::on_field)).into();
         // A reply starts in the body, a new message in To.
         let first = if reply.is_some() { &body } else { &to };
@@ -110,11 +112,75 @@ impl Compose {
             words: 0,
             keep: false,
             refocus: None,
+            import_error: None,
+            _error: None,
             _count: None,
             _dismiss: None,
             _appearance: appearance,
             _fields: fields,
         }
+    }
+
+    pub(crate) fn focus_body(&self, window: &mut Window, cx: &gpui::App) {
+        window.focus(&self.body.focus_handle(cx));
+    }
+
+    pub(crate) fn insert_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_modal() { return; }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true, directories: false, multiple: false, prompt: Some("Insert file".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match paths.await {
+                Ok(Ok(Some(paths))) => { this.update_in(cx, |this, window, cx| this.import_paths(&paths, window, cx)).ok(); }
+                Ok(Ok(None)) => {}
+                _ => { this.update(cx, |this, cx| this.file_error("Could not open the file picker", cx)).ok(); }
+            }
+        }).detach();
+    }
+
+    fn file_error(&mut self, message: &'static str, cx: &mut Context<Self>) {
+        self.import_error = Some(message);
+        self._error = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UNDO_WINDOW).await;
+            this.update(cx, |this, cx| { this.import_error = None; cx.notify(); }).ok();
+        }));
+        cx.notify();
+    }
+
+    fn import_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_modal() { return; }
+        let [path] = paths else { return self.file_error("Insert one Markdown or text file at a time", cx); };
+        let path = path.clone();
+        let read_path = path.clone();
+        let read = cx.background_executor().spawn(async move { read_file(&read_path) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = read.await;
+            this.update_in(cx, |this, window, cx| {
+                if !this.is_modal() { return; }
+                match result {
+                    Ok(text) => {
+                        this.insert_file_text(&path, &text, cx);
+                        this.focus_body(window, cx);
+                    }
+                    Err(error) => this.file_error(error, cx),
+                }
+            }).ok();
+        }).detach();
+    }
+
+    fn insert_file_text(&mut self, path: &Path, text: &str, cx: &mut Context<Self>) {
+        let mut body = text;
+        if markdown_path(path) && self.body.read(cx).text().is_empty() && self.subject.read(cx).text().is_empty() {
+            let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+            if let Some(heading) = first.trim_end_matches('\r').strip_prefix("# ").filter(|h| !h.trim().is_empty()) {
+                self.subject.update(cx, |subject, cx| subject.insert(heading.trim(), false, cx));
+                body = rest;
+            }
+        }
+        self.body.update(cx, |input, cx| input.insert(body, false, cx));
+        self.import_error = None;
+        cx.notify();
     }
 
     /// `LAGOM_SCREEN=compose-text`: a written reply with a word selected.
@@ -320,7 +386,7 @@ impl Compose {
         cx.stop_propagation();
     }
 
-    fn sheet(&self, cx: &mut Context<Self>) -> Div {
+    fn sheet(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let field = |label: &'static str| {
             div()
@@ -335,6 +401,8 @@ impl Compose {
         let grow = |input: &Entity<TextInput>| div().flex_1().min_w(px(0.)).child(input.clone());
 
         div()
+            .id("compose-sheet")
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.import_paths(paths.paths(), window, cx)))
             .w(px(800.))
             .h(px(560.))
             .flex()
@@ -370,8 +438,7 @@ impl Compose {
                             .rounded(px(radius::CONTROL))
                             .text_color(t.ink2)
                             .on_click(cx.listener(|this, _, _, cx| this.discard(cx)))
-                            .child("Discard")
-                            .child(mono("⌘⌫", t.ink2)),
+                            .child("Discard"),
                     ),
             )
             .child(
@@ -391,8 +458,7 @@ impl Compose {
                                 .rounded(px(radius::CONTROL))
                                 .text_color(t.ink2)
                                 .on_click(cx.listener(|this, _, window, cx| this.add_cc(window, cx)))
-                                .child("Cc")
-                                .child(mono("⌘⇧C", t.ink2)),
+                                .child("Cc"),
                         )
                     }))
                     .when(self.show_cc, |d| d.child(field("Cc").child(grow(&self.cc))))
@@ -405,7 +471,7 @@ impl Compose {
                     .px(px(24.))
                     .py(px(20.))
                     .text_size(px(size::BODY))
-                    .line_height(relative(1.6))
+                    .line_height(relative(READING_LEADING))
                     .child(self.body.clone()),
             )
             .child(
@@ -419,7 +485,7 @@ impl Compose {
                     .border_t_1()
                     .border_color(t.line)
                     .child(
-                        key_button(t, "Send", "⌘↵", Some(t.accent))
+                        button(t, "Send", Some(t.accent))
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     )
                     // shortcut: Attach and Send later are left out until the core supports them.
@@ -437,46 +503,33 @@ impl Compose {
             )
     }
 
-    fn toast(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = &self.theme;
-        toast(
-            t,
-            // Nothing has left yet: it goes when the Undo window ends.
-            "Sending",
-            Some(key_button(t, "Undo", "⌘Z", None).on_click(cx.listener(|this, _, window, cx| { this.undo(window, cx); })).into_any_element()),
-        )
-    }
 }
 
-/// A toast at the bottom of the window: a label and, optionally, an Undo button.
+/// Where toasts stack: bottom-centre of the element it is placed in, `bottom` px up.
+pub(crate) fn toast_layer(bottom: f32) -> Div {
+    div().absolute().bottom(px(bottom)).left_0().right_0().flex().flex_col().items_center().gap(px(8.))
+}
+
+/// A toast: a label and, optionally, an Undo button. Put it in a `toast_layer`.
 pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Option<gpui::AnyElement>) -> impl IntoElement {
     let label = label.into();
     div()
-        .absolute()
-        .bottom(px(24.))
-        .left_0()
-        .right_0()
         .flex()
-        .justify_center()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .h(px(48.))
-                .pl(px(16.))
-                .pr(px(if undo.is_some() { 7. } else { 16. }))
-                .bg(t.raised)
-                .border_1()
-                .border_color(t.line)
-                .rounded(px(radius::PANEL))
-                .shadow_lg()
-                .font_weight(FontWeight::MEDIUM)
-                .child(label)
-                .children(undo),
-        )
+        .items_center()
+        .gap(px(12.))
+        .h(px(40.))
+        .pl(px(14.))
+        .pr(px(if undo.is_some() { 6. } else { 14. }))
+        .bg(t.raised)
+        .border_1()
+        .border_color(t.line)
+        .rounded(px(radius::PANEL))
+        .shadow_lg()
+        .font_weight(FontWeight::MEDIUM)
+        .child(label)
+        .children(undo)
         .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
-            d.opacity(ease_out_quint()(v)).bottom(px(16. + 8. * spring(v)))
+            d.opacity(ease_out_quint()(v)).relative().top(px(8. * (1. - spring(v))))
         })
 }
 
@@ -488,7 +541,8 @@ impl Render for Compose {
             return div();
         }
         let t = self.theme;
-        let scrim = Rgba { a: 0.7, ..t.subtle };
+        // A light veil, as AppKit sheets barely dim the window behind them.
+        let scrim = Rgba { a: 0.12, ..gpui::rgb(0x000000) };
         let layer = div()
             .absolute()
             .inset_0()
@@ -528,6 +582,122 @@ impl Render for Compose {
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .children(layer)
-            .when(self.phase == Phase::Sent, |d| d.child(self.toast(cx)))
+            // The "Sending" toast after Send is the main window's, placed over the reading pane.
+            .when_some(self.import_error.filter(|_| self.is_modal()), |d, message| d.child(toast_layer(24.).child(toast(&t, message, None))))
+    }
+}
+
+fn markdown_path(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+}
+
+fn read_file(path: &Path) -> Result<String, &'static str> {
+    if !markdown_path(path) && !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("txt")) {
+        return Err("Choose a .md, .markdown or .txt file");
+    }
+    const LIMIT: u64 = 1024 * 1024;
+    let file = std::fs::File::open(path).map_err(|_| "Could not open the file")?;
+    if !file.metadata().is_ok_and(|m| m.is_file()) { return Err("Choose a regular text file"); }
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut bytes).map_err(|_| "Could not read the file")?;
+    if bytes.len() as u64 > LIMIT { return Err("The file is larger than 1 MB"); }
+    String::from_utf8(bytes).map_err(|_| "The file must be UTF-8 text")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    fn open(cx: &mut TestAppContext) -> (Entity<Compose>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::text_input::bind_keys(cx);
+            cx.bind_keys([gpui::KeyBinding::new("secondary-z", crate::main_window::Undo, Some("TextInput"))]);
+        });
+        cx.add_window_view(|window, cx| Compose::new("a@example.com", "b@example.com", "", Some((None, vec![])), window, cx))
+    }
+
+    #[gpui::test]
+    fn bold_and_italic_wrap_toggle_and_undo(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_input("Hej Åsa");
+        cx.simulate_keystrokes("secondary-a secondary-b");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "**Hej Åsa**");
+        cx.simulate_keystrokes("secondary-b");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa");
+        cx.simulate_keystrokes("secondary-i");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "_Hej Åsa_");
+        cx.simulate_keystrokes("secondary-i right secondary-b");
+        cx.simulate_input("fet");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa**fet**");
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa****");
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "Hej Åsa");
+    }
+
+    #[gpui::test]
+    fn enter_continues_and_ends_lists(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        for (source, after) in [("- ett", "- ett\n- "), ("* ett", "* ett\n* "), ("9. nio", "9. nio\n10. "), ("  - nästlad", "  - nästlad\n  - ")] {
+            view.update(cx, |v, cx| v.body.update(cx, |body, cx| body.set_text(source, cx)));
+            cx.simulate_keystrokes("enter");
+            assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), after);
+            cx.simulate_keystrokes("enter");
+            assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), format!("{source}\n"));
+        }
+    }
+
+    #[gpui::test]
+    fn list_shortcuts_toggle_selected_lines(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_input("ett\ntvå");
+        cx.simulate_keystrokes("secondary-a secondary-shift-8");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "- ett\n- två");
+        cx.simulate_keystrokes("secondary-shift-7");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "1. ett\n2. två");
+        cx.simulate_keystrokes("secondary-shift-7");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "ett\ntvå");
+    }
+
+    #[gpui::test]
+    fn markdown_heading_fills_only_an_empty_subject_and_body(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| v.insert_file_text(Path::new("brev.md"), "# Hälsningar\r\n\r\n**Hej**", cx));
+        assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).subject), "Hälsningar");
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "\n**Hej**");
+        for (subject, body, path) in [("Befintligt", "", "brev.md"), ("", "text", "brev.md"), ("", "", "brev.txt")] {
+            view.update(cx, |v, cx| {
+                v.subject.update(cx, |input, cx| input.set_text(subject, cx));
+                v.body.update(cx, |input, cx| input.set_text(body, cx));
+                v.insert_file_text(Path::new(path), "# Rubrik\ntext", cx);
+            });
+            assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).subject), subject);
+            assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), format!("{body}# Rubrik\ntext"));
+        }
+        view.update(cx, |v, cx| {
+            v.body.update(cx, |input, cx| { input.set_text("före efter", cx); input.select(6..6, cx); });
+            v.insert_file_text(Path::new("brev.markdown"), "mitten ", cx);
+        });
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "före mitten efter");
+    }
+
+    #[test]
+    fn file_import_checks_extension_size_and_utf8() {
+        let dir = std::env::temp_dir().join(format!("lagom-markdown-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mail.MD");
+        std::fs::write(&path, "# Hälsningar").unwrap();
+        assert_eq!(read_file(&path).unwrap(), "# Hälsningar");
+        assert!(read_file(&dir.join("missing.txt")).is_err());
+        assert!(read_file(&dir.join("image.png")).is_err());
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(read_file(&path).unwrap_err().contains("UTF-8"));
+        std::fs::write(&path, vec![b'a'; 1024 * 1024]).unwrap();
+        assert_eq!(read_file(&path).unwrap().len(), 1024 * 1024);
+        std::fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
+        assert!(read_file(&path).unwrap_err().contains("1 MB"));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

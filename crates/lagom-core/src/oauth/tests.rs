@@ -1,0 +1,307 @@
+use super::*;
+use keyring::credential::{CredentialApi, CredentialBuilderApi};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[test]
+fn pkce_and_callback_validation() {
+    assert_eq!(
+        challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    );
+    assert_eq!(
+        &*parse_callback("/?code=a%2Bb&state=expected", "expected").unwrap(),
+        "a+b"
+    );
+    assert!(matches!(
+        parse_callback("/?error=access_denied&state=s", "s"),
+        Err(Error::Cancelled)
+    ));
+    for target in [
+        "/?code=c&state=wrong",
+        "/?error=access_denied&state=wrong",
+        "/?code=c",
+        "/?state=s",
+        "/?code=c&state=s&state=s",
+        "/other?code=c&state=s",
+    ] {
+        assert!(parse_callback(target, "s").is_err());
+    }
+}
+fn jwt(payload: &str) -> String {
+    format!("header.{}.signature", URL_SAFE_NO_PAD.encode(payload))
+}
+#[test]
+fn jwt_identity() {
+    assert_eq!(
+        claims(&jwt(r#"{"email":"a@gmail.com","name":"Alice"}"#)).unwrap(),
+        ("a@gmail.com".into(), "Alice".into())
+    );
+    assert_eq!(
+        claims(&jwt(r#"{"preferred_username":"a@outlook.com"}"#))
+            .unwrap()
+            .0,
+        "a@outlook.com"
+    );
+    for token in [
+        "invalid".into(),
+        "a.%.c".into(),
+        jwt("{}"),
+        jwt(r#"{"email":"a\n@b.com"}"#),
+    ] {
+        assert!(claims(&token).is_err());
+    }
+}
+
+// A persistent in-memory keychain for the end-to-end flow; OS credentials are never touched.
+#[derive(Debug, Clone, Default)]
+struct Memory(Arc<Mutex<HashMap<String, String>>>);
+#[derive(Debug)]
+struct Credential {
+    memory: Memory,
+    key: String,
+}
+impl CredentialApi for Credential {
+    fn set_secret(&self, value: &[u8]) -> keyring::Result<()> {
+        self.set_password(std::str::from_utf8(value).unwrap())
+    }
+    fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+        self.get_password().map(String::into_bytes)
+    }
+    fn set_password(&self, value: &str) -> keyring::Result<()> {
+        self.memory
+            .0
+            .lock()
+            .unwrap()
+            .insert(self.key.clone(), value.into());
+        Ok(())
+    }
+    fn get_password(&self) -> keyring::Result<String> {
+        self.memory
+            .0
+            .lock()
+            .unwrap()
+            .get(&self.key)
+            .cloned()
+            .ok_or(keyring::Error::NoEntry)
+    }
+    fn delete_credential(&self) -> keyring::Result<()> {
+        self.memory.0.lock().unwrap().remove(&self.key);
+        Ok(())
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn debug_fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("test credential")
+    }
+}
+impl CredentialBuilderApi for Memory {
+    fn build(
+        &self,
+        _: Option<&str>,
+        service: &str,
+        user: &str,
+    ) -> keyring::Result<Box<keyring::credential::Credential>> {
+        Ok(Box::new(Credential {
+            memory: self.clone(),
+            key: format!("{service}/{user}"),
+        }))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+async fn request(
+    socket: tokio::net::TcpStream,
+) -> (BufReader<tokio::net::TcpStream>, String, String) {
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let first = line.clone();
+    let mut len = 0;
+    loop {
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            len = n.trim().parse().unwrap();
+        }
+    }
+    let mut body = vec![0; len];
+    reader.read_exact(&mut body).await.unwrap();
+    (reader, first, String::from_utf8(body).unwrap())
+}
+async fn respond(stream: &mut (impl AsyncWriteExt + Unpin), status: &str, body: &str) {
+    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+}
+#[tokio::test]
+async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
+    keyring::set_default_credential_builder(Box::new(Memory::default()));
+    for provider in [Provider::Google, Provider::Microsoft] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let config = || Config {
+            id: "test-id".into(),
+            secret: Zeroizing::new(
+                if provider == Provider::Google {
+                    "test-secret"
+                } else {
+                    ""
+                }
+                .into(),
+            ),
+            auth: format!("{endpoint}/authorize"),
+            token: format!("{endpoint}/token"),
+            scope: provider.config().scope,
+        };
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut socket, first, _) = request(socket).await;
+            let url = Url::parse(&format!(
+                "http://localhost{}",
+                first.split_whitespace().nth(1).unwrap()
+            ))
+            .unwrap();
+            let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(params["code_challenge_method"], "S256");
+            assert_eq!(params["client_id"], "test-id");
+            let redirect = Url::parse(&params["redirect_uri"]).unwrap();
+            assert_eq!(
+                redirect.host_str().unwrap(),
+                if provider == Provider::Google {
+                    "127.0.0.1"
+                } else {
+                    "localhost"
+                }
+            );
+            respond(&mut socket, "200 OK", "{}").await;
+            let mut callback =
+                tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
+                    .await
+                    .unwrap();
+            callback
+                .write_all(
+                    format!(
+                        "GET /?code=test-code&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                        params["state"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            callback.read_to_string(&mut response).await.unwrap();
+            assert!(response.contains("You can close this tab and return to Lagom."));
+            for n in 0..3 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _, form) = request(socket).await;
+                let form: HashMap<_, _> = url::form_urlencoded::parse(form.as_bytes())
+                    .into_owned()
+                    .collect();
+                assert_eq!(form["client_id"], "test-id");
+                assert_eq!(
+                    form.contains_key("client_secret"),
+                    provider == Provider::Google
+                );
+                if n == 0 {
+                    assert_eq!(form["grant_type"], "authorization_code");
+                    assert_eq!(challenge(&form["code_verifier"]), params["code_challenge"]);
+                    assert_eq!(form["redirect_uri"], params["redirect_uri"]);
+                    assert_eq!(form["code"], "test-code");
+                } else {
+                    assert_eq!(form["grant_type"], "refresh_token");
+                    assert_eq!(
+                        form["refresh_token"],
+                        if n == 1 { "refresh-1" } else { "refresh-2" }
+                    );
+                }
+                if n == 2 {
+                    respond(
+                        &mut socket,
+                        "400 Bad Request",
+                        r#"{"error":"invalid_grant","error_description":"secret-must-not-leak"}"#,
+                    )
+                    .await;
+                } else {
+                    let body = serde_json::json!({"access_token": format!("access-{n}"), "token_type":"Bearer", "expires_in":3600, "refresh_token":format!("refresh-{}", n+1), "id_token":jwt(r#"{"email":"alice@example.com","name":"Alice"}"#)}).to_string();
+                    respond(&mut socket, "200 OK", &body).await;
+                }
+            }
+        });
+        let signed = sign_in_with(provider, config(), |url| {
+            let url = url.to_owned();
+            tokio::spawn(async move {
+                http(Duration::from_secs(3))
+                    .unwrap()
+                    .get(url)
+                    .send()
+                    .await
+                    .unwrap();
+            });
+        })
+        .await
+        .unwrap();
+        assert_eq!(signed.email, "alice@example.com");
+        assert_eq!(signed.account.auth, Auth::OAuth(provider));
+        assert_eq!(&*signed.account.password().unwrap(), "refresh-1");
+        assert_eq!(
+            &*access_token_with(&signed.account, None, &config())
+                .await
+                .unwrap(),
+            "access-0"
+        );
+        assert_eq!(
+            &*access_token_with(&signed.account, Some("access-0"), &config())
+                .await
+                .unwrap(),
+            "access-1"
+        );
+        assert_eq!(&*signed.account.password().unwrap(), "refresh-2");
+        // A concurrent rejection of the old token reuses the refresh already completed.
+        assert_eq!(
+            &*access_token_with(&signed.account, Some("access-0"), &config())
+                .await
+                .unwrap(),
+            "access-1"
+        );
+        cache(&signed.account.id)
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .expires = Instant::now();
+        let error = access_token_with(&signed.account, None, &config())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::ReauthRequired));
+        assert!(!format!("{error:?}").contains("secret-must-not-leak"));
+        signed.account.delete_password().unwrap();
+        forget(&signed.account.id);
+        server.await.unwrap();
+    }
+}
+#[tokio::test]
+async fn dropping_sign_in_closes_the_listener() {
+    let mut redirect = None;
+    let mut config = Provider::Google.config();
+    config.id = "test".into();
+    let mut flow = Box::pin(sign_in_with(Provider::Google, config, |url| {
+        redirect = Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "redirect_uri")
+            .map(|(_, v)| v.into_owned());
+    }));
+    assert!(tokio::time::timeout(Duration::from_millis(30), &mut flow)
+        .await
+        .is_err());
+    drop(flow);
+    let redirect = Url::parse(&redirect.unwrap()).unwrap();
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
+            .await
+            .is_err()
+    );
+}
