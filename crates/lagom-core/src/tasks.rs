@@ -139,10 +139,14 @@ impl Store {
         changed(self.db.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?, notes, due])?)
     }
     pub fn set_done(&self, id: i64, done: bool) -> Result<()> {
-        changed(self.db.execute("UPDATE tasks SET done_at=CASE WHEN ?2 THEN unixepoch() ELSE NULL END,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, done])?)
+        changed(self.db.execute("UPDATE tasks SET done_at=CASE WHEN ?2 THEN COALESCE(done_at,unixepoch()) ELSE NULL END,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, done])?)
     }
+    /// Puts the task at `position` in `list`; tasks at or after it move down one.
     pub fn move_task(&self, id: i64, list: i64, position: i64) -> Result<()> {
-        changed(self.db.execute("UPDATE tasks SET list=?2,position=?3,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, list, position])?)
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute("UPDATE tasks SET position=position+1,updated=unixepoch(),dirty=1 WHERE list=?1 AND position>=?2 AND id<>?3 AND deleted=0", params![list, position, id])?;
+        changed(tx.execute("UPDATE tasks SET list=?2,position=?3,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, list, position])?)?;
+        Ok(tx.commit()?)
     }
     pub fn delete_task(&self, id: i64) -> Result<()> {
         changed(self.db.execute(
@@ -320,17 +324,22 @@ mod tests {
                 .iter()
                 .map(|t| t.id)
                 .collect::<Vec<_>>(),
-            [a.id, c.id, b.id]
+            [c.id, a.id, b.id]
         );
         reset_dirty(&s, a.id);
         s.set_done(a.id, true).unwrap();
         assert_dirty(&s, a.id);
+        let first: i64 = s.db.query_row("SELECT done_at FROM tasks WHERE id=?1", [a.id], |r| r.get(0)).unwrap();
+        s.db.execute("UPDATE tasks SET done_at=1 WHERE id=?1", [a.id]).unwrap();
+        s.set_done(a.id, true).unwrap();
+        let again: i64 = s.db.query_row("SELECT done_at FROM tasks WHERE id=?1", [a.id], |r| r.get(0)).unwrap();
+        assert!(first > 1 && again == 1, "marking done again keeps the first completion time");
         let all = s.tasks(list, true).unwrap();
         assert_eq!(
             all.iter().map(|t| t.id).collect::<Vec<_>>(),
             [c.id, b.id, a.id]
         );
-        assert_eq!(all[2].done_at, Some(all[2].updated));
+        assert_eq!(all[2].done_at, Some(1));
         assert_eq!(s.tasks(list, false).unwrap().len(), 2);
         reset_dirty(&s, a.id);
         s.set_done(a.id, false).unwrap();
