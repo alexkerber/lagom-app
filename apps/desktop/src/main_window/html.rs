@@ -129,7 +129,8 @@ pub(super) struct Web {
     shown: Option<Key>,
     /// A document finished loading since the view was last hidden for plain text.
     ready: bool,
-    visible: bool,
+    visible: Rc<std::cell::Cell<bool>>,
+    drawable: Rc<std::cell::Cell<bool>>,
     /// The shown mail has remote images.
     pub(super) has_remote: bool,
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
@@ -159,9 +160,13 @@ impl MainWindow {
     /// so the web view hides while one is open.
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
-        let want = self.inbox.current().filter(|_| matches!(self.page, Page::Mail) && !empty).map(|id| (id, &self.inbox.mail[id]));
+        let want = self.inbox.current().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
         let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
         self.web.frame(want, &self.theme, overlay, window, cx);
+        let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());
+        for body in self.expanded.values() {
+            body.update(cx, |body, cx| body.prepare(self.theme, overlay, window, cx));
+        }
     }
 }
 
@@ -186,6 +191,7 @@ impl Web {
             // Plain text: the next HTML message waits for its own load, never shows a stale one.
             self.shown = None;
             self.ready = false;
+            self.drawable.set(false);
             self.set_visible(false);
             return;
         };
@@ -207,16 +213,17 @@ impl Web {
             self.shown = Some(key);
             self.has_remote = has_remote(html);
             // Shown already: the previous message stays until this one has loaded, no flash.
-            self.ready &= self.visible;
+            self.ready &= self.visible.get();
         }
-        self.set_visible(self.ready && !overlay);
+        self.drawable.set(self.ready && !overlay);
+        // Native children outside the scroll viewport must stay hidden until their slot is painted.
+        self.set_visible(false);
     }
 
     fn set_visible(&mut self, visible: bool) {
-        if self.visible == visible {
+        if self.visible.replace(visible) == visible {
             return;
         }
-        self.visible = visible;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(view) = &self.view {
             let _ = view.set_visible(visible);
@@ -228,9 +235,22 @@ impl Web {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let view = self.view.clone();
         let place = self.place.clone();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let drawable = self.drawable.clone();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let visible = self.visible.clone();
         gpui::canvas(
             move |bounds, window, _| {
+                let mut bounds = bounds.intersect(&window.content_mask().bounds);
+                bounds.size.width = bounds.size.width.max(px(0.));
+                bounds.size.height = bounds.size.height.max(px(0.));
                 let now = Some((bounds, window.scale_factor()));
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                if let Some(view) = &view {
+                    let show = drawable.get() && bounds.size.width > px(0.) && bounds.size.height > px(0.);
+                    visible.set(show);
+                    let _ = view.set_visible(show);
+                }
                 if place.get() == now {
                     return;
                 }

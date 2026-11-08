@@ -290,7 +290,7 @@ impl ImapSync {
                 self.fetch_message(store, &folder, uid).await?;
             }
         }
-        for uid in store.missing_attachments(id, limit)? {
+        for uid in store.missing_metadata(id, limit)? {
             if present.contains(&uid) {
                 self.fetch_message(store, &folder, uid).await?;
             }
@@ -351,6 +351,7 @@ impl ImapSync {
         Ok(())
     }
     async fn fetch_message(&mut self, store: &Store, folder: &Folder, uid: u32) -> Result<()> {
+        // shortcut: async-imap exposes no X-GM-THRID accessor; add it to this FETCH when the dependency supports it.
         let metadata=net(async {self.session.uid_fetch(uid.to_string(),"(UID ENVELOPE FLAGS BODYSTRUCTURE RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER]<0.262144>)").await?.try_collect::<Vec<_>>().await}).await?;
         let Some(fetch) = metadata.iter().find(|f| f.uid == Some(uid)) else {
             return Ok(());

@@ -7,7 +7,7 @@ use lagom_core::{attachment::Attachment, store::MessageSummary};
 /// One message in the list and the reading pane.
 /// A folder a message can be in. `New`: one ⌘K is creating, known by its full name until the
 /// server lists it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Place {
     Folder(i64),
     New(String),
@@ -40,9 +40,14 @@ pub struct Mail {
     pub folder: Place,
     /// The folders it left, newest last: undo goes back to where it was when the action ran.
     pub was: Vec<Place>,
+    pub snoozed_until: Option<i64>,
+    pub was_snoozed: Vec<Option<i64>>,
     pub to: String,
     pub message_id: String,
     pub thread_key: String,
+    pub thread_id: String,
+    pub account: String,
+    pub date: i64,
 }
 
 impl Mail {
@@ -62,9 +67,14 @@ impl Mail {
             store: Some(m.id),
             folder: Place::Folder(m.folder),
             was: Vec::new(),
+            snoozed_until: m.snoozed_until,
+            was_snoozed: Vec::new(),
             to: m.to.clone(),
             message_id: m.message_id.clone(),
             thread_key: m.thread_key.clone(),
+            thread_id: m.thread_id.clone(),
+            account: m.account.clone(),
+            date: m.date,
         }
     }
 }
@@ -80,6 +90,10 @@ pub fn when(unix: i64, now: DateTime<Local>) -> String {
         _ if t.year() == now.year() => t.format("%-d %b").to_string(),
         _ => t.format("%b %Y").to_string(),
     }
+}
+
+pub fn full_date(unix: i64) -> String {
+    Local.timestamp_opt(unix, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
 /// Body text as paragraphs, split at blank lines.
@@ -192,7 +206,7 @@ pub struct Snapshot {
 /// worker reports a change, never per key press.
 /// `pin`: a store id that must be in the list on screen if it belongs there, even past
 /// `limit` (a ⌘K hit), so the selection lands on it and not on another row.
-pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64, pin: Option<i64>) -> lagom_core::Result<Snapshot> {
+pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64, pin: Option<i64>, group: bool) -> lagom_core::Result<Snapshot> {
     let folders = store.folders(account, now)?;
     let counts = store.counts(account, now)?;
     let inbox_id = folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox).map(|f| f.id);
@@ -201,13 +215,13 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
         view => view,
     };
     let mut inbox = match inbox_id {
-        Some(id) => store.list_messages(id, now, limit, 0)?,
+        Some(id) => if group { store.list_conversations(account, Some(id), now, limit)? } else { store.list_messages(id, now, limit, 0)? },
         None => Vec::new(),
     };
     let mut open = match view {
         View::Inbox | View::Trash => Vec::new(),
-        View::Folder(id) => store.list_messages(id, now, limit, 0)?,
-        View::Later => store.later(account, now, limit, 0)?,
+        View::Folder(id) => if group { store.list_conversations(account, Some(id), now, limit)? } else { store.list_messages(id, now, limit, 0)? },
+        View::Later => if group { store.list_conversations(account, None, now, limit)? } else { store.later(account, now, limit, 0)? },
     };
     if let Some(m) = pin.and_then(|id| store.message(id).ok()).map(|m| m.summary) {
         let snoozed = m.snoozed_until.is_some_and(|t| t > now);
@@ -219,7 +233,9 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
         };
         // Past the page means older than every loaded row: it goes last.
         if let Some(list) = list.filter(|l| !l.iter().any(|r| r.id == m.id)) {
-            list.push(m);
+            if group {
+                list.extend(store.thread_messages(account, &m.thread_id)?.into_iter().filter(|row| row.folder == m.folder && row.snoozed_until.is_some_and(|t| t > now) == snoozed));
+            } else { list.push(m); }
         }
     }
     let next_due = store.later(account, now, 1, 0)?.first().and_then(|m| m.snoozed_until);
@@ -441,7 +457,7 @@ mod tests {
             })
             .collect();
         let oldest = ids[0];
-        let rows = |pin, view| load(&store, &account.id, view, 3, 100, pin).unwrap();
+        let rows = |pin, view| load(&store, &account.id, view, 3, 100, pin, false).unwrap();
         let list = |s: Snapshot| s.inbox.iter().chain(&s.open).map(|m| m.id).collect::<Vec<_>>();
         // Page of 3: the oldest is not loaded, unless pinned; then it comes last, once.
         assert!(!list(rows(None, View::Inbox)).contains(&oldest));

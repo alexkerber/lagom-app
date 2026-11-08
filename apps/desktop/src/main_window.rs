@@ -154,6 +154,7 @@ fn row_y(ix: usize) -> f32 {
 }
 
 mod html;
+mod conversation;
 mod live;
 mod popout;
 pub use live::Live;
@@ -268,6 +269,11 @@ pub struct MainWindow {
     title: SharedString,
     // The web view for HTML mail.
     web: html::Web,
+    reading_thread: Option<usize>,
+    reading_dirty: bool,
+    reading_scroll: ScrollHandle,
+    reading_members: Vec<usize>,
+    expanded: HashMap<usize, Entity<conversation::MessageBody>>,
     // Messages open in their own windows: (message id, window).
     popouts: Vec<(usize, gpui::WindowHandle<MessageWindow>)>,
     _appearance: gpui::Subscription,
@@ -355,6 +361,11 @@ impl MainWindow {
             resize: None,
             title: SharedString::default(),
             web: html::Web::default(),
+            reading_thread: None,
+            reading_dirty: false,
+            reading_scroll: ScrollHandle::new(),
+            reading_members: Vec::new(),
+            expanded: HashMap::new(),
             popouts: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
@@ -362,6 +373,8 @@ impl MainWindow {
         if let Some(problem) = problem.or(preference_problem) {
             this.notify(problem, cx);
         }
+        this.inbox.group = this.panes.group_conversations;
+        this.inbox.regroup();
         if this.live.is_some() {
             this.reload(cx);
             this.restore_drafts(window, cx);
@@ -627,6 +640,8 @@ impl MainWindow {
     /// `when`: the time a Later move brings the message back.
     fn act_with(&mut self, ix: usize, what: Move, dx: f32, when: LaterWhen, cx: &mut Context<Self>) {
         if self.emptying_trash() { return; }
+        let Some(&row) = self.inbox.list().get(ix) else { return };
+        let members = self.inbox.members(row);
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
         // The list changes height under the highlight; rows paint the selection until it settles.
         self.glide = None;
@@ -638,8 +653,10 @@ impl MainWindow {
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, at: Instant::now(), dx });
-        self.server(what, id, when, cx);
-        self.close_popouts(Some(id), cx);
+        for member in members {
+            self.server(what, member, when, cx);
+            self.close_popouts(Some(member), cx);
+        }
         // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
         if what == Move::Delete {
             self.notify("Deleted", cx);
@@ -658,6 +675,7 @@ impl MainWindow {
         self.clear_motion();
         self.page = Page::Mail;
         self.inbox.open(f);
+        self.reading_thread = None;
         if let Some(live) = &mut self.live {
             live.pin = None;
         }
@@ -679,8 +697,11 @@ impl MainWindow {
     fn undo(&mut self, cx: &mut Context<Self>) {
         if self.emptying_trash() { return; }
         let open = self.inbox.open;
+        let members = self.inbox.batches.last().cloned().unwrap_or_default();
         let Some((what, id, ix)) = self.inbox.undo() else { return };
-        self.unserver(what, id, cx);
+        for member in members { self.unserver(what, member, cx); }
+        self.inbox.regroup();
+        let (id, ix) = if self.inbox.group { (self.inbox.current().unwrap_or(id), self.inbox.selected) } else { (id, ix) };
         self.toast = None;
         self.come_back(what, id, ix, self.inbox.open != open, cx);
     }
@@ -1359,7 +1380,10 @@ impl MainWindow {
         };
         // `bg`: paints the selection fill; `on_sel`: text colours for a row on the selection fill.
         // Unread is a dot and a semibold sender; the sender truncates, so nothing beside it moves.
-        let row = |m: &Mail, bg: bool, on_sel: bool| {
+        let row = |id: usize, bg: bool, on_sel: bool| {
+            let m = &self.inbox.mail[id];
+            let members = self.inbox.members(id);
+            let unread = members.iter().any(|&id| self.inbox.mail[id].unread);
             let (ink, ink2) = if on_sel { (sel_ink, sel_ink2) } else { (t.ink, t.ink2) };
             div()
                 .flex()
@@ -1377,15 +1401,16 @@ impl MainWindow {
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .child(div().size(px(7.)).flex_shrink_0().rounded_full().when(m.unread, |d| d.bg(if on_sel { dot } else { t.accent })))
+                        .child(div().size(px(7.)).flex_shrink_0().rounded_full().when(unread, |d| d.bg(if on_sel { dot } else { t.accent })))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .one_line()
-                                .when(m.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
                                 .child(m.from.clone()),
                         )
+                        .when(members.len() > 1, |d| d.child(mono(members.len().to_string(), ink2).px(px(5.)).rounded(px(radius::CONTROL)).bg(t.subtle)))
                         .child(mono(m.time.clone(), ink2)),
                 )
                 .child(div().pl(px(13.)).one_line().child(m.subject.clone()))
@@ -1409,7 +1434,7 @@ impl MainWindow {
             self.ghosts.iter().filter(move |g| g.ix == ix).map(move |g| {
                 let (what, dx) = (g.what, g.dx);
                 let p = g.progress(now);
-                let el = away(row(&self.inbox.mail[g.id], false, false), theme, what, p, dx).into_any_element();
+                let el = away(row(g.id, false, false), theme, what, p, dx).into_any_element();
                 with_behind(el, theme, what, p)
             })
         };
@@ -1448,7 +1473,7 @@ impl MainWindow {
             let selected = i == self.inbox.selected;
             // A row under the fingers or springing back paints its own fill and gets no copy.
             let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
-            let el = row(&self.inbox.mail[id], selected && gliding.is_none(), selected && (landed || moving))
+            let el = row(id, selected && gliding.is_none(), selected && (landed || moving))
                 .id(("row", id))
                 // Arrow at rest, as in native lists.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.
@@ -1531,7 +1556,7 @@ impl MainWindow {
                     continue;
                 }
                 let y = row_y(ix);
-                let ink = row(&self.inbox.mail[id], false, true)
+                let ink = row(id, false, true)
                     .absolute()
                     .left_0()
                     .right_0()
@@ -1672,6 +1697,17 @@ impl MainWindow {
         self.inbox.open.map_or("Inbox".into(), |f| self.inbox.folders[f].name.clone().into())
     }
 
+    pub(super) fn toggle_conversations(&mut self, cx: &mut Context<Self>) {
+        self.panes.group_conversations = !self.panes.group_conversations;
+        self.inbox.group = self.panes.group_conversations;
+        self.inbox.regroup();
+        self.clear_motion();
+        self.reading_thread = None;
+        self.save_panes(cx);
+        self.reload(cx);
+        cx.notify();
+    }
+
     fn reading_pane(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
@@ -1719,7 +1755,8 @@ impl MainWindow {
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
                     ),
             )
-            .child(reading_view(t, id, m, text, self.web.slot(), toasts, on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
+            .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, id, m, text, self.web.slot(), toasts, on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
     }
 }
 
@@ -1936,7 +1973,7 @@ impl Render for MainWindow {
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
-                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), cx)
+                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
@@ -2204,11 +2241,15 @@ struct Inbox {
     trash: Vec<usize>,
     // (what, message id, list it left, index it left from).
     history: Vec<(Move, usize, Option<usize>, usize)>,
+    batches: Vec<Vec<usize>>,
+    group: bool,
+    rows: Vec<usize>,
+    members: HashMap<usize, Vec<usize>>,
 }
 
 impl Inbox {
     fn new(len: usize, later: usize) -> Self {
-        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, later, trash: Vec::new(), history: Vec::new() }
+        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new() }
     }
 
     /// The sample inbox and folders, with their unread counts.
@@ -2228,6 +2269,40 @@ impl Inbox {
     }
 
     fn list(&self) -> &Vec<usize> {
+        if self.group { &self.rows } else { self.raw_list() }
+    }
+
+    fn members(&self, id: usize) -> Vec<usize> {
+        if self.group { self.members.get(&id).cloned().unwrap_or_else(|| vec![id]) } else { vec![id] }
+    }
+
+    fn regroup(&mut self) {
+        let keep = self.current();
+        let mut groups: HashMap<(String, mail::Place, String), usize> = HashMap::new();
+        self.members.clear();
+        let mut rows = Vec::new();
+        for id in self.raw_list().clone() {
+            let m = &self.mail[id];
+            let key = (m.account.clone(), m.folder.clone(), if m.thread_id.is_empty() { format!("message:{id}") } else { m.thread_id.clone() });
+            let rep = *groups.entry(key).or_insert_with(|| { rows.push(id); id });
+            self.members.entry(rep).or_default().push(id);
+        }
+        for rep in &mut rows {
+            let mut members = self.members.remove(rep).unwrap();
+            members.sort_by_key(|&id| (self.mail[id].date, self.mail[id].store.unwrap_or(id as i64)));
+            let latest = *members.last().unwrap();
+            self.members.insert(latest, members);
+            *rep = latest;
+        }
+        rows.sort_by_key(|&id| std::cmp::Reverse((self.mail[id].date, self.mail[id].store.unwrap_or(0))));
+        self.rows = rows;
+        if self.group {
+            self.selected = keep.and_then(|id| self.rows.iter().position(|rep| self.members[rep].contains(&id)))
+                .unwrap_or(self.selected).min(self.rows.len().saturating_sub(1));
+        }
+    }
+
+    fn raw_list(&self) -> &Vec<usize> {
         if self.open_kind() == Some(Kind::Trash) { return &self.trash; }
         self.open.map_or(&self.items, |f| &self.folders[f].items)
     }
@@ -2247,6 +2322,7 @@ impl Inbox {
 
     /// The count for the list on screen.
     fn shown_count(&self) -> usize {
+        if self.group { return self.rows.len(); }
         match self.open {
             None => self.count(),
             Some(_) => self.list().len(),
@@ -2263,6 +2339,8 @@ impl Inbox {
 
     fn open(&mut self, f: Option<usize>) {
         self.open = f;
+        self.selected = 0;
+        self.regroup();
         self.selected = 0;
     }
 
@@ -2321,6 +2399,24 @@ impl Inbox {
     /// Removes the message at `ix`. If it was selected, the one below it (above it at the end)
     /// becomes selected. A swipe can hit any row, so otherwise the selection stays on its message.
     fn act_at(&mut self, ix: usize, what: Move) -> Option<(usize, usize)> {
+        let id = *self.list().get(ix)?;
+        let keep = self.current();
+        let selected = self.selected;
+        let members = self.members(id);
+        let mut moved = Vec::new();
+        for member in members {
+            let Some(at) = self.raw_list().iter().position(|&i| i == member) else { continue };
+            if self.act_one(at, what).is_some() { moved.push(member); }
+        }
+        if moved.is_empty() { return None; }
+        self.batches.push(moved);
+        self.regroup();
+        self.selected = keep.and_then(|keep| self.list().iter().position(|&rep| self.members(rep).contains(&keep)))
+            .unwrap_or(selected).min(self.list().len().saturating_sub(1));
+        Some((id, ix))
+    }
+
+    fn act_one(&mut self, ix: usize, what: Move) -> Option<(usize, usize)> {
         if what == Move::Inbox && self.open.is_none() { return None; }
         if let Move::Folder(f) = what {
             // A move into the open folder, or a folder that does not exist, changes nothing.
@@ -2338,12 +2434,12 @@ impl Inbox {
         if here.is_some() && self.open_kind() == here {
             return None;
         }
-        let id = *self.list().get(ix)?;
+        let id = *self.raw_list().get(ix)?;
         self.list_mut().remove(ix);
         if ix < self.selected {
             self.selected -= 1;
         }
-        self.selected = self.selected.min(self.list().len().saturating_sub(1));
+        self.selected = self.selected.min(self.raw_list().len().saturating_sub(1));
         self.recount(id, self.open, what, false);
         match what {
             Move::Inbox => self.items.insert(0, id),
@@ -2357,15 +2453,39 @@ impl Inbox {
 
     /// Puts the last moved message back where it was, opens that list and selects the message.
     fn undo(&mut self) -> Option<(Move, usize, usize)> {
-        let last = self.history.len().checked_sub(1)?;
-        self.restore(last, true)
+        let batch = self.batches.pop()?;
+        let mut result = None;
+        for id in batch.into_iter().rev() {
+            if let Some(at) = self.history.iter().rposition(|h| h.1 == id) {
+                result = self.restore(at, true);
+            }
+        }
+        self.regroup();
+        result.map(|(what, id, ix)| {
+            let row = self.list().iter().position(|&rep| self.members(rep).contains(&id)).unwrap_or(ix);
+            self.selected = row;
+            (what, self.list().get(row).copied().unwrap_or(id), row)
+        })
     }
 
     /// A move of `id` failed on the server: take it back. Returns where the row reappears, if its
     /// list is on screen; otherwise the next store read shows it there.
     fn revert(&mut self, id: usize) -> Option<(Move, usize, usize)> {
         let at = self.history.iter().rposition(|h| h.1 == id)?;
-        self.restore(at, false)
+        if let Some(batch) = self.batches.iter_mut().rev().find(|batch| batch.contains(&id)) {
+            batch.retain(|&member| member != id);
+        }
+        self.batches.retain(|batch| !batch.is_empty());
+        let count = self.list().len();
+        let keep = self.current();
+        let result = self.restore(at, false);
+        self.regroup();
+        if let Some(ix) = keep.and_then(|id| self.list().iter().position(|&rep| self.members(rep).contains(&id))) { self.selected = ix; }
+        if self.group && self.list().len() == count { return None; }
+        result.map(|(what, id, ix)| {
+            let row = self.list().iter().position(|&rep| self.members(rep).contains(&id)).unwrap_or(ix);
+            (what, self.list().get(row).copied().unwrap_or(id), row)
+        })
     }
 
     /// `switch`: open the list the message left (undo). Otherwise the selection stays on its message.
@@ -2382,7 +2502,7 @@ impl Inbox {
             return None;
         }
         self.open = from;
-        let was_empty = self.list().is_empty();
+        let was_empty = self.raw_list().is_empty();
         let list = self.list_mut();
         list.retain(|&i| i != id);
         let ix = ix.min(list.len());
@@ -2400,6 +2520,7 @@ impl Inbox {
     fn left(&mut self, id: usize, target: Option<mail::Place>) {
         let m = &mut self.mail[id];
         m.was.push(m.folder.clone());
+        m.was_snoozed.push(m.snoozed_until);
         if let Some(target) = target {
             m.folder = target;
         }
@@ -2411,6 +2532,7 @@ impl Inbox {
         if let Some(folder) = m.was.pop() {
             m.folder = folder;
         }
+        if let Some(until) = m.was_snoozed.pop() { m.snoozed_until = until; }
         m.folder.clone()
     }
 
@@ -2431,6 +2553,7 @@ impl Inbox {
                     fresh.body.clear();
                 }
                 fresh.was = std::mem::take(&mut self.mail[id].was);
+                fresh.was_snoozed = std::mem::take(&mut self.mail[id].was_snoozed);
                 self.mail[id] = fresh;
                 id
             }
@@ -2456,7 +2579,8 @@ impl Inbox {
                 *self.list_mut() = snap.open.iter().map(|m| self.intern(m, seen, now)).collect();
             }
         }
-        let found = keep.and_then(|s| self.list().iter().position(|&id| self.mail[id].store == Some(s)));
+        self.regroup();
+        let found = keep.and_then(|s| self.list().iter().position(|&id| self.members(id).iter().any(|&member| self.mail[member].store == Some(s))));
         self.selected = found.unwrap_or(self.selected).min(self.list().len().saturating_sub(1));
     }
 }
@@ -2464,6 +2588,52 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_actions_and_undo_stay_in_the_folder() {
+        for what in [Move::Done, Move::Later, Move::Delete, Move::Folder(0)] {
+            let mut inbox = Inbox::demo(4);
+            inbox.group = true;
+            for id in [0, 1, 7] {
+                inbox.mail[id].thread_id = "conversation".into();
+                inbox.mail[id].date = id as i64;
+            }
+            inbox.regroup();
+            assert_eq!(inbox.list().len(), 3);
+            assert_eq!(inbox.members(1), [0, 1]);
+            inbox.selected = 1;
+            let keep = inbox.current();
+            inbox.act_at(0, what).unwrap();
+            assert!(!inbox.items.contains(&0) && !inbox.items.contains(&1));
+            assert!(inbox.folders[0].items.contains(&7));
+            assert_eq!(inbox.current(), keep);
+            assert_eq!(inbox.batches.last().unwrap(), &[0, 1]);
+            let (_, id, _) = inbox.undo().unwrap();
+            assert_eq!(id, 1);
+            assert_eq!(inbox.members(id), [0, 1]);
+            assert!(inbox.history.is_empty());
+            assert_eq!(inbox.list().len(), 3);
+            inbox.group = false;
+            assert_eq!(inbox.list().len(), 4);
+        }
+    }
+
+    #[test]
+    fn failed_thread_member_does_not_undo_successful_members_twice() {
+        let mut inbox = Inbox::demo(3);
+        inbox.group = true;
+        inbox.mail[0].thread_id = "thread".into();
+        inbox.mail[1].thread_id = "thread".into();
+        inbox.regroup();
+        inbox.act_at(0, Move::Delete).unwrap();
+        inbox.revert(0).unwrap();
+        assert_eq!(inbox.batches, [vec![1]]);
+        inbox.undo().unwrap();
+        assert_eq!(inbox.items.iter().filter(|&&id| id == 0).count(), 1);
+        assert_eq!(inbox.items.iter().filter(|&&id| id == 1).count(), 1);
+        assert!(inbox.trash.is_empty());
+        assert_eq!(inbox.list().len(), 2);
+    }
 
     #[test]
     fn virtual_ranges_include_partial_rows_and_trailing_ghosts() {
@@ -2858,6 +3028,52 @@ mod dispatch {
     }
 
     #[gpui::test]
+    fn conversation_reading_and_setting_keep_thread_rows_virtual(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        view.update(cx, |v, cx| {
+            for (id, mail) in v.inbox.mail.iter_mut().enumerate() {
+                mail.thread_id = format!("thread-{}", id / 2);
+                mail.date = -(id as i64);
+                mail.unread = id == 1;
+            }
+            v.inbox.regroup();
+            v.reading_thread = None;
+            cx.notify();
+        });
+        frame(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.list().len(), 5_000);
+            assert_eq!(v.reading_members, [1, 0]);
+            assert!(v.expanded.contains_key(&1));
+        });
+        assert!(children(&view, cx) < 15);
+        view.update(cx, |v, cx| {
+            v.toggle_message(0, cx);
+            assert_eq!(v.expanded.len(), 2);
+            v.toggle_message(1, cx);
+            assert_eq!(v.expanded.len(), 1);
+        });
+        cx.simulate_keystrokes("j");
+        frame(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.current()), Some(2));
+        view.update(cx, |v, cx| v.act(Move::Delete, cx));
+        assert_eq!(inbox_len(&view, cx), 4_999);
+        view.update(cx, |v, cx| v.undo(cx));
+        assert_eq!(inbox_len(&view, cx), 5_000);
+        view.update(cx, |v, cx| {
+            v.toggle_conversations(cx);
+            assert_eq!(v.inbox.list().len(), 10_000);
+            v.toggle_conversations(cx);
+            assert_eq!(v.inbox.list().len(), 5_000);
+            v.inbox.selected = 2500;
+            v.scroll.set_offset(gpui::point(px(0.), px(-row_y(2500))));
+            v.clear_motion();
+        });
+        frame(cx);
+        assert!(children(&view, cx) < 15);
+    }
+
+    #[gpui::test]
     fn inline_folder_name_enter_escape_and_validation(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let n = view.read_with(cx, |v, _| v.inbox.folders.len());
@@ -2954,6 +3170,7 @@ mod dispatch {
         view.update(cx, |v, _| {
             v.inbox.mail = vec![Mail { from: "Sender".into(), subject: "Subject".into(), snippet: "Preview".into(), ..Mail::default() }; 10_000];
             v.inbox.items = (0..10_000).collect();
+            v.inbox.regroup();
         });
         cx.simulate_resize(gpui::size(px(1440.), px(600.)));
         (view, cx)
@@ -3056,6 +3273,7 @@ mod dispatch {
         assert!(children(&view, cx) < 40);
         view.update(cx, |v, cx| {
             v.inbox.items.truncate(20);
+            v.inbox.regroup();
             v.inbox.selected = 19;
             v.clear_motion();
             cx.notify();
@@ -3264,7 +3482,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();

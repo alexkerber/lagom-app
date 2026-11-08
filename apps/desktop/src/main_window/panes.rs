@@ -22,7 +22,11 @@ pub(super) struct Panes {
     pub sidebar: f32,
     pub list: f32,
     pub sidebar_hidden: bool,
+    #[serde(default = "group_default")]
+    pub group_conversations: bool,
 }
+
+fn group_default() -> bool { true }
 
 impl Panes {
     pub fn new(viewport: f32) -> Self {
@@ -30,6 +34,7 @@ impl Panes {
             sidebar: SIDEBAR_DEFAULT,
             list: default_list(viewport, SIDEBAR_DEFAULT),
             sidebar_hidden: false,
+            group_conversations: true,
         }
     }
 
@@ -133,6 +138,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_preferences_group_by_default_and_off_roundtrips() {
+        let mut panes: Panes = serde_json::from_str(r#"{"sidebar":220,"list":420,"sidebar_hidden":false}"#).unwrap();
+        assert!(panes.group_conversations);
+        panes.group_conversations = false;
+        let restored: Panes = serde_json::from_str(&serde_json::to_string(&panes).unwrap()).unwrap();
+        assert!(!restored.group_conversations);
+    }
+
+    #[test]
     fn defaults_match_the_original_layout() {
         assert_eq!(Panes::new(1440.).fit(1440.), (220., 420.));
         assert_eq!(Panes::new(970.).fit(970.), (220., 300.));
@@ -144,6 +158,7 @@ mod tests {
             sidebar: 320.,
             list: 560.,
             sidebar_hidden: false,
+            group_conversations: true,
         };
         assert_eq!(panes.fit(1440.), (320., 560.));
         assert_eq!(panes.fit(1100.), (320., 330.));
@@ -196,6 +211,7 @@ mod tests {
                             sidebar,
                             list,
                             sidebar_hidden,
+                            group_conversations: true,
                         };
                         let (sidebar, list) = panes.fit(viewport);
                         assert!(sidebar == 0. || (180. ..=320.).contains(&sidebar));
@@ -218,7 +234,7 @@ mod tests {
             for i in 0..8 {
                 let path = &path;
                 scope.spawn(move || {
-                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0 };
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true };
                     for _ in 0..100 {
                         panes.save(path).unwrap();
                         let saved = Panes::load(path, 1440.).unwrap();
