@@ -21,7 +21,7 @@ pub struct Live {
     sync: HashMap<String, SyncState>,
     ops: HashMap<u64, Op>,
     next_op: Rc<std::cell::Cell<u64>>,
-    pending: Rc<std::cell::RefCell<HashSet<u64>>>,
+    pending: Rc<std::cell::RefCell<HashMap<u64, Option<String>>>>,
     /// The current list still needs a successful store read.
     stale: bool,
     /// Rows per list read. Grows when the selection nears the end.
@@ -69,7 +69,8 @@ struct Mail {
     bridge: Bridge,
     next_op: Rc<std::cell::Cell<u64>>,
     // Destructive actions must wait for commands issued by a window that has since closed.
-    pending: Rc<std::cell::RefCell<HashSet<u64>>>,
+    // Keep the Empty Trash account so its guard and cleanup survive reopening too.
+    pending: Rc<std::cell::RefCell<HashMap<u64, Option<String>>>>,
     _events: Task<()>,
 }
 
@@ -182,8 +183,9 @@ impl Live {
     fn op(&mut self, op: Op) -> u64 {
         let id = self.next_op.get() + 1;
         self.next_op.set(id);
+        let account = match &op { Op::EmptyTrash(account) => Some(account.clone()), _ => None };
+        self.pending.borrow_mut().insert(id, account);
         self.ops.insert(id, op);
-        self.pending.borrow_mut().insert(id);
         id
     }
 }
@@ -333,8 +335,9 @@ impl MainWindow {
                 }
                 Event::Op { op, error } => {
                     read = true;
-                    if let Some(live) = &self.live { live.pending.borrow_mut().remove(&op); }
-                    let Some(done) = self.live.as_mut().and_then(|l| l.ops.remove(&op)) else { continue };
+                    let Some(live) = &mut self.live else { continue };
+                    let empty = live.pending.borrow_mut().remove(&op).flatten();
+                    let Some(done) = live.ops.remove(&op).or_else(|| empty.map(Op::EmptyTrash)) else { continue };
                     match (done, error) {
                         (Op::EmptyTrash(account), None) => {
                             if self.live.as_ref().and_then(|l| l.account()).is_some_and(|a| a.id == account) {
@@ -570,7 +573,7 @@ impl MainWindow {
     }
 
     pub(super) fn emptying_trash(&self) -> bool {
-        self.live.as_ref().is_some_and(|l| l.ops.values().any(|op| matches!(op, Op::EmptyTrash(_))))
+        self.live.as_ref().is_some_and(|l| l.pending.borrow().values().any(Option::is_some))
     }
 
     pub(super) fn can_empty_trash(&self) -> bool {
@@ -1017,7 +1020,7 @@ mod tests {
         drop(view);
         cx.run_until_parked();
         let mut handle = cx.cx.update(|cx| crate::open_main_window(false, cx).unwrap());
-        for action in 0..3 {
+        for action in 0..4 {
             handle.update(cx, |v, _, cx| {
                 v.open_kind(Kind::Trash, cx);
                 assert!(v.can_empty_trash());
@@ -1045,23 +1048,78 @@ mod tests {
                 v.confirm_empty_trash = true;
                 v.empty_trash(cx);
                 assert!(!v.confirm_empty_trash);
+                if action >= 2 {
+                    v.act(Move::Inbox, cx);
+                    assert_eq!(v.inbox.list().len(), 1, "Restore must stay blocked while the old empty command is pending");
+                }
             }).unwrap();
             assert!(rx.try_recv().is_err(), "no empty command while the old command is pending");
-            if action == 0 {
+            if action == 0 || action == 3 {
                 handle.update(cx, |_, window, _| window.remove_window()).unwrap();
                 cx.run_until_parked();
             }
             cx.cx.update(|cx| Mail::dispatch(vec![Event::Op { op, error: Some("fixture refused".into()) }, Event::Changed], cx));
-            if action == 0 {
+            if action == 0 || action == 3 {
                 handle = cx.cx.update(|cx| crate::open_main_window(false, cx).unwrap());
             }
             handle.update(cx, |v, _, cx| {
                 v.open_kind(Kind::Trash, cx);
                 assert!(v.can_empty_trash(), "completion must release the guard even without a window");
+                assert!(!v.emptying_trash());
+                if action == 2 {
+                    assert!(v.toast.as_ref().unwrap().0.contains("Could not empty Trash"));
+                }
                 assert!(v.create_folder("Parent/Child", cx).is_err(), "namespace validation survives reopen");
             }).unwrap();
             assert!(rx.try_recv().is_err());
         }
+    }
+
+    #[gpui::test]
+    fn reopened_empty_trash_completion_closes_new_popouts(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, mut rx) = window(cx);
+        let (store, bridge, next_op, pending, message) = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            let folder = live.store.save_folder(account, "Trash", None, FolderRole::Trash).unwrap();
+            let message = live.store.save_message(&Message { summary: MessageSummary {
+                account: account.clone(), folder, uid: 1, seen: true, ..Default::default()
+            }, ..Default::default() }).unwrap();
+            v.inbox = Inbox::live();
+            v.open_kind(Kind::Trash, cx);
+            v.confirm_empty_trash = true;
+            v.empty_trash(cx);
+            let live = v.live.as_ref().unwrap();
+            (live.store.clone(), live.bridge.clone(), live.next_op.clone(), live.pending.clone(), message)
+        });
+        let Cmd::EmptyTrash { op, .. } = rx.try_recv().unwrap() else { panic!("missing empty") };
+        cx.cx.update(|cx| cx.set_global(Mail { store: store.clone(), bridge, next_op, pending, _events: Task::ready(()) }));
+        let weak = view.downgrade();
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+        let handle = cx.cx.update(|cx| crate::open_main_window(false, cx).unwrap());
+        let popout = handle.update(cx, |v, window, cx| {
+            v.open_kind(Kind::Trash, cx);
+            v.open_popout(window, cx);
+            v.popouts[0].1
+        }).unwrap();
+        assert!(popout.read_with(cx, |_, _| ()).is_ok());
+        popout.update(cx, |v, _, cx| v.act(Move::Inbox, cx)).unwrap();
+        assert!(rx.try_recv().is_err(), "popout Restore must wait for the old empty command");
+        store.delete_message(message).unwrap();
+        cx.cx.update(|cx| Mail::dispatch(vec![Event::Op { op, error: None }], cx));
+        cx.run_until_parked();
+        assert!(popout.read_with(cx, |_, _| ()).is_err(), "completion must close popouts opened after reopening");
+        handle.read_with(cx, |v, _| {
+            assert!(v.inbox.list().is_empty());
+            assert!(v.popouts.is_empty());
+            assert!(v.can_empty_trash());
+            assert_eq!(v.toast.as_ref().unwrap().0, "Trash emptied");
+        }).unwrap();
+        assert!(rx.try_recv().is_err());
     }
 
     #[gpui::test]
