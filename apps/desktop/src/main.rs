@@ -51,15 +51,8 @@ impl AssetSource for Assets {
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
-        // Inter Tight is bundled. Inter and Geist Mono come from the system for now.
-        // shortcut: relies on installed Inter and Geist Mono, bundle them before the first release.
-        cx.text_system()
-            .add_fonts(vec![
-                Cow::Borrowed(include_bytes!("../assets/fonts/InterTight-Bold.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/fonts/InterTight-ExtraBold.ttf")),
-            ])
-            .expect("load bundled fonts");
-
+        // All text is the system font. Geist Mono (palette key caps) comes from the system if
+        // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.
         main_window::bind_keys(cx);
         text_input::bind_keys(cx);
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
@@ -69,10 +62,12 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(main_window::MIN_WINDOW.0), px(main_window::MIN_WINDOW.1))),
                 // macOS: no visible title bar, traffic lights inside the sidebar. The invisible
                 // system title bar still moves the window. Windows and Linux keep their native bar.
                 titlebar: Some(TitlebarOptions {
-                    title: Some("lagom".into()),
+                    // The list on screen; MainWindow keeps it current.
+                    title: Some("Inbox".into()),
                     appears_transparent: cfg!(target_os = "macos"),
                     traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(18.))),
                 }),

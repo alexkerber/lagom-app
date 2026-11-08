@@ -10,12 +10,12 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent, PathPromptOptions, Rgba, Subscription, Task, Window,
 };
 
-use crate::main_window::{key_button, mono, pressable};
+use crate::main_window::{button, mono, pressable};
 use crate::motion::spring;
 use crate::mail::recipients;
 use crate::text_input::{TextInput, TextInputEvent};
 use lagom_core::smtp::Outgoing;
-use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
+use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, READING_LEADING};
 
 /// Sample reply for `LAGOM_SCREEN=compose-text`.
 const BODY: &str = "Thursday works. I will read the minutes before the meeting. Probably on the train.\n\nAlex";
@@ -438,8 +438,7 @@ impl Compose {
                             .rounded(px(radius::CONTROL))
                             .text_color(t.ink2)
                             .on_click(cx.listener(|this, _, _, cx| this.discard(cx)))
-                            .child("Discard")
-                            .child(mono("⌘⌫", t.ink2)),
+                            .child("Discard"),
                     ),
             )
             .child(
@@ -459,8 +458,7 @@ impl Compose {
                                 .rounded(px(radius::CONTROL))
                                 .text_color(t.ink2)
                                 .on_click(cx.listener(|this, _, window, cx| this.add_cc(window, cx)))
-                                .child("Cc")
-                                .child(mono("⌘⇧C", t.ink2)),
+                                .child("Cc"),
                         )
                     }))
                     .when(self.show_cc, |d| d.child(field("Cc").child(grow(&self.cc))))
@@ -473,7 +471,7 @@ impl Compose {
                     .px(px(24.))
                     .py(px(20.))
                     .text_size(px(size::BODY))
-                    .line_height(relative(1.6))
+                    .line_height(relative(READING_LEADING))
                     .child(self.body.clone()),
             )
             .child(
@@ -487,7 +485,7 @@ impl Compose {
                     .border_t_1()
                     .border_color(t.line)
                     .child(
-                        key_button(t, "Send", "⌘↵", Some(t.accent))
+                        button(t, "Send", Some(t.accent))
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     )
                     // shortcut: Attach and Send later are left out until the core supports them.
@@ -505,46 +503,33 @@ impl Compose {
             )
     }
 
-    fn toast(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = &self.theme;
-        toast(
-            t,
-            // Nothing has left yet: it goes when the Undo window ends.
-            "Sending",
-            Some(key_button(t, "Undo", "⌘Z", None).on_click(cx.listener(|this, _, window, cx| { this.undo(window, cx); })).into_any_element()),
-        )
-    }
 }
 
-/// A toast at the bottom of the window: a label and, optionally, an Undo button.
+/// Where toasts stack: bottom-centre of the element it is placed in, `bottom` px up.
+pub(crate) fn toast_layer(bottom: f32) -> Div {
+    div().absolute().bottom(px(bottom)).left_0().right_0().flex().flex_col().items_center().gap(px(8.))
+}
+
+/// A toast: a label and, optionally, an Undo button. Put it in a `toast_layer`.
 pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Option<gpui::AnyElement>) -> impl IntoElement {
     let label = label.into();
     div()
-        .absolute()
-        .bottom(px(24.))
-        .left_0()
-        .right_0()
         .flex()
-        .justify_center()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .h(px(48.))
-                .pl(px(16.))
-                .pr(px(if undo.is_some() { 7. } else { 16. }))
-                .bg(t.raised)
-                .border_1()
-                .border_color(t.line)
-                .rounded(px(radius::PANEL))
-                .shadow_lg()
-                .font_weight(FontWeight::MEDIUM)
-                .child(label)
-                .children(undo),
-        )
+        .items_center()
+        .gap(px(12.))
+        .h(px(40.))
+        .pl(px(14.))
+        .pr(px(if undo.is_some() { 6. } else { 14. }))
+        .bg(t.raised)
+        .border_1()
+        .border_color(t.line)
+        .rounded(px(radius::PANEL))
+        .shadow_lg()
+        .font_weight(FontWeight::MEDIUM)
+        .child(label)
+        .children(undo)
         .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
-            d.opacity(ease_out_quint()(v)).bottom(px(16. + 8. * spring(v)))
+            d.opacity(ease_out_quint()(v)).relative().top(px(8. * (1. - spring(v))))
         })
 }
 
@@ -556,7 +541,8 @@ impl Render for Compose {
             return div();
         }
         let t = self.theme;
-        let scrim = Rgba { a: 0.7, ..t.subtle };
+        // A light veil, as AppKit sheets barely dim the window behind them.
+        let scrim = Rgba { a: 0.12, ..gpui::rgb(0x000000) };
         let layer = div()
             .absolute()
             .inset_0()
@@ -596,8 +582,8 @@ impl Render for Compose {
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .children(layer)
-            .when(self.phase == Phase::Sent, |d| d.child(self.toast(cx)))
-            .when_some(self.import_error.filter(|_| self.is_modal()), |d, message| d.child(toast(&t, message, None)))
+            // The "Sending" toast after Send is the main window's, placed over the reading pane.
+            .when_some(self.import_error.filter(|_| self.is_modal()), |d, message| d.child(toast_layer(24.).child(toast(&t, message, None))))
     }
 }
 

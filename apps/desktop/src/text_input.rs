@@ -902,11 +902,13 @@ impl Render for TextInput {
                     .h(px(30.))
                     .px(px(10.))
                     .border_1()
-                    .border_color(if focused { t.accent } else { t.line })
+                    .border_color(t.line)
                     .rounded(px(radius::CONTROL))
+                    // Opaque, so the focus ring shows only outside the field, as in AppKit.
+                    .bg(t.raised)
                     .when(focused, |d| {
                         d.shadow(vec![BoxShadow {
-                            color: Rgba { a: 0.25, ..t.accent }.into(),
+                            color: Rgba { a: 0.5, ..t.sel_focus }.into(),
                             offset: point(px(0.), px(0.)),
                             blur_radius: px(0.),
                             spread_radius: px(3.),
@@ -917,9 +919,9 @@ impl Render for TextInput {
                 input: cx.entity(),
                 shown,
                 placeholder: t.ink2.into(),
-                caret: t.accent.into(),
-                // Native fields grey the selection of an unfocused field.
-                selection: if focused { Rgba { a: 0.25, ..t.accent } } else { t.sel }.into(),
+                caret: t.sel_focus.into(),
+                // The accent as a light highlight, as AppKit derives it; unfocused fields grey it.
+                selection: if focused { Rgba { a: 0.3, ..t.sel_focus } } else { t.sel }.into(),
             })
     }
 }

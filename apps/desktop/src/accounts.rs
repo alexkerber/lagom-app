@@ -10,7 +10,7 @@ use gpui::{
 use lagom_core::account::{Account, Security, ServerConfig};
 use zeroize::Zeroizing;
 
-use crate::main_window::{icon, key_button, mono, pressable};
+use crate::main_window::{button, icon, mono, pressable};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
@@ -470,7 +470,7 @@ impl AddAccount {
                     .gap(px(16.))
                     .pt(px(8.))
                     .child(
-                        key_button(t, if self.state == State::Connecting { "Connecting" } else { "Connect" }, "⌘↵", Some(t.accent))
+                        button(t, if self.state == State::Connecting { "Connecting" } else { "Connect" }, Some(t.accent))
                             .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
                     )
                     .children(status),
@@ -479,7 +479,7 @@ impl AddAccount {
 }
 
 fn headline(text: impl Into<SharedString>) -> gpui::Div {
-    div().font_family(font::DISPLAY).text_size(px(size::DISPLAY + 6.)).font_weight(FontWeight::BOLD).line_height(relative(1.05)).child(text.into())
+    div().text_size(px(size::DISPLAY)).font_weight(FontWeight::BOLD).child(text.into())
 }
 
 impl Render for AddAccount {

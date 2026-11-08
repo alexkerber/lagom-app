@@ -14,6 +14,7 @@ use gpui::{
 };
 
 use crate::mail::LaterWhen;
+use crate::main_window::OneLine;
 use crate::motion::spring;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
@@ -392,7 +393,7 @@ impl Render for CommandPalette {
             .font_family(font::ui())
             .child(input)
             .when_some(self.subject.clone().filter(|_| moving), |d, s| {
-                d.child(mono(format!("1 message · {s}"), t.ink2).truncate().px(px(20.)).pt(px(10.)))
+                d.child(mono(format!("1 message · {s}"), t.ink2).one_line().px(px(20.)).pt(px(10.)))
             })
             .child(list)
             .child(footer);
@@ -408,7 +409,8 @@ impl Render for CommandPalette {
             .justify_center()
             .items_start()
             .pt(px(112.))
-            .bg(gpui::black().opacity(if t.dark { 0.5 } else { 0.18 }))
+            // A faint dim: AppKit panels barely darken the window behind them.
+            .bg(gpui::black().opacity(if t.dark { 0.15 } else { 0.05 }))
             .child(dialog)
             // docs/motion.md asks for scale 0.98 → 1, but GPUI divs have no scale transform:
             // the dialog drops 8 px into place on a spring instead, and fades in.
