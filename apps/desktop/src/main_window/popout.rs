@@ -10,7 +10,7 @@ pub struct MessageWindow {
     main: WindowHandle<MainWindow>,
     /// The message: an id into `Inbox::mail`, stable across store reads.
     id: usize,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     web: html::Web,
     _main: [Subscription; 2],
 }
@@ -45,7 +45,7 @@ impl MessageWindow {
 
     pub(super) fn act(&mut self, what: Move, cx: &mut Context<Self>) {
         let id = self.id;
-        self.main.update(cx, |main, _, cx| main.act_on(id, what, cx)).ok();
+        self.main.update(cx, |main, window, cx| main.act_on(id, what, window, cx)).ok();
     }
 
     /// The reply sheet opens in the main window, which owns drafts and sending.
@@ -83,6 +83,7 @@ impl Render for MessageWindow {
             .on_action(cx.listener(|this, _: &Later, _, cx| this.act(Move::Later, cx)))
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| this.act(Move::Delete, cx)))
             .on_action(cx.listener(|this, _: &Reply, _, cx| this.reply(cx)))
+            .map(|d| quit_through_main(d, cx))
             .size_full()
             .flex()
             .flex_col()
@@ -112,6 +113,26 @@ impl Render for MessageWindow {
             )
             .child(reading_view(&t, id, &m, !web, self.web.slot(), 0, on_reply))
     }
+}
+
+/// ⌘Q here waits for unsent mail as it does in the main window, which shows the toast.
+fn quit_through_main<E: InteractiveElement>(el: E, cx: &mut Context<MessageWindow>) -> E {
+    #[cfg(target_os = "macos")]
+    let el = el.on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| {
+        let held = this.main.update(cx, |main, window, cx| {
+            let held = main.hold_exit(Exit::Quit, cx);
+            if held {
+                window.activate_window();
+            }
+            held
+        });
+        if !held.unwrap_or(false) {
+            cx.propagate();
+        }
+    }));
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
+    el
 }
 
 /// Offset of each new message window from the main window, as macOS cascades windows.
@@ -150,19 +171,26 @@ impl MainWindow {
 
     /// A move of message `id` from its window. If another list is on screen, the list holding
     /// the message opens first, as Undo does, so the move plays where it can be seen.
-    pub(super) fn act_on(&mut self, id: usize, what: Move, cx: &mut Context<Self>) {
+    pub(super) fn act_on(&mut self, id: usize, what: Move, window: &mut Window, cx: &mut Context<Self>) {
+        // The palette acts on the selection, which this move changes.
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+        }
         if !self.inbox.list().contains(&id) {
             let from = match self.inbox.items.contains(&id) {
-                true => None,
-                false => match self.inbox.folders.iter().position(|f| f.items.contains(&id)) {
-                    Some(f) => Some(f),
-                    None => return,
-                },
+                true => Some(None),
+                false => self.inbox.folders.iter().position(|f| f.items.contains(&id)).map(Some),
             };
-            self.open_box(from, cx);
+            match (from, self.inbox.mail[id].store) {
+                (Some(from), _) => self.open_box(from, cx),
+                // Past the loaded page, such as an older ⌘K hit: load its list as ⌘K does.
+                (None, Some(store)) => self.open_found(store, cx),
+                (None, None) => {}
+            }
         }
-        if let Some(ix) = self.inbox.list().iter().position(|&i| i == id) {
-            self.act_at(ix, what, 0., cx);
+        match self.inbox.list().iter().position(|&i| i == id) {
+            Some(ix) => self.act_at(ix, what, 0., cx),
+            None => self.notify("That message is not in a loaded list. Try again after the next sync.", cx),
         }
     }
 

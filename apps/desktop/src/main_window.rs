@@ -412,16 +412,7 @@ impl MainWindow {
         let search = self.live.as_ref().and_then(|l| l.search());
         let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
         let palette = cx.new(|cx| CommandPalette::new(query, composing, targets, subject, search, window, cx));
-        cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
-            this.palette = None;
-            if let Some(compose) = this.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
-                compose.update(cx, |c, cx| c.focus_body(window, cx));
-            } else {
-                window.focus(&this.focus);
-            }
-            cx.notify();
-        })
-        .detach();
+        cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| this.close_palette(window, cx)).detach();
         cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
             let f = match target {
                 MoveTo::Folder(f) => *f,
@@ -438,6 +429,17 @@ impl MainWindow {
         .detach();
         window.focus(&gpui::Focusable::focus_handle(&palette, cx));
         self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// The keys go back to the sheet under the palette, or to the inbox.
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        if let Some(compose) = self.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
+            compose.update(cx, |c, cx| c.focus_body(window, cx));
+        } else {
+            window.focus(&self.focus);
+        }
         cx.notify();
     }
 
@@ -2893,6 +2895,34 @@ mod dispatch {
         // Undo in the main window puts it back; the window stays closed.
         view.update(cx, |v, cx| v.undo(cx));
         assert_eq!((inbox_len(&view, cx), windows(cx)), (n, 1));
+    }
+
+    #[gpui::test]
+    fn a_message_window_move_closes_the_palette_and_quit_keeps_drafts(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Not done yet");
+        cx.simulate_keystrokes("escape secondary-o");
+        cx.run_until_parked();
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        // The palette would act on the selection, which the move changes: it closes.
+        view.update_in(cx, |v, window, cx| v.open_palette("move tr", window, cx));
+        popout.update(cx, |p, _, cx| p.act(Move::Delete, cx)).unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.palette.is_none()));
+        // ⌘Q in a message window asks about the draft, as in the main window.
+        cx.simulate_keystrokes("secondary-o");
+        cx.run_until_parked();
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        let focus = popout.update(cx, |p, _, _| p.focus.clone()).unwrap();
+        cx.update_window(popout.into(), |_, window, cx| {
+            assert!(focus.is_focused(window), "the message window has the keys");
+            // Actions reach the elements of the last frame; test windows only draw on request.
+            window.draw(cx).clear();
+            window.dispatch_action(Box::new(crate::menus::Quit), cx);
+        }).unwrap();
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.clone())), Some(QUIT_AGAIN_UNSENT.into()));
     }
 
     #[gpui::test]
