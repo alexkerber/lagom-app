@@ -61,7 +61,7 @@ New core modules: `crates/lagom-core/src/tasks.rs` and `calendar.rs` (types and 
 - **Tasks, order of work:** push first, then pull.
   - Push: send rows with `dirty=1` or `deleted=1` as PATCH, DELETE or INSERT, then clear the flags.
   - Pull: Google with `updatedMin` (it has no sync token); Graph by refetching the list (delta later).
-- **Conflict rule:** last writer wins, and the local edit wins because it is pushed before the pull. The cost is losing a server edit made in the same 2-minute window. Alex should accept this.
+- **Conflict rule:** last writer wins, and the local edit wins because it is pushed before the pull. The cost is losing a server edit made in the same 2-minute window. the maintainer should accept this.
 - **Offline:** the `dirty`/`deleted`/`pending` columns are the queue. There is no separate ops table.
 - **Retries without duplicates:**
   - Google `events.insert` accepts a client-made `id` (base32hex).
@@ -95,7 +95,7 @@ Each slice ships on its own. New `Cmd`s go in `apps/desktop/src/sync.rs`, the UI
   - removing an account keeps local tasks
 - Desktop: a `TestAppContext` test where `t` creates a task (same pattern as `main_window.rs:2372`).
 
-## 6. Decisions for Alex
+## 6. Decisions for the maintainer
 1. **What is the "start screen"?** The empty-inbox view, the sidebar, or a new home view?
 2. **Work/Private vs the provider's lists.** Should they map onto them (e.g. Google "My Tasks" = Private), or should remote lists appear as their own lists under the account?
 3. **Which list `t` uses**, and whether it asks first.
