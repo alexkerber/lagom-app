@@ -2910,19 +2910,22 @@ mod dispatch {
         popout.update(cx, |p, _, cx| p.act(Move::Delete, cx)).unwrap();
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.palette.is_none()));
-        // ⌘Q in a message window asks about the draft, as in the main window.
-        cx.simulate_keystrokes("secondary-o");
-        cx.run_until_parked();
-        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
-        let focus = popout.update(cx, |p, _, _| p.focus.clone()).unwrap();
-        cx.update_window(popout.into(), |_, window, cx| {
-            assert!(focus.is_focused(window), "the message window has the keys");
-            // Actions reach the elements of the last frame; test windows only draw on request.
-            window.draw(cx).clear();
-            window.dispatch_action(Box::new(crate::menus::Quit), cx);
-        }).unwrap();
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.clone())), Some(QUIT_AGAIN_UNSENT.into()));
+        // ⌘Q in a message window asks about the draft, as in the main window. Quit is a macOS menu action.
+        #[cfg(target_os = "macos")]
+        {
+            cx.simulate_keystrokes("secondary-o");
+            cx.run_until_parked();
+            let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+            let focus = popout.update(cx, |p, _, _| p.focus.clone()).unwrap();
+            cx.update_window(popout.into(), |_, window, cx| {
+                assert!(focus.is_focused(window), "the message window has the keys");
+                // Actions reach the elements of the last frame; test windows only draw on request.
+                window.draw(cx).clear();
+                window.dispatch_action(Box::new(crate::menus::Quit), cx);
+            }).unwrap();
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.clone())), Some(QUIT_AGAIN_UNSENT.into()));
+        }
     }
 
     #[gpui::test]
