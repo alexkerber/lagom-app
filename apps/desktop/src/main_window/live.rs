@@ -130,6 +130,9 @@ impl MainWindow {
         if let Some(live) = &self.live {
             let account = live.account().ok_or("Add an account before creating folders")?;
             let server = live.store.folders(&account.id, now()).map_err(|e| e.to_string())?;
+            if server.is_empty() {
+                return Err("Sync folders before creating a folder".into());
+            }
             folders::validate_name(name, server.iter().filter_map(|f| f.delimiter.as_deref()), server.iter().map(|f| f.name.as_str()).chain(local))
         } else {
             folders::validate_name(name, std::iter::once("/"), local)
@@ -643,12 +646,13 @@ mod tests {
         });
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         let (bridge, rx) = crate::sync::Bridge::detached();
-        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}-{}", std::process::id(), std::thread::current().id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
         let account = Account::new("me@lagom.test".into(), config.clone(), config).unwrap();
         let store = Rc::new(Store::open(dir.join("t.sqlite3")).unwrap());
         store.save_account(&account).unwrap();
+        store.save_folder(&account.id, "INBOX", Some("/"), lagom_core::store::FolderRole::Inbox).unwrap();
         let live = Live {
             bridge,
             store,
@@ -668,6 +672,27 @@ mod tests {
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn folder_creation_waits_for_the_accounts_namespace(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let live = v.live.as_mut().unwrap();
+            let mut account = live.accounts[0].clone();
+            account.id = "unlisted-account".into();
+            live.store.save_account(&account).unwrap();
+            live.accounts.push(account.clone());
+            v.switch_account(1, cx);
+            let n = v.inbox.folders.len();
+            assert_eq!(v.create_folder("Parent/Child", cx), Err("Sync folders before creating a folder".into()));
+            assert_eq!(v.inbox.folders.len(), n);
+            assert!(rx.try_recv().is_err());
+            assert!(v.live.as_ref().unwrap().ops.is_empty());
+            v.live.as_ref().unwrap().store.save_folder(&account.id, "INBOX", None, lagom_core::store::FolderRole::Inbox).unwrap();
+            v.create_folder("Parent/Child", cx).unwrap();
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::CreateFolder { name, .. } if name == "Parent/Child"));
+        });
     }
 
     #[gpui::test]
@@ -748,6 +773,7 @@ mod tests {
             let mut other = live.accounts[0].clone();
             other.id = "other-account".into();
             live.store.save_account(&other).unwrap();
+            live.store.save_folder(&other.id, "INBOX", Some("/"), lagom_core::store::FolderRole::Inbox).unwrap();
             live.accounts.push(other);
             v.switch_account(1, cx);
             v.create_folder("Taxes", cx).unwrap();

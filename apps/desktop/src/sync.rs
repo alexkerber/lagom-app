@@ -431,6 +431,9 @@ impl Worker {
 
     async fn create_folder(&mut self, account: &str, name: &str) -> lagom_core::Result<()> {
         let folders = self.store.folders(account, now())?;
+        if folders.is_empty() {
+            return Err(Error::Invalid("Sync folders before creating a folder"));
+        }
         crate::folders::validate_name(name, folders.iter().filter_map(|f| f.delimiter.as_deref()), folders.iter().map(|f| f.name.as_str())).map_err(Error::Invalid)?;
         let account = self.account(account)?;
         let mut session = self.take(&account).await?;
@@ -571,6 +574,59 @@ fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn folder_command_does_not_create_after_failed_initial_listing() {
+        use lagom_core::account::{Security, ServerConfig};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read, mut write) = socket.into_split();
+            let mut read = BufReader::new(read);
+            write.write_all(b"* OK fixture\r\n").await.unwrap();
+            let mut creates = 0;
+            loop {
+                let mut line = String::new();
+                if read.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                let response = if command.starts_with("LOGIN ") {
+                    format!("{tag} OK login\r\n")
+                } else if command == "CAPABILITY" {
+                    format!("* CAPABILITY IMAP4rev1 SPECIAL-USE\r\n{tag} OK capability\r\n")
+                } else if command == "LIST \"\" \"*\" RETURN (SPECIAL-USE)" {
+                    format!("* LIST () \"/\" \"INBOX\"\r\n{tag} NO listing failed\r\n")
+                } else if command.starts_with("CREATE ") {
+                    creates += 1;
+                    format!("{tag} NO unexpected create\r\n")
+                } else {
+                    panic!("unexpected fixture command: {command}");
+                };
+                write.write_all(response.as_bytes()).await.unwrap();
+            }
+            creates
+        });
+        let path = std::env::temp_dir().join(format!("lagom-unlisted-folder-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
+        let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        worker.store.save_account(&account).unwrap();
+        let mut session = ImapSync::login(&account, "fixture").await.unwrap();
+        assert!(session.list_folders(&worker.store).await.is_err());
+        assert!(worker.store.folders(&account.id, now()).unwrap().is_empty());
+        worker.sessions.insert(account.id.clone(), session);
+        worker.quick(Cmd::CreateFolder { op: 42, account: account.id, name: "Parent/Child".into() }).await;
+        let Some(Event::Op { op: 42, error }) = out.recv().await else { panic!("expected folder result") };
+        assert!(matches!(out.recv().await, Some(Event::Changed)));
+        drop(worker);
+        let creates = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(creates, 0, "CREATE must wait for a known namespace");
+        assert_eq!(error.as_deref(), Some("Sync folders before creating a folder"));
+    }
 
     #[tokio::test]
     async fn folder_command_reports_validation_errors_without_connecting() {
