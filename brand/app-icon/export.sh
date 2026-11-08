@@ -18,7 +18,8 @@ func source(_ name: String) -> NSImage {
 }
 let light = source("icon-1024")
 let subject = source("layer-envelope")
-// Include the glow's nonzero alpha when fitting inside the circular safe zone.
+// Match the 72 dp visible area of Android's 108 dp adaptive canvas.
+// Faint shadow tails may extend outside the 66 dp safe circle.
 let probe = CGContext(data: nil, width: 1024, height: 1024, bitsPerComponent: 8,
     bytesPerRow: 4096, space: CGColorSpace(name: CGColorSpace.sRGB)!,
     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -26,11 +27,11 @@ probe.draw(subject.cgImage(forProposedRect: nil, context: nil, hints: nil)!,
     in: CGRect(x: 0, y: 0, width: 1024, height: 1024))
 let pixels = probe.data!.assumingMemoryBound(to: UInt8.self)
 var radius: Double = 1
-for y in 0..<1024 { for x in 0..<1024 where pixels[(y * 1024 + x) * 4 + 3] > 0 {
+for y in 0..<1024 { for x in 0..<1024 where pixels[(y * 1024 + x) * 4 + 3] >= 32 {
     radius = max(radius, hypot(Double(x) - 511.5, Double(y) - 511.5))
 }}
-let adaptiveScale = CGFloat((1024 * 0.33 - 3) / radius)
-assert(adaptiveScale > 0 && adaptiveScale <= 1)
+let adaptiveScale: CGFloat = 72.0 / 108.0
+assert(radius * Double(adaptiveScale) < 1024 * (33.0 / 108.0) - 3)
 func color(_ hex: UInt32) -> NSColor {
     NSColor(srgbRed: CGFloat((hex >> 16) & 255)/255, green: CGFloat((hex >> 8) & 255)/255, blue: CGFloat(hex & 255)/255, alpha: 1)
 }
