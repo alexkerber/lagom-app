@@ -3515,6 +3515,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-user-notifications",
  "pulldown-cmark",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

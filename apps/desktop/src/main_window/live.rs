@@ -32,8 +32,6 @@ pub struct Live {
     seen: HashSet<i64>,
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
     _events: Task<()>,
-    notifications: crate::notifications::Service,
-    _notification_events: Task<()>,
     /// Wakes the window when the next message on Later is due.
     due: Option<(i64, Task<()>)>,
 }
@@ -68,12 +66,6 @@ impl Live {
         let path = Store::default_path()?;
         let store = Store::open(&path)?;
         let (bridge, mut events) = crate::sync::start(path);
-        let (notifications, mut notification_events) = crate::notifications::Service::new();
-        let notification_task = cx.spawn_in(window, async move |this, cx| {
-            while let Some(event) = notification_events.recv().await {
-                if this.update_in(cx, |this, window, cx| this.on_notification(event, window, cx)).is_err() { return; }
-            }
-        });
         let task = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.recv().await {
                 // Several changes in a row read the store once.
@@ -104,8 +96,6 @@ impl Live {
             notification_target: None,
             seen: HashSet::new(),
             _events: task,
-            notifications,
-            _notification_events: notification_task,
             due: None,
         })
     }
@@ -279,11 +269,11 @@ impl MainWindow {
         if let Some(target) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.notification_target.take()) {
             self.open_notification(target, window, cx);
         }
-        self.notify_mail(new_mail, window);
+        self.notify_mail(new_mail, window, cx);
         cx.notify();
     }
 
-    fn notify_mail(&mut self, messages: Vec<lagom_core::store::MessageSummary>, window: &Window) {
+    fn notify_mail(&mut self, messages: Vec<lagom_core::store::MessageSummary>, window: &Window, cx: &mut Context<Self>) {
         if !self.panes.notifications || window.is_window_active() { return; }
         let Some(live) = &mut self.live else { return };
         // Permission prompts and queued UI events can outlive a read, snooze or move.
@@ -297,15 +287,15 @@ impl MainWindow {
             (!current.seen && current.snoozed_until.is_none() && folder.role == lagom_core::store::FolderRole::Inbox)
                 .then_some(current)
         }).collect();
-        live.notifications.show(messages);
+        cx.global_mut::<crate::notifications::State>().service.show(messages);
     }
 
-    fn on_notification(&mut self, event: crate::notifications::Event, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_notification(&mut self, event: crate::notifications::Event, window: &mut Window, cx: &mut Context<Self>) {
         use crate::notifications::Event;
         match event {
             Event::Authorized(allowed) => {
-                let pending = self.live.as_mut().map(|l| l.notifications.authorized(allowed)).unwrap_or_default();
-                self.notify_mail(pending, window);
+                let pending = cx.global_mut::<crate::notifications::State>().service.authorized(allowed);
+                self.notify_mail(pending, window, cx);
             }
             Event::Failed(error) => self.notify(error, cx),
             Event::Clicked(target) => self.open_notification(target, window, cx),
@@ -682,16 +672,24 @@ mod tests {
         });
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         let (bridge, rx) = crate::sync::Bridge::detached();
-        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}-{:?}", std::process::id(), std::thread::current().id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
         let account = Account::new("me@lagom.test".into(), config.clone(), config).unwrap();
         let store = Rc::new(Store::open(dir.join("t.sqlite3")).unwrap());
         store.save_account(&account).unwrap();
-        let live = Live {
+        cx.cx.update(|cx| cx.set_global(crate::notifications::State {
+            service: crate::notifications::Service::new().0, _events: Task::ready(()),
+        }));
+        view.update(cx, |v, _| v.live = Some(fixture_live(store, bridge)));
+        (view, cx, rx)
+    }
+
+    fn fixture_live(store: Rc<Store>, bridge: Bridge) -> Live {
+        Live {
             bridge,
-            store,
-            accounts: vec![account],
+            store: store.clone(),
+            accounts: store.accounts().unwrap(),
             current: 0,
             sync: HashMap::new(),
             ops: HashMap::new(),
@@ -704,12 +702,8 @@ mod tests {
             seen: HashSet::new(),
             failed: Vec::new(),
             _events: Task::ready(()),
-            notifications: crate::notifications::Service::new().0,
-            _notification_events: Task::ready(()),
             due: None,
-        };
-        view.update(cx, |v, _| v.live = Some(live));
-        (view, cx, rx)
+        }
     }
 
     fn incoming(v: &MainWindow, uid: u32) -> lagom_core::store::MessageSummary {
@@ -726,8 +720,8 @@ mod tests {
     fn notifications_respect_focus_setting_and_changes_while_permission_waits(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         let (service, mut events) = crate::notifications::Service::new();
-        let m = view.update(cx, |v, _| {
-            v.live.as_mut().unwrap().notifications = service;
+        let m = view.update(cx, |v, cx| {
+            cx.global_mut::<crate::notifications::State>().service = service;
             incoming(v, 1)
         });
         view.update_in(cx, |_, window, _| window.activate_window());
@@ -752,17 +746,91 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.live.as_ref().unwrap().store.snooze(m.id, Some(i64::MAX)).unwrap();
             v.on_notification(crate::notifications::Event::Authorized(true), window, cx);
-            assert_eq!(v.live.as_ref().unwrap().notifications.posted_count(), 0);
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 0);
         });
         // A later new message uses the existing authorization, without another prompt.
         view.update_in(cx, |v, window, cx| {
             let m = incoming(v, 2);
             v.on_events(vec![Event::NewMail(vec![m])], window, cx);
-            assert_eq!(v.live.as_ref().unwrap().notifications.posted_count(), 1);
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 1);
             v.on_notification(crate::notifications::Event::Failed("fixture notification error"), window, cx);
         });
         assert!(events.try_recv().is_err());
         assert!(toast(&view, cx).contains("fixture notification error"));
+    }
+
+    #[gpui::test]
+    fn notification_click_survives_closed_main_window(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let (target, store, bridge) = view.update(cx, |v, _| {
+            let m = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            (crate::notifications::Target { account: m.account, message: Some(m.id) }, live.store.clone(), live.bridge.clone())
+        });
+        cx.cx.update(|cx| crate::notifications::init(cx, move |cx| {
+            let handle = crate::open_main_window(true, cx)?;
+            handle.update(cx, |v, _, cx| {
+                if v.live.is_none() {
+                    v.live = Some(fixture_live(store.clone(), bridge.clone()));
+                    v.inbox = Inbox::live();
+                    v.reload(cx);
+                }
+            })?;
+            Ok(handle)
+        }));
+        let message = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.message_summary(target.message.unwrap()).unwrap());
+        let sender = cx.cx.update(|cx| {
+            let service = &mut cx.global_mut::<crate::notifications::State>().service;
+            service.authorized(true);
+            service.show(vec![message]);
+            service.event_sender()
+        });
+        let weak = view.downgrade();
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none(), "closed window must release its view");
+        sender.send(crate::notifications::Event::Authorized(true)).unwrap();
+        cx.run_until_parked();
+        cx.cx.update(|cx| {
+            assert!(cx.windows().is_empty(), "permission callbacks must not reopen mail");
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 1);
+        });
+        assert!(sender.send(crate::notifications::Event::Clicked(target.clone())).is_ok(), "click listener must survive closing the main window");
+        cx.run_until_parked();
+        cx.cx.update(|cx| {
+            let windows = cx.windows();
+            assert_eq!(windows.len(), 1);
+            let reopened = windows[0].downcast::<MainWindow>().unwrap();
+            let v = reopened.read(cx).unwrap();
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, target.message);
+        });
+        sender.send(crate::notifications::Event::Clicked(crate::notifications::Target { message: None, ..target })).unwrap();
+        cx.run_until_parked();
+        cx.cx.update(|cx| {
+            let windows = cx.windows();
+            assert_eq!(windows.len(), 1, "later clicks must reuse the main window");
+            let v = windows[0].downcast::<MainWindow>().unwrap().read(cx).unwrap();
+            assert!(v.live.as_ref().unwrap().pin.is_none());
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn notification_revalidation_does_not_read_message_bodies(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.deactivate_window();
+        view.update_in(cx, |v, window, cx| {
+            let m = incoming(v, 1);
+            let live = v.live.as_mut().unwrap();
+            let db = rusqlite::Connection::open(live.store.path()).unwrap();
+            db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [m.id]).unwrap();
+            assert!(live.store.message(m.id).is_err());
+            assert_eq!(live.store.message_summary(m.id).unwrap(), m);
+            cx.global_mut::<crate::notifications::State>().service.authorized(true);
+            v.on_events(vec![Event::NewMail(vec![m])], window, cx);
+            assert_eq!(cx.global::<crate::notifications::State>().service.posted_count(), 1);
+        });
     }
 
     #[gpui::test]

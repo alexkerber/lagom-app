@@ -31,6 +31,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 wry = { version = "0.57", default-features = false }
 
 [dev-dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
 # GPUI's TestAppContext, to drive key dispatch in tests.
 gpui = { version = "0.2.2", features = ["test-support"] }
 

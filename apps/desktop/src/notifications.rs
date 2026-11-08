@@ -53,6 +53,40 @@ pub enum Event {
     Failed(&'static str),
 }
 
+// The macOS center holds its delegate weakly; retain the service even without a window.
+pub struct State {
+    pub service: Service,
+    pub _events: gpui::Task<()>,
+}
+
+impl gpui::Global for State {}
+
+pub fn init(cx: &mut gpui::App, reopen: impl Fn(&mut gpui::App) -> anyhow::Result<gpui::WindowHandle<crate::MainWindow>> + 'static) {
+    let (service, mut events) = Service::new();
+    let task = cx.spawn(async move |cx| {
+        while let Some(event) = events.recv().await {
+            if cx.update(|cx| {
+                let window = if matches!(event, Event::Clicked(_)) {
+                    match reopen(cx) {
+                        Ok(window) => Some(window),
+                        Err(error) => { eprintln!("Could not open notification: {error}"); None }
+                    }
+                } else {
+                    cx.windows().into_iter().find_map(|w| w.downcast::<crate::MainWindow>())
+                };
+                if let Some(window) = window {
+                    window.update(cx, |view, window, cx| view.on_notification(event, window, cx)).ok();
+                } else if let Event::Authorized(allowed) = event {
+                    cx.global_mut::<State>().service.authorized(allowed);
+                } else if let Event::Failed(error) = event {
+                    eprintln!("{error}");
+                }
+            }).is_err() { return; }
+        }
+    });
+    cx.set_global(State { service, _events: task });
+}
+
 pub struct Service {
     platform: platform::Service,
     requested: bool,
@@ -84,6 +118,9 @@ impl Service {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn event_sender(&self) -> UnboundedSender<Event> { self.platform.events.clone() }
 
     #[cfg(test)]
     pub fn posted_count(&self) -> usize { self.platform.notices.borrow().len() }
@@ -143,7 +180,7 @@ mod platform {
 mod platform {
     use super::*;
     pub struct Service {
-        events: UnboundedSender<Event>,
+        pub(super) events: UnboundedSender<Event>,
         pub notices: std::cell::RefCell<Vec<Notice>>,
     }
     impl Service {
