@@ -137,13 +137,21 @@ for j in range(3):
 outline = [(-.18,.86),(-.30,.69),(-.83,.55),(-1.02,.38),(-1.03,.15),
            (-.76,-1.25),(-.65,-1.46),(-.43,-1.55),(.43,-1.55),(.65,-1.46),
            (.76,-1.25),(1.03,.15),(1.02,.38),(.83,.55),(.30,.69),(.18,.86)]
-z0=.43
-verts=[(x,y,z0+z) for z in (0,.045) for x,y in outline]
+# Corner cutting makes a continuous pressed outline without polygonal shoulders.
+for _ in range(4):
+    outline = [point for a,b in zip(outline, outline[1:]+outline[:1])
+               for point in ((.75*a[0]+.25*b[0], .75*a[1]+.25*b[1]),
+                             (.25*a[0]+.75*b[0], .25*a[1]+.75*b[1]))]
+# At 40 mm per scene unit this is 1.2 mm steel; keep the original top surface.
+z0=.445
+thickness=.030
+verts=[(x,y,z0+z) for z in (0,thickness) for x,y in outline]
 n=len(outline)
 faces=[tuple(reversed(range(n))),tuple(range(n,2*n))]+[(i,(i+1)%n,(i+1)%n+n,i+n) for i in range(n)]
 blade=mesh('Tapered steel blade',verts,faces,steel)
 # Boolean makes an actual aperture, not a dark line painted on solid steel.
-slot=box('Slot cutter',(0,.20,z0+.03),(1.76,.12,.4),steel,.055)
+slot=box('Slot cutter',(0,.20,z0+.015),(1.76,.09,.4),steel,.044)
+slot.modifiers[0].segments=16
 bpy.context.view_layer.objects.active=slot
 bpy.ops.object.modifier_apply(modifier=slot.modifiers[0].name)
 bpy.context.view_layer.objects.active=blade
@@ -152,8 +160,15 @@ cut.operation='DIFFERENCE'
 cut.object=slot
 bpy.ops.object.modifier_apply(modifier=cut.name)
 bpy.data.objects.remove(slot,do_unlink=True)
-bevel(blade,.035,5)
-line('Polished cutting edge',[(-.84,.13,.479),(.84,.13,.479)],steel,.012)
+polished = material('Polished steel edge', (.65,.69,.72), .16, 1)
+blade.data.materials.append(polished)
+bevel(blade,.006,6)
+blade.modifiers[0].material=1
+blade.modifiers[0].harden_normals=True
+blade.modifiers[1].keep_sharp=True
+for face in blade.data.polygons:
+    face.use_smooth = abs(face.normal.z) < .9
+line('Polished cutting edge',[(-.83,.155,.477),(.83,.155,.477)],polished,.004)
 
 
 def between(name,a,b,radius,mat):
@@ -212,17 +227,20 @@ solid=plate.modifiers.new('Plate depth','SOLIDIFY'); solid.thickness=.12
 bevel(plate,.045,4)
 plate.rotation_euler=cam.rotation_euler
 plate.location=Vector((0,.55,.35)) + cam.rotation_euler.to_matrix() @ Vector((0,0,-1.55))
-assert max(abs(x) for x,y in outline[:5]) > max(abs(x) for x,y in outline[6:10])
+assert len(outline)==256 and .025 <= thickness <= .0375
+assert max(abs(x) for x,y in outline if y>0) > max(abs(x) for x,y in outline if y<-1.3)
 assert len(profile)>3 and scene.render.resolution_x==1024
 for variant,color in [('light',(.79,.76,.68)),('dark',(.027,.035,.032))]:
     plate_mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value=(*color,1)
     scene.render.filepath=str(out.with_name(out.stem+'-'+variant+'.png'))
     bpy.ops.render.render(write_still=True)
-# Main proposal is the light plate. Blender writes the thumbnail with the same color transform.
+# The main asset is an isolated transparent object; the thumbnail previews the light icon.
+plate.hide_render=True
+scene.render.filepath=str(out)
+bpy.ops.render.render(write_still=True)
 image=bpy.data.images.load(str(out.with_name(out.stem+'-light.png')))
 assert len(image.pixels) == 1024 * 1024 * 4
 image.pixels[0]  # Load pixels before changing the source path.
-image.filepath_raw=str(out); image.save()
 image.scale(32,32)
 image.filepath_raw=str(out.with_name(out.stem+'-32.png')); image.save()
 assert all(out.with_name(out.stem+s+'.png').exists() for s in ('','-light','-dark','-32'))
