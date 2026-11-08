@@ -74,7 +74,7 @@ const SNIPPET_LINES: usize = 2;
 const ROW_H: f32 = 2. * ROW_PAD + 2. * ROW_GAP + (2. * size::BASE + SNIPPET_LINES as f32 * size::SNIPPET) * LEADING;
 
 /// Selection highlight moving to the row J, K or a click selected.
-const GLIDE: Duration = Duration::from_millis(140);
+const GLIDE: Duration = Duration::from_millis(260);
 /// Padding around the rows in the list.
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
