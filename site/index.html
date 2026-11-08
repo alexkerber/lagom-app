@@ -60,17 +60,16 @@
 
     footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 20px 0 40px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
     footer span { overflow-wrap: anywhere; }
+    /* The Swedish flag, as on Swedish brands: lagom is a Swedish word with no direct translation. */
+    .sv { display: inline-flex; align-items: center; gap: 0.45em; }
+    .flag { width: 1.4em; height: 0.875em; flex-shrink: 0; border-radius: 2px; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <nav aria-label="Site">
       <a class="brand display" href="./">
-        <svg viewBox="0 0 1024 1024" width="34" height="34" aria-hidden="true">
-          <rect width="1024" height="1024" rx="228" fill="var(--accent)"/>
-          <rect x="192" y="424" width="640" height="176" rx="88" fill="#FFFFFF"/>
-          <circle cx="512" cy="512" r="56" fill="var(--accent)"/>
-        </svg>
+        <img src="apple-touch-icon-180.png" width="42" height="42" alt="">
         lagom
       </a>
       <div class="links">
@@ -84,7 +83,7 @@
       <div class="copy">
         <div class="entry">
           <h1 class="display">lagom</h1>
-          <p class="pron"><span class="mono">/ˈlɑːɡɔm/</span> ("LAH-gom") <em>adv., adj.</em> Swedish.</p>
+          <p class="pron"><span class="mono">/ˈlɑːɡɔm/</span> ("LAH-gom") <em>adv., adj.</em> <span class="sv"><svg class="flag" viewBox="0 0 16 10" aria-hidden="true"><rect width="16" height="10" fill="#006AA7"/><rect x="5" width="2" height="10" fill="#FECC00"/><rect y="4" width="16" height="2" fill="#FECC00"/></svg>Swedish.</span></p>
           <p class="def display">Not too much. Not too little. Just right.</p>
         </div>
         <p class="lede">A fast, keyboard-first email client with one job: getting you back to an empty inbox. <strong>Written in Rust for macOS, Linux and Windows. Local-first.</strong></p>
@@ -105,7 +104,7 @@
 
     <footer class="mono">
       <span>Not included: AI features, team features, a sign-up wall.</span>
-      <span>Open source · MIT · github.com/alexkerber/lagom-app</span>
+      <span class="sv"><svg class="flag" viewBox="0 0 16 10" aria-hidden="true"><rect width="16" height="10" fill="#006AA7"/><rect x="5" width="2" height="10" fill="#FECC00"/><rect y="4" width="16" height="2" fill="#FECC00"/></svg>Made in Sweden · Open source · MIT · github.com/alexkerber/lagom-app</span>
     </footer>
   </div>
 </body>
