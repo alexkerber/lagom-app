@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x2="0" y2="1"><stop stop-color="#23856B"/><stop offset="1" stop-color="#105542"/></linearGradient>
+    <linearGradient id="paper" x2="0" y2="1"><stop stop-color="#FFFDF5"/><stop offset="1" stop-color="#E2EDE2"/></linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="182" fill="url(#plate)"/>
+  <path d="M308 274H414Q438 274 438 298V560Q438 588 466 588H716Q740 588 740 612V718Q740 742 716 742H436Q284 742 284 590V298Q284 274 308 274Z" fill="#063C31" opacity=".22" transform="translate(0 16)"/>
+  <path d="M308 274H414Q438 274 438 298V560Q438 588 466 588H716Q740 588 740 612V718Q740 742 716 742H436Q284 742 284 590V298Q284 274 308 274Z" fill="url(#paper)"/>
+  <path d="M284 568V590Q284 742 436 742H458L438 588Z" fill="#B8D5C6"/>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x2="0" y2="1"><stop stop-color="#F0B747"/><stop offset="1" stop-color="#D69322"/></linearGradient>
+    <linearGradient id="ink" x2="0" y2="1"><stop stop-color="#243F45"/><stop offset="1" stop-color="#142E34"/></linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="182" fill="url(#plate)"/>
+  <path fill="#875B15" opacity=".18" transform="translate(0 14)" fill-rule="evenodd" d="M458 292H566C710 292 770 378 770 512S710 732 566 732H458C314 732 254 646 254 512S314 292 458 292ZM394 466C368 466 352 486 352 512S368 558 394 558H630C656 558 672 538 672 512S656 466 630 466Z"/>
+  <path fill="url(#ink)" fill-rule="evenodd" d="M458 292H566C710 292 770 378 770 512S710 732 566 732H458C314 732 254 646 254 512S314 292 458 292ZM394 466C368 466 352 486 352 512S368 558 394 558H630C656 558 672 538 672 512S656 466 630 466Z"/>
+</svg>
