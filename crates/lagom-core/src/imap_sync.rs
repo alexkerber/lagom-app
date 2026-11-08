@@ -7,7 +7,7 @@ use crate::{
     Error, Result,
 };
 use async_imap::{
-    imap_proto::{BodyStructure, MessageSection, SectionPath},
+    imap_proto::{BodyStructure, ContentEncoding, SectionPath},
     types::{Capabilities, Fetch, Flag, NameAttribute},
     Client, Session,
 };
@@ -339,22 +339,25 @@ impl ImapSync {
         let mut parts = Vec::new();
         let mut attachments = false;
         text_parts(body, &[], 0, &mut parts, &mut attachments)?;
-        // shortcut: first preferred inline body only, combine multiple inline parts when needed.
+        // The first text part (search, and the reading pane where HTML does not render) and the
+        // first HTML part (the rendered view), in one fetch.
+        // shortcut: further inline parts are not combined; combine them when needed.
         parts.sort_by_key(|p| p.1);
-        if let Some((path, _, size)) = parts.first() {
-            if *size as usize > mime::MAX_MIME_BYTES {
+        let picks: Vec<_> = [parts.iter().find(|p| !p.1), parts.iter().find(|p| p.1)].into_iter().flatten().collect();
+        if picks.is_empty() {
+            message = mime::parse(header)?;
+        } else {
+            if picks.iter().map(|p| p.2 as usize).sum::<usize>() > mime::MAX_MIME_BYTES {
                 return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, attachments);
             }
-            let section = path
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(".");
+            let section = |path: &[u32]| path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
             // GreenMail emits malformed partial text responses; check octets before full part fetch.
-            let query = if path.is_empty() {
+            // An empty path is a single-part message: one pick.
+            let query = if picks[0].0.is_empty() {
                 "(UID BODY.PEEK[TEXT])".to_owned()
             } else {
-                format!("(UID BODY.PEEK[{section}.MIME] BODY.PEEK[{section}])")
+                let items: Vec<String> = picks.iter().map(|p| format!("BODY.PEEK[{}]", section(&p.0))).collect();
+                format!("(UID {})", items.join(" "))
             };
             let bodies = net(async {
                 self.session
@@ -364,20 +367,21 @@ impl ImapSync {
                     .await
             })
             .await?;
-            if let Some(body) = bodies.iter().find(|f| f.uid == Some(uid)) {
-                let headers = if path.is_empty() {
-                    header
-                } else {
-                    body.section(&SectionPath::Part(path.clone(), Some(MessageSection::Mime)))
-                        .ok_or(Error::Network("MIME part headers missing"))?
-                };
+            let Some(body) = bodies.iter().find(|f| f.uid == Some(uid)) else {
+                return Ok(());
+            };
+            message = mime::parse(header)?;
+            let mut total = 0;
+            for (path, html, _, part_headers) in picks.iter().copied() {
+                let headers = if path.is_empty() { header } else { part_headers.as_bytes() };
                 let text = if path.is_empty() {
                     body.text()
                 } else {
                     body.section(&SectionPath::Part(path.clone(), None))
                 }
                 .ok_or(Error::Network("MIME text part missing"))?;
-                if headers.len() >= 65536 || headers.len() + text.len() > mime::MAX_MIME_BYTES {
+                total += headers.len() + text.len();
+                if headers.len() >= 65536 || total > mime::MAX_MIME_BYTES {
                     return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, attachments);
                 }
                 let mut raw = headers.to_vec();
@@ -391,17 +395,17 @@ impl ImapSync {
                 let parsed = mime::parse(&raw)?;
                 if path.is_empty() {
                     message = parsed;
-                } else {
-                    message = mime::parse(header)?;
-                    message.body_text = parsed.body_text;
+                } else if *html {
+                    // HTML only: its text, converted by mail-parser, is the body text.
+                    if picks.len() == 1 {
+                        message.body_text = parsed.body_text;
+                    }
                     message.body_html = parsed.body_html;
-                    message.summary.snippet = parsed.summary.snippet;
+                } else {
+                    message.body_text = parsed.body_text;
                 }
-            } else {
-                return Ok(());
             }
-        } else {
-            message = mime::parse(header)?;
+            message.summary.snippet = mime::snippet(&message.body_text, message.body_html.as_deref());
         }
         self.save(store, folder, uid, fetch, message, attachments)
     }
@@ -614,7 +618,7 @@ fn text_parts(
     body: &BodyStructure<'_>,
     path: &[u32],
     depth: usize,
-    parts: &mut Vec<(Vec<u32>, bool, u32)>,
+    parts: &mut Vec<(Vec<u32>, bool, u32, String)>,
     attachments: &mut bool,
 ) -> Result<()> {
     if depth > 32 {
@@ -646,10 +650,23 @@ fn text_parts(
             if common.ty.subtype.eq_ignore_ascii_case("plain")
                 || common.ty.subtype.eq_ignore_ascii_case("html") =>
         {
+            // The part's headers from BODYSTRUCTURE: some servers answer `n.m.MIME` with the
+            // parent's headers. Server strings lose CR and LF so they stay one header each.
+            let clean = |v: &str| v.replace(['\r', '\n', '"', '\\'], "");
+            let params: String = common.ty.params.iter().flatten().map(|(k, v)| format!("; {}=\"{}\"", clean(k), clean(v))).collect();
+            let encoding = match &other.transfer_encoding {
+                ContentEncoding::SevenBit => "7bit".into(),
+                ContentEncoding::EightBit => "8bit".into(),
+                ContentEncoding::Binary => "binary".into(),
+                ContentEncoding::Base64 => "base64".into(),
+                ContentEncoding::QuotedPrintable => "quoted-printable".into(),
+                ContentEncoding::Other(e) => clean(e),
+            };
             parts.push((
                 path.to_vec(),
                 !common.ty.subtype.eq_ignore_ascii_case("plain"),
                 other.octets,
+                format!("Content-Type: text/{}{params}\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n", clean(&common.ty.subtype)),
             ));
         }
         _ => {
