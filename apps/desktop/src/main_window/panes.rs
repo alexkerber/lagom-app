@@ -1,4 +1,9 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,10 +79,25 @@ impl Panes {
     }
 
     pub fn save(self, path: &Path) -> anyhow::Result<()> {
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, serde_json::to_vec(&self)?)?;
-        fs::rename(temp, path)?;
-        Ok(())
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let bytes = serde_json::to_vec(&self)?;
+        let (temp, mut file) = loop {
+            let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let temp = path.with_extension(format!("json.{}.{id}.tmp", std::process::id()));
+            match fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
+                Ok(file) => break (temp, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        let result = file.write_all(&bytes).and_then(|_| {
+            drop(file);
+            fs::rename(&temp, path)
+        });
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result.map_err(Into::into)
     }
 }
 
@@ -170,6 +190,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn concurrent_saves_use_private_temp_files() {
+        let dir = std::env::temp_dir().join(format!("lagom-panes-writers-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("window.json");
+        let shared_temp = path.with_extension("json.tmp");
+        fs::write(&shared_temp, "another writer").unwrap();
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let path = &path;
+                scope.spawn(move || {
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0 };
+                    for _ in 0..100 {
+                        panes.save(path).unwrap();
+                        let saved = Panes::load(path, 1440.).unwrap();
+                        assert!((180. ..=187.).contains(&saved.sidebar));
+                        assert_eq!(saved.list, 560.);
+                        assert_eq!(saved.sidebar_hidden, (saved.sidebar as u32 - 180) % 2 == 0);
+                    }
+                });
+            }
+        });
+        assert_eq!(fs::read_to_string(&shared_temp).unwrap(), "another writer");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_file(path).unwrap();
+        fs::remove_file(shared_temp).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 
     #[test]

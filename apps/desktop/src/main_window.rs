@@ -95,6 +95,8 @@ struct Resize {
     divider: Divider,
     start_x: Pixels,
     start_width: f32,
+    start_panes: Panes,
+    moved: bool,
 }
 
 fn motion() -> Animation {
@@ -927,14 +929,19 @@ impl MainWindow {
     }
 
     fn finish_resize(&mut self, cx: &mut Context<Self>) {
-        if self.resize.take().is_some() {
-            self.save_panes(cx);
+        if let Some(resize) = self.resize.take() {
+            if resize.moved {
+                self.save_panes(cx);
+            }
             cx.notify();
         }
     }
 
     fn resize_to(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
-        let Some(resize) = self.resize else { return };
+        let Some(resize) = self.resize.as_mut() else { return };
+        if x == resize.start_x && !resize.moved { return; }
+        resize.moved = true;
+        self.panes = resize.start_panes;
         let width = resize.start_width + f32::from(x - resize.start_x);
         let viewport = f32::from(window.viewport_size().width);
         match resize.divider {
@@ -973,6 +980,8 @@ impl MainWindow {
                         divider,
                         start_x: e.position.x,
                         start_width: match divider { Divider::Sidebar => this.sidebar_w, Divider::List => this.list_w },
+                        start_panes: this.panes,
+                        moved: false,
                     });
                 }
                 cx.notify();
@@ -2505,6 +2514,49 @@ mod dispatch {
         cx.simulate_keystrokes("alt-cmd-s");
         assert_eq!(widths(cx).0, 0.);
         assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
+    }
+
+    #[gpui::test]
+    fn sidebar_collapse_restores_width_from_drag_start(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| { v.panes.sidebar = 300.; cx.notify(); });
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        cx.run_until_parked();
+        let at = |x| gpui::point(px(x), px(200.));
+        cx.simulate_mouse_down(at(300.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(140.), MouseButton::Left, Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 180.);
+        cx.simulate_mouse_move(at(119.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(at(119.), MouseButton::Left, Default::default());
+        cx.simulate_keystrokes("alt-cmd-s");
+        assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 300.);
+    }
+
+    #[gpui::test]
+    fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false };
+        // Valid JSON with trailing whitespace also detects an unnecessary save.
+        let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
+        std::fs::write(&path, &bytes).unwrap();
+        view.update(cx, |v, cx| {
+            v.panes = panes;
+            v.preferences_path = Some(path.clone());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(970.), px(900.)));
+        cx.run_until_parked();
+        let (sidebar, list) = panes.fit(970.);
+        for x in [sidebar, sidebar + 1. + list] {
+            let at = gpui::point(px(x), px(200.));
+            cx.simulate_mouse_down(at, MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(at, MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(at, MouseButton::Left, Default::default());
+            assert_eq!(view.read_with(cx, |v, _| v.panes), panes);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[gpui::test]
