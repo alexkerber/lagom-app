@@ -5,7 +5,7 @@
 - [ ] Domain. `lagom.app`, `lagom.com` and `lagom.io` are taken (RDAP, 2026-11-06). Free on that date: `lagom-mail.com/.app/.io`, `lagomhq.com/.app/.io`, `lagommail.app/.io`, and `.se` for lagom-app, lagommail, lagom-mail and lagomhq.
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42. Web pass done 2026-11-08: `docs/trademark-check.md` (medium risk, official databases still to search by hand).
-- [ ] App icon: three concepts in `brand/icon/` (sheet.png). Alex picks one.
+- [ ] App icon: three concepts in `brand/app-icon/` (sheet.png). Alex picks one.
 - [x] Brand concept: Concept D "Butik" from Claude design.
 - [x] Exact colour tokens from Claude design, in `apps/desktop/src/theme.rs` (from ConceptD and MainWindowD).
 - [ ] Website: switch `site/` to the exact tokens and drop the parts Alex rejected (0 kr cards, info strip, pill buttons).
