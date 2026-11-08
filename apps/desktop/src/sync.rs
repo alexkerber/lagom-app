@@ -629,6 +629,7 @@ mod tests {
                             inbox = command.contains("INBOX");
                             "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n".into()
                         }
+                        "UID STORE 4 -FLAGS.SILENT (\\Deleted)" => String::new(),
                         "UID MOVE 4 \"INBOX\"" => { restored = true; String::new() }
                         "UID FETCH 8 (UID FLAGS)" => "* 1 FETCH (UID 8 FLAGS ())\r\n".into(),
                         "UID FETCH 5 (UID FLAGS)" => "* 1 FETCH (UID 5 FLAGS ())\r\n".into(),

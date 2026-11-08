@@ -113,3 +113,121 @@ async fn empty_trash_rejects_other_folders_and_accounts() {
 
 #[tokio::test]
 async fn empty_trash_stops_after_search_failure() { empty_trash(Case::SearchFailed).await; }
+
+async fn restore_after_interrupted_empty(moves: bool, changed_validity: bool, reject_clear: bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+    let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+    let server = tokio::spawn(async move {
+        let mut deleted = false;
+        let mut present = true;
+        let mut copied = false;
+        let mut survives = false;
+        for attempt in 0..2 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            let mut inbox = false;
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                let data = match command {
+                    "LOGIN \"fixture\" \"fixture\"" => String::new(),
+                    "CAPABILITY" => format!("* CAPABILITY IMAP4rev1 UIDPLUS{}\r\n", if moves { " MOVE" } else { "" }),
+                    "SELECT \"Trash\"" | "SELECT \"INBOX\"" => {
+                        inbox = command.contains("INBOX");
+                        let validity = if attempt == 1 && changed_validity { 8 } else { 7 };
+                        format!("* 1 EXISTS\r\n* OK [UIDVALIDITY {validity}] valid\r\n")
+                    }
+                    "UID SEARCH ALL" => {
+                        let uid = if inbox && survives { "8" } else if !inbox && present { "1" } else { "" };
+                        format!("* SEARCH {uid}\r\n")
+                    }
+                    "UID STORE 1 +FLAGS.SILENT (\\Deleted)" => { deleted = true; String::new() }
+                    "UID EXPUNGE 1" => {
+                        assert!(deleted);
+                        if attempt == 0 { break; }
+                        present = false;
+                        String::new()
+                    }
+                    "UID STORE 1 -FLAGS.SILENT (\\Deleted)" => {
+                        assert_eq!(attempt, 1);
+                        assert!(!changed_validity);
+                        if !reject_clear { deleted = false; }
+                        String::new()
+                    }
+                    "UID MOVE 1 \"INBOX\"" | "UID COPY 1 \"INBOX\"" => {
+                        assert_eq!(attempt, 1);
+                        assert!(!changed_validity && !reject_clear);
+                        assert_eq!(command.contains("MOVE"), moves);
+                        copied = true;
+                        // Model another client's EXPUNGE in Inbox after the flags-preserving move.
+                        survives = !deleted;
+                        if moves { present = false; }
+                        String::new()
+                    }
+                    "UID FETCH 8 (UID FLAGS)" => "* 1 FETCH (UID 8 FLAGS (\\Seen \\Flagged))\r\n".into(),
+                    command if command.starts_with("UID FETCH 8 ") => {
+                        if command.contains("BODYSTRUCTURE") {
+                            let header = "Subject: Fixture\r\nContent-Type: text/plain\r\n\r\n";
+                            format!("* 1 FETCH (UID 8 FLAGS (\\Seen \\Flagged) BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER] {{{}}}\r\n{header})\r\n", header.len())
+                        } else {
+                            assert!(command.contains("BODY.PEEK[TEXT]"));
+                            "* 1 FETCH (UID 8 BODY[TEXT] {4}\r\nbody)\r\n".into()
+                        }
+                    }
+                    _ => panic!("unexpected fixture command: {command}"),
+                };
+                let status = if reject_clear && command == "UID STORE 1 -FLAGS.SILENT (\\Deleted)" { "NO" } else { "OK" };
+                socket.get_mut().write_all(format!("{data}{tag} {status} fixture\r\n").as_bytes()).await.unwrap();
+            }
+            if attempt == 0 { assert!(deleted && present, "STORE succeeded before the disconnect"); }
+        }
+        assert_eq!(copied, !changed_validity && !reject_clear);
+        assert_eq!(present, changed_validity || reject_clear);
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+    store.save_account(&account).unwrap();
+    let trash = store.save_folder(&account.id, "Trash", None, FolderRole::Trash).unwrap();
+    let inbox = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    for folder in [trash, inbox] {
+        store.reset_uidvalidity(folder, 7).unwrap();
+    }
+    let id = store.save_message(&Message { summary: MessageSummary {
+        account: account.id.clone(), folder: trash, uid: 1, seen: true, flagged: true, ..Default::default()
+    }, ..Default::default() }).unwrap();
+    let mut imap = ImapSync::login(&account, "fixture").await.unwrap();
+    assert!(imap.empty_trash(&mut store, trash).await.is_err());
+    assert_eq!(store.known_uids(trash).unwrap(), [1]);
+    drop(imap);
+    let mut imap = ImapSync::login(&account, "fixture").await.unwrap();
+    let result = imap.move_message(&mut store, id, inbox).await;
+    drop(imap);
+    server.await.unwrap();
+    assert_eq!(result.is_ok(), !changed_validity && !reject_clear, "{result:?}");
+    if result.is_ok() {
+        assert_eq!(store.known_uids(inbox).unwrap(), [8], "restored mail must survive a later EXPUNGE");
+        let restored = &store.list_messages(inbox, 0, 1, 0).unwrap()[0];
+        assert!(restored.seen && restored.flagged, "other flags survive restoration");
+        assert!(store.known_uids(trash).unwrap().is_empty());
+    } else if !changed_validity {
+        assert_eq!(store.known_uids(trash).unwrap(), [1]);
+    }
+}
+
+#[tokio::test]
+async fn restored_mail_survives_expunge_after_interrupted_empty() {
+    for moves in [true, false] { restore_after_interrupted_empty(moves, false, false).await; }
+}
+
+#[tokio::test]
+async fn restore_stops_if_clearing_deleted_fails() {
+    for moves in [true, false] { restore_after_interrupted_empty(moves, false, true).await; }
+}
+
+#[tokio::test]
+async fn restore_checks_uidvalidity_before_clearing_deleted() {
+    for moves in [true, false] { restore_after_interrupted_empty(moves, true, false).await; }
+}

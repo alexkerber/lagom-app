@@ -151,7 +151,7 @@ impl MainWindow {
         let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
             None => mail::View::Inbox,
             Some((Kind::Later, _)) => mail::View::Later,
-            Some((Kind::Trash, _)) => mail::View::Trash,
+            Some((Kind::Trash, None)) => mail::View::Trash,
             Some((_, Some(id))) => mail::View::Folder(id),
             // A folder ⌘K just created: nothing on the server yet.
             Some((_, None)) => mail::View::Inbox,
@@ -670,6 +670,37 @@ mod tests {
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn search_in_second_trash_displays_and_empties_that_folder(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, mut rx) = window(cx);
+        let trash = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            let first = live.store.save_folder(account, "Deleted Items", None, FolderRole::Trash).unwrap();
+            let trash = live.store.save_folder(account, "Trash", None, FolderRole::Trash).unwrap();
+            let mut hit = 0;
+            for folder in [first, trash] {
+                hit = live.store.save_message(&Message { summary: MessageSummary {
+                    account: account.clone(), folder, uid: 1, seen: true, ..Default::default()
+                }, ..Default::default() }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.open_found(hit, cx);
+            assert_eq!(v.inbox.folders[v.inbox.open.unwrap()].store, Some(trash));
+            assert_eq!(v.inbox.list().iter().map(|&id| v.inbox.mail[id].store).collect::<Vec<_>>(), [Some(hit)]);
+            v.confirm_empty_trash = true;
+            v.reload(cx);
+            assert!(v.confirm_empty_trash);
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].folder, mail::Place::Folder(trash));
+            v.empty_trash(cx);
+            trash
+        });
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::EmptyTrash { folder, .. } if folder == trash));
+        assert!(rx.try_recv().is_err());
     }
 
     #[gpui::test]

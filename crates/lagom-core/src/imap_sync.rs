@@ -251,19 +251,23 @@ impl ImapSync {
     async fn all_uids(&mut self) -> Result<HashSet<u32>> {
         use async_imap::imap_proto::{MailboxDatum, Response, Status};
         // async-imap's search parser discards the tagged status, even after partial results.
-        let tag = net(self.session.run_command("UID SEARCH ALL")).await?;
-        let mut uids = HashSet::new();
-        loop {
-            let response = net(self.session.read_response()).await?
-                .ok_or(Error::Network("IMAP search interrupted"))?;
-            match response.parsed() {
-                Response::MailboxData(MailboxDatum::Search(ids)) => uids.extend(ids.iter().copied().filter(|u| *u > 0)),
-                Response::Done { tag: done, status, .. } if *done == tag => {
-                    return if *status == Status::Ok { Ok(uids) } else { Err(Error::Network("IMAP search failed")) };
+        tokio::time::timeout(TIMEOUT, async {
+            let tag = self.session.run_command("UID SEARCH ALL").await
+                .map_err(|_| Error::Network("IMAP operation failed"))?;
+            let mut uids = HashSet::new();
+            loop {
+                let response = self.session.read_response().await
+                    .map_err(|_| Error::Network("IMAP operation failed"))?
+                    .ok_or(Error::Network("IMAP search interrupted"))?;
+                match response.parsed() {
+                    Response::MailboxData(MailboxDatum::Search(ids)) => uids.extend(ids.iter().copied().filter(|u| *u > 0)),
+                    Response::Done { tag: done, status, .. } if *done == tag => {
+                        return if *status == Status::Ok { Ok(uids) } else { Err(Error::Network("IMAP search failed")) };
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
+        }).await.map_err(|_| Error::Network("IMAP operation timed out"))?
     }
     pub async fn sync_folder(&mut self, store: &mut Store, id: i64, limit: usize) -> Result<()> {
         if limit == 0 {
@@ -547,6 +551,10 @@ impl ImapSync {
         let (source, _) = self.select(store, message.folder).await?;
         if before != source.uidvalidity {
             return Err(Error::Invalid("mailbox changed; resync before operation"));
+        }
+        if source.role == FolderRole::Trash {
+            // An interrupted empty may have marked the message; MOVE and COPY preserve flags.
+            net(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
         }
         if self.capabilities.has_str("MOVE") {
             net(self
@@ -879,6 +887,41 @@ mod tests {
 mod protocol_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test(start_paused = true)]
+    async fn search_deadline_includes_all_untagged_responses() {
+        let (client, server) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            for response in ["", "* CAPABILITY IMAP4rev1\r\n"] {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+                let tag = line.split_whitespace().next().unwrap();
+                server.get_mut().write_all(format!("{response}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let (tag, command) = line.trim_end().split_once(' ').unwrap();
+            assert_eq!(command, "UID SEARCH ALL");
+            for _ in 0..3 {
+                tokio::time::sleep(TIMEOUT / 2).await;
+                if server.get_mut().write_all(b"* SEARCH 1\r\n").await.is_err() { return; }
+            }
+            let _ = server.get_mut().write_all(format!("{tag} OK done\r\n").as_bytes()).await;
+        });
+        let config = ServerConfig { host: "localhost".into(), port: 3143, security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
+        let capabilities = session.capabilities().await.unwrap();
+        let mut imap = ImapSync { account, session, capabilities };
+        let start = tokio::time::Instant::now();
+        let result = imap.all_uids().await;
+        assert!(matches!(result, Err(Error::Network("IMAP operation timed out"))), "{result:?}");
+        assert_eq!(start.elapsed(), TIMEOUT);
+        drop(imap);
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn understated_attachment_is_rejected_before_reading_the_literal() {
         let (client, server) = tokio::io::duplex(4096);

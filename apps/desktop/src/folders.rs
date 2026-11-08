@@ -96,10 +96,14 @@ pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
 /// (folder, depth) in tree order. Children of a closed folder are left out unless `all`.
 pub fn tree(folders: &[Folder], all: bool) -> Vec<(usize, usize)> {
     fn walk(folders: &[Folder], parent: Option<usize>, depth: usize, all: bool, out: &mut Vec<(usize, usize)>) {
-        for (f, folder) in folders.iter().enumerate().filter(|(_, x)| x.parent == parent && x.listed()) {
-            out.push((f, depth));
-            if all || folder.open {
-                walk(folders, Some(f), depth + 1, all, out);
+        for (f, folder) in folders.iter().enumerate().filter(|(_, x)| x.parent == parent) {
+            if folder.listed() {
+                out.push((f, depth));
+                if all || folder.open {
+                    walk(folders, Some(f), depth + 1, all, out);
+                }
+            } else {
+                walk(folders, Some(f), depth, all, out);
             }
         }
     }
@@ -109,7 +113,7 @@ pub fn tree(folders: &[Folder], all: bool) -> Vec<(usize, usize)> {
 }
 
 pub fn has_children(folders: &[Folder], f: usize) -> bool {
-    folders.iter().any(|x| x.parent == Some(f) && x.listed())
+    folders.iter().enumerate().any(|(i, x)| x.parent == Some(f) && (x.listed() || has_children(folders, i)))
 }
 
 /// "Travel / Trains".
@@ -176,6 +180,26 @@ mod tests {
         assert!(tree(&folders, true).is_empty());
         merge(&mut folders, &[server]);
         assert_eq!(folders.len(), 1);
+    }
+
+    #[test]
+    fn hidden_system_parents_keep_custom_children_in_both_trees() {
+        let mut folders = vec![
+            Folder { kind: Kind::Trash, open: false, ..Folder::new("Trash", None, &[]) },
+            Folder::new("Receipts", Some(0), &[]),
+            Folder::new("Old", Some(1), &[]),
+        ];
+        for all in [false, true] {
+            assert_eq!(tree(&folders, all), [(1, 0), (2, 1)]);
+        }
+        assert_eq!(path(&folders, 1), "Trash / Receipts");
+        folders[1].open = false;
+        assert_eq!(tree(&folders, false), [(1, 0)]);
+        assert_eq!(tree(&folders, true), [(1, 0), (2, 1)]);
+        folders.push(Folder::new("Provider", None, &[]));
+        folders[0].parent = Some(3);
+        assert!(has_children(&folders, 3));
+        assert_eq!(tree(&folders, false), [(3, 0), (1, 1)]);
     }
 
     #[test]
