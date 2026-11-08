@@ -86,9 +86,18 @@ const LIST_MAX: f32 = 420.;
 const HEADER_H: f32 = 52.;
 /// The reading pane at the window's minimum width: room for a 56-character line of 14 pt text.
 const READING_MIN: f32 = 440.;
+/// The content panel's right margin and its two borders.
+const PANEL_INSET: f32 = 8. + 2.;
 /// The smallest window: sidebar, the narrowest list and the narrowest reading pane, plus the
 /// panel's margin and border. 600 pt tall keeps the sidebar's groups on screen.
-pub const MIN_WINDOW: (f32, f32) = (SIDEBAR_W + LIST_MIN + READING_MIN + 10., 600.);
+pub const MIN_WINDOW: (f32, f32) = (SIDEBAR_W + LIST_MIN + READING_MIN + PANEL_INSET, 600.);
+
+/// The list column for a window `viewport` pt wide: 36 % of the panel, 300 to 420 pt.
+/// A pixel width, not a relative one: GPUI measures clamped text at a narrower width first
+/// when the column is relative and a row animates, and then drops the ellipsis.
+fn list_width(viewport: f32) -> f32 {
+    (0.36 * (viewport - SIDEBAR_W - PANEL_INSET)).clamp(LIST_MIN, LIST_MAX)
+}
 
 fn motion() -> Animation {
     Animation::new(MOTION).with_easing(ease_out_quint())
@@ -187,6 +196,8 @@ pub struct MainWindow {
     // The list has the keys and the window is active: selection in the accent. Set each render.
     list_focused: bool,
     window_active: bool,
+    // The list column's width for this render's window size.
+    list_w: f32,
     // The window title last set, so render sets it only when the list changes.
     title: SharedString,
     _appearance: gpui::Subscription,
@@ -245,6 +256,7 @@ impl MainWindow {
             glide: None,
             list_focused: false,
             window_active: false,
+            list_w: LIST_MAX,
             title: SharedString::default(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
@@ -1292,9 +1304,7 @@ impl MainWindow {
             None => format!("{left} left"),
         };
         div()
-            .w(relative(0.36))
-            .min_w(px(LIST_MIN))
-            .max_w(px(LIST_MAX))
+            .w(px(self.list_w))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1504,6 +1514,7 @@ impl Render for MainWindow {
         self.open_current(cx);
         self.window_active = window.is_window_active();
         self.list_focused = self.window_active && self.focus.is_focused(window);
+        self.list_w = list_width(f32::from(window.viewport_size().width));
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let title = match &self.page {
@@ -1537,7 +1548,7 @@ impl Render for MainWindow {
                     .absolute()
                     .inset_0()
                     .flex()
-                    .child(div().w(relative(0.36)).min_w(px(LIST_MIN)).max_w(px(LIST_MAX)).flex_shrink_0())
+                    .child(div().w(px(self.list_w)).flex_shrink_0())
                     // Pane padding, reply field and a gap.
                     .child(div().flex_1().relative().child(layer(20. + 36. + 12.))),
                 false => layer(24.),
@@ -1655,7 +1666,8 @@ const SLOP: f32 = 8.;
 const MOUSE_SLOP: f32 = 6.;
 /// docs/motion.md: about 35 % of the 408 px row, or 120 px, whichever is less.
 const THRESHOLD: f32 = 120.;
-/// A long left swipe deletes: about 60 % of the 408 px row (the list is a fixed 420 px wide).
+/// A long left swipe deletes: about 60 % of the 408 px row in the widest (420 px) list. A
+/// narrower list keeps the same distance, so the swipe runs further past the row's width.
 const DELETE_THRESHOLD: f32 = 0.6 * 408.;
 
 /// The move a swipe released at `dx` makes. Right has one stage (Done), left has two (Later, Delete).
@@ -2096,6 +2108,14 @@ mod tests {
         assert_eq!(swipe(&[(119., 0.)]).end(), Some((7, 119., None)));
         assert_eq!(swipe(&[(150., 0.), (-140., 0.)]).end(), Some((7, 10., None)));
         assert_eq!(swipe(&[(0., 30.)]).end(), None);
+    }
+
+    #[test]
+    fn list_width_clamps_and_leaves_the_reading_pane_its_minimum() {
+        assert_eq!(list_width(1440.), LIST_MAX);
+        assert_eq!(list_width(MIN_WINDOW.0), LIST_MIN);
+        let pane = MIN_WINDOW.0 - SIDEBAR_W - PANEL_INSET - list_width(MIN_WINDOW.0);
+        assert!(pane >= READING_MIN, "reading pane {pane}");
     }
 
     #[test]
