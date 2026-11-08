@@ -101,12 +101,13 @@ impl Panes {
     }
 }
 
-/// Windows refuses to replace a file another handle has open (a reader, or antivirus), so retry briefly.
+/// Windows refuses to replace a file another handle has open (a reader, or antivirus), so retry briefly:
+/// error 5 is access denied, 32 a sharing violation.
 fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut tries = 0;
     loop {
         match fs::rename(from, to) {
-            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied && tries < 50 => {
+            Err(e) if cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32)) && tries < 50 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
