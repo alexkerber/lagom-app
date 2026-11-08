@@ -42,6 +42,8 @@ def material(name, color, rough=.4, metal=0, grain=None):
     bs.inputs['Metallic'].default_value = metal
     if metal:
         bs.inputs['Anisotropic'].default_value = .72
+        if take6 and name == 'Brushed stainless':
+            bs.inputs['Tangent'].default_value = (0,1,0)
     if grain and (not take2 or (take3 and name == 'Brushed stainless')):
         coord = n.new('ShaderNodeTexCoord')
         mapping = n.new('ShaderNodeVectorMath')
@@ -192,8 +194,8 @@ line('Polished cutting edge',[(x,.145,.477+(.035*(1-(x/1.16)**2) if take4 else 0
 
 def between(name,a,b,radius,mat):
     if take5:
-        a = (a[0], a[1]-.53, a[2]-.23)
-        b = (b[0], b[1]-.53, b[2]-.23)
+        a = (a[0], a[1]-(.25 if take6 else .53), a[2]-(.12 if take6 else .23))
+        b = (b[0], b[1]-(.25 if take6 else .53), b[2]-(.12 if take6 else .23))
     direction=Vector(b)-Vector(a)
     bpy.ops.mesh.primitive_cylinder_add(vertices=64,radius=radius,depth=direction.length,location=(Vector(a)+Vector(b))/2)
     o=bpy.context.object
@@ -211,8 +213,8 @@ neck_profile=[(.66,.478,.18,.016),(.70,.485,.17,.025),(.76,.50,.145,.045),
 verts=[]
 for y,z,rx,rz in neck_profile:
     if take5 and y > .76:
-        y = .76 + (y-.76)*.10
-        z = .50 + (z-.50)*.15
+        y = .76 + (y-.76)*(.60 if take6 else .10)
+        z = .50 + (z-.50)*(.60 if take6 else .15)
     for j in range(64):
         a=2*math.pi*j/64
         verts.append((rx*math.cos(a),y,z+rz*math.sin(a)))
@@ -236,14 +238,14 @@ def envelope_point(x,t,offset=0):
     if take6:
         angle = 2.25*math.pi*t
         radius = .43-.16*t+offset
-        return (x,-.36+radius*math.cos(angle),.96+radius*math.sin(angle))
+        return (x,.76-radius*math.cos(angle),.96+radius*math.sin(angle))
     return (x, .20-1.42*t, .49+.12*math.sin(math.pi*t)+.13*t**8+offset)
 if take5:
-    profile = ([(.20,.44),(.16,.62),(.11,.80)] if take6 else []) + [envelope_point(0,i/80)[1:] for i in range(81)]
+    profile = ([(.20,.44),(.24,.62),(.29,.80)] if take6 else []) + [envelope_point(0,i/80)[1:] for i in range(81)]
     white.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.93,.87,.73,1)
 v=[(x,y,z) for y,z in profile for x in ((-.78,.78) if take5 else (-.58,.58))]
 strip_faces=[(2*i,2*i+1,2*i+3,2*i+2) for i in range(len(profile)-1)]
-strip=mesh('Single curled letter',v,[tuple(reversed(f)) for f in strip_faces] if take5 and not take6 else strip_faces,white)
+strip=mesh('Single curled letter',v,[tuple(reversed(f)) for f in strip_faces] if take5 else strip_faces,white)
 sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=2
 solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.016 if take5 else .008
 for face in strip.data.polygons: face.use_smooth=True
@@ -277,11 +279,16 @@ if take5:
                [(0,i+1,(i+1)%len(border)+1) for i in range(len(border))],stamp_mat)
     for face in stamp.data.polygons: face.use_smooth=True
 if take6:
-    pivot = Vector((0,-.36,.96))
+    pivot = Vector((0,.76,.96))
     transform = Matrix.Translation(pivot) @ Matrix.Rotation(math.radians(15),4,'Y') @ Matrix.Translation(-pivot)
     for obj in scene.objects:
         if obj.name.startswith(('Single curled letter','Letter V fold')):
             obj.matrix_world = transform @ obj.matrix_world
+if take6:
+    # The handle points toward the viewer; the shaved envelope curls toward it.
+    turn = Matrix.Rotation(math.pi,4,'Z')
+    for obj in scene.objects:
+        obj.matrix_world = turn @ obj.matrix_world
 subject=list(scene.objects)
 
 # Orthographic camera and broad softboxes: no external textures or environment maps.
@@ -362,7 +369,7 @@ if take2:
             links.new(gradient.outputs[0], bs.inputs['Emission Color'])
             bs.inputs['Emission Strength'].default_value = .65
             ink.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.065,.065,.065,1)
-        frames = [(v,1.55,(0,-.70,.65)) for v in 'ABCD'] if take6 else [('1',2.18,(0,-.35,.65)),('2',2.18,(0,-.35,.65))] if take4 else [
+        frames = [(v,1.55,(0,.40,.65)) for v in 'ABCD'] if take6 else [('1',2.18,(0,-.35,.65)),('2',2.18,(0,-.35,.65))] if take4 else [
             ('1', 2.65, (0,-.12,.68)),
             ('2', 4.0, (0,-.02,.93)),
             ('3', 2.65, (0,-.12,.68))]
