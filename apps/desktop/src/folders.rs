@@ -59,6 +59,22 @@ pub fn sample() -> Vec<Folder> {
     folders
 }
 
+pub fn validate_name<'a>(name: &str, delimiters: impl Iterator<Item = &'a str>, mut names: impl Iterator<Item = &'a str>) -> Result<(), &'static str> {
+    if name.trim().is_empty() {
+        return Err("Enter a folder name");
+    }
+    if name.len() > 1024 || name.chars().any(char::is_control) {
+        return Err("Invalid folder name");
+    }
+    if delimiters.filter(|d| !d.is_empty()).any(|d| name.contains(d)) {
+        return Err("Folder names cannot contain the hierarchy delimiter");
+    }
+    if names.any(|n| n.eq_ignore_ascii_case(name)) {
+        return Err("A folder with this name already exists");
+    }
+    Ok(())
+}
+
 /// Updates `folders` from the store in place. Indices never move (undo history and the open
 /// list hold them): new folders go last, deleted ones are marked gone.
 pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
@@ -75,9 +91,9 @@ pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
             _ => Kind::Custom,
         };
         let name = s.delimiter.as_deref().and_then(|d| s.name.rsplit_once(d)).map_or(s.name.as_str(), |(_, n)| n);
-        // A folder ⌘K created locally is adopted once the server lists it.
+        // An optimistic folder is adopted once the server lists it.
         let found = folders.iter().position(|f| f.store == Some(s.id)).or_else(|| folders.iter().position(|f| {
-            f.store.is_none() && ((f.kind == Kind::Custom && f.full == s.name) || (f.kind == Kind::Trash && kind == Kind::Trash))
+            f.store.is_none() && !f.gone && ((f.kind == Kind::Custom && f.full == s.name) || (f.kind == Kind::Trash && kind == Kind::Trash))
         }));
         let i = found.unwrap_or_else(|| {
             folders.push(Folder::new(name, None, &[]));
@@ -138,6 +154,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validates_folder_names_against_the_account_namespace() {
+        let check = |name: &str| validate_name(name, ["."].into_iter(), ["INBOX", "Receipts", "Travel.Trains"].into_iter());
+        for name in ["", "  ", "\t", "Travel.Trains", "New.Child", "receipts", "inbox", "bad\r\nname", "bad\0name"] {
+            assert!(check(name).is_err(), "{name:?}");
+        }
+        assert!(check(&"x".repeat(1025)).is_err());
+        for name in ["Taxes", "Räksmörgås", "Travel/Trains", "Two words"] {
+            assert!(check(name).is_ok(), "{name:?}");
+        }
+        assert!(validate_name("Travel/Trains", ["/"].into_iter(), [].into_iter()).is_err());
+        assert!(validate_name("Travel/Trains", [].into_iter(), [].into_iter()).is_ok());
+        assert!(validate_name("Taxes", [""].into_iter(), [].into_iter()).is_ok());
+    }
+
+    #[test]
     fn closed_folders_hide_their_children() {
         let mut folders = sample();
         let names = |rows: Vec<(usize, usize)>| rows.iter().map(|&(f, d)| (path(&folders, f), d)).collect::<Vec<_>>();
@@ -180,6 +211,23 @@ mod tests {
         assert!(tree(&folders, true).is_empty());
         merge(&mut folders, &[server]);
         assert_eq!(folders.len(), 1);
+    }
+
+    #[test]
+    fn merge_adopts_pending_folder_and_trash_without_reviving_failed_creation() {
+        use lagom_core::store::{Folder as F, FolderRole as R};
+        let mut folders = vec![
+            Folder { gone: true, ..Folder::new("Taxes", None, &[]) },
+            Folder::new("Taxes", None, &[]),
+            Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) },
+        ];
+        let server = |id, name: &str, role| F { id, account: "fixture".into(), name: name.into(), delimiter: Some("/".into()), role, uidvalidity: None, uidnext: None, last_uid: 0, highest_modseq: None, unread: 0 };
+        merge(&mut folders, &[server(1, "Taxes", R::Other), server(2, "[Provider]/Bin", R::Trash)]);
+        assert_eq!(folders.len(), 3);
+        assert!(folders[0].gone && folders[0].store.is_none());
+        assert_eq!(folders[1].store, Some(1));
+        assert_eq!((folders[2].kind, folders[2].store), (Kind::Trash, Some(2)));
+        assert_eq!(tree(&folders, true), [(1, 0)]);
     }
 
     #[test]
