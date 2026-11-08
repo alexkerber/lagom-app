@@ -38,12 +38,12 @@ gpui = { version = "0.2.2", features = ["test-support"] }
 # shortcut: Cargo gates build dependencies by host, use target gating when it supports cross-compiling to Windows.
 embed-resource = "3.0"
 
-[target.'cfg(target_os = "windows")'.dev-dependencies]
-windows = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSView", "objc2-quartz-core"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData"] }
 
 [package.metadata.bundle]

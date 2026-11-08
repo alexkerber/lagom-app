@@ -17,6 +17,9 @@ use gpui::{Bounds, Pixels, Rgba};
 
 use super::*;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod native;
+
 /// Whether this platform renders HTML mail.
 pub(super) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
@@ -115,6 +118,13 @@ addEventListener('click', e => {
 addEventListener('keydown', e => { if (e.key === 'Escape') window.ipc.postMessage('escape'); }, true);
 "#;
 
+fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
+    let mut clip = bounds.intersect(&mask);
+    clip.size.width = clip.size.width.max(px(0.));
+    clip.size.height = clip.size.height.max(px(0.));
+    (bounds, clip)
+}
+
 /// (message id, HTML length, remote images, dark): the document on screen.
 type Key = (usize, usize, bool, bool);
 
@@ -122,7 +132,7 @@ type Key = (usize, usize, bool, bool);
 #[derive(Default)]
 pub(super) struct Web {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    view: Option<Rc<wry::WebView>>,
+    view: Option<Rc<native::View>>,
     /// Set just before the app loads a document: the one navigation the web view may make.
     ours: Rc<std::cell::Cell<bool>>,
     /// The document asked for last.
@@ -135,7 +145,7 @@ pub(super) struct Web {
     pub(super) has_remote: bool,
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
-    place: Rc<std::cell::Cell<Option<(Bounds<Pixels>, f32)>>>,
+    place: Rc<std::cell::Cell<Option<(Bounds<Pixels>, Bounds<Pixels>, f32)>>>,
 }
 
 /// A window with a mail web view: the main window and each message window.
@@ -241,13 +251,11 @@ impl Web {
         let visible = self.visible.clone();
         gpui::canvas(
             move |bounds, window, _| {
-                let mut bounds = bounds.intersect(&window.content_mask().bounds);
-                bounds.size.width = bounds.size.width.max(px(0.));
-                bounds.size.height = bounds.size.height.max(px(0.));
-                let now = Some((bounds, window.scale_factor()));
+                let (bounds, clip) = placement(bounds, window.content_mask().bounds);
+                let now = Some((bounds, clip, window.scale_factor()));
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if let Some(view) = &view {
-                    let show = drawable.get() && bounds.size.width > px(0.) && bounds.size.height > px(0.);
+                    let show = drawable.get() && clip.size.width > px(0.) && clip.size.height > px(0.);
                     visible.set(show);
                     let _ = view.set_visible(show);
                 }
@@ -257,12 +265,11 @@ impl Web {
                 place.set(now);
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if let Some(view) = &view {
-                    use wry::dpi::{LogicalPosition, LogicalSize};
-                    let (o, s) = (bounds.origin, bounds.size);
-                    let _ = view.set_bounds(wry::Rect {
-                        position: LogicalPosition::new(f64::from(f32::from(o.x)), f64::from(f32::from(o.y))).into(),
-                        size: LogicalSize::new(f64::from(f32::from(s.width)), f64::from(f32::from(s.height))).into(),
-                    });
+                    if view.place(bounds, clip, window.scale_factor()).is_err() {
+                        visible.set(false);
+                        let _ = view.set_visible(false);
+                        place.set(None);
+                    }
                 }
             },
             |_, _, _, _| {},
@@ -296,7 +303,7 @@ impl Web {
     /// The web view, hidden and unfocused, with page scripts, navigation and downloads off and
     /// nothing kept on disk.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn create<T: WebHost>(ours: Rc<std::cell::Cell<bool>>, theme: &Theme, window: &mut Window, cx: &mut Context<T>) -> Option<wry::WebView> {
+    fn create<T: WebHost>(ours: Rc<std::cell::Cell<bool>>, theme: &Theme, window: &mut Window, cx: &mut Context<T>) -> Option<native::View> {
         // GPUI's test windows have no native handle.
         if cfg!(test) {
             return None;
@@ -337,7 +344,7 @@ impl Web {
             }
         })
         .detach();
-        Some(view)
+        native::View::new(view)
     }
 }
 
@@ -350,6 +357,22 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{point, size};
+
+    #[test]
+    fn scrolling_clips_without_resizing_or_reanchoring_the_document() {
+        let mask = Bounds::new(point(px(20.), px(100.)), size(px(300.), px(400.)));
+        for (x, y) in [(20., 100.), (10., 50.), (20., 400.), (20., -500.)] {
+            let full = Bounds::new(point(px(x), px(y)), size(px(320.), px(480.)));
+            let (document, clip) = placement(full, mask);
+            assert_eq!(document, full);
+            assert!(clip.size.width >= px(0.) && clip.size.height >= px(0.));
+            if clip.size.height > px(0.) {
+                assert!(clip.origin.y >= mask.origin.y);
+                assert!(clip.bottom() <= mask.bottom());
+            }
+        }
+    }
 
     #[test]
     fn the_document_blocks_scripts_and_remote_loads() {

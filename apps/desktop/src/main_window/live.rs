@@ -428,14 +428,20 @@ impl MainWindow {
         };
         let changed = self.reading_thread != Some(id);
         if changed || self.reading_dirty {
+            let was_single = self.reading_members.len() <= 1;
             if changed { self.expanded.clear(); }
             self.reading_dirty = false;
             self.reading_members = self.inbox.members(id);
             if self.inbox.group {
                 if let Some(live) = &self.live {
                     let m = &self.inbox.mail[id];
+                    let folder = m.folder.clone();
                     match live.store.thread_messages(&m.account, &m.thread_id) {
-                        Ok(rows) => {
+                        Ok(mut rows) => {
+                            // Prefer the visible folder's copy; actions still use every folder member.
+                            rows.sort_by_key(|m| (mail::Place::Folder(m.folder) != folder, m.id));
+                            let mut seen = HashSet::new();
+                            rows.retain(|m| m.message_id.is_empty() || seen.insert(m.message_id.clone()));
                             self.reading_members = rows.iter().map(|m| self.inbox.intern(m, &live.seen, chrono::Local::now())).collect();
                         }
                         Err(e) => self.notify(format!("Could not read conversation: {e}"), cx),
@@ -445,7 +451,7 @@ impl MainWindow {
             self.reading_members.sort_by_key(|&id| (self.inbox.mail[id].date, self.inbox.mail[id].store.unwrap_or(id as i64)));
             self.reading_thread = Some(id);
             self.expanded.retain(|id, _| self.reading_members.contains(id));
-            if changed && self.inbox.group && self.reading_members.len() > 1 {
+            if (changed || was_single) && self.inbox.group && self.reading_members.len() > 1 {
                 let newest = self.reading_members.iter().rev().find(|&&id| self.inbox.mail[id].unread)
                     .or_else(|| self.reading_members.last()).copied();
                 if let Some(id) = newest {
@@ -784,6 +790,106 @@ mod tests {
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn reading_deduplicates_folder_copies_but_actions_keep_their_ids(cx: &mut TestAppContext) {
+        use lagom_core::store::FolderRole;
+        let (view, cx, mut rx) = window(cx);
+        let (inbox_id, archive_id) = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            let inbox = live.store.folders(account, 0).unwrap()[0].id;
+            let archive = live.store.save_folder(account, "All Mail", None, FolderRole::Archive).unwrap();
+            let mut m = lagom_core::mime::parse(b"From: sender@example.com\r\nTo: recipient@example.com\r\nMessage-ID: <copy@test>\r\n\r\nBody").unwrap();
+            m.summary.account = account.clone();
+            m.summary.folder = archive;
+            m.summary.uid = 1;
+            let archive_id = live.store.save_message(&m).unwrap();
+            m.summary.folder = inbox;
+            let inbox_id = live.store.save_message(&m).unwrap();
+            v.inbox = Inbox::live();
+            v.reading_thread = None;
+            v.reload(cx);
+            v.open_current(cx);
+            assert_eq!(v.reading_members.len(), 1);
+            assert_eq!(v.inbox.mail[v.reading_members[0]].store, Some(inbox_id));
+            assert!(v.expanded.is_empty());
+            let archive = v.inbox.folders.iter().position(|f| f.store == Some(archive)).unwrap();
+            v.inbox.open = Some(archive);
+            v.reload(cx); v.open_current(cx);
+            assert_eq!(v.reading_members.len(), 1);
+            assert_eq!(v.inbox.mail[v.reading_members[0]].store, Some(archive_id));
+            v.inbox.open = None;
+            v.reload(cx); v.open_current(cx);
+            (inbox_id, archive_id)
+        });
+        while rx.try_recv().is_ok() {}
+        view.update(cx, |v, cx| v.act(Move::Delete, cx));
+        let moved: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|cmd| match cmd { Cmd::Op { id, .. } => Some(id), _ => None }).collect();
+        assert_eq!(moved, [inbox_id]);
+        assert!(!moved.contains(&archive_id));
+    }
+
+    #[gpui::test]
+    fn reading_keeps_distinct_messages_without_message_ids(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            let folder = live.store.folders(account, 0).unwrap()[0].id;
+            for uid in 1..=2 {
+                let mut m = lagom_core::mime::parse(b"From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Topic\r\n\r\nBody").unwrap();
+                m.summary.account = account.clone(); m.summary.folder = folder; m.summary.uid = uid;
+                live.store.save_message(&m).unwrap();
+            }
+            v.inbox = Inbox::live(); v.reading_thread = None;
+            v.reload(cx); v.open_current(cx);
+            assert_eq!(v.inbox.list().len(), 1);
+            assert_eq!(v.reading_members.len(), 2);
+            assert!(v.reading_members.iter().all(|&id| v.inbox.mail[id].message_id.is_empty()));
+        });
+    }
+
+    #[gpui::test]
+    fn first_sent_reply_opens_a_body_without_advancing_on_receipts(cx: &mut TestAppContext) {
+        use lagom_core::store::FolderRole;
+        let (view, cx, mut rx) = window(cx);
+        let mut reply = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            let inbox = live.store.folders(account, 0).unwrap()[0].id;
+            let sent = live.store.save_folder(account, "Sent", None, FolderRole::Sent).unwrap();
+            let mut m = lagom_core::mime::parse(b"From: sender@example.com\r\nTo: recipient@example.com\r\nMessage-ID: <root@test>\r\n\r\nRoot").unwrap();
+            m.summary.account = account.clone(); m.summary.folder = inbox; m.summary.uid = 1; m.summary.date = 1;
+            live.store.save_message(&m).unwrap();
+            m.summary.folder = sent; m.summary.message_id = "reply@test".into(); m.summary.thread_refs = "root@test".into(); m.summary.date = 2;
+            v.inbox = Inbox::live(); v.reading_thread = None;
+            v.reload(cx); v.open_current(cx);
+            assert_eq!(v.reading_members.len(), 1);
+            assert!(v.expanded.is_empty());
+            m
+        });
+        view.update(cx, |v, cx| {
+            let selected = v.reading_thread;
+            let reply_id = v.live.as_ref().unwrap().store.save_message(&reply).unwrap();
+            v.reload(cx); v.open_current(cx);
+            assert_eq!(v.reading_thread, selected);
+            assert_eq!(v.reading_members.len(), 2);
+            assert_eq!(v.expanded.len(), 1);
+            let expanded = *v.expanded.keys().next().unwrap();
+            assert_eq!(v.inbox.mail[expanded].store, Some(reply_id));
+            reply.summary.seen = true;
+            v.live.as_ref().unwrap().store.save_message(&reply).unwrap();
+            while rx.try_recv().is_ok() {}
+            v.reload(cx); v.open_current(cx);
+            assert!(v.expanded.contains_key(&expanded));
+            assert_eq!(v.expanded.len(), 1);
+            assert!(rx.try_recv().is_err());
+            v.toggle_message(expanded, cx);
+            v.reload(cx); v.open_current(cx);
+            assert!(v.expanded.is_empty(), "a deliberate collapse survives a reload");
+        });
     }
 
     #[gpui::test]
