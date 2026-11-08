@@ -12,6 +12,8 @@ for arg do
         *) printf 'Usage: %s [--quick] [--visual]\n' "$0" >&2; exit 2 ;;
     esac
 done
+# Build and launch the same binary, and keep test temp files under target/.
+export CARGO_TARGET_DIR="$PWD/target"
 export TMPDIR="$PWD/target/smoke/tmp"
 mkdir -p "$TMPDIR" || exit 1
 out=target/smoke
@@ -24,13 +26,9 @@ own_child() {
 cleanup() {
     if [ -n "$pid" ]; then
         if own_child; then
+            # shortcut: TERM only, no KILL; a PID could in theory be reused between the check and
+            # the signal. Upgrade to a supervisor if this ever runs unattended.
             kill "$pid" 2>/dev/null || :
-            sleep 1
-            if own_child; then
-                case "$(ps -o comm= -p "$pid")" in
-                    lagom|*/lagom) kill -KILL "$pid" 2>/dev/null || : ;;
-                esac
-            fi
         fi
         wait "$pid" 2>/dev/null || :
         pid=
@@ -99,6 +97,7 @@ then
 fi
 result PASS 'window probe compilation'
 # Keep in sync with LAGOM_SCREEN in apps/desktop/src (including live account views).
+# popout and popout-html open a second window; the probe captures the first, so they are left out.
 screens='inbox empty palette later folders settings html html-simple move compose compose-text compose-cc compose-md compose-md-bar glide swipe-neutral swipe swipe-later swipe-delete deleted add-account add-account-form'
 for screen in $screens; do
     for theme in light dark; do
