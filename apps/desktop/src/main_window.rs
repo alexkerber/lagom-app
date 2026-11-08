@@ -2513,9 +2513,9 @@ mod dispatch {
         cx.simulate_mouse_move(at(100.), MouseButton::Left, Default::default());
         assert_eq!(widths(cx).0, 0.);
         cx.simulate_mouse_up(at(100.), MouseButton::Left, Default::default());
-        cx.simulate_keystrokes("alt-cmd-s");
+        cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(widths(cx).0, 220.);
-        cx.simulate_keystrokes("alt-cmd-s");
+        cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(widths(cx).0, 0.);
         assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
     }
@@ -2532,7 +2532,7 @@ mod dispatch {
         assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 180.);
         cx.simulate_mouse_move(at(119.), MouseButton::Left, Default::default());
         cx.simulate_mouse_up(at(119.), MouseButton::Left, Default::default());
-        cx.simulate_keystrokes("alt-cmd-s");
+        cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 300.);
     }
 
