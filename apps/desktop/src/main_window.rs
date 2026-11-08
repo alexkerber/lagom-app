@@ -1571,7 +1571,8 @@ impl MainWindow {
         let web = html::SUPPORTED && m.html.is_some();
         let text = !web || self.palette.is_some() || self.compose.is_some();
         // Toasts sit just above the reply field; the web view would cover them.
-        let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count();
+        let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count()
+            + self.live.as_ref().map_or(0, |live| live.failed.len());
         div()
             .flex_1()
             .min_w(px(0.))
@@ -1932,6 +1933,22 @@ impl MainWindow {
             });
             // Nothing has left yet: it goes when the Undo window ends.
             out.push(scoped(i, crate::compose::toast(&t, "Sending", Some(undo().on_click(on_undo).into_any_element())).into_any_element()));
+        }
+        if let Some(live) = &self.live {
+            for (i, pending) in live.failed.iter().enumerate() {
+                let id = pending.id.clone();
+                let edit_id = id.clone();
+                let status = match pending.state.as_str() {
+                    "uncertain" => "Delivery uncertain — sending again may duplicate delivery",
+                    "failed" => "Not sent — automatic retry stopped",
+                    _ => "Not sent — retry scheduled",
+                };
+                let actions = div().flex().flex_shrink_0().gap(px(8.))
+                    .child(button(&t, "Send again", None).on_click(cx.listener(move |this, _, _, cx| this.retry_failed(&id, cx))))
+                    .child(button(&t, "Edit draft", None).on_click(cx.listener(move |this, _, window, cx| this.edit_failed(&edit_id, window, cx))));
+                out.push(scoped(self.sending.len() + i, crate::compose::toast(&t,
+                    format!("{}: {}", status, if pending.mail.subject.is_empty() { pending.mail.to.join(", ") } else { pending.mail.subject.clone() }), Some(actions.into_any_element())).into_any_element()));
+            }
         }
         if let Some((text, offers_undo, _)) = &self.toast {
             let action = offers_undo.then(|| undo().on_click(cx.listener(|this, _, _, cx| this.undo(cx))).into_any_element());

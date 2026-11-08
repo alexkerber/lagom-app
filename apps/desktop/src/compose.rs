@@ -39,7 +39,9 @@ enum Phase {
 
 pub struct Compose {
     store: Option<(Rc<Store>, Account)>,
-    save_pending: bool,
+    _save_delay: Option<Task<()>>,
+    _save: Option<Task<()>>,
+    save_again: bool,
     theme: Theme,
     phase: Phase,
     focus: FocusHandle,
@@ -100,7 +102,9 @@ impl Compose {
         window.focus(&first.focus_handle(cx));
         Self {
             store: None,
-            save_pending: false,
+            _save_delay: None,
+            _save: None,
+            save_again: false,
             from: from.into(),
             message_id: lagom_core::smtp::message_id(from),
             reply,
@@ -153,20 +157,51 @@ impl Compose {
         }
     }
 
-    /// Coalesce field changes in one event turn; no timer holds unsaved text across turns.
     fn save_later(&mut self, cx: &mut Context<Self>) {
-        if self.save_pending { return; }
-        self.save_pending = true;
-        let this = cx.entity().downgrade();
-        cx.defer(move |cx| {
-            this.update(cx, |this, cx| {
-                this.save_pending = false;
-                if this.is_modal() || this.keep { this.save(cx); }
-            }).ok();
-        });
+        self._save_delay = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COUNT_DELAY).await;
+            this.update(cx, |this, cx| this.autosave(cx)).ok();
+        }));
     }
 
+    fn autosave(&mut self, cx: &mut Context<Self>) {
+        if !(self.is_modal() || self.keep) { return; }
+        if self._save.is_some() {
+            self.save_again = true;
+            return;
+        }
+        let Some((store, account)) = &self.store else { return };
+        let draft = self.draft(account, cx);
+        let path = store.path().to_owned();
+        let revision = store.draft_revision(&self.message_id);
+        let save = cx.background_executor().spawn(async move {
+            Store::open(path)?.autosave_draft(&draft, &revision?)
+        });
+        self._save = Some(cx.spawn(async move |this, cx| {
+            let result = save.await;
+            this.update(cx, |this, cx| {
+                this._save = None;
+                let message = "Could not save draft. Check local storage and try again.";
+                if result.is_err() && (this.is_modal() || this.keep) {
+                    this.problem = Some(message);
+                    cx.notify();
+                } else if result.is_ok() && this.problem == Some(message) {
+                    this.problem = None;
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.save_again) { this.autosave(cx); }
+            }).ok();
+        }));
+    }
+
+    pub(crate) fn account_id(&self) -> Option<&str> {
+        self.store.as_ref().map(|(_, account)| account.id.as_str())
+    }
+
+    // shortcut: explicit Send/close/quit still flush synchronously; use ordered worker commands if these actions stall.
     pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
+        self._save_delay = None;
+        self.save_again = false;
         let Some((store, account)) = &self.store else { return true };
         match store.save_draft(&self.draft(account, cx)) {
             Ok(()) => {
@@ -416,6 +451,8 @@ impl Compose {
 
     /// The faded sheet keeps its hitboxes while Sent, so Discard must not act then.
     fn discard(&mut self, cx: &mut Context<Self>) {
+        self._save_delay = None;
+        self.save_again = false;
         if self.phase != Phase::Sent {
             if let Some((store, _)) = &self.store {
                 if store.delete_draft(&self.message_id).is_err() {
@@ -608,6 +645,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
         .items_center()
         .gap(px(12.))
         .h(px(40.))
+        .max_w_full()
         .pl(px(14.))
         .pr(px(if undo.is_some() { 6. } else { 14. }))
         .bg(t.raised)
@@ -616,7 +654,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
         .rounded(px(radius::PANEL))
         .shadow_lg()
         .font_weight(FontWeight::MEDIUM)
-        .child(label)
+        .child(div().flex_1().min_w(px(0.)).line_clamp(1).text_ellipsis().child(label))
         .children(undo)
         .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
             d.opacity(ease_out_quint()(v)).relative().top(px(8. * (1. - spring(v))))

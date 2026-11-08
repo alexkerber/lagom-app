@@ -42,13 +42,19 @@ partially consumed commands must not be reused. No automatic retry or polling.
 A failed operation may have reached the server; resync before retrying a move.
 `Error::SentCopy` means SMTP succeeded: do not submit the message again.
 
-Draft edits are stored locally, coalesced within each UI event turn. Sending commits
-an outbox row before the five-second Undo window; Undo atomically restores the
-draft. Startup restores drafts and resumes pending sends. Failed sends retain their
-error and retry on sync. An SMTP acknowledgement is checkpointed before Sent APPEND,
-so an APPEND failure retries only the copy. Quit does not wait for network work.
-A crash or lost acknowledgement between server acceptance and the local checkpoint
-can still produce duplicate delivery or Sent copies; Message-ID stays unchanged.
+Draft autosave waits for a 300 ms typing pause and writes on a background executor.
+Revision checks prevent a late autosave from overwriting a newer save or restoring
+sent/discarded mail. Explicit Send, close and quit still flush local drafts synchronously.
+Sending commits an outbox row before the five-second Undo window; Undo atomically
+restores the draft. Temporary failures retry on sync with exponential backoff from
+one minute to one hour. Permanent refusals stop automatic retry. Interrupted SMTP
+attempts and unknown delivery outcomes remain uncertain until the user chooses
+Send again (which can duplicate delivery) or Edit draft (which atomically cancels
+the queued entry). Failed send status and actions survive restarting the desktop.
+SMTP and acknowledged Sent APPEND are checkpointed separately before refreshing
+the local Sent cache. A lost APPEND acknowledgement or crash before its checkpoint
+can still duplicate a Sent copy; Message-ID stays unchanged. The synchronous CLI
+send API leaves no queued entries on failure. Quit does not wait for network work.
 One desktop worker owns the queue per store. Server-side Drafts sync is not implemented.
 
 Initial sync stores the newest 500 UIDs per folder by default; subsequent sync

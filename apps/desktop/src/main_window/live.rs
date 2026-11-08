@@ -29,6 +29,7 @@ pub struct Live {
     want: Option<i64>,
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
+    pub(super) failed: Vec<lagom_core::outbox::Pending>,
     _events: Task<()>,
     /// Wakes the window when the next message on Later is due.
     due: Option<(i64, Task<()>)>,
@@ -45,9 +46,9 @@ fn now() -> i64 {
 pub(super) fn sent_note(delivery: Delivery, error: Option<String>) -> String {
     match (delivery, error) {
         (Delivery::Sent, None) => "Sent".into(),
-        (Delivery::Sent, Some(e)) => format!("Sent. {e}. Retrying the Sent copy on next sync."),
-        (Delivery::Maybe, _) => "Delivery uncertain. Kept in outbox for retry; a duplicate is possible.".into(),
-        (Delivery::NotSent, e) => format!("Kept in outbox: {}. Retrying on next sync.", e.unwrap_or_default()),
+        (Delivery::Sent, Some(e)) => format!("Sent. {e}. The Sent copy will retry with backoff."),
+        (Delivery::Maybe, _) => "Delivery uncertain. Kept in outbox; choose Send again or Edit draft.".into(),
+        (Delivery::NotSent, e) => format!("Kept in outbox: {}. See send status for retry or editing.", e.unwrap_or_default()),
     }
 }
 
@@ -81,6 +82,7 @@ impl Live {
         Ok(Self {
             bridge,
             accounts: store.accounts()?,
+            failed: store.failed_outbox()?,
             store: Rc::new(store),
             current: 0,
             sync: HashMap::new(),
@@ -126,12 +128,19 @@ impl MainWindow {
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
+        let Ok(accounts) = live.store.accounts() else { return };
+        live.accounts = accounts;
+        live.failed = live.store.failed_outbox().unwrap_or_default();
+        self.drafts.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
+        self.sending.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
+        if self.compose.as_ref().is_some_and(|c| c.read(cx).account_id().is_some_and(|id| !live.accounts.iter().any(|a| a.id == id))) {
+            self.compose = None;
+        }
         if !live.ops.is_empty() {
             live.stale = true;
             return;
         }
         live.stale = false;
-        live.accounts = live.store.accounts().unwrap_or_default();
         live.current = live.current.min(live.accounts.len().saturating_sub(1));
         let Some(account) = live.account().map(|a| a.id.clone()) else {
             self.inbox = Inbox::live();
@@ -433,6 +442,42 @@ impl MainWindow {
         if !live.bridge.send(Cmd::Send(id)) { self.worker_gone(cx); }
     }
 
+    pub(super) fn retry_failed(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        match live.store.retry_send(id, chrono::Local::now().timestamp_millis()) {
+            Ok(true) => self.send_mail(id.into(), cx),
+            Ok(false) => self.notify("This message is already being sent", cx),
+            Err(e) => self.notify(format!("Could not retry: {e}"), cx),
+        }
+        self.reload(cx);
+    }
+
+    pub(super) fn edit_failed(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        match live.store.undo_send(id) {
+            Ok(true) => {
+                match live.store.drafts() {
+                    Ok(drafts) => {
+                        if let Some(draft) = drafts.into_iter().find(|draft| draft.id == id) {
+                            if let Some(account) = live.accounts.iter().find(|a| a.id == draft.account).cloned() {
+                                let store = live.store.clone();
+                                let compose = cx.new(|cx| Compose::restore(draft, account, store, window, cx));
+                                self.watch_compose(&compose, window, cx);
+                                if let Some(other) = self.compose.take() { self.drafts.push(other); }
+                                compose.update(cx, |c, cx| c.reopen(window, cx));
+                                self.compose = Some(compose);
+                            }
+                        }
+                    }
+                    Err(e) => self.notify(format!("Draft restored, but could not open it: {e}"), cx),
+                }
+            }
+            Ok(false) => self.notify("This message is already being sent", cx),
+            Err(e) => self.notify(format!("Could not restore draft: {e}"), cx),
+        }
+        self.reload(cx);
+    }
+
     pub(super) fn restore_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
         let store = live.store.clone();
@@ -563,6 +608,7 @@ mod tests {
             pin: None,
             want: None,
             seen: HashSet::new(),
+            failed: Vec::new(),
             _events: Task::ready(()),
             due: None,
         };
@@ -685,7 +731,8 @@ mod tests {
         let original = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx));
         assert_eq!(original.in_reply_to.as_deref(), Some("<parent@example.com>"));
         assert!(original.references.contains(&"<root@example.com>".into()));
-        // The same turn's save has completed, without advancing a debounce timer or quitting.
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
         let stored = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap());
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].text, "Draft **body**");
@@ -698,6 +745,64 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
         cx.simulate_keystrokes("cmd-backspace");
         assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+    }
+
+    #[gpui::test]
+    fn autosave_waits_for_a_pause_and_keeps_the_latest_edit(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("first");
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.simulate_input(" latest");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "");
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "first latest");
+    }
+
+    #[gpui::test]
+    fn failed_send_actions_retry_or_restore_for_editing(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        send_one(cx);
+        let id = view.update(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            let id = live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().remove(0);
+            assert!(live.store.claim_send(&id, i64::MAX).unwrap());
+            live.store.send_failed(&id, &lagom_core::Error::MaybeSent, 0).unwrap();
+            id
+        });
+        view.update(cx, |v, cx| v.reload(cx));
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().failed[0].state.clone()), "uncertain");
+        view.update(cx, |v, cx| v.retry_failed(&id, cx));
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Send(sent)) if sent == id));
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_ref().unwrap();
+            assert!(live.store.claim_send(&id, i64::MAX).unwrap());
+            live.store.send_failed(&id, &lagom_core::Error::Rejected, 0).unwrap();
+            v.edit_failed(&id, window, cx);
+        });
+        assert!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).is_modal()));
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.pending(&id).is_err()));
+        cx.simulate_keystrokes("cmd-backspace");
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+    }
+
+    #[gpui::test]
+    fn removing_an_account_releases_retained_drafts(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Saved draft");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(cx, |v, _| v.drafts.len()), 1);
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_ref().unwrap();
+            live.store.delete_account(&live.accounts[0].id).unwrap();
+            v.on_events(vec![Event::Changed], window, cx);
+        });
+        assert!(view.read_with(cx, |v, _| v.drafts.is_empty()));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
     }
 
     #[gpui::test]

@@ -135,18 +135,15 @@ const SUBMIT_DEADLINE: Duration = Duration::from_secs(60);
 const SENT_COPY_DEADLINE: Duration = Duration::from_secs(60);
 
 /// SMTP success is irreversible. `SentCopy` means delivery succeeded; retry only
-/// saving the copy, never the SMTP submission. The durable queue retains failures for sync.
+/// saving the copy, never the SMTP submission. This synchronous API leaves no queue entry.
 pub async fn send(
     account: &Account,
     password: &str,
     outgoing: &Outgoing,
     store: &mut Store,
 ) -> Result<()> {
-    let id = store.enqueue(account, outgoing, 0)?;
-    if !store.claim_send(&id, 0)? { return Err(Error::Invalid("message already being sent")); }
-    send_queued(account, password, &store.pending(&id)?, store).await
+    send_within(account, password, outgoing, store, LOGIN_DEADLINE, SUBMIT_DEADLINE).await
 }
-#[cfg(test)]
 async fn send_within(
     account: &Account,
     password: &str,
@@ -158,7 +155,7 @@ async fn send_within(
     let message = compose(account, outgoing)?;
     let raw = message.formatted();
     submit_within(account, password, &message, &raw, login, submit).await?;
-    save_sent(account, password, &raw, store).await
+    save_sent(account, password, &raw, store, None).await
 }
 
 async fn submit_within(account: &Account, password: &str, message: &Message, raw: &[u8], login: Duration, submit: Duration) -> Result<()> {
@@ -171,6 +168,7 @@ async fn submit_within(account: &Account, password: &str, message: &Message, raw
             match timeout(login, transport.test_connection()).await {
                 Ok(Ok(true)) => {},
                 Ok(Err(e)) if auth_failure(&e) => return Err(Error::Authentication),
+                Ok(Err(e)) if e.is_permanent() => return Err(Error::Rejected),
                 _ => return Err(Error::Network("could not reach the SMTP server")),
             }
             match timeout(submit, transport.send_raw(message.envelope(), raw)).await {
@@ -197,25 +195,29 @@ pub async fn send_queued(account: &Account, password: &str, pending: &crate::out
     let result = async {
         if !pending.submitted {
             let message = compose(account, &pending.mail)?;
-            // shortcut: a crash after SMTP accepts DATA but before this checkpoint can duplicate mail; upgrade when the transport supports idempotent submission.
             submit_within(account, password, &message, &pending.raw, LOGIN_DEADLINE, SUBMIT_DEADLINE).await?;
-            store.submitted(&pending.id)?;
+            store.submitted(&pending.id).map_err(|_| Error::MaybeSent)?;
         }
-        save_sent(account, password, &pending.raw, store).await?;
+        if !pending.copied {
+            save_sent(account, password, &pending.raw, store, Some(&pending.id)).await?;
+        }
         store.sent(&pending.id)
     }.await;
     if let Err(error) = &result {
-        store.send_failed(&pending.id, &error.to_string())?;
+        store.send_failed(&pending.id, error, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64)?;
     }
     result
 }
 
-async fn save_sent(account: &Account, password: &str, raw: &[u8], store: &mut Store) -> Result<()> {
+async fn save_sent(account: &Account, password: &str, raw: &[u8], store: &mut Store, queued: Option<&str>) -> Result<()> {
     if !presets::is_gmail(account) {
         let copy = async {
             let mut imap = ImapSync::login(account, password).await?;
             // shortcut: a lost APPEND acknowledgement can repeat the Sent copy; reconcile Message-ID before APPEND when duplicate copies need prevention.
-            imap.append_sent(store, raw).await?;
+            let folder = imap.append_sent(store, raw).await?;
+            if let Some(id) = queued { store.copied(id)?; }
+            // Refresh is best effort after the acknowledged copy has been checkpointed.
+            let _ = imap.sync_folder(store, folder, crate::imap_sync::DEFAULT_LIMIT).await;
             // A failed LOGOUT cannot turn an already submitted and saved message into a send failure.
             let _ = imap.logout().await;
             Ok::<_, Error>(())
@@ -230,7 +232,9 @@ async fn save_sent(account: &Account, password: &str, raw: &[u8], store: &mut St
 /// A reply code means the server refused the message. Anything else (a dropped connection, a
 /// timeout) can happen after the server took it.
 fn submission_error(e: lettre::transport::smtp::Error) -> Error {
-    if e.status().is_some() {
+    if e.is_permanent() {
+        Error::Rejected
+    } else if e.status().is_some() {
         Error::Network("the SMTP server refused the message")
     } else {
         Error::MaybeSent

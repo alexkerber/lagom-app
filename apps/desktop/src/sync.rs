@@ -143,6 +143,7 @@ async fn run(path: PathBuf, mut rx: UnboundedReceiver<Cmd>, me: UnboundedSender<
         let _ = events.send(Event::Sync(String::new(), SyncState::Failed(error.to_string())));
         return;
     }
+    let _ = events.send(Event::Changed);
     let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
     for account in w.store.accounts().unwrap_or_default() {
         w.watch(&account);
@@ -449,9 +450,19 @@ impl Worker {
             if !self.store.claim_send(id, chrono::Local::now().timestamp_millis())? {
                 return Ok(false);
             }
-            let pending = self.store.pending(id)?;
-            let account = self.account(&pending.account)?;
-            let password = account.password()?;
+            let prepared = (|| {
+                let pending = self.store.pending(id)?;
+                let account = self.account(&pending.account)?;
+                let password = account.password()?;
+                Ok((pending, account, password))
+            })();
+            let (pending, account, password) = match prepared {
+                Ok(prepared) => prepared,
+                Err(e) => {
+                    self.store.send_failed(id, &e, chrono::Local::now().timestamp_millis())?;
+                    return Err(e);
+                }
+            };
             smtp::send_queued(&account, &password, &pending, &mut self.store).await?;
             Ok(true)
         }.await;
@@ -464,13 +475,12 @@ impl Worker {
                         self.emit(Event::ReauthRequired(pending.account));
                     }
                 }
-                let saved = self.store.send_failed(id, &e.to_string());
                 let delivery = match e {
                     Error::SentCopy => Delivery::Sent,
                     Error::MaybeSent => Delivery::Maybe,
                     _ => Delivery::NotSent,
                 };
-                (delivery, Some(saved.err().unwrap_or(e).to_string()))
+                (delivery, Some(e.to_string()))
             }
         };
         self.emit(Event::Sent { delivery, error });

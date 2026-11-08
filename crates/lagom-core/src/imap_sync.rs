@@ -551,14 +551,14 @@ impl ImapSync {
         let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
         self.move_message(store, id, target).await
     }
-    pub async fn append_sent(&mut self, store: &mut Store, raw: &[u8]) -> Result<()> {
+    pub async fn append_sent(&mut self, store: &mut Store, raw: &[u8]) -> Result<i64> {
         let target = self.ensure_role(store, FolderRole::Sent, "Sent").await?;
         let folder = store.folder(target)?;
         net(self
             .session
             .append(&folder.name, Some("(\\Seen)"), None, raw))
         .await?;
-        self.sync_folder(store, target, DEFAULT_LIMIT).await
+        Ok(target)
     }
     /// Wait until INBOX changes. Dropping this future closes its connection; no UI thread is created.
     pub async fn idle_inbox(mut self) -> Result<bool> {
