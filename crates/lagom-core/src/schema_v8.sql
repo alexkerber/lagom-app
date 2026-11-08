@@ -8,3 +8,5 @@ CREATE TABLE thread_links (
  PRIMARY KEY(account,node)
 );
 CREATE INDEX thread_links_thread ON thread_links(account,thread_id);
+CREATE INDEX messages_later_date ON messages(account,date DESC,id DESC) WHERE snoozed_until IS NOT NULL;
+CREATE INDEX messages_thread_folder ON messages(account,thread_id,folder,date,id);

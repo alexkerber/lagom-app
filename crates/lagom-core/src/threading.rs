@@ -72,17 +72,14 @@ impl Store {
 }
 
 fn conversation_sql(folder: Option<i64>) -> String {
-    let (index, thread_index, scope, newer_scope) = if folder.is_some() {
-        ("messages_folder_date", "messages_thread_folder", "m.folder=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)",
-            "n.folder=?2 AND (n.snoozed_until IS NULL OR n.snoozed_until<=?3)")
+    let (index, thread_index, scope) = if folder.is_some() {
+        ("messages_folder_date", "messages_thread_folder", "m.folder=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)")
     } else {
-        ("messages_later_date", "messages_thread", "m.snoozed_until>?3", "n.snoozed_until>?3")
+        ("messages_later_date", "messages_thread", "m.snoozed_until>?3")
     };
-    // Start with the page, then use the thread index; a folder-first join scans the whole mailbox.
+    // The date index visits the latest visible member first; DISTINCT skips the rest without rescanning the thread.
     format!("WITH page AS (
-        SELECT m.thread_id FROM messages m INDEXED BY {index} WHERE m.account=?1 AND {scope}
-        AND m.id=(SELECT n.id FROM messages n INDEXED BY {thread_index} WHERE n.account=m.account AND n.thread_id=m.thread_id AND {newer_scope}
-            ORDER BY n.date DESC,n.id DESC LIMIT 1)
+        SELECT DISTINCT m.thread_id FROM messages m INDEXED BY {index} WHERE m.account=?1 AND {scope}
         ORDER BY m.date DESC,m.id DESC LIMIT ?4)
         SELECT {SUMMARY_COLUMNS} FROM page CROSS JOIN messages m INDEXED BY {thread_index} ON m.account=?1 AND m.thread_id=page.thread_id
         WHERE {scope} ORDER BY m.date DESC,m.id DESC")
@@ -104,22 +101,6 @@ mod tests {
     }
 
     #[test]
-    fn v8_upgrade_preserves_threads_and_indexes_later() {
-        let (dir, s, account, folder) = fixture();
-        let id = s.save_message(&Message { summary: MessageSummary {
-            account: account.clone(), folder, uid: 1, message_id: "root@test".into(), ..Default::default()
-        }, body_text: "cached body".into(), ..Default::default() }).unwrap();
-        s.snooze(id, Some(1000)).unwrap();
-        let before = s.message(id).unwrap();
-        s.db.execute_batch("DROP INDEX messages_later_date; DROP INDEX messages_thread_folder; PRAGMA user_version=8;").unwrap();
-        drop(s);
-        let s = Store::open(dir.path().join("threads.db")).unwrap();
-        assert_eq!(s.message(id).unwrap(), before);
-        assert_eq!(s.list_conversations(&account, None, 0, 1).unwrap(), [before.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
-    }
-
-    #[test]
     fn conversation_pages_use_the_latest_date_and_id_together() {
         let (_dir, s, account, folder) = fixture();
         let mut ids = Vec::new();
@@ -136,6 +117,52 @@ mod tests {
             assert_eq!(page[0].id, ids[1]);
             assert_eq!(page[0].id, larger[0].id);
             assert_eq!(larger.iter().map(|m| m.id).collect::<Vec<_>>(), [ids[1], ids[0], ids[2]]);
+        }
+    }
+
+    #[test]
+    fn conversation_pages_match_visible_members_across_scopes_and_deadlines() {
+        let (_dir, s, account, folder) = fixture();
+        let (imap, smtp) = crate::presets::servers("other@fastmail.com").unwrap();
+        let other = Account::new("other@fastmail.com".into(), imap, smtp).unwrap();
+        s.save_account(&other).unwrap();
+        let other_folder = s.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let mut ids = Vec::new();
+        let mut views = Vec::new();
+        for (account, folder) in [(account, folder), (other.id, other_folder)] {
+            let archive = s.save_folder(&account, "Archive", None, FolderRole::Archive).unwrap();
+            for uid in 1..=48 {
+                let id = s.save_message(&Message { summary: MessageSummary {
+                    account: account.clone(), folder: if uid % 3 == 0 { archive } else { folder }, uid,
+                    date: (uid * 7 % 13) as i64, message_id: format!("{uid}@test"),
+                    thread_refs: format!("thread-{}@test", uid % 8), ..Default::default()
+                }, ..Default::default() }).unwrap();
+                s.snooze(id, [None, Some(50), Some(100), Some(150)][uid as usize / 3 % 4]).unwrap();
+                ids.push(id);
+            }
+            views.push((account, [Some(folder), Some(archive), None]));
+        }
+        let mut messages: Vec<_> = ids.into_iter().map(|id| s.message(id).unwrap().summary).collect();
+        messages.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
+        for (account, views) in views {
+            for view in views {
+                for now in [0, 50, 100, 150] {
+                    let visible: Vec<_> = messages.iter().filter(|m| m.account == account && match view {
+                        Some(folder) => m.folder == folder && m.snoozed_until.is_none_or(|t| t <= now),
+                        None => m.snoozed_until.is_some_and(|t| t > now),
+                    }).cloned().collect();
+                    for limit in [0, 1, 3, 20] {
+                        let mut threads = BTreeSet::new();
+                        for m in &visible {
+                            if threads.len() == limit { break; }
+                            threads.insert(&m.thread_id);
+                        }
+                        let expected: Vec<_> = visible.iter().filter(|m| threads.contains(&m.thread_id)).cloned().collect();
+                        assert_eq!(s.list_conversations(&account, view, now, limit as u32).unwrap(), expected,
+                            "folder={view:?}, now={now}, limit={limit}");
+                    }
+                }
+            }
         }
     }
 
@@ -161,21 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn v9_upgrade_preserves_threads_and_indexes_folders() {
-        let (dir, s, account, folder) = fixture();
-        let id = s.save_message(&Message { summary: MessageSummary {
-            account: account.clone(), folder, uid: 1, message_id: "root@test".into(), ..Default::default()
-        }, body_text: "cached body".into(), ..Default::default() }).unwrap();
-        let before = s.message(id).unwrap();
-        s.db.execute_batch("DROP INDEX messages_thread_folder; PRAGMA user_version=9;").unwrap();
-        drop(s);
-        let s = Store::open(dir.path().join("threads.db")).unwrap();
-        assert_eq!(s.message(id).unwrap(), before);
-        assert_eq!(s.list_conversations(&account, Some(folder), 0, 1).unwrap(), [before.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
-    }
-
-    #[test]
     fn conversation_page_does_not_rescan_newer_messages_in_other_folders() {
         let (_dir, s, account, folder) = fixture();
         let archive = s.save_folder(&account, "Archive", None, FolderRole::Archive).unwrap();
@@ -195,6 +207,39 @@ mod tests {
         assert_eq!(rows.first().unwrap().date, 2000);
         assert_eq!(rows.last().unwrap().id, id);
         assert!(steps < 500_000, "newer messages in another folder must not be scanned for every candidate: {steps} VM steps");
+    }
+
+    #[test]
+    fn later_page_does_not_rescan_newer_unsnoozed_messages() {
+        mixed_snooze_page(false);
+    }
+
+    #[test]
+    fn inbox_page_does_not_rescan_newer_snoozed_messages() {
+        mixed_snooze_page(true);
+    }
+
+    fn mixed_snooze_page(inbox: bool) {
+        let (_dir, s, account, folder) = fixture();
+        let archive = s.save_folder(&account, "Archive", None, FolderRole::Archive).unwrap();
+        let view = inbox.then_some(folder);
+        let id = s.save_message(&Message { summary: MessageSummary {
+            account: account.clone(), folder, uid: 1, date: 1, message_id: "root@test".into(), ..Default::default()
+        }, ..Default::default() }).unwrap();
+        s.db.execute("WITH RECURSIVE seq(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM seq WHERE n<4000)
+            INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,thread_id)
+            SELECT account,CASE WHEN n<=2000 THEN folder ELSE ?2 END,n,'','','','','','','',n,'',0,0,0,0,'',thread_id FROM messages,seq WHERE id=?1", params![id, view.unwrap_or(archive)]).unwrap();
+        s.db.execute("UPDATE messages SET snoozed_until=CASE WHEN (date<=2000)=?1 THEN 1000 END", [view.is_none()]).unwrap();
+        let mut stmt = s.db.prepare(&conversation_sql(view)).unwrap();
+        let start = std::time::Instant::now();
+        let rows = stmt.query_map(params![account, view, 0, 200], summary_row).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+        eprintln!("2000 visible + 2000 newer hidden messages, folder={view:?}: {:?}, {steps} VM steps", start.elapsed());
+        assert_eq!(rows.len(), 2000);
+        assert!(rows.iter().all(|m| m.folder == folder));
+        assert_eq!(rows.first().unwrap().date, 2000);
+        assert_eq!(rows.last().unwrap().id, id);
+        assert!(steps < 500_000, "hidden messages must not be scanned for every candidate: {steps} VM steps");
     }
 
     #[test]

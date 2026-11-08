@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 10 {
+        if version > 8 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -88,12 +88,6 @@ impl Store {
             store.db.execute_batch(include_str!("schema_v8.sql"))?;
             store.backfill_threads()?;
             tx.commit()?;
-        }
-        if version < 9 {
-            store.db.execute_batch(include_str!("schema_v9.sql"))?;
-        }
-        if version < 10 {
-            store.db.execute_batch(include_str!("schema_v10.sql"))?;
         }
         Ok(store)
     }
@@ -201,7 +195,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -616,7 +610,7 @@ mod mail_tests {
     }
 
     #[test]
-    fn v7_thread_headers_are_backfilled_and_missing_references_wait_for_sync() {
+    fn v7_upgrade_preserves_data_and_adds_thread_indexes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v7.db");
         let db = Connection::open(&path).unwrap();
@@ -634,13 +628,39 @@ mod mail_tests {
         let mut child = mail(&account, folder, 2);
         child.summary.message_id = "child@test".into();
         child.summary.thread_key = "root@test".into();
-        let root = save_legacy(&old, root);
-        let child = save_legacy(&old, child);
+        let mut root = save_legacy(&old, root);
+        let mut child = save_legacy(&old, child);
+        old.snooze(root.summary.id, Some(1000)).unwrap();
+        root.summary.snoozed_until = Some(1000);
+        old.db.execute("INSERT INTO attachments VALUES (?1,'2','report.pdf','application/pdf',128,'base64')", [root.summary.id]).unwrap();
+        let attachments = old.attachments(root.summary.id).unwrap();
+        let saved_folder = old.folder(folder).unwrap();
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        for (index, columns) in [
+            ("messages_thread", vec!["account", "thread_id", "date", "id"]),
+            ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
+            ("messages_later_date", vec!["account", "date", "id"]),
+        ] {
+            let actual = store.db.prepare(&format!("PRAGMA index_info({index})")).unwrap()
+                .query_map([], |r| r.get::<_, String>(2)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(actual, columns);
+        }
+        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.folder(folder).unwrap(), saved_folder);
+        assert_eq!(store.attachments(root.summary.id).unwrap(), attachments);
         let a = store.message(root.summary.id).unwrap();
         let b = store.message(child.summary.id).unwrap();
+        root.summary.thread_id = a.summary.thread_id.clone();
+        child.summary.thread_id = a.summary.thread_id.clone();
+        root.summary.thread_refs = "root@test".into();
+        child.summary.thread_refs = "root@test".into();
+        assert_eq!(a, root);
+        assert_eq!(b, child);
+        assert_eq!(store.list_conversations(&account.id, Some(folder), 0, 1).unwrap(), [b.summary.clone()]);
+        assert_eq!(store.list_conversations(&account.id, None, 0, 1).unwrap(), [a.summary.clone()]);
         assert_eq!(a.summary.thread_id, b.summary.thread_id);
         assert_eq!(b.summary.thread_refs, "root@test");
         assert_eq!(b.body_text, child.body_text);
@@ -690,7 +710,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -760,7 +780,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            10
+            8
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -789,7 +809,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));
