@@ -6,7 +6,7 @@
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42. Web pass done 2026-11-08: `docs/trademark-check.md` (medium risk, official databases still to search by hand).
 - [x] App icon: Blender source `brand/app-icon/skymning/3d/skymning.py`; platform assets rebuilt with `brand/app-icon/export.sh`.
-- [ ] Windows: embed `brand/app-icon/export/lagom.ico` as the executable icon.
+- [x] Windows: embed `brand/app-icon/export/lagom.ico` as executable resource 1, also used by GPUI for its window icon; headless Windows test compares every embedded image with the source.
 - [x] Brand concept: Concept D "Butik" from Claude design.
 - [x] Exact colour tokens from Claude design, in `apps/desktop/src/theme.rs` (from ConceptD and MainWindowD).
 - [ ] Website: switch `site/` to the exact tokens and drop the rejected parts (0 kr cards, info strip, pill buttons).
