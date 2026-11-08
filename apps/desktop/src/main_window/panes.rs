@@ -67,7 +67,7 @@ impl Panes {
     }
 
     pub fn load(path: &Path, viewport: f32) -> anyhow::Result<Self> {
-        let bytes = match fs::read(path) {
+        let bytes = match retry(|| fs::read(path)) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::new(viewport)),
             Err(e) => return Err(e.into()),
@@ -92,12 +92,27 @@ impl Panes {
         };
         let result = file.write_all(&bytes).and_then(|_| {
             drop(file);
-            fs::rename(&temp, path)
+            retry(|| fs::rename(&temp, path))
         });
         if result.is_err() {
             let _ = fs::remove_file(&temp);
         }
         result.map_err(Into::into)
+    }
+}
+
+/// Windows denies opening or replacing a file while another handle replaces it or holds it (antivirus),
+/// so retry briefly: error 5 is access denied, 32 a sharing violation.
+fn retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tries = 0;
+    loop {
+        match op() {
+            Err(e) if cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32)) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            result => return result,
+        }
     }
 }
 

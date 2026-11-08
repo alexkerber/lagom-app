@@ -26,6 +26,37 @@ pub fn metadata_only(header: &[u8]) -> Result<Message> {
     message.summary.snippet = String::new();
     Ok(message)
 }
+/// Zero-width characters that newsletters repeat after the preheader to push the body text
+/// out of list previews (`&#847;`, `&zwnj;`, soft hyphens).
+const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+/// The list preview, at most 200 characters on one line. From the HTML when there is one: text
+/// parts are often generated, with CSS and "[Image]" lines in them. mail-parser's conversion
+/// skips `<head>`, `<style>` and `<script>` and decodes entities.
+pub fn snippet(text: &str, html: Option<&str>) -> String {
+    match html {
+        Some(html) => clean_snippet(&mail_parser::decoders::html::html_to_text(html)),
+        None => clean_snippet(text),
+    }
+}
+
+/// Invisible padding dropped, white space collapsed, cut at 200 characters. Also for snippets
+/// stored before this cleanup.
+pub fn clean_snippet(text: &str) -> String {
+    let visible: String = text.chars().filter(|c| !INVISIBLE.contains(c)).collect();
+    let mut out = String::new();
+    for word in visible.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+        if out.len() >= 800 {
+            break;
+        }
+    }
+    out.chars().take(200).collect()
+}
+
 fn addresses(list: Option<AddressList<'_>>) -> String {
     list.map(|l| {
         l.mailboxes()
@@ -61,14 +92,7 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
         .next()
         .and_then(|part| part.text())
         .map(|v| v.into_owned());
-    let snippet = body_text
-        .split_whitespace()
-        .take(200)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(200)
-        .collect();
+    let snippet = snippet(&body_text, body_html.as_deref());
     Ok(Message {
         summary: MessageSummary {
             message_id,
@@ -113,6 +137,16 @@ mod tests {
         assert!(!m.summary.has_attachments);
         let m = parse(b"Content-Type: text/plain; charset=windows-1252\r\n\r\nPrice \x80").unwrap();
         assert!(m.body_text.contains('€'));
+    }
+    #[test]
+    fn newsletter_snippet_has_no_css_or_padding() {
+        let raw = "Content-Type: text/html; charset=utf-8\r\n\r\n<!DOCTYPE html><html><head><title>News</title><style>@media only screen and (max-width: 600px) { .container { width: 100% !important; } }</style></head><body><div style=\"display:none\">Autumn sale &#847; &zwnj; &nbsp; &#847; &zwnj;&nbsp;&shy;</div><table><tr><td><style>.x { color: red }</style><p>Fifty&nbsp;kinds of tomato &amp; two&nbsp;&nbsp; kinds of soil</p></td></tr></table></body></html>";
+        let m = parse(raw.as_bytes()).unwrap();
+        assert_eq!(m.summary.snippet, "Autumn sale Fifty kinds of tomato & two kinds of soil");
+        // A generated text part with junk loses to the HTML part.
+        assert_eq!(snippet("[Image] Mobile px) { .conta", Some("<p>Real text</p>")), "Real text");
+        assert_eq!(snippet("a\u{200C}\u{200C}  b\n\nc", None), "a b c");
+        assert_eq!(snippet(&"word ".repeat(100), None).chars().count(), 200);
     }
     #[test]
     fn rejects_empty_and_oversized() {

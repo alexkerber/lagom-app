@@ -23,7 +23,7 @@ use crate::motion::spring;
 use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow]);
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("MainWindow");
@@ -54,6 +54,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("alt-secondary-s", ToggleSidebar, ctx),
         KeyBinding::new("escape", Cancel, keys),
+        KeyBinding::new("secondary-o", OpenInWindow, ctx),
+    ]);
+    // A message window takes the keys that act on its message. Esc does nothing there.
+    let message = Some("MessageWindow && !TextInput");
+    cx.bind_keys([
+        KeyBinding::new("e", Done, message),
+        KeyBinding::new("l", Later, message),
+        KeyBinding::new("secondary-backspace", DeleteMessage, message),
+        KeyBinding::new("backspace", DeleteMessage, message),
+        KeyBinding::new("delete", DeleteMessage, message),
+        KeyBinding::new("secondary-r", Reply, message),
+        KeyBinding::new("r", Reply, message),
     ]);
 }
 
@@ -74,7 +86,10 @@ const SNIPPET_LINES: usize = 2;
 const ROW_H: f32 = 2. * ROW_PAD + 2. * ROW_GAP + (2. * size::BASE + SNIPPET_LINES as f32 * size::SNIPPET) * LEADING;
 
 /// Selection highlight moving to the row J, K or a click selected.
-const GLIDE: Duration = Duration::from_millis(140);
+const GLIDE: Duration = Duration::from_millis(260);
+/// A press while the highlight still glides (a held arrow key) takes this shorter curve, so the
+/// highlight keeps up with key repeat instead of trailing rows behind.
+const GLIDE_REPEAT: Duration = Duration::from_millis(120);
 /// Padding around the rows in the list.
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
@@ -117,14 +132,24 @@ struct Glide {
     from: f32,
     to: f32,
     at: Instant,
+    dur: Duration,
     seq: usize,
 }
 
 impl Glide {
-    /// Where the highlight is now, so a new key press starts from there and never jumps.
-    fn y(&self) -> f32 {
-        let d = (self.at.elapsed().as_secs_f32() / GLIDE.as_secs_f32()).min(1.);
+    /// A glide to `to` that starts where `prev` is now, so a new key press never jumps.
+    fn new(prev: Option<Glide>, from: f32, to: f32, now: Instant, seq: usize) -> Self {
+        let dur = if prev.is_some_and(|g| !g.landed(now)) { GLIDE_REPEAT } else { GLIDE };
+        Glide { from: prev.map_or(from, |g| g.y(now)), to, at: now, dur, seq }
+    }
+
+    fn y(&self, now: Instant) -> f32 {
+        let d = (now.saturating_duration_since(self.at).as_secs_f32() / self.dur.as_secs_f32()).min(1.);
         self.from + (self.to - self.from) * ease_out_quint()(d)
+    }
+
+    fn landed(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) >= self.dur
     }
 }
 
@@ -132,8 +157,11 @@ fn row_y(ix: usize) -> f32 {
     LIST_PAD + ix as f32 * ROW_H
 }
 
+mod html;
 mod live;
+mod popout;
 pub use live::Live;
+use popout::MessageWindow;
 
 /// What fills the main panel.
 enum Page {
@@ -204,6 +232,10 @@ pub struct MainWindow {
     resize: Option<Resize>,
     // The window title last set, so render sets it only when the list changes.
     title: SharedString,
+    // The web view for HTML mail.
+    web: html::Web,
+    // Messages open in their own windows: (message id, window).
+    popouts: Vec<(usize, gpui::WindowHandle<MessageWindow>)>,
     _appearance: gpui::Subscription,
     _activation: gpui::Subscription,
 }
@@ -287,6 +319,8 @@ impl MainWindow {
             preferences_path,
             resize: None,
             title: SharedString::default(),
+            web: html::Web::default(),
+            popouts: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         };
@@ -307,6 +341,16 @@ impl MainWindow {
                 this.open_box(first, cx);
             }
             "settings" => this.page = Page::Settings(None),
+            // The HTML newsletter and a simple HTML message.
+            "html" => this.inbox.select(INBOX_LEN - 1),
+            "html-simple" => this.inbox.select(3),
+            // A message window over the main window: plain text, or the HTML newsletter.
+            "popout" | "popout-html" => {
+                if screen == "popout-html" {
+                    this.inbox.select(INBOX_LEN - 1);
+                }
+                cx.defer_in(window, |this, window, cx| this.open_popout(window, cx));
+            }
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(true, window, cx),
             // A written reply with a word selected, Cc open with its focus ring, and live Markdown.
@@ -381,16 +425,7 @@ impl MainWindow {
         let search = self.live.as_ref().and_then(|l| l.search());
         let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
         let palette = cx.new(|cx| CommandPalette::new(query, composing, targets, subject, search, window, cx));
-        cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
-            this.palette = None;
-            if let Some(compose) = this.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
-                compose.update(cx, |c, cx| c.focus_body(window, cx));
-            } else {
-                window.focus(&this.focus);
-            }
-            cx.notify();
-        })
-        .detach();
+        cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| this.close_palette(window, cx)).detach();
         cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
             let f = match target {
                 MoveTo::Folder(f) => *f,
@@ -407,6 +442,17 @@ impl MainWindow {
         .detach();
         window.focus(&gpui::Focusable::focus_handle(&palette, cx));
         self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// The keys go back to the sheet under the palette, or to the inbox.
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        if let Some(compose) = self.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
+            compose.update(cx, |c, cx| c.focus_body(window, cx));
+        } else {
+            window.focus(&self.focus);
+        }
         cx.notify();
     }
 
@@ -433,6 +479,11 @@ impl MainWindow {
     /// `reply`: to the selected message. One draft at a time: R and C bring back a draft that
     /// Esc closed, whichever message is selected.
     fn open_compose(&mut self, reply: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.compose_for(self.inbox.current().filter(|_| reply), window, cx);
+    }
+
+    /// `reply`: to this message id. See `open_compose`.
+    fn compose_for(&mut self, reply: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.toast = None;
         let compose = match self.drafts.pop() {
@@ -441,7 +492,7 @@ impl MainWindow {
                 compose
             }
             None => {
-                let m = self.inbox.current().filter(|_| reply).map(|id| &self.inbox.mail[id]);
+                let m = reply.map(|id| &self.inbox.mail[id]);
                 let to = m.map_or("", |m| m.address.as_str());
                 let subject = m.map_or(String::new(), |m| mail::reply_subject(&m.subject));
                 let headers = m.map(|m| mail::reply_headers(&m.message_id, &m.thread_key));
@@ -567,6 +618,7 @@ impl MainWindow {
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, seq: self.seq, at: Instant::now(), dx });
         self.server(what, id, when, cx);
+        self.close_popouts(Some(id), cx);
         // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
         if what == Move::Delete {
             self.notify("Deleted", cx);
@@ -732,7 +784,20 @@ impl MainWindow {
             (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
             _ => {
                 self.seq += 1;
-                self.spring = Some((id, dx, self.seq));
+                let seq = self.seq;
+                self.spring = Some((id, dx, seq));
+                // Done springing, the row is an ordinary row again (its own fill, copies in a glide).
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SPRING).await;
+                    this.update(cx, |this, cx| {
+                        if this.spring.is_some_and(|s| s.2 == seq) {
+                            this.spring = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
             }
         }
         cx.notify();
@@ -754,9 +819,8 @@ impl MainWindow {
         self.prune();
         // While rows leave or come back, the rows paint the selection; a glide would start late.
         self.glide = (self.ghosts.is_empty() && self.entering.is_empty()).then(|| {
-            let from = self.glide.map_or(row_y(before), |g| g.y());
             self.seq += 1;
-            Glide { from, to: row_y(ix), at: Instant::now(), seq: self.seq }
+            Glide::new(self.glide, row_y(before), row_y(ix), Instant::now(), self.seq)
         });
         // Child 0 is the highlight; ghosts at or before `ix` sit in front of the row.
         let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
@@ -1293,25 +1357,35 @@ impl MainWindow {
         };
         // The selection highlight glides between rows while nothing else moves the list.
         let gliding = self.glide.filter(|_| self.ghosts.is_empty() && self.entering.is_empty());
+        // One reading of the clock per frame: the highlight, its copies below and the row colours
+        // agree. Each with_animation would start when its element first appears instead.
+        let now = Instant::now();
+        let (landed, fill_y) = gliding.map_or((true, 0.), |g| (g.landed(now), g.y(now)));
         // shortcut: renders every row, fine for the sample inbox. Virtualise (uniform_list or
         // gpui::list, docs/performance.md rule 3) when real mail arrives; rows leaving and
         // coming back change height, which uniform_list cannot lay out.
         let mut rows: Vec<AnyElement> = vec![match gliding {
             // First child, so it paints under the rows. `child_ix` counts it.
-            Some(g) => div()
-                .absolute()
-                .left(px(LIST_PAD))
-                .right(px(LIST_PAD))
-                .h(px(ROW_H))
-                .rounded(px(radius::CONTROL))
-                .bg(sel_bg)
-                .with_animation(("glide", g.seq), Animation::new(GLIDE).with_easing(ease_out_quint()), move |el, d| {
-                    el.top(px(g.from + (g.to - g.from) * d))
-                })
-                .into_any_element(),
+            Some(g) => {
+                let fill = div()
+                    .absolute()
+                    .top(px(fill_y))
+                    .left(px(LIST_PAD))
+                    .right(px(LIST_PAD))
+                    .h(px(ROW_H))
+                    .rounded(px(radius::CONTROL))
+                    .bg(sel_bg);
+                // This render places the highlight; the animation only asks for the next frame. It
+                // repeats until a render sees the glide land, so a late frame cannot end it early.
+                match landed {
+                    true => fill.into_any_element(),
+                    false => fill.with_animation(("glide", g.seq), Animation::new(g.dur).repeat(), |el, _| el).into_any_element(),
+                }
+            }
             None => div().into_any_element(),
         }];
         let dragging = self.mouse_swiping();
+        // White text waits for the gliding fill to arrive; until then its copies below show it.
         // Only rows near the viewport or the selection get text; the rest are empty boxes of the
         // same height. Shaping ~500 rows on every animation frame made E, L and the arrows stutter.
         // One element per row stays, so `scroll_to_item` indices still hold.
@@ -1334,15 +1408,21 @@ impl MainWindow {
                 continue;
             }
             let selected = i == self.inbox.selected;
-            // White text waits for the gliding fill to arrive. The glide animates frame by frame,
-            // so the frame it lands on renders this again.
-            let landed = gliding.is_none_or(|g| g.at.elapsed() >= GLIDE);
-            let el = row(&self.inbox.mail[id], selected && gliding.is_none(), selected && landed)
+            // A row under the fingers or springing back paints its own fill and gets no copy.
+            let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
+            let el = row(&self.inbox.mail[id], selected && gliding.is_none(), selected && (landed || moving))
                 .id(("row", id))
                 // Arrow at rest, as in native lists.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.
                 .when(dragging, |d| d.cursor(CursorStyle::ClosedHand))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, _| this.press(id, e.position)))
+                // A double-click opens the message in its own window instead of starting a swipe.
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| match e.click_count {
+                    2 => {
+                        this.select(|inbox| inbox.select(i), cx);
+                        this.open_popout(window, cx);
+                    }
+                    _ => this.press(id, e.position),
+                }))
                 // Runs before the window's mouse up ends the drag: a dragged row is not a click.
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.swipe.offset(id).is_none() {
@@ -1397,6 +1477,49 @@ impl MainWindow {
             });
         }
         rows.extend(ghosts_at(self.inbox.list().len()));
+        // The eased fill reaches the selected row long before the glide ends, but row text turns
+        // white only then, and the row it leaves turns dark at once. Until it lands, copies of the
+        // rows it crosses, in selection colours, show through the fill, clipped to each row: text
+        // keeps its contrast wherever the fill is. Only rows near the viewport, as above.
+        if let Some(g) = gliding.filter(|_| !landed) {
+            // The fill starts on one row, or across two after a glide was cut short.
+            let from = ((g.from - LIST_PAD) / ROW_H).floor() as isize;
+            let (lo, hi) = (from.min(sel).max(first).max(0), (from + 1).max(sel).min(last));
+            for ix in (lo..=hi).map(|i| i as usize) {
+                let Some(&id) = self.inbox.list().get(ix) else { continue };
+                // A row under the fingers moves sideways; a copy would stay put over it.
+                if self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id) {
+                    continue;
+                }
+                let y = row_y(ix);
+                let ink = row(&self.inbox.mail[id], false, true)
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(y - fill_y));
+                let fill = div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .h(px(ROW_H))
+                    .rounded(px(radius::CONTROL))
+                    .overflow_hidden()
+                    .bg(sel_bg)
+                    .top(px(fill_y - y))
+                    .child(ink);
+                rows.push(
+                    div()
+                        .absolute()
+                        .top(px(y))
+                        .left(px(LIST_PAD))
+                        .right(px(LIST_PAD))
+                        .h(px(ROW_H))
+                        .overflow_hidden()
+                        .child(fill)
+                        .into_any_element(),
+                );
+            }
+        }
 
         let filter = div()
             .flex()
@@ -1489,9 +1612,11 @@ impl MainWindow {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
         let m = &self.inbox.mail[id];
-        let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
-        let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
-
+        // HTML mail: the web view covers only the body. The text shows while an overlay hides it.
+        let web = html::SUPPORTED && m.html.is_some();
+        let text = !web || self.palette.is_some() || self.compose.is_some();
+        // Toasts sit just above the reply field; the web view would cover them.
+        let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count();
         div()
             .flex_1()
             .min_w(px(0.))
@@ -1499,15 +1624,8 @@ impl MainWindow {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(HEADER_H))
-                    .flex_shrink_0()
+                toolbar(t)
                     .px(px(16.))
-                    .border_b_1()
-                    .border_color(t.line)
                     .child(
                         // Pine green, like the Done swipe.
                         button(t, "Done", Some(t.swipe_done))
@@ -1518,123 +1636,193 @@ impl MainWindow {
                         button(t, "Later", None)
                             .on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     )
+                    .when(web && self.web.has_remote && !m.remote, |d| {
+                        d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
+                            this.inbox.mail[id].remote = true;
+                            cx.notify();
+                        })))
+                    })
                     // shortcut: no Forward button until forwarding exists.
                     .child(div().flex_1())
-                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2)),
-            )
-            .child(
-                div()
-                    .id(("reading", id))
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .max_w(px(760.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(20.))
-                    .pt(px(24.))
-                    .px(px(32.))
-                    .pb(px(20.))
+                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .child(
-                                div()
-                                    .text_size(px(size::SUBJECT))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(m.subject.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .child(
-                                        div()
-                                            .size(px(32.))
-                                            .rounded_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(t.subtle)
-                                            .border_1()
-                                            .border_color(t.line)
-                                            .text_size(px(size::SMALL))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(initials.to_uppercase()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(1.))
-                                            .min_w(px(0.))
-                                            .child(div().font_weight(FontWeight::SEMIBOLD).child(m.from.clone()))
-                                            .child(
-                                                div()
-                                                    .text_size(px(size::SMALL))
-                                                    .text_color(t.ink2)
-                                                    .one_line()
-                                                    .child(format!("{} → {to}", m.address)),
-                                            ),
-                                    )
-                                    .child(mono(m.time.clone(), t.ink2)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .text_size(px(size::BODY))
-                            .line_height(relative(READING_LEADING))
-                            // Until the body loads (one store read), the snippet stands in.
-                            .when(m.body.is_empty(), |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
-                            .children(m.body.iter().map(|p| div().child(p.clone())))
-                            .children(m.attachment.clone().map(|(name, kb)| {
-                                div()
-                                    .flex()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(12.))
-                                            .px(px(14.))
-                                            .py(px(10.))
-                                            .rounded(px(radius::ATTACHMENT))
-                                            .border_1()
-                                            .border_color(t.line)
-                                            .bg(t.subtle)
-                                            .text_size(px(size::SNIPPET))
-                                            .line_height(relative(LEADING))
-                                            .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                                            .child(mono(kb, t.ink2)),
-                                    )
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("reply-box")
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .justify_between()
-                            .h(px(36.))
-                            .px(px(12.))
-                            .rounded(px(radius::CONTROL))
-                            .border_1()
-                            .border_color(t.line)
-                            .bg(t.raised)
-                            .text_color(t.ink2)
-                            .on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))
-                            .child(format!("Reply to {}", m.from)),
+                        icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
                     ),
             )
+            .child(reading_view(t, id, m, text, self.web.slot(), toasts, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
     }
+}
+
+/// The bar above a message: buttons on a macOS toolbar's height.
+fn toolbar(t: &Theme) -> Div {
+    div().flex().items_center().gap(px(8.)).h(px(HEADER_H)).flex_shrink_0().border_b_1().border_color(t.line)
+}
+
+/// A borderless glyph button with a tooltip, as in a macOS toolbar.
+fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
+    let theme = *t;
+    pressable(div().id(id), t, false)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.))
+        .rounded(px(radius::CONTROL))
+        .child(icon(path, t.ink2, 16.))
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
+}
+
+struct Tip(Theme, &'static str);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.0;
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(radius::CONTROL))
+            .border_1()
+            .border_color(t.line)
+            .bg(t.raised)
+            .text_color(t.ink)
+            .text_size(px(size::SMALL))
+            .font_family(font::ui())
+            .shadow_md()
+            .child(self.1)
+    }
+}
+
+/// One message below its toolbar: the trusted header in GPUI, the body as text (`text`) or the
+/// web view's `slot`, the attachment and the reply field. The reading pane and message windows
+/// both show this. `toasts`: room the web view leaves for toasts above the reply field.
+fn reading_view(
+    t: &Theme,
+    id: usize,
+    m: &Mail,
+    text: bool,
+    slot: impl IntoElement,
+    toasts: usize,
+    on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let web = html::SUPPORTED && m.html.is_some();
+    let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
+    let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
+    let attachment = || m.attachment.clone().map(|(name, kb)| {
+        div().flex().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(14.))
+                .py(px(10.))
+                .rounded(px(radius::ATTACHMENT))
+                .border_1()
+                .border_color(t.line)
+                .bg(t.subtle)
+                .text_size(px(size::SNIPPET))
+                .line_height(relative(LEADING))
+                .child(div().font_weight(FontWeight::MEDIUM).child(name))
+                .child(mono(kb, t.ink2)),
+        )
+    });
+    div()
+        .id(("reading", id))
+        .flex_1()
+        .min_h(px(0.))
+        .overflow_y_scroll()
+        .max_w(px(760.))
+        .flex()
+        .flex_col()
+        .gap(px(20.))
+        .pt(px(24.))
+        .px(px(32.))
+        .pb(px(20.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .text_size(px(size::SUBJECT))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(m.subject.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .size(px(32.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(t.subtle)
+                                .border_1()
+                                .border_color(t.line)
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(initials.to_uppercase()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .min_w(px(0.))
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(m.from.clone()))
+                                .child(
+                                    div()
+                                        .text_size(px(size::SMALL))
+                                        .text_color(t.ink2)
+                                        .one_line()
+                                        .child(format!("{} → {to}", m.address)),
+                                ),
+                        )
+                        .child(mono(m.time.clone(), t.ink2)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .text_size(px(size::BODY))
+                .line_height(relative(READING_LEADING))
+                // Until the body loads (one store read), the snippet stands in.
+                .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
+                .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
+                // The web view's place: the rest of the pane, less room for toasts.
+                .when(web, |d| {
+                    d.flex_1().min_h(px(0.)).relative().child(
+                        div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot),
+                    )
+                })
+                .when(!web, |d| d.children(attachment())),
+        )
+        .when(web, |d| d.children(attachment()))
+        .when(!web, |d| d.child(div().flex_1()))
+        .child(
+            div()
+                .id("reply-box")
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_between()
+                .h(px(36.))
+                .px(px(12.))
+                .rounded(px(radius::CONTROL))
+                .border_1()
+                .border_color(t.line)
+                .bg(t.raised)
+                .text_color(t.ink2)
+                .on_click(on_reply)
+                .child(format!("Reply to {}", m.from)),
+        )
 }
 
 impl Render for MainWindow {
@@ -1646,6 +1834,7 @@ impl Render for MainWindow {
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
+        self.web_frame(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let title = match &self.page {
@@ -1701,6 +1890,7 @@ impl Render for MainWindow {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
@@ -1723,6 +1913,7 @@ impl Render for MainWindow {
             }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
+            .on_action(cx.listener(|this, _: &OpenInWindow, window, cx| if !this.overlay_open(cx) { this.open_popout(window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(cx) }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
@@ -2129,6 +2320,8 @@ impl Inbox {
         match self.by_store.get(&m.id) {
             Some(&id) => {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
+                fresh.html = self.mail[id].html.take();
+                fresh.remote = self.mail[id].remote;
                 fresh.was = std::mem::take(&mut self.mail[id].was);
                 self.mail[id] = fresh;
                 id
@@ -2163,6 +2356,27 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_arrow_key_highlight_keeps_up() {
+        let t0 = Instant::now();
+        let single = Glide::new(None, row_y(0), row_y(1), t0, 0);
+        assert_eq!(single.dur, GLIDE);
+        // macOS repeats a held key after a delay (225 ms at the shortest), then up to 30 times a
+        // second. Each repeat starts from where the highlight is.
+        let (delay, step) = (Duration::from_millis(225), Duration::from_millis(33));
+        let mut glide = single;
+        for n in 1..=20 {
+            let now = t0 + delay + step * (n - 1);
+            let lag = (row_y(n as usize) - glide.y(now)) / ROW_H;
+            assert!(lag < 0.5, "press {n}: highlight {lag:.2} rows behind");
+            glide = Glide::new(Some(glide), row_y(n as usize), row_y(n as usize + 1), now, n as usize);
+            assert_eq!(glide.dur, GLIDE_REPEAT);
+        }
+        // Once it lands, the next single press takes the full curve again.
+        let later = t0 + delay + step * 20 + GLIDE;
+        assert_eq!(Glide::new(Some(glide), row_y(21), row_y(22), later, 21).dur, GLIDE);
+    }
 
     #[test]
     fn move_stays_in_bounds() {
@@ -2721,6 +2935,95 @@ mod dispatch {
         assert_eq!(inbox_len(&view, cx), 0);
         cx.simulate_keystrokes("c");
         assert!(view.read_with(cx, |v, _| v.compose.is_some()));
+    }
+
+    /// The middle of list row `ix`, below the window margin and the list header.
+    fn row_at(view: &Entity<MainWindow>, ix: usize, cx: &mut VisualTestContext) -> gpui::Point<Pixels> {
+        let x = view.read_with(cx, |v, _| v.sidebar_w + v.list_w / 2.);
+        gpui::point(px(x), px(8. + 1. + HEADER_H + row_y(ix) + ROW_H / 2.))
+    }
+
+    fn windows(cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, cx| cx.windows().len())
+    }
+
+    #[gpui::test]
+    fn double_click_opens_a_message_window_once(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.run_until_parked();
+        // A single click selects and opens nothing.
+        let at = row_at(&view, 2, cx);
+        cx.simulate_click(at, Default::default());
+        assert_eq!((view.read_with(cx, |v, _| v.inbox.selected), windows(cx)), (2, 1));
+        // The second press of a double-click opens the message, and starts no swipe.
+        let at = row_at(&view, 3, cx);
+        cx.simulate_click(at, Default::default());
+        cx.simulate_event(MouseDownEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.simulate_event(MouseUpEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 2);
+        assert!(view.read_with(cx, |v, _| v.inbox.selected == 3 && v.swipe == Swipe::Idle && v.drag.is_none()));
+        assert_eq!(view.read_with(cx, |v, _| v.popouts.iter().map(|p| p.0).collect::<Vec<_>>()), [3]);
+        // The same message again comes to the front instead; ⌘O opens the selection too.
+        cx.simulate_event(MouseDownEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 2);
+        view.update_in(cx, |v, window, _| window.focus(&v.focus));
+        cx.simulate_keystrokes("j secondary-o");
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 3);
+    }
+
+    #[gpui::test]
+    fn done_in_a_message_window_moves_it_and_closes_the_window(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let n = inbox_len(&view, cx);
+        cx.simulate_keystrokes("j secondary-o");
+        cx.run_until_parked();
+        let (id, popout) = view.read_with(cx, |v, _| v.popouts[0]);
+        assert_eq!((id, windows(cx)), (1, 2));
+        // Another message selected and another list on screen: Done still moves message 1.
+        cx.simulate_keystrokes("j");
+        view.update(cx, |v, cx| v.open_box(Some(0), cx));
+        popout.update(cx, |p, _, cx| p.act(Move::Done, cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(windows(cx), 1);
+        assert!(view.read_with(cx, |v, _| v.inbox.open.is_none() && !v.inbox.items.contains(&1) && v.popouts.is_empty()));
+        assert_eq!(inbox_len(&view, cx), n - 1);
+        // Undo in the main window puts it back; the window stays closed.
+        view.update(cx, |v, cx| v.undo(cx));
+        assert_eq!((inbox_len(&view, cx), windows(cx)), (n, 1));
+    }
+
+    #[gpui::test]
+    fn a_message_window_move_closes_the_palette_and_quit_keeps_drafts(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Not done yet");
+        cx.simulate_keystrokes("escape secondary-o");
+        cx.run_until_parked();
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        // The palette would act on the selection, which the move changes: it closes.
+        view.update_in(cx, |v, window, cx| v.open_palette("move tr", window, cx));
+        popout.update(cx, |p, _, cx| p.act(Move::Delete, cx)).unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.palette.is_none()));
+        // ⌘Q in a message window asks about the draft, as in the main window. Quit is a macOS menu action.
+        #[cfg(target_os = "macos")]
+        {
+            cx.simulate_keystrokes("secondary-o");
+            cx.run_until_parked();
+            let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+            let focus = popout.update(cx, |p, _, _| p.focus.clone()).unwrap();
+            cx.update_window(popout.into(), |_, window, cx| {
+                assert!(focus.is_focused(window), "the message window has the keys");
+                // Actions reach the elements of the last frame; test windows only draw on request.
+                window.draw(cx).clear();
+                window.dispatch_action(Box::new(crate::menus::Quit), cx);
+            }).unwrap();
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.clone())), Some(QUIT_AGAIN_UNSENT.into()));
+        }
     }
 
     #[gpui::test]

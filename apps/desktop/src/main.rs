@@ -42,6 +42,7 @@ impl AssetSource for Assets {
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "icons/link.svg" => include_bytes!("../assets/icons/link.svg"),
+            "icons/pop-out.svg" => include_bytes!("../assets/icons/pop-out.svg"),
             "icons/list-bullets.svg" => include_bytes!("../assets/icons/list-bullets.svg"),
             "icons/list-numbers.svg" => include_bytes!("../assets/icons/list-numbers.svg"),
             "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),

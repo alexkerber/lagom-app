@@ -141,6 +141,7 @@ impl MainWindow {
         live.current = live.current.min(live.accounts.len().saturating_sub(1));
         let Some(account) = live.account().map(|a| a.id.clone()) else {
             self.inbox = Inbox::live();
+            self.close_popouts(None, cx);
             return;
         };
         let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
@@ -234,6 +235,7 @@ impl MainWindow {
                             live.current = live.accounts.iter().position(|a| a.id == id).unwrap_or(0);
                         }
                         self.inbox = Inbox::live();
+                        self.close_popouts(None, cx);
                         self.clear_motion();
                         window.focus(&self.focus);
                         read = true;
@@ -359,7 +361,10 @@ impl MainWindow {
         let Some(store) = self.inbox.mail[id].store else { return };
         if self.inbox.mail[id].body.is_empty() {
             self.inbox.mail[id].body = match live.store.message(store) {
-                Ok(m) => mail::paragraphs(&m.body_text),
+                Ok(m) => {
+                    self.inbox.mail[id].html = m.body_html.map(Into::into);
+                    mail::paragraphs(&m.body_text)
+                }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
         }
@@ -401,6 +406,7 @@ impl MainWindow {
         live.pin = None;
         // Folder indices belong to one account; history does too.
         self.inbox = Inbox::live();
+        self.close_popouts(None, cx);
         self.clear_motion();
         self.page = Page::Mail;
         self.reload(cx);
@@ -517,6 +523,7 @@ impl MainWindow {
         live.accounts.retain(|a| a.id != id);
         live.current = 0;
         self.inbox = Inbox::live();
+        self.close_popouts(None, cx);
         self.clear_motion();
         self.page = Page::Settings(None);
         cx.notify();
@@ -588,6 +595,47 @@ mod tests {
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn a_message_window_moves_an_older_hit_from_a_folder(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, mut rx) = window(cx);
+        // A folder with three messages, of which a read loads only the newest two.
+        let store = view.update(cx, |v, _| {
+            let live = v.live.as_mut().unwrap();
+            live.limit = 2;
+            let a = live.accounts[0].clone();
+            live.store.save_account(&a).unwrap();
+            let f = live.store.save_folder(&a.id, "Projects", Some("/"), FolderRole::Other).unwrap();
+            let save = |uid: u32| {
+                let summary = MessageSummary { account: a.id.clone(), folder: f, uid, subject: format!("Note {uid}"), date: uid as i64, ..Default::default() };
+                live.store.save_message(&Message { summary, body_text: "text".into(), body_html: None }).unwrap()
+            };
+            let oldest = save(1);
+            save(2);
+            save(3);
+            v.inbox = Inbox::live();
+            oldest
+        });
+        // The oldest is a ⌘K hit, opened in its own window from the pinned folder.
+        view.update(cx, |v, cx| {
+            v.reload(cx);
+            v.open_found(store, cx);
+            // Selecting the last row grew the page; a hit further back stays past it.
+            v.live.as_mut().unwrap().limit = 2;
+        });
+        view.update_in(cx, |v, window, cx| v.open_popout(window, cx));
+        cx.run_until_parked();
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        // The inbox opens in the main window; the folder's cached rows still hold the hit.
+        view.update(cx, |v, cx| v.open_box(None, cx));
+        popout.update(cx, |p, _, cx| p.act(Move::Done, cx)).unwrap();
+        cx.run_until_parked();
+        // Opening it marked it read first; then the move.
+        let cmds: Vec<Cmd> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(cmds.iter().any(|c| matches!(c, Cmd::Op { id, act: Act::Archive, .. } if *id == store)), "no archive of the hit");
+        assert_eq!(view.read_with(cx, |v, cx| (v.popouts.len(), cx.windows().len())), (0, 1));
     }
 
     fn send_one(cx: &mut VisualTestContext) {

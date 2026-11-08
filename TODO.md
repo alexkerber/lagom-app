@@ -99,7 +99,12 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Gmail/Microsoft OAuth2 (XOAUTH2). Outlook.com requires OAuth2; the preset alone does not enable password login.
 - [ ] JMAP.
 - [ ] Push beyond IMAP IDLE.
-- [ ] HTML rendering (HTML is cached as untrusted content only).
+- [x] HTML rendering on macOS and Windows (`feat/html-mail`): one wry web view per window, page JavaScript off, a strict CSP, no navigation, links to the system browser, "Load remote images" per message. Linux shows the text part.
+- [ ] HTML on Linux: wry's child web view needs GTK's main loop and X11; GPUI runs neither.
+- [ ] HTML: inline `cid:` images. Sync fetches only the text and HTML parts; fetch the inline parts and serve them through a custom protocol.
+- [ ] HTML: mail synced before `feat/html-mail` has no stored HTML part (multipart mail kept only its text part). Refetch bodies once, or on open.
+- [ ] HTML: check on Windows (WebView2: do app scripts run with page scripts off, so links and Esc work?).
+- [ ] HTML: wide newsletters scroll sideways in a narrow pane; Apple Mail scales them to fit.
 - [ ] Attachment download.
 - [ ] Threading UI.
 - [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
