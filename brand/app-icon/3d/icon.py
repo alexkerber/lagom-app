@@ -1,4 +1,4 @@
-"""Blender -b -P icon.py -- icon.png [--take2 | --take3 | --take4] (renders concept variants)."""
+"""Blender -b -P icon.py -- icon.png [--take2 | --take3 | --take4 | --take5] (renders concept variants)."""
 import bpy
 import math
 import random
@@ -7,7 +7,8 @@ from pathlib import Path
 from mathutils import Vector, Matrix
 
 out = Path(sys.argv[sys.argv.index('--') + 1]).resolve()
-take4 = '--take4' in sys.argv
+take5 = '--take5' in sys.argv
+take4 = '--take4' in sys.argv or take5
 take3 = '--take3' in sys.argv or take4
 take2 = '--take2' in sys.argv or take3
 assert out.suffix == '.png'
@@ -179,6 +180,9 @@ line('Polished cutting edge',[(x,.145,.477+(.035*(1-(x/1.16)**2) if take4 else 0
 
 
 def between(name,a,b,radius,mat):
+    if take5:
+        a = (a[0], a[1]-.53, a[2]-.23)
+        b = (b[0], b[1]-.53, b[2]-.23)
     direction=Vector(b)-Vector(a)
     bpy.ops.mesh.primitive_cylinder_add(vertices=64,radius=radius,depth=direction.length,location=(Vector(a)+Vector(b))/2)
     o=bpy.context.object
@@ -195,6 +199,9 @@ neck_profile=[(.66,.478,.18,.016),(.70,.485,.17,.025),(.76,.50,.145,.045),
               (1.18,.71,.11,.11),(1.32,.77,.115,.115)]
 verts=[]
 for y,z,rx,rz in neck_profile:
+    if take5 and y > .76:
+        y = .76 + (y-.76)*.10
+        z = .50 + (z-.50)*.15
     for j in range(64):
         a=2*math.pi*j/64
         verts.append((rx*math.cos(a),y,z+rz*math.sin(a)))
@@ -214,16 +221,22 @@ def curl(t, offset=0):
     radius=.43-.18*t/(2.5*math.pi)+offset
     return (-.30+radius*math.cos(t), .98+radius*math.sin(t))
 profile += [curl(2.5*math.pi*i/160) for i in range(161)]
-v=[(x,y,z) for y,z in profile for x in (-.58,.58)]
-strip=mesh('Single curled letter',v,[(2*i,2*i+1,2*i+3,2*i+2) for i in range(len(profile)-1)],white)
+def envelope_point(x,t,offset=0):
+    return (x, .20-1.42*t, .49+.12*math.sin(math.pi*t)+.13*t**8+offset)
+if take5:
+    profile = [envelope_point(0,i/80)[1:] for i in range(81)]
+    white.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (.93,.87,.73,1)
+v=[(x,y,z) for y,z in profile for x in ((-.78,.78) if take5 else (-.58,.58))]
+strip_faces=[(2*i,2*i+1,2*i+3,2*i+2) for i in range(len(profile)-1)]
+strip=mesh('Single curled letter',v,[tuple(reversed(f)) for f in strip_faces] if take5 else strip_faces,white)
 sub=strip.modifiers.new('Relaxed paper curl','SUBSURF'); sub.levels=2
-solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.008
+solid=strip.modifiers.new('Paper thickness','SOLIDIFY'); solid.thickness=.016 if take5 else .008
 for face in strip.data.polygons: face.use_smooth=True
 # Rules sit on the outer face of the spiral, with no letters or glyphs.
-for i,t in enumerate([.7, 1.05, 1.4, 1.75] if take4 else [.8, 1.4, 2.0] if take2 else [.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
+for i,t in enumerate([] if take5 else [.7, 1.05, 1.4, 1.75] if take4 else [.8, 1.4, 2.0] if take2 else [.65, .92, 1.19, 1.46, 1.73, 2.0, 2.27, 2.54, 2.81, 3.08, 3.35]):
     y,z=curl(t,.012 if take4 else .009)
     line('Curled letter rule',[(-.48,y,z),([.35,.20,.40,.05][i] if take4 else .40 if i%4!=3 else .12,y,z)],ink,.003 if take4 else .030 if take2 else .007)
-if take4:
+if take4 and not take5:
     # Reveal the rolled edge while keeping the slicer itself symmetric.
     pivot = Vector((0,-.30,.98))
     turn = Matrix.Rotation(math.radians(18),4,'Y')
@@ -231,6 +244,23 @@ if take4:
     for obj in scene.objects:
         if obj.name.startswith(('Single curled letter','Curled letter rule')):
             obj.matrix_world = transform @ obj.matrix_world
+if take5:
+    fold = material('Envelope crease',(.22,.20,.17),.9)
+    for side in (-1,1):
+        line('Letter V fold',[envelope_point(side*.72*(1-i/40),.06+.56*i/40,.008) for i in range(41)],fold,.009)
+        line('Letter bottom fold',[envelope_point(side*(.72-.47*i/30),.98-.31*i/30,.008) for i in range(31)],fold,.006)
+    stamp_mat = material('Blue postage',(.015,.055,.12),.8)
+    corners = [(.44,.13),(.70,.13),(.70,.34),(.44,.34)]
+    border=[]
+    for a,b in zip(corners,corners[1:]+corners[:1]):
+        dx,dt=b[0]-a[0],b[1]-a[1]
+        length=math.hypot(dx,dt)
+        for i in range(20):
+            inset=.009 if i%2 else 0
+            border.append(envelope_point(a[0]+dx*i/20-dt/length*inset,a[1]+dt*i/20+dx/length*inset,.024))
+    stamp=mesh('Postage stamp',[envelope_point(.57,.235,.024)]+border,
+               [(0,i+1,(i+1)%len(border)+1) for i in range(len(border))],stamp_mat)
+    for face in stamp.data.polygons: face.use_smooth=True
 subject=list(scene.objects)
 
 # Orthographic camera and broad softboxes: no external textures or environment maps.
@@ -245,7 +275,7 @@ for name,loc,power,sz,color in [
     ('Front fill',(1,-5,4),250,3,(1,1,1))]:
     bpy.ops.object.light_add(type='AREA',location=loc)
     o=bpy.context.object; o.name=name; o.data.energy=power; o.data.shape='RECTANGLE'
-    o.data.size=sz; o.data.size_y=sz*.65; o.data.color=color
+    o.data.size=sz*(.6 if take5 else 1); o.data.size_y=o.data.size*.65; o.data.color=color
     o.rotation_euler=(Vector((0,0,.3))-o.location).to_track_quat('-Z','Y').to_euler()
 
 # Frame evaluated subject geometry at 660 px, independently of the 824 px plate.
@@ -319,10 +349,12 @@ if take2:
             for obj in subject:
                 obj.hide_render = (variant != '3' and obj.name.startswith(('Envelope','Task'))) or (not take4 and variant == '2' and obj.name.startswith(('Flowing','Steel ferrule','Walnut grip')))
             root.scale = (zoom,)*3
-            root.rotation_euler.z = math.radians(-10) if take4 and variant == '2' else 0
+            if take5:
+                stamp.hide_render = variant == '2'
+            root.rotation_euler.z = math.radians(-10) if take4 and not take5 and variant == '2' else 0
             root.location = target - zoom*(root.rotation_euler.to_matrix() @ Vector(anchor))
             plate.location = target + rotation @ Vector((0,0,-3.5))
-            scene.render.filepath = str(out.with_name(('take4-' if take4 else 'take3-')+variant+'.png'))
+            scene.render.filepath = str(out.with_name(('take5-' if take5 else 'take4-' if take4 else 'take3-')+variant+'.png'))
             bpy.ops.render.render(write_still=True)
             # Clip the zoomed subject to the same rounded 824 px tile silhouette.
             rendered = bpy.data.images.load(scene.render.filepath, check_existing=False)
@@ -338,7 +370,7 @@ if take2:
             rendered.filepath_raw = scene.render.filepath
             rendered.save()
             bpy.data.images.remove(rendered)
-        assert all(out.with_name(('take4-' if take4 else 'take3-')+v+'.png').exists() for v in ('12' if take4 else '123'))
+        assert all(out.with_name(('take5-' if take5 else 'take4-' if take4 else 'take3-')+v+'.png').exists() for v in ('12' if take4 else '123'))
     else:
         for variant, color, grip in [
             ('A', (.43,.035,.022), (.045,.022,.016)),
