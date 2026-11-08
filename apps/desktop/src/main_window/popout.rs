@@ -115,12 +115,12 @@ impl Render for MessageWindow {
     }
 }
 
-/// ⌘Q here waits for unsent mail as it does in the main window, which shows the toast.
+/// ⌘Q flushes local edits in the main window; queued sends survive the exit.
 fn quit_through_main<E: InteractiveElement>(el: E, cx: &mut Context<MessageWindow>) -> E {
     #[cfg(target_os = "macos")]
     let el = el.on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| {
         let held = this.main.update(cx, |main, window, cx| {
-            let held = main.hold_exit(Exit::Quit, cx);
+            let held = main.hold_exit(cx);
             if held {
                 window.activate_window();
             }

@@ -42,6 +42,21 @@ partially consumed commands must not be reused. No automatic retry or polling.
 A failed operation may have reached the server; resync before retrying a move.
 `Error::SentCopy` means SMTP succeeded: do not submit the message again.
 
+Draft autosave waits for a 300 ms typing pause and writes on a background executor.
+Revision checks prevent a late autosave from overwriting a newer save or restoring
+sent/discarded mail. Explicit Send, close and quit still flush local drafts synchronously.
+Sending commits an outbox row before the five-second Undo window; Undo atomically
+restores the draft. Temporary failures retry on sync with exponential backoff from
+one minute to one hour. Permanent refusals stop automatic retry. Interrupted SMTP
+attempts and unknown delivery outcomes remain uncertain until the user chooses
+Send again (which can duplicate delivery) or Edit draft (which atomically cancels
+the queued entry). Failed send status and actions survive restarting the desktop.
+SMTP and acknowledged Sent APPEND are checkpointed separately before refreshing
+the local Sent cache. A lost APPEND acknowledgement or crash before its checkpoint
+can still duplicate a Sent copy; Message-ID stays unchanged. The synchronous CLI
+send API leaves no queued entries on failure. Quit does not wait for network work.
+One desktop worker owns the queue per store. Server-side Drafts sync is not implemented.
+
 Initial sync stores the newest 500 UIDs per folder by default; subsequent sync
 keeps cached older messages and fetches every UID beyond the saved checkpoint.
 UIDVALIDITY changes invalidate that folder's cached rows. Successful sync compares
@@ -211,7 +226,8 @@ presentation of discovery/cancellation belong to the subsequent UI change.
 `ImapSync::login` and `smtp::{send, verify}` retain their password argument for
 existing callers; OAuth accounts ignore that argument and use the memory cache
 and keychain. Only an explicit authentication rejection causes one refresh and
-retry. SMTP never retries an ambiguous submission (`MaybeSent`).
+retry. SMTP does not retry within an ambiguous submission (`MaybeSent`); the outbox
+retries it on the next sync with the same Message-ID, which can produce a duplicate.
 
 ## OAuth validation on 2026-11-07
 

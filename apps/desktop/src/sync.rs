@@ -1,6 +1,6 @@
 //! The mail worker. One background thread runs a Tokio runtime (the core's IMAP and SMTP need
-//! it), owns the network and every store write, and works through `Cmd`s in order. The UI reads
-//! the store itself and hears about changes through `Event`s, so a frame never waits on the network.
+//! it), owns the network and sync writes, and works through `Cmd`s in order. Compose commits
+//! locally; the UI reads the store and hears about changes through `Event`s, without network waits.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,7 +15,7 @@ use lagom_core::{
     oauth::{self, Provider, SignedIn},
     discovery::{self, Discovery},
     imap_sync::{ImapSync, DEFAULT_LIMIT},
-    smtp::{self, Outgoing},
+    smtp,
     store::{FolderRole, Store},
     Error,
 };
@@ -53,7 +53,8 @@ pub enum Cmd {
     /// `id` is the store row the UI saw. The worker follows it through earlier moves.
     Op { op: u64, id: i64, act: Act },
     MarkSeen(i64),
-    Send { op: u64, account: String, mail: Box<Outgoing> },
+    /// The message is already durable, including its Undo deadline.
+    Send(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,7 +92,7 @@ pub enum Event {
     /// A MarkSeen finished, done or not.
     Seen(i64),
     /// `error` says why, also when the message went out but its Sent copy failed.
-    Sent { op: u64, delivery: Delivery, error: Option<String> },
+    Sent { delivery: Delivery, error: Option<String> },
 }
 
 #[derive(Clone)]
@@ -138,6 +139,11 @@ async fn run(path: PathBuf, mut rx: UnboundedReceiver<Cmd>, me: UnboundedSender<
             return;
         }
     };
+    if let Err(error) = store.recover_outbox() {
+        let _ = events.send(Event::Sync(String::new(), SyncState::Failed(error.to_string())));
+        return;
+    }
+    let _ = events.send(Event::Changed);
     let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
     for account in w.store.accounts().unwrap_or_default() {
         w.watch(&account);
@@ -235,20 +241,7 @@ impl Worker {
                 self.emit(Event::Seen(id));
                 self.emit(Event::Changed);
             }
-            Cmd::Send { op, account, mail } => {
-                let (delivery, error) = match self.send(&account, &mail).await {
-                    Ok(()) => (Delivery::Sent, None),
-                    Err(Error::SentCopy) => (Delivery::Sent, Some(Error::SentCopy.to_string())),
-                    Err(Error::MaybeSent) => (Delivery::Maybe, None),
-                    Err(Error::ReauthRequired) => {
-                        self.emit(Event::ReauthRequired(account));
-                        (Delivery::NotSent, Some(Error::ReauthRequired.to_string()))
-                    }
-                    Err(e) => (Delivery::NotSent, Some(e.to_string())),
-                };
-                self.emit(Event::Sent { op, delivery, error });
-                self.emit(Event::Changed);
-            }
+            Cmd::Send(id) => { self.send(&id).await; }
             other => self.deferred.push_back(other),
         }
     }
@@ -336,6 +329,10 @@ impl Worker {
         let accounts = self.store.accounts().unwrap_or_default();
         for account in accounts.into_iter().filter(|a| only.as_ref().is_none_or(|id| *id == a.id)) {
             self.emit(Event::Sync(account.id.clone(), SyncState::Syncing));
+            match self.store.due_outbox(&account.id, chrono::Local::now().timestamp_millis()) {
+                Ok(ids) => for id in ids { self.send(&id).await; },
+                Err(e) => self.emit(Event::Sync(account.id.clone(), SyncState::Failed(e.to_string()))),
+            }
             let state = match self.sync_account(&account, inbox_only, rx).await {
                 Ok(()) => SyncState::Synced(now()),
                 Err(Error::ReauthRequired) => {
@@ -448,10 +445,46 @@ impl Worker {
         result
     }
 
-    async fn send(&mut self, account: &str, mail: &Outgoing) -> lagom_core::Result<()> {
-        let account = self.account(account)?;
-        let password = account.password()?;
-        smtp::send(&account, &password, mail, &mut self.store).await
+    async fn send(&mut self, id: &str) {
+        let result = async {
+            if !self.store.claim_send(id, chrono::Local::now().timestamp_millis())? {
+                return Ok(false);
+            }
+            let prepared = (|| {
+                let pending = self.store.pending(id)?;
+                let account = self.account(&pending.account)?;
+                let password = account.password()?;
+                Ok((pending, account, password))
+            })();
+            let (pending, account, password) = match prepared {
+                Ok(prepared) => prepared,
+                Err(e) => {
+                    self.store.send_failed(id, &e, chrono::Local::now().timestamp_millis())?;
+                    return Err(e);
+                }
+            };
+            smtp::send_queued(&account, &password, &pending, &mut self.store).await?;
+            Ok(true)
+        }.await;
+        let (delivery, error) = match result {
+            Ok(false) => return,
+            Ok(true) => (Delivery::Sent, None),
+            Err(e) => {
+                if matches!(e, Error::ReauthRequired) {
+                    if let Ok(pending) = self.store.pending(id) {
+                        self.emit(Event::ReauthRequired(pending.account));
+                    }
+                }
+                let delivery = match e {
+                    Error::SentCopy => Delivery::Sent,
+                    Error::MaybeSent => Delivery::Maybe,
+                    _ => Delivery::NotSent,
+                };
+                (delivery, Some(e.to_string()))
+            }
+        };
+        self.emit(Event::Sent { delivery, error });
+        self.emit(Event::Changed);
     }
 
     /// IDLE on INBOX in its own task with its own connection; a change queues an INBOX sync.
@@ -627,10 +660,12 @@ mod greenmail {
         assert_eq!(added, Ok(account.id.clone()));
         synced(&mut events).await;
 
-        for (op, subject) in [(1, "Archive me"), (2, "Trash me"), (3, "File me"), (4, "Move me")] {
-            let mail = Outgoing { to: vec![email.clone()], subject: subject.into(), text: "Body".into(), ..Default::default() };
-            let _ = bridge.send(Cmd::Send { op, account: account.id.clone(), mail: Box::new(mail) });
-            let Event::Sent { delivery, error, .. } = next(&mut events, |e| matches!(e, Event::Sent { op: o, .. } if *o == op)).await else { unreachable!() };
+        let queue = Store::open(&path).unwrap();
+        for subject in ["Archive me", "Trash me", "File me", "Move me"] {
+            let mail = smtp::Outgoing { to: vec![email.clone()], subject: subject.into(), text: "Body".into(), ..Default::default() };
+            let id = queue.enqueue(&account, &mail, 0).unwrap();
+            let _ = bridge.send(Cmd::Send(id));
+            let Event::Sent { delivery, error, .. } = next(&mut events, |e| matches!(e, Event::Sent { .. })).await else { unreachable!() };
             assert_eq!(delivery, Delivery::Sent, "{error:?}");
         }
         let _ = bridge.send(Cmd::Sync(None));

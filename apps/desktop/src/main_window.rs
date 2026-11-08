@@ -237,14 +237,10 @@ pub struct MainWindow {
     toast: Option<(SharedString, bool, Task<()>)>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
-    // Sheets Esc closed or a failed send returned, newest last. R and C reopen the newest.
+    // Saved drafts, newest last. R and C reopen the newest.
     drafts: Vec<gpui::Entity<Compose>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
-    // Quit or close waits for these sends to reach the worker's answer.
-    exit: Option<Exit>,
-    // Gives up the wait after `EXIT_WAIT`; dropping it cancels.
-    exit_timer: Option<Task<()>>,
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
     page: Page,
@@ -283,9 +279,9 @@ impl MainWindow {
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
-        // The close button: a send in its Undo window goes first instead of being dropped.
+        // Flush local edits before close; queued sends need no network wait.
         let this = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |_, cx| this.update(cx, |this, cx| !this.hold_exit(Exit::Close, cx)).unwrap_or(true));
+        window.on_window_should_close(cx, move |_, cx| this.update(cx, |this, cx| !this.hold_exit(cx)).unwrap_or(true));
         // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
         let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
@@ -337,8 +333,6 @@ impl MainWindow {
             compose: None,
             drafts: Vec::new(),
             sending: Vec::new(),
-            exit: None,
-            exit_timer: None,
             live,
             page: Page::Mail,
             all_folders: false,
@@ -363,6 +357,7 @@ impl MainWindow {
         }
         if this.live.is_some() {
             this.reload(cx);
+            this.restore_drafts(window, cx);
             if this.live.as_ref().is_some_and(|l| l.accounts.is_empty()) || screen.starts_with("add-account") {
                 this.add_account(window, cx);
             }
@@ -535,6 +530,11 @@ impl MainWindow {
                     None => "Home · you@home.example".into(),
                 };
                 let compose = cx.new(|cx| Compose::new(&from, to, &subject, headers, window, cx));
+                if let Some(live) = &self.live {
+                    if let Some(account) = live.account().cloned() {
+                        compose.update(cx, |c, cx| c.persist(live.store.clone(), account, cx));
+                    }
+                }
                 self.watch_compose(&compose, window, cx);
                 compose
             }
@@ -543,46 +543,16 @@ impl MainWindow {
         cx.notify();
     }
 
-    /// Before quit or close. One rule: nothing unsent (a send on its way, a draft, an open sheet) is lost
-    /// unless the user quits again while the toast that asks for it is on screen. Sheets in
-    /// their Undo window send now. True: do not exit yet.
-    fn hold_exit(&mut self, exit: Exit, cx: &mut Context<Self>) -> bool {
-        for compose in self.sending.clone() {
-            if let Some(mail) = compose.update(cx, |c, cx| c.send_now(cx)) {
-                self.send_mail(compose, mail, cx);
+    /// Only a failed local write can hold an exit; drafts and sends need no network wait.
+    fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut saved = true;
+        for compose in self.drafts.iter().chain(self.compose.iter()) {
+            if compose.read(cx).is_modal() || compose.read(cx).keeps_draft() {
+                saved &= compose.update(cx, |c, cx| c.save(cx));
             }
         }
-        let sending = self.live.as_ref().is_some_and(|l| l.sending());
-        let asked = self.toast.as_ref().is_some_and(|t| t.0 == QUIT_AGAIN_SENDING || t.0 == QUIT_AGAIN_UNSENT);
-        let drafts = !self.drafts.is_empty() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
-        if !sending && !drafts || asked {
-            self.cancel_exit();
-            return false;
-        }
-        if !sending {
-            self.cancel_exit();
-            self.notify(QUIT_AGAIN_UNSENT, cx);
-            return true;
-        }
-        if self.exit.is_none() {
-            self.exit_timer = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(EXIT_WAIT).await;
-                this.update(cx, |this, cx| {
-                    if this.exit.take().is_some() {
-                        this.notify(QUIT_AGAIN_SENDING, cx);
-                    }
-                })
-                .ok();
-            }));
-        }
-        self.exit = Some(exit);
-        self.notify("Sending first, then closing", cx);
-        true
-    }
-
-    fn cancel_exit(&mut self) {
-        self.exit = None;
-        self.exit_timer = None;
+        if !saved { self.notify("Could not save draft. Check local storage before closing.", cx); }
+        !saved
     }
 
     fn watch_compose(&mut self, compose: &Entity<Compose>, window: &mut Window, cx: &mut Context<Self>) {
@@ -621,7 +591,7 @@ impl MainWindow {
                         this.drafts.push(other);
                     }
                 }
-                ComposeEvent::Send(mail) => this.send_mail(compose.clone(), (**mail).clone(), cx),
+                ComposeEvent::Send(id) => this.send_mail(id.clone(), cx),
             }
             cx.notify();
         })
@@ -1624,7 +1594,8 @@ impl MainWindow {
         let web = html::SUPPORTED && m.html.is_some();
         let text = !web || self.palette.is_some() || self.compose.is_some();
         // Toasts sit just above the reply field; the web view would cover them.
-        let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count();
+        let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count()
+            + self.live.as_ref().map_or(0, |live| live.failed.len());
         div()
             .flex_1()
             .min_w(px(0.))
@@ -1996,6 +1967,22 @@ impl MainWindow {
             // Nothing has left yet: it goes when the Undo window ends.
             out.push(scoped(i, crate::compose::toast(&t, "Sending", Some(undo().on_click(on_undo).into_any_element())).into_any_element()));
         }
+        if let Some(live) = &self.live {
+            for (i, pending) in live.failed.iter().enumerate() {
+                let id = pending.id.clone();
+                let edit_id = id.clone();
+                let status = match pending.state.as_str() {
+                    "uncertain" => "Delivery uncertain — sending again may duplicate delivery",
+                    "failed" => "Not sent — automatic retry stopped",
+                    _ => "Not sent — retry scheduled",
+                };
+                let actions = div().flex().flex_shrink_0().gap(px(8.))
+                    .child(button(&t, "Send again", None).on_click(cx.listener(move |this, _, _, cx| this.retry_failed(&id, cx))))
+                    .child(button(&t, "Edit draft", None).on_click(cx.listener(move |this, _, window, cx| this.edit_failed(&edit_id, window, cx))));
+                out.push(scoped(self.sending.len() + i, crate::compose::toast(&t,
+                    format!("{}: {}", status, if pending.mail.subject.is_empty() { pending.mail.to.join(", ") } else { pending.mail.subject.clone() }), Some(actions.into_any_element())).into_any_element()));
+            }
+        }
         if let Some((text, offers_undo, _)) = &self.toast {
             let action = offers_undo.then(|| undo().on_click(cx.listener(|this, _, _, cx| this.undo(cx))).into_any_element());
             out.push(scoped(usize::MAX, crate::compose::toast(&t, text.clone(), action).into_any_element()));
@@ -2087,28 +2074,16 @@ impl Swipe {
     }
 }
 
-/// ⌘Q and ⌘W (macOS menu) wait for sends in their Undo window. Menu and key actions reach
+/// ⌘Q and ⌘W flush local edits. Menu and key actions reach
 /// the window before the app's global handlers, which run when this one propagates.
 fn exit_actions<E: InteractiveElement>(el: E, cx: &mut Context<MainWindow>) -> E {
     #[cfg(target_os = "macos")]
     let el = el
-        .on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(Exit::Quit, cx) { cx.propagate() }))
-        .on_action(cx.listener(|this, _: &crate::menus::CloseWindow, _, cx| if !this.hold_exit(Exit::Close, cx) { cx.propagate() }));
+        .on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(cx) { cx.propagate() }))
+        .on_action(cx.listener(|this, _: &crate::menus::CloseWindow, _, cx| if !this.hold_exit(cx) { cx.propagate() }));
     #[cfg(not(target_os = "macos"))]
     let _ = cx;
     el
-}
-
-/// How long quit or close waits for sends before it lets the user quit anyway.
-const EXIT_WAIT: Duration = Duration::from_secs(90);
-/// While one of these toasts shows (5 s), the next quit or close goes and drops what is unsent.
-const QUIT_AGAIN_UNSENT: &str = "Unsent mail kept. Quit again to discard it.";
-const QUIT_AGAIN_SENDING: &str = "Still sending. Quit again to quit anyway; unsent mail is then lost.";
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Exit {
-    Close,
-    Quit,
 }
 
 /// Inbox and folder state as ids into `mail`. Plain Rust, so tests run without a window.
@@ -3138,69 +3113,36 @@ mod dispatch {
     }
 
     #[gpui::test]
-    fn quit_sends_a_mail_in_its_undo_window_now(cx: &mut TestAppContext) {
+    fn quit_does_not_wait_for_a_send_in_its_undo_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         cx.simulate_keystrokes("c");
-        cx.simulate_input("ana@example.com");
+        cx.simulate_input("recipient@example.com");
         cx.simulate_keystrokes("cmd-enter");
         let sheet = view.read_with(cx, |v, _| v.sending[0].clone());
-        let id = sheet.read_with(cx, |c, cx| c.outgoing(cx).message_id);
-        assert!(id.as_deref().is_some_and(|id| id.starts_with('<') && id.ends_with("@home.example>")));
-        // The sheet hands over its mail at once, with the Message-ID a resend would reuse.
-        let mail = sheet.update(cx, |c, cx| c.send_now(cx)).expect("mail in its Undo window");
-        assert_eq!((mail.to.as_slice(), mail.message_id), (["ana@example.com".to_string()].as_slice(), id));
-        assert!(sheet.update(cx, |c, cx| c.send_now(cx)).is_none());
-        // Quit flushes every sheet; demo mode has no worker, so nothing holds the quit.
-        cx.simulate_keystrokes("c");
-        cx.simulate_input("bo@example.com");
-        cx.simulate_keystrokes("cmd-enter");
-        let second = view.read_with(cx, |v, _| v.sending.last().cloned()).unwrap();
-        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        assert!(!second.read_with(cx, |c, _| c.undoable()));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(sheet.read_with(cx, |c, _| c.undoable()));
     }
 
     #[gpui::test]
-    fn a_waiting_quit_also_sends_mail_sent_meanwhile(cx: &mut TestAppContext) {
-        let (view, cx) = open(cx);
-        // Quit is waiting for mail A; mail B was sent after it and is in its Undo window.
-        view.update(cx, |v, _| v.exit = Some(Exit::Quit));
-        cx.simulate_keystrokes("c");
-        cx.simulate_input("bo@example.com");
-        cx.simulate_keystrokes("cmd-enter");
-        let b = view.read_with(cx, |v, _| v.sending.last().cloned()).unwrap();
-        assert!(b.read_with(cx, |c, _| c.undoable()));
-        // A has finished: before quitting, B goes to the worker too (demo: nothing to wait for).
-        assert_eq!(view.update(cx, |v, cx| v.exit_ready(cx)), Some(Exit::Quit));
-        assert!(!b.read_with(cx, |c, _| c.undoable()));
-    }
-
-    #[gpui::test]
-    fn quit_with_a_draft_asks_once_per_episode(cx: &mut TestAppContext) {
+    fn quit_with_a_draft_never_asks_to_discard(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         cx.simulate_keystrokes("r");
         cx.simulate_input("Not done yet");
         cx.simulate_keystrokes("escape");
         assert_eq!(view.read_with(cx, |v, _| v.drafts.len()), 1);
-        // First quit keeps the draft and asks; quitting again while asked discards it.
-        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        assert!(!view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        // Once the toast has gone, the question is new: a single quit does not discard.
-        cx.executor().advance_clock(Duration::from_secs(6));
-        cx.run_until_parked();
-        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
-        // An open sheet with text counts too: reopening the draft must not let quit through.
-        cx.executor().advance_clock(Duration::from_secs(6));
-        cx.run_until_parked();
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(view.read_with(cx, |v, _| v.toast.is_none()));
         cx.simulate_keystrokes("r");
         assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.drafts.is_empty()));
-        assert!(view.update(cx, |v, cx| v.hold_exit(Exit::Quit, cx)));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(view.read_with(cx, |v, _| v.toast.is_none()));
     }
 
     #[test]
-    fn an_unsure_send_says_check_sent() {
+    fn a_failed_send_explains_outbox_retry() {
         assert_eq!(live::sent_note(Delivery::Sent, None), "Sent");
-        assert!(live::sent_note(Delivery::Maybe, None).starts_with("May have been sent. Check Sent before sending again."));
-        assert!(live::sent_note(Delivery::NotSent, Some("refused".into())).starts_with("Not sent: refused."));
+        assert!(live::sent_note(Delivery::Maybe, None).contains("outbox"));
+        assert!(live::sent_note(Delivery::NotSent, Some("refused".into())).contains("refused"));
     }
 
     #[gpui::test]
@@ -3302,7 +3244,7 @@ mod dispatch {
         popout.update(cx, |p, _, cx| p.act(Move::Delete, cx)).unwrap();
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.palette.is_none()));
-        // ⌘Q in a message window asks about the draft, as in the main window. Quit is a macOS menu action.
+        // A message window also leaves saved drafts alone on quit.
         #[cfg(target_os = "macos")]
         {
             cx.simulate_keystrokes("secondary-o");
@@ -3316,7 +3258,8 @@ mod dispatch {
                 window.dispatch_action(Box::new(crate::menus::Quit), cx);
             }).unwrap();
             cx.run_until_parked();
-            assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.clone())), Some(QUIT_AGAIN_UNSENT.into()));
+            assert!(view.read_with(cx, |v, _| v.toast.as_ref().is_none_or(|t| !t.0.contains("Quit again"))));
+            assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
         }
     }
 

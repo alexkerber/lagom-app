@@ -7,6 +7,7 @@ pub mod mime;
 pub mod presets;
 pub mod oauth;
 pub mod smtp;
+pub mod outbox;
 pub mod store;
 pub mod tasks;
 
@@ -24,6 +25,8 @@ pub enum Error {
     Network(&'static str),
     #[error("message sent, but the Sent copy could not be saved; do not resend")]
     SentCopy,
+    #[error("the SMTP server permanently refused the message")]
+    Rejected,
     #[error("sign in again")]
     ReauthRequired,
     #[error("sign-in cancelled")]
