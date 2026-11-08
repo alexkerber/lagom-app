@@ -44,7 +44,7 @@
 - [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (`feat/folders`).
 - [ ] Swipe: try it by hand on a trackpad, a Magic Mouse and a mouse drag (incl. release outside the window), including the 245 px delete stage and the colour fade; tests cover only the state logic.
 - [ ] Swipe: haptic tick at each threshold. GPUI 0.2.2 has no API for `NSHapticFeedbackManager`.
-- [ ] Trash: a sidebar entry to open it and empty it. Delete only moves to an in-memory Trash now.
+- [x] Trash: system sidebar entry mapped through IMAP special-use flags, confirmed Empty Trash on the worker (UIDPLUS required), and Move to Inbox. Delete moves to server Trash; demo mode keeps it in memory.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
 - [x] Swipe: drag a row with the mouse, same stages as the trackpad. Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
 - [x] Compose: Esc keeps the draft locally and R brings it back; Send moves it to the outbox and ⌘⌫ discards it.

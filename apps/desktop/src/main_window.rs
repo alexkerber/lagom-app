@@ -246,6 +246,7 @@ pub struct MainWindow {
     page: Page,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
+    confirm_empty_trash: bool,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -336,6 +337,7 @@ impl MainWindow {
             live,
             page: Page::Mail,
             all_folders: false,
+            confirm_empty_trash: false,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -609,6 +611,7 @@ impl MainWindow {
     /// Optimistic: the row leaves at once, then the worker applies the move on the server.
     /// `when`: the time a Later move brings the message back.
     fn act_with(&mut self, ix: usize, what: Move, dx: f32, when: LaterWhen, cx: &mut Context<Self>) {
+        if self.emptying_trash() { return; }
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
         // The list changes height under the highlight; rows paint the selection until it settles.
         self.glide = None;
@@ -651,6 +654,7 @@ impl MainWindow {
 
     // Ghosts and springs sit at indices in the list on screen, so they go when the list changes.
     fn clear_motion(&mut self) {
+        self.confirm_empty_trash = false;
         self.glide = None;
         self.ghosts.clear();
         self.entering.clear();
@@ -658,6 +662,7 @@ impl MainWindow {
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.emptying_trash() { return; }
         let open = self.inbox.open;
         let Some((what, id, ix)) = self.inbox.undo() else { return };
         self.unserver(what, id, cx);
@@ -857,7 +862,7 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
     let row = row.bg(t.bg);
     match what {
         // A move to a folder leaves like Done.
-        Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)),
+        Move::Inbox | Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)),
         // Delete leaves the other way, at the same speed.
         Move::Delete => row.left(px(dx - p * 200.)),
         // Towards Later in the sidebar: lift (shadow), shrink and move left.
@@ -869,7 +874,7 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
 fn swipe_colors(t: &Theme, what: Option<Move>) -> (Rgba, Rgba) {
     match what {
         None => (t.sel, t.ink2),
-        Some(Move::Done | Move::Folder(_)) => (t.swipe_done, t.accent_ink),
+        Some(Move::Inbox | Move::Done | Move::Folder(_)) => (t.swipe_done, t.accent_ink),
         Some(Move::Later) => (t.swipe_later, t.accent_ink),
         Some(Move::Delete) => (t.danger, t.accent_ink),
     }
@@ -1201,7 +1206,8 @@ impl MainWindow {
                             .on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Later, cx))),
                     )
                     .child(nav("icons/sent.svg", "Sent", None, open_kind(Kind::Sent)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Sent, cx))))
-                    .child(nav("icons/done.svg", "Done", None, open_kind(Kind::Done)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Done, cx)))),
+                    .child(nav("icons/done.svg", "Done", None, open_kind(Kind::Done)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Done, cx))))
+                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Trash, cx)))),
             )
             .child(self.folder_group(heading("Folders"), cx))
             .child(account_rows)
@@ -1528,9 +1534,13 @@ impl MainWindow {
 
         // Title and subtitle as in a macOS toolbar: the count, and a quiet sync status.
         let left = self.inbox.shown_count();
-        let subtitle = match self.sync_state() {
-            Some(sync) => format!("{left} left · {sync}"),
-            None => format!("{left} left"),
+        let subtitle = if self.confirm_empty_trash && self.inbox.open_kind() == Some(Kind::Trash) {
+            "Delete all permanently?".to_string()
+        } else {
+            match self.sync_state() {
+                Some(sync) => format!("{left} left · {sync}"),
+                None => format!("{left} left"),
+            }
         };
         div()
             .w(px(self.list_w))
@@ -1546,7 +1556,8 @@ impl MainWindow {
                     .items_center()
                     .justify_between()
                     .gap(px(8.))
-                    .h(px(HEADER_H))
+                    .h(px(self.list_header_height()))
+                    .when(self.confirm_empty_trash, |d| d.flex_col().items_start().py(px(8.)))
                     .flex_shrink_0()
                     .px(px(16.))
                     .border_b_1()
@@ -1559,7 +1570,18 @@ impl MainWindow {
                             .child(div().font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
                             .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}"))),
                     )
-                    .child(filter),
+                    .child(if self.inbox.open_kind() == Some(Kind::Trash) {
+                        let controls = div().flex().gap(px(8.));
+                        if self.emptying_trash() {
+                            controls.child(mono("Emptying…", t.ink2))
+                        } else if self.confirm_empty_trash {
+                            controls
+                                .child(button(t, "Delete all", Some(t.danger)).on_click(cx.listener(|this, _, _, cx| this.empty_trash(cx))))
+                                .child(button(t, "Cancel", None).on_click(cx.listener(|this, _, _, cx| { this.confirm_empty_trash = false; cx.notify(); })))
+                        } else {
+                            controls.child(button(t, "Empty Trash", None).on_click(cx.listener(|this, _, _, cx| { this.confirm_empty_trash = true; cx.notify(); })))
+                        }
+                    } else { filter }),
             )
             .child(
                 {
@@ -1581,8 +1603,13 @@ impl MainWindow {
             )
     }
 
+    fn list_header_height(&self) -> f32 {
+        HEADER_H + if self.confirm_empty_trash && self.inbox.open_kind() == Some(Kind::Trash) { 32. } else { 0. }
+    }
+
     /// The list on screen, for its header and the window title.
     fn list_title(&self) -> SharedString {
+        if self.inbox.open_kind() == Some(Kind::Trash) { return "Trash".into(); }
         self.inbox.open.map_or("Inbox".into(), |f| self.inbox.folders[f].name.clone().into())
     }
 
@@ -1590,6 +1617,7 @@ impl MainWindow {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
         let m = &self.inbox.mail[id];
+        let trash = self.inbox.open_kind() == Some(Kind::Trash);
         let this = cx.entity().downgrade();
         let on_download = move |section, _: &mut Window, cx: &mut App| {
             this.update(cx, |this, cx| this.download_attachment(id, section, cx)).ok();
@@ -1611,14 +1639,13 @@ impl MainWindow {
                     .px(px(16.))
                     .child(
                         // Pine green, like the Done swipe.
-                        button(t, "Done", Some(t.swipe_done))
-                            .on_click(cx.listener(|this, _, _, cx| this.act(Move::Done, cx))),
+                        button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.swipe_done))
+                            .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))),
                     )
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
-                    .child(
-                        button(t, "Later", None)
-                            .on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
-                    )
+                    .when(!trash, |d| d.child(
+                        button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
+                    ))
                     .when(web && self.web.has_remote && !m.remote, |d| {
                         d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.inbox.mail[id].remote = true;
@@ -1834,7 +1861,7 @@ impl Render for MainWindow {
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
-        let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - HEADER_H).max(0.);
+        let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
             Page::Settings(_) => "Settings".into(),
@@ -1920,8 +1947,10 @@ impl Render for MainWindow {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) {
+                this.confirm_empty_trash = false;
                 this.finish_resize(cx);
                 this.release(false, cx);
+                cx.notify();
             }))
             .map(|d| exit_actions(d, cx))
             .size_full()
@@ -2002,6 +2031,7 @@ impl MainWindow {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Move {
+    Inbox,
     Done,
     Later,
     /// Into the folder at this index in `Inbox::folders`.
@@ -2125,6 +2155,7 @@ impl Inbox {
     /// The sample inbox and folders, with their unread counts.
     fn demo(len: usize) -> Self {
         let mut inbox = Self { folders: folders::sample(), ..Self::new(len, LATER_SAMPLE) };
+        inbox.folders.push(Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) });
         for f in 0..inbox.folders.len() {
             inbox.folders[f].unread = inbox.folders[f].items.iter().filter(|&&id| inbox.mail[id].unread).count();
         }
@@ -2134,14 +2165,16 @@ impl Inbox {
     /// Empty until the first store read. Later is a local list, not a server folder.
     fn live() -> Self {
         let later = Folder { kind: Kind::Later, ..Folder::new("Later", None, &[]) };
-        Self { mail: Vec::new(), folders: vec![later], ..Self::new(0, 0) }
+        Self { mail: Vec::new(), folders: vec![later, Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) }], ..Self::new(0, 0) }
     }
 
     fn list(&self) -> &Vec<usize> {
+        if self.open_kind() == Some(Kind::Trash) { return &self.trash; }
         self.open.map_or(&self.items, |f| &self.folders[f].items)
     }
 
     fn list_mut(&mut self) -> &mut Vec<usize> {
+        if self.open_kind() == Some(Kind::Trash) { return &mut self.trash; }
         match self.open {
             Some(f) => &mut self.folders[f].items,
             None => &mut self.items,
@@ -2215,13 +2248,14 @@ impl Inbox {
         match what {
             Move::Later => step(&mut self.later, 1, !back),
             Move::Folder(f) => step(&mut self.folders[f].unread, unread, !back),
-            Move::Done | Move::Delete => {}
+            Move::Inbox | Move::Done | Move::Delete => {}
         }
     }
 
     /// Removes the message at `ix`. If it was selected, the one below it (above it at the end)
     /// becomes selected. A swipe can hit any row, so otherwise the selection stays on its message.
     fn act_at(&mut self, ix: usize, what: Move) -> Option<(usize, usize)> {
+        if what == Move::Inbox && self.open.is_none() { return None; }
         if let Move::Folder(f) = what {
             // A move into the open folder, or a folder that does not exist, changes nothing.
             if self.open == Some(f) || f >= self.folders.len() {
@@ -2233,7 +2267,7 @@ impl Inbox {
             Move::Done => Some(Kind::Done),
             Move::Later => Some(Kind::Later),
             Move::Delete => Some(Kind::Trash),
-            Move::Folder(_) => None,
+            Move::Inbox | Move::Folder(_) => None,
         };
         if here.is_some() && self.open_kind() == here {
             return None;
@@ -2246,6 +2280,7 @@ impl Inbox {
         self.selected = self.selected.min(self.list().len().saturating_sub(1));
         self.recount(id, self.open, what, false);
         match what {
+            Move::Inbox => self.items.insert(0, id),
             Move::Folder(f) => self.folders[f].items.insert(0, id),
             Move::Delete => self.trash.insert(0, id),
             Move::Later | Move::Done => {}
@@ -2272,6 +2307,7 @@ impl Inbox {
         let (what, id, from, ix) = self.history.remove(at);
         self.recount(id, from, what, true);
         match what {
+            Move::Inbox => self.items.retain(|&i| i != id),
             Move::Folder(f) => self.folders[f].items.retain(|&i| i != id),
             Move::Delete => self.trash.retain(|&i| i != id),
             Move::Later | Move::Done => {}
@@ -2351,7 +2387,7 @@ impl Inbox {
             if self.folders[f].gone {
                 self.open = None;
             } else {
-                self.folders[f].items = snap.open.iter().map(|m| self.intern(m, seen, now)).collect();
+                *self.list_mut() = snap.open.iter().map(|m| self.intern(m, seen, now)).collect();
             }
         }
         let found = keep.and_then(|s| self.list().iter().position(|&id| self.mail[id].store == Some(s)));
@@ -2534,6 +2570,23 @@ mod tests {
     }
 
     #[test]
+    fn trash_can_restore_to_inbox_and_undo() {
+        let mut inbox = Inbox::demo(3);
+        inbox.act_at(1, Move::Delete).unwrap();
+        inbox.open(inbox.find_kind(Kind::Trash));
+        assert_eq!(inbox.list(), &[1]);
+        assert_eq!(inbox.act_at(0, Move::Delete), None);
+        assert_eq!(inbox.act_at(0, Move::Inbox), Some((1, 0)));
+        assert!(inbox.list().is_empty());
+        assert_eq!(inbox.items, [1, 0, 2]);
+        assert_eq!(inbox.undo(), Some((Move::Inbox, 1, 0)));
+        assert_eq!(inbox.list(), &[1]);
+        assert_eq!(inbox.items, [0, 2]);
+        inbox.open(None);
+        assert_eq!(inbox.act_at(0, Move::Inbox), None);
+    }
+
+    #[test]
     fn mouse_click_versus_drag() {
         let drag = |moves: &[(f32, f32)]| {
             let mut s = Swipe::start(7);
@@ -2603,7 +2656,7 @@ mod tests {
     fn folder_counts_are_unread_only() {
         let mut inbox = with_folders();
         let counts: Vec<_> = (0..inbox.folders.len()).map(|f| inbox.unread(f)).collect();
-        assert_eq!(counts, [3, 0, 1, 0, 0, 0, 0, 1, 2]);
+        assert_eq!(counts, [3, 0, 1, 0, 0, 0, 0, 1, 2, 0]);
         // A read message (Build bot) into Travel keeps Travel at zero; an unread one counts.
         inbox.act_at(2, Move::Folder(1));
         assert_eq!(inbox.unread(1), 0);

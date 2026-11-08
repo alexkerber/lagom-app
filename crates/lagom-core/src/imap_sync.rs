@@ -248,12 +248,29 @@ impl ImapSync {
         store.reset_uidvalidity(id, validity)?;
         Ok((store.folder(id)?, mailbox))
     }
+    async fn all_uids(&mut self) -> Result<HashSet<u32>> {
+        use async_imap::imap_proto::{MailboxDatum, Response, Status};
+        // async-imap's search parser discards the tagged status, even after partial results.
+        let tag = net(self.session.run_command("UID SEARCH ALL")).await?;
+        let mut uids = HashSet::new();
+        loop {
+            let response = net(self.session.read_response()).await?
+                .ok_or(Error::Network("IMAP search interrupted"))?;
+            match response.parsed() {
+                Response::MailboxData(MailboxDatum::Search(ids)) => uids.extend(ids.iter().copied().filter(|u| *u > 0)),
+                Response::Done { tag: done, status, .. } if *done == tag => {
+                    return if *status == Status::Ok { Ok(uids) } else { Err(Error::Network("IMAP search failed")) };
+                }
+                _ => {}
+            }
+        }
+    }
     pub async fn sync_folder(&mut self, store: &mut Store, id: i64, limit: usize) -> Result<()> {
         if limit == 0 {
             return Err(Error::Invalid("sync limit must be positive"));
         }
         let (folder, mailbox) = self.select(store, id).await?;
-        let present = net(self.session.uid_search("ALL")).await?;
+        let present = self.all_uids().await?;
         let mut sorted: Vec<_> = present.iter().copied().filter(|u| *u > 0).collect();
         sorted.sort_unstable();
         let known: HashSet<_> = store.known_uids(id)?.into_iter().collect();
@@ -310,7 +327,7 @@ impl ImapSync {
             }
         }
         // SEARCH again catches expunges that occurred while bodies were fetched.
-        let present = net(self.session.uid_search("ALL")).await?;
+        let present = self.all_uids().await?;
         let saved: HashSet<_> = store.known_uids(id)?.into_iter().collect();
         if candidates
             .iter()
@@ -544,22 +561,7 @@ impl ImapSync {
                 .session
                 .uid_copy(message.uid.to_string(), &destination.name))
             .await?;
-            net(async {
-                self.session
-                    .uid_store(message.uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
-                    .await?
-                    .try_collect::<Vec<_>>()
-                    .await
-            })
-            .await?;
-            net(async {
-                self.session
-                    .uid_expunge(message.uid.to_string())
-                    .await?
-                    .try_collect::<Vec<_>>()
-                    .await
-            })
-            .await?;
+            self.delete_uids(&message.uid.to_string()).await?;
         }
         // Destination UIDs are assigned by the server. Resync before removing the old local row.
         self.sync_folder(store, target, DEFAULT_LIMIT).await?;
@@ -598,6 +600,31 @@ impl ImapSync {
         }
         let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
         self.move_message(store, id, target).await
+    }
+    async fn delete_uids(&mut self, set: &str) -> Result<()> {
+        // async-imap's STORE/EXPUNGE streams discard tagged NO/BAD replies.
+        net(self.session.run_command_and_check_ok(format!("UID STORE {set} +FLAGS.SILENT (\\Deleted)"))).await?;
+        net(self.session.run_command_and_check_ok(format!("UID EXPUNGE {set}"))).await
+    }
+    pub async fn empty_trash(&mut self, store: &mut Store, id: i64) -> Result<()> {
+        let folder = store.folder(id)?;
+        if folder.account != self.account.id || folder.role != FolderRole::Trash {
+            return Err(Error::Invalid("not this account's Trash folder"));
+        }
+        if !self.capabilities.has_str("UIDPLUS") {
+            return Err(Error::Network("empty Trash requires UIDPLUS"));
+        }
+        let (selected, _) = self.select(store, id).await?;
+        if folder.uidvalidity.is_some() && folder.uidvalidity != selected.uidvalidity {
+            return Err(Error::Invalid("mailbox changed; resync before operation"));
+        }
+        let mut uids: Vec<_> = self.all_uids().await?.into_iter().collect();
+        uids.sort_unstable();
+        // Exact UIDs keep mail arriving during the operation out of the expunge.
+        for chunk in uids.chunks(100) {
+            self.delete_uids(&uid_set(chunk)).await?;
+        }
+        self.sync_folder(store, id, DEFAULT_LIMIT).await
     }
     pub async fn append_sent(&mut self, store: &mut Store, raw: &[u8]) -> Result<i64> {
         let target = self.ensure_role(store, FolderRole::Sent, "Sent").await?;

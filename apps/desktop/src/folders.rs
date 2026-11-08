@@ -38,7 +38,7 @@ impl Folder {
 
     /// Listed in the folder group and as a "Move to" target.
     pub fn listed(&self) -> bool {
-        !self.gone && matches!(self.kind, Kind::Custom | Kind::Trash)
+        !self.gone && self.kind == Kind::Custom
     }
 }
 
@@ -76,7 +76,9 @@ pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
         };
         let name = s.delimiter.as_deref().and_then(|d| s.name.rsplit_once(d)).map_or(s.name.as_str(), |(_, n)| n);
         // A folder ⌘K created locally is adopted once the server lists it.
-        let found = folders.iter().position(|f| f.store == Some(s.id)).or_else(|| folders.iter().position(|f| f.store.is_none() && f.kind == Kind::Custom && f.full == s.name));
+        let found = folders.iter().position(|f| f.store == Some(s.id)).or_else(|| folders.iter().position(|f| {
+            f.store.is_none() && ((f.kind == Kind::Custom && f.full == s.name) || (f.kind == Kind::Trash && kind == Kind::Trash))
+        }));
         let i = found.unwrap_or_else(|| {
             folders.push(Folder::new(name, None, &[]));
             folders.len() - 1
@@ -161,6 +163,19 @@ mod tests {
         assert!(folders[3].gone && !folders[3].listed());
         assert_eq!((folders.len(), folders[4].parent), (5, None));
         assert_eq!(tree(&folders, true).iter().map(|r| r.0).collect::<Vec<_>>(), [1, 4]);
+    }
+
+    #[test]
+    fn localized_trash_adopts_the_system_entry() {
+        use lagom_core::store::{Folder as F, FolderRole as R};
+        let mut folders = vec![Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) }];
+        let server = F { id: 42, account: "fixture".into(), name: "[Provider]/Bin".into(), delimiter: Some("/".into()), role: R::Trash, uidvalidity: Some(7), uidnext: None, last_uid: 0, highest_modseq: None, unread: 3 };
+        merge(&mut folders, &[server.clone()]);
+        assert_eq!(folders.len(), 1);
+        assert_eq!((folders[0].kind, folders[0].store, folders[0].unread), (Kind::Trash, Some(42), 3));
+        assert!(tree(&folders, true).is_empty());
+        merge(&mut folders, &[server]);
+        assert_eq!(folders.len(), 1);
     }
 
     #[test]

@@ -9,6 +9,7 @@ enum Op {
     Move(usize),
     /// Undo of a move: on failure only a message.
     Undo,
+    EmptyTrash(String),
 }
 
 pub struct Live {
@@ -150,6 +151,7 @@ impl MainWindow {
         let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
             None => mail::View::Inbox,
             Some((Kind::Later, _)) => mail::View::Later,
+            Some((Kind::Trash, _)) => mail::View::Trash,
             Some((_, Some(id))) => mail::View::Folder(id),
             // A folder ⌘K just created: nothing on the server yet.
             Some((_, None)) => mail::View::Inbox,
@@ -223,6 +225,15 @@ impl MainWindow {
                     read = true;
                     let Some(done) = self.live.as_mut().and_then(|l| l.ops.remove(&op)) else { continue };
                     match (done, error) {
+                        (Op::EmptyTrash(account), None) => {
+                            if self.live.as_ref().and_then(|l| l.account()).is_some_and(|a| a.id == account) {
+                                self.inbox.history.clear();
+                                self.close_popouts(None, cx);
+                                self.clear_motion();
+                            }
+                            self.notify("Trash emptied", cx);
+                        }
+                        (Op::EmptyTrash(_), Some(e)) => self.notify(format!("Could not empty Trash: {e}"), cx),
                         (_, None) => {}
                         (Op::Move(id), Some(e)) => {
                             self.inbox.back(id);
@@ -278,7 +289,7 @@ impl MainWindow {
                         self.come_back(what, id, ix, false, cx);
                     }
                 }
-                Op::Undo => {}
+                Op::Undo | Op::EmptyTrash(_) => {}
             }
         }
         self.notify("Mail stopped working. Restart Lagom; pending sends are saved in the outbox.", cx);
@@ -290,6 +301,11 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store).map(mail::Place::Folder);
         let (act, target) = match what {
+            Move::Inbox => {
+                let inbox = live.account().and_then(|a| live.store.folders(&a.id, now()).ok())
+                    .and_then(|fs| fs.into_iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox));
+                (Act::Inbox, inbox.map(|f| mail::Place::Folder(f.id)))
+            }
             Move::Done => (Act::Archive, store_of(Kind::Done)),
             Move::Delete => (Act::Trash, store_of(Kind::Trash)),
             Move::Later => (Act::Snooze(Some(when.at(chrono::Local::now()).timestamp())), None),
@@ -317,7 +333,7 @@ impl MainWindow {
         let back = self.inbox.back(id);
         let act = match what {
             Move::Later => Act::Snooze(None),
-            Move::Done | Move::Delete | Move::Folder(_) => match back {
+            Move::Inbox | Move::Done | Move::Delete | Move::Folder(_) => match back {
                 mail::Place::Folder(id) => Act::Move(id),
                 // The worker finds it by name: the create ran before this undo.
                 mail::Place::New(name) => Act::NewFolder(name),
@@ -374,6 +390,32 @@ impl MainWindow {
             live.limit += PAGE;
             self.reload(cx);
         }
+    }
+
+    pub(super) fn emptying_trash(&self) -> bool {
+        self.live.as_ref().is_some_and(|l| l.ops.values().any(|op| matches!(op, Op::EmptyTrash(_))))
+    }
+
+    pub(super) fn empty_trash(&mut self, cx: &mut Context<Self>) {
+        if !self.confirm_empty_trash || self.inbox.open_kind() != Some(Kind::Trash) || self.emptying_trash() { return; }
+        self.confirm_empty_trash = false;
+        if let Some(live) = &mut self.live {
+            let Some(folder) = self.inbox.open.and_then(|f| self.inbox.folders[f].store) else {
+                self.notify("No Trash folder on the server yet", cx);
+                return;
+            };
+            let Some(account) = live.account().map(|a| a.id.clone()) else { return };
+            let op = live.op(Op::EmptyTrash(account));
+            if !live.bridge.send(Cmd::EmptyTrash { op, folder }) { self.worker_gone(cx); }
+        } else {
+            self.inbox.trash.clear();
+            self.inbox.history.clear();
+            self.inbox.selected = 0;
+            self.close_popouts(None, cx);
+            self.clear_motion();
+            self.notify("Trash emptied", cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn open_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
@@ -534,6 +576,7 @@ impl MainWindow {
 
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.release(false, cx);
+        self.confirm_empty_trash = false;
         self.page = Page::Settings(None);
         cx.notify();
     }
@@ -627,6 +670,67 @@ mod tests {
         };
         view.update(cx, |v, _| v.live = Some(live));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn trash_confirmation_restore_and_worker_completion(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, mut rx) = window(cx);
+        let folder = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            live.store.save_folder(account, "INBOX", None, FolderRole::Inbox).unwrap();
+            let folder = live.store.save_folder(account, "[Provider]/Bin", Some("/"), FolderRole::Trash).unwrap();
+            live.store.save_message(&Message { summary: MessageSummary {
+                account: account.clone(), folder, uid: 5, seen: true, ..Default::default()
+            }, ..Default::default() }).unwrap();
+            v.inbox = Inbox::live();
+            // Open before the first folder merge: the role still resolves to the provider folder.
+            v.open_kind(Kind::Trash, cx);
+            assert_eq!(v.inbox.list().len(), 1);
+            assert_eq!(v.inbox.folders[v.inbox.open.unwrap()].store, Some(folder));
+            assert_eq!(v.list_title().as_ref(), "Trash");
+            v.empty_trash(cx);
+            assert!(!v.emptying_trash());
+            v.confirm_empty_trash = true;
+            v.open_box(None, cx);
+            assert!(!v.confirm_empty_trash);
+            v.open_kind(Kind::Trash, cx);
+            v.act(Move::Inbox, cx);
+            folder
+        });
+        let Cmd::Op { op, act: Act::Inbox, .. } = rx.try_recv().unwrap() else { panic!("missing restore") };
+        assert!(rx.try_recv().is_err(), "no empty command before confirmation");
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx));
+        let op = view.update(cx, |v, cx| {
+            assert_eq!(v.inbox.list().len(), 1, "failed restore comes back");
+            v.confirm_empty_trash = true;
+            v.empty_trash(cx);
+            assert!(v.emptying_trash());
+            v.confirm_empty_trash = true;
+            v.empty_trash(cx);
+            v.act(Move::Inbox, cx);
+            v.live.as_ref().unwrap().next_op
+        });
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::EmptyTrash { op: id, folder: f } if id == op && f == folder));
+        assert!(rx.try_recv().is_err(), "no duplicate or move while emptying");
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx));
+        view.update(cx, |v, cx| {
+            assert!(!v.emptying_trash());
+            assert_eq!(v.inbox.list().len(), 1);
+            assert!(v.toast.as_ref().unwrap().0.contains("Could not empty Trash"));
+            v.confirm_empty_trash = true;
+            v.empty_trash(cx);
+            let id = v.inbox.mail[v.inbox.current().unwrap()].store.unwrap();
+            v.live.as_ref().unwrap().store.delete_message(id).unwrap();
+        });
+        let Cmd::EmptyTrash { op, .. } = rx.try_recv().unwrap() else { panic!("missing empty") };
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Op { op, error: None }], window, cx));
+        view.read_with(cx, |v, _| {
+            assert!(!v.emptying_trash());
+            assert!(v.inbox.list().is_empty());
+            assert!(v.inbox.history.is_empty());
+        });
     }
 
     #[gpui::test]
