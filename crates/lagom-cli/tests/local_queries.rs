@@ -84,3 +84,19 @@ fn discovery_and_unconfigured_sign_in() {
     }
     assert!(Store::open(&db).unwrap().accounts().unwrap().is_empty());
 }
+
+#[test]
+fn body_file_is_read_as_utf8_before_account_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("empty.db");
+    let path = temp.path().join("mail.md");
+    for (bytes, error) in [(b"# H\xc3\xa4lsningar".as_slice(), "No matching account"), (b"\xff".as_slice(), "as UTF-8")] {
+        std::fs::write(&path, bytes).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+            .arg("--database").arg(&db)
+            .args(["send", "--to", "a@example.com", "--subject", "Hi", "--body-file"])
+            .arg(&path).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(error));
+    }
+}

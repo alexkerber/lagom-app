@@ -107,8 +107,10 @@ enum Command {
         bcc: Vec<String>,
         #[arg(long)]
         subject: String,
-        #[arg(long)]
-        body: String,
+        #[arg(long, required_unless_present = "body_file", conflicts_with = "body_file")]
+        body: Option<String>,
+        #[arg(long, required_unless_present = "body")]
+        body_file: Option<PathBuf>,
         #[arg(long)]
         in_reply_to: Option<String>,
         #[arg(long)]
@@ -418,9 +420,14 @@ async fn main() -> Result<()> {
             bcc,
             subject,
             body,
+            body_file,
             in_reply_to,
             references,
         } => {
+            let body = match body_file {
+                Some(path) => std::fs::read_to_string(&path).with_context(|| format!("Could not read {} as UTF-8", path.display()))?,
+                None => body.context("Provide --body or --body-file")?,
+            };
             let account = selected(&store, args.account.as_deref())?;
             let password = account.password()?;
             smtp::send(
@@ -515,6 +522,10 @@ mod tests {
             "Hello"
         ])
         .is_ok());
+        let send = ["lagom-cli", "send", "--to", "a@example.com", "--subject", "Hi"];
+        assert!(Args::try_parse_from(send).is_err());
+        assert!(Args::try_parse_from(send.into_iter().chain(["--body-file", "mail.md"])).is_ok());
+        assert!(Args::try_parse_from(send.into_iter().chain(["--body", "x", "--body-file", "mail.md"])).is_err());
         assert_eq!(clean("Hi\x1b[31m"), "Hi\\u{1b}[31m");
     }
 }

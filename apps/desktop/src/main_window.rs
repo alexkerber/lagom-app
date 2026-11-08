@@ -309,10 +309,15 @@ impl MainWindow {
             .collect();
         let subject = self.inbox.current().map(|id| self.inbox.mail[id].subject.clone());
         let search = self.live.as_ref().and_then(|l| l.search());
-        let palette = cx.new(|cx| CommandPalette::new(query, targets, subject, search, window, cx));
+        let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
+        let palette = cx.new(|cx| CommandPalette::new(query, composing, targets, subject, search, window, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| {
             this.palette = None;
-            window.focus(&this.focus);
+            if let Some(compose) = this.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
+                compose.update(cx, |c, cx| c.focus_body(window, cx));
+            } else {
+                window.focus(&this.focus);
+            }
             cx.notify();
         })
         .detach();
@@ -342,6 +347,12 @@ impl MainWindow {
             Run::Delete => self.act(Move::Delete, cx),
             Run::Reply => self.open_compose(true, window, cx),
             Run::Compose => self.open_compose(false, window, cx),
+            Run::InsertFile => {
+                if self.compose.is_none() { self.open_compose(false, window, cx); }
+                if let Some(compose) = &self.compose {
+                    compose.update(cx, |c, cx| c.insert_file(window, cx));
+                }
+            }
             Run::Sync => self.sync_now(),
             Run::Settings => self.open_settings(cx),
             Run::AddAccount => self.add_account(window, cx),
@@ -1533,7 +1544,9 @@ impl Render for MainWindow {
                     this.undo(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| if !this.overlay_open(cx) { this.open_palette("", window, cx) }))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                if this.palette.is_none() && matches!(this.page, Page::Mail) { this.open_palette("", window, cx); }
+            }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(cx) }))
@@ -2281,6 +2294,22 @@ mod dispatch {
         assert_eq!(inbox_len(&view, cx), n - 1);
         cx.simulate_keystrokes("cmd-z");
         assert_eq!(inbox_len(&view, cx), n);
+    }
+
+    #[gpui::test]
+    fn palette_opens_over_compose_and_returns_to_the_body(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("**Hej**");
+        cx.simulate_keystrokes("secondary-k");
+        let palette = view.read_with(cx, |v, _| v.palette.clone()).expect("palette over compose");
+        cx.simulate_input("insert");
+        assert_eq!(palette.read_with(cx, |p, cx| p.query(cx)), "insert");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.palette.is_none()));
+        cx.simulate_input(" Åsa");
+        let compose = view.read_with(cx, |v, _| v.compose.clone()).unwrap();
+        assert_eq!(compose.read_with(cx, |c, cx| c.body_text(cx)), "**Hej** Åsa");
     }
 
     #[gpui::test]
