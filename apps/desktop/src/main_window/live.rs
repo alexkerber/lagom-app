@@ -141,6 +141,7 @@ impl MainWindow {
         self.toast = None;
         self.inbox.create_folder(name);
         self.all_folders = true;
+        self.folder_scroll.scroll_to_bottom();
         if let Some(live) = &mut self.live {
             let account = live.account().unwrap().id.clone();
             let op = live.op(Op::CreateFolder { account: account.clone(), name: name.into() });

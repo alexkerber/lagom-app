@@ -583,9 +583,15 @@ mod tests {
         let account = Account::new("test@lagom.test".into(), server.clone(), server).unwrap();
         worker.store.save_account(&account).unwrap();
         worker.store.save_folder(&account.id, "INBOX", Some("."), FolderRole::Inbox).unwrap();
-        for name in ["", "  ", "inbox", "Parent.Child"] {
+        for (name, expected) in [
+            ("", "Enter a folder name"),
+            ("  ", "Enter a folder name"),
+            ("inbox", "A folder with this name already exists"),
+            ("Parent.Child", "Folder names cannot contain the hierarchy delimiter"),
+        ] {
             worker.quick(Cmd::CreateFolder { op: 42, account: account.id.clone(), name: name.into() }).await;
-            assert!(matches!(out.recv().await, Some(Event::Op { op: 42, error: Some(_) })));
+            let Some(Event::Op { op: 42, error }) = out.recv().await else { panic!("expected folder result") };
+            assert_eq!(error.as_deref(), Some(expected), "{name:?}");
             assert!(matches!(out.recv().await, Some(Event::Changed)));
         }
         assert_eq!(worker.store.folders(&account.id, now()).unwrap().len(), 1);
