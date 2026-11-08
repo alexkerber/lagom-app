@@ -1597,6 +1597,10 @@ impl MainWindow {
         let t = &self.theme;
         let Some(id) = self.inbox.current() else { return div().flex_1() };
         let m = &self.inbox.mail[id];
+        let this = cx.entity().downgrade();
+        let on_download = move |section, _: &mut Window, cx: &mut App| {
+            this.update(cx, |this, cx| this.download_attachment(id, section, cx)).ok();
+        };
         // HTML mail: the web view covers only the body. The text shows while an overlay hides it.
         let web = html::SUPPORTED && m.html.is_some();
         let text = !web || self.palette.is_some() || self.compose.is_some();
@@ -1635,7 +1639,7 @@ impl MainWindow {
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
                     ),
             )
-            .child(reading_view(t, id, m, text, self.web.slot(), toasts, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
+            .child(reading_view(t, id, m, text, self.web.slot(), toasts, on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
     }
 }
 
@@ -1677,6 +1681,14 @@ impl Render for Tip {
     }
 }
 
+fn attachment_size(bytes: u32) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.0} KB", bytes as f64 / 1024.),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.),
+    }
+}
+
 /// One message below its toolbar: the trusted header in GPUI, the body as text (`text`) or the
 /// web view's `slot`, the attachment and the reply field. The reading pane and message windows
 /// both show this. `toasts`: room the web view leaves for toasts above the reply field.
@@ -1687,29 +1699,26 @@ fn reading_view(
     text: bool,
     slot: impl IntoElement,
     toasts: usize,
+    on_download: impl Fn(String, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let web = html::SUPPORTED && m.html.is_some();
     let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
     let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
-    let attachment = || m.attachment.clone().map(|(name, kb)| {
-        div().flex().child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .px(px(14.))
-                .py(px(10.))
-                .rounded(px(radius::ATTACHMENT))
-                .border_1()
-                .border_color(t.line)
-                .bg(t.subtle)
-                .text_size(px(size::SNIPPET))
-                .line_height(relative(LEADING))
-                .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                .child(mono(kb, t.ink2)),
-        )
-    });
+    let on_download = std::rc::Rc::new(on_download);
+    let attachment = || m.attachments.iter().enumerate().map(|(index, part)| {
+        let on_download = on_download.clone();
+        let section = part.section.clone();
+        pressable(div().id(("attachment", index)), t, false)
+            .flex().items_center().gap(px(12.)).min_w(px(0.)).flex_shrink_0()
+            .px(px(14.)).py(px(10.)).rounded(px(radius::ATTACHMENT))
+            .border_1().border_color(t.line).bg(t.subtle)
+            .text_size(px(size::SNIPPET)).line_height(relative(LEADING))
+            .child(icon("icons/folder.svg", t.ink2, 16.))
+            .child(div().flex_1().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).child(part.filename.clone()))
+            .child(mono(attachment_size(part.size), t.ink2))
+            .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
+    }).collect::<Vec<_>>();
     div()
         .id(("reading", id))
         .flex_1()
@@ -2307,6 +2316,10 @@ impl Inbox {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
                 fresh.html = self.mail[id].html.take();
                 fresh.remote = self.mail[id].remote;
+                fresh.attachments = std::mem::take(&mut self.mail[id].attachments);
+                if m.has_attachments && fresh.attachments.is_empty() {
+                    fresh.body.clear();
+                }
                 fresh.was = std::mem::take(&mut self.mail[id].was);
                 self.mail[id] = fresh;
                 id
@@ -2361,6 +2374,23 @@ mod tests {
         // Once it lands, the next single press takes the full curve again.
         let later = t0 + delay + step * 20 + GLIDE;
         assert_eq!(Glide::new(Some(glide), row_y(21), row_y(22), later, 21).dur, GLIDE);
+    }
+
+    #[test]
+    fn attachment_metadata_survives_reload_and_missing_metadata_reloads_body() {
+        let mut inbox = Inbox::live();
+        let summary = lagom_core::store::MessageSummary { id: 1, has_attachments: true, ..Default::default() };
+        let seen = HashSet::new();
+        let now = chrono::Local::now();
+        let id = inbox.intern(&summary, &seen, now);
+        inbox.mail[id].body = vec!["body".into()];
+        inbox.intern(&summary, &seen, now);
+        assert!(inbox.mail[id].body.is_empty());
+        inbox.mail[id].attachments = vec![lagom_core::attachment::Attachment { section: "2".into(), filename: "file.pdf".into(), ..Default::default() }];
+        inbox.mail[id].body = vec!["body".into()];
+        inbox.intern(&summary, &seen, now);
+        assert_eq!(inbox.mail[id].body, ["body"]);
+        assert_eq!(inbox.mail[id].attachments[0].filename, "file.pdf");
     }
 
     #[test]

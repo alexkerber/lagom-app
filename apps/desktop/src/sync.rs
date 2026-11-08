@@ -53,6 +53,7 @@ pub enum Cmd {
     /// `id` is the store row the UI saw. The worker follows it through earlier moves.
     Op { op: u64, id: i64, act: Act },
     MarkSeen(i64),
+    Download { id: i64, section: String },
     Send { op: u64, account: String, mail: Box<Outgoing> },
 }
 
@@ -90,6 +91,7 @@ pub enum Event {
     Added(Result<String, String>),
     /// A MarkSeen finished, done or not.
     Seen(i64),
+    Downloaded(Result<PathBuf, String>),
     /// `error` says why, also when the message went out but its Sent copy failed.
     Sent { op: u64, delivery: Delivery, error: Option<String> },
 }
@@ -228,6 +230,10 @@ impl Worker {
                 let error = self.op(id, act).await.err().map(|e| e.to_string());
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
+            }
+            Cmd::Download { id, section } => {
+                let result = self.download(id, &section).await.map_err(|e| e.to_string());
+                self.emit(Event::Downloaded(result));
             }
             Cmd::MarkSeen(id) => {
                 // Either way the UI drops its override: the store says what the server has.
@@ -440,6 +446,16 @@ impl Worker {
         self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
     }
 
+    async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
+        let id = self.resolve(id).await?;
+        let account = self.account(&self.store.message(id)?.summary.account)?;
+        let part = self.store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
+        let mut session = self.take(&account).await?;
+        let result = session.fetch_attachment(&mut self.store, id, section).await;
+        self.give(&account.id, session, &result);
+        lagom_core::attachment::save_download(&part.filename, &result?)
+    }
+
     async fn mark_seen(&mut self, id: i64) -> lagom_core::Result<()> {
         let account = self.account(&self.store.message(id)?.summary.account)?;
         let mut session = self.take(&account).await?;
@@ -510,6 +526,8 @@ mod tests {
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
         let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
+        worker.quick(Cmd::Download { id: -1, section: "2".into() }).await;
+        assert!(matches!(out.recv().await, Some(Event::Downloaded(Err(_)))));
         worker.quick(Cmd::SignIn(Provider::Google)).await;
         assert!(worker.sign_in.is_some());
         worker.quick(Cmd::CancelSignIn).await;

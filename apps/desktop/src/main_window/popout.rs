@@ -75,6 +75,10 @@ impl Render for MessageWindow {
         let on_reply = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
             this.update(cx, |this, cx| this.reply(cx)).ok();
         };
+        let main_window = self.main;
+        let on_download = move |section, _: &mut Window, cx: &mut App| {
+            main_window.update(cx, |main, _, cx| main.download_attachment(id, section, cx)).ok();
+        };
         div()
             .key_context("MessageWindow")
             .track_focus(&self.focus)
@@ -111,7 +115,7 @@ impl Render for MessageWindow {
                         })))
                     }),
             )
-            .child(reading_view(&t, id, &m, !web, self.web.slot(), 0, on_reply))
+            .child(reading_view(&t, id, &m, !web, self.web.slot(), 0, on_download, on_reply))
     }
 }
 

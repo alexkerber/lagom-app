@@ -195,6 +195,10 @@ impl MainWindow {
         for event in events {
             match event {
                 Event::OpenUrl(url) => cx.open_url(&url),
+                Event::Downloaded(result) => match result {
+                    Ok(path) => cx.reveal_path(&path),
+                    Err(error) => self.notify(format!("Could not download attachment: {error}"), cx),
+                },
                 Event::Discovered { .. } | Event::SignInCancelled => {},
                 Event::ReauthRequired(account) => {
                     if let Some(live) = &mut self.live {
@@ -353,6 +357,14 @@ impl MainWindow {
         }
     }
 
+    pub(super) fn download_attachment(&mut self, id: usize, section: String, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        let Some(store) = self.inbox.mail.get(id).and_then(|m| m.store) else { return };
+        if !live.bridge.send(Cmd::Download { id: store, section }) {
+            self.worker_gone(cx);
+        }
+    }
+
     /// Before a frame: the selected message's body comes from the store once, and opening a
     /// message marks it read. One indexed row read, only when the selection changed.
     pub(super) fn open_current(&mut self, cx: &mut Context<Self>) {
@@ -360,8 +372,9 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         let Some(store) = self.inbox.mail[id].store else { return };
         if self.inbox.mail[id].body.is_empty() {
-            self.inbox.mail[id].body = match live.store.message(store) {
-                Ok(m) => {
+            self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?))) {
+                Ok((m, parts)) => {
+                    self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
                     mail::paragraphs(&m.body_text)
                 }
@@ -646,6 +659,21 @@ mod tests {
 
     fn toast(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.toast.as_ref().map(|t| t.0.to_string()).unwrap_or_default())
+    }
+
+    #[gpui::test]
+    fn attachment_click_queues_work_and_failure_shows_toast(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            v.inbox.mail[0].store = Some(42);
+            v.download_attachment(0, "2.1".into(), cx);
+        });
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Download { id: 42, section }) if section == "2.1"));
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Downloaded(Err("fixture failure".into()))], window, cx));
+        assert_eq!(toast(&view, cx), "Could not download attachment: fixture failure");
+        assert_eq!(attachment_size(0), "0 B");
+        assert_eq!(attachment_size(2048), "2 KB");
+        assert_eq!(attachment_size(1_572_864), "1.5 MB");
     }
 
     #[gpui::test]
