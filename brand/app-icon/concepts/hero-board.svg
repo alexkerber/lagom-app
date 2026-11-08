@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="1660" viewBox="0 0 1200 1660">
+<rect y="0" width="1200" height="700" fill="#E6E9EC"/>
+<text x="36" y="44" fill="#263034" font-family="Helvetica,Arial,sans-serif" font-size="22" font-weight="600">LAGOM · Ljus Dock</text>
+<text x="30" y="110" fill="#263034" opacity=".65" font-family="Helvetica,Arial,sans-serif" font-size="14">256 px</text>
+<image x="112.0" y="90" width="256" height="256" xlink:href="hero-A.png"/>
+<image x="472.0" y="90" width="256" height="256" xlink:href="hero-B.png"/>
+<image x="832.0" y="90" width="256" height="256" xlink:href="hero-C.png"/>
+<text x="30" y="430" fill="#263034" opacity=".65" font-family="Helvetica,Arial,sans-serif" font-size="14">128 px</text>
+<image x="176.0" y="410" width="128" height="128" xlink:href="hero-A.png"/>
+<image x="536.0" y="410" width="128" height="128" xlink:href="hero-B.png"/>
+<image x="896.0" y="410" width="128" height="128" xlink:href="hero-C.png"/>
+<text x="30" y="620" fill="#263034" opacity=".65" font-family="Helvetica,Arial,sans-serif" font-size="14">32 px</text>
+<image x="224.0" y="600" width="32" height="32" xlink:href="hero-A.png"/>
+<image x="584.0" y="600" width="32" height="32" xlink:href="hero-B.png"/>
+<image x="944.0" y="600" width="32" height="32" xlink:href="hero-C.png"/>
+<text x="240" y="378" text-anchor="middle" fill="#263034" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="600">A · Vattenpass</text>
+<text x="600" y="378" text-anchor="middle" fill="#263034" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="600">B · Glaskuvert</text>
+<text x="960" y="378" text-anchor="middle" fill="#263034" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="600">C · Stillpunkt</text>
+<rect y="700" width="1200" height="700" fill="#20252B"/>
+<text x="36" y="744" fill="#EDF0F2" font-family="Helvetica,Arial,sans-serif" font-size="22" font-weight="600">LAGOM · Mörk Dock</text>
+<text x="30" y="810" fill="#EDF0F2" opacity=".65" font-family="Helvetica,Arial,sans-serif" font-size="14">256 px</text>
+<image x="112.0" y="790" width="256" height="256" xlink:href="hero-A.png"/>
+<image x="472.0" y="790" width="256" height="256" xlink:href="hero-B.png"/>
+<image x="832.0" y="790" width="256" height="256" xlink:href="hero-C.png"/>
+<text x="30" y="1130" fill="#EDF0F2" opacity=".65" font-family="Helvetica,Arial,sans-serif" font-size="14">128 px</text>
+<image x="176.0" y="1110" width="128" height="128" xlink:href="hero-A.png"/>
+<image x="536.0" y="1110" width="128" height="128" xlink:href="hero-B.png"/>
+<image x="896.0" y="1110" width="128" height="128" xlink:href="hero-C.png"/>
+<text x="30" y="1320" fill="#EDF0F2" opacity=".65" font-family="Helvetica,Arial,sans-serif" font-size="14">32 px</text>
+<image x="224.0" y="1300" width="32" height="32" xlink:href="hero-A.png"/>
+<image x="584.0" y="1300" width="32" height="32" xlink:href="hero-B.png"/>
+<image x="944.0" y="1300" width="32" height="32" xlink:href="hero-C.png"/>
+<text x="240" y="1078" text-anchor="middle" fill="#EDF0F2" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="600">A · Vattenpass</text>
+<text x="600" y="1078" text-anchor="middle" fill="#EDF0F2" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="600">B · Glaskuvert</text>
+<text x="960" y="1078" text-anchor="middle" fill="#EDF0F2" font-family="Helvetica,Arial,sans-serif" font-size="20" font-weight="600">C · Stillpunkt</text>
+<rect y="1400" width="1200" height="260" fill="#414B56"/>
+<text x="36" y="1440" fill="#EFF5FB" font-family="Helvetica,Arial,sans-serif" font-size="21">Tonad · 128 px</text>
+<image x="176" y="1470" width="128" height="128" xlink:href="hero-A-tinted.png"/>
+<text x="240" y="1630" text-anchor="middle" fill="#EFF5FB" font-family="Helvetica,Arial,sans-serif" font-size="17">A · Vattenpass</text>
+<image x="536" y="1470" width="128" height="128" xlink:href="hero-B-tinted.png"/>
+<text x="600" y="1630" text-anchor="middle" fill="#EFF5FB" font-family="Helvetica,Arial,sans-serif" font-size="17">B · Glaskuvert</text>
+<image x="896" y="1470" width="128" height="128" xlink:href="hero-C-tinted.png"/>
+<text x="960" y="1630" text-anchor="middle" fill="#EFF5FB" font-family="Helvetica,Arial,sans-serif" font-size="17">C · Stillpunkt</text>
+</svg>
