@@ -58,7 +58,13 @@ fn main() {
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
         #[cfg(target_os = "macos")]
         menus::init(cx);
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        let demo = std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1");
+        // Demo captures can exercise narrow layouts without reading saved window preferences.
+        let width = if demo {
+            std::env::var("LAGOM_DEMO_WIDTH").ok().and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite()).unwrap_or(1440.).max(main_window::MIN_WINDOW.0)
+        } else { 1440. };
+        let bounds = Bounds::centered(None, size(px(width), px(900.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -75,7 +81,7 @@ fn main() {
                 ..Default::default()
             },
             // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
-            |window, cx| cx.new(|cx| MainWindow::new(std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1"), window, cx)),
+            move |window, cx| cx.new(|cx| MainWindow::new(demo, window, cx)),
         )
         .expect("open main window");
         cx.activate(true);

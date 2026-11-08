@@ -3319,6 +3319,8 @@ dependencies = [
  "chrono",
  "gpui",
  "lagom-core",
+ "serde",
+ "serde_json",
  "tokio",
  "unicode-segmentation",
  "zeroize",

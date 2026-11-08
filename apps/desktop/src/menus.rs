@@ -73,7 +73,14 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Command Palette", crate::main_window::OpenPalette),
             ],
         },
-        Menu { name: "View".into(), items: vec![MenuItem::action("Enter Full Screen", ToggleFullScreen)] },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Toggle Sidebar", crate::main_window::ToggleSidebar),
+                MenuItem::separator(),
+                MenuItem::action("Enter Full Screen", ToggleFullScreen),
+            ],
+        },
         Menu {
             name: "Window".into(),
             items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)],
