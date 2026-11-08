@@ -1,8 +1,8 @@
 use std::{io, pin::Pin, task::{Context, Poll}};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-// imap-proto 0.17 recurses before async-imap exposes responses, including unsolicited FETCH.
-// shortcut: cap all structured responses at 40 lists; replace this scanner when the parser has a native depth limit.
+// Reject excessive wire nesting early; the patched parser also bounds recursion independently.
+// shortcut: cap all structured responses at 40 lists; revisit if a supported extension needs deeper lists.
 const MAX_DEPTH: usize = 40;
 
 #[derive(Debug)]
@@ -220,6 +220,27 @@ mod tests {
                     drop(client);
                     writer.await.unwrap();
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_attribute_cannot_hide_fragmented_recursion() {
+        for depth in [48, 10_000] {
+            for chunk in [1, 7, 4096] {
+                let raw = format!("* 1 FETCH (X (\") BODYSTRUCTURE {}", "(".repeat(depth));
+                let (mut server, stream) = tokio::io::duplex(chunk);
+                let writer = tokio::spawn(async move {
+                    let _ = server.write_all(raw.as_bytes()).await;
+                    std::future::pending::<()>().await;
+                });
+                let mut client = Client::new(Guarded::new(stream));
+                let response = tokio::time::timeout(std::time::Duration::from_secs(1), client.read_response()).await;
+                writer.abort();
+                let _ = writer.await;
+                let error = response.expect("must reject recursion before the server finishes the response").unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert!(client.read_response().await.unwrap().is_none());
             }
         }
     }

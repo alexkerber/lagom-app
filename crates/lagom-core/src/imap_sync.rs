@@ -685,7 +685,7 @@ mod tests {
     fn text_parts_skip_excessive_nesting_and_keep_siblings() {
         use async_imap::imap_proto::{AttributeValue, Response};
         let text = r#"("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1)"#;
-        for depth in [32, 33, 40] {
+        for depth in [32, 33, 39] {
             let nested = format!("{}{text}{}", "(".repeat(depth - 1), " \"MIXED\")".repeat(depth - 1));
             let raw = format!("* 1 FETCH (BODYSTRUCTURE ({nested}{text} \"MIXED\"))\r\n");
             let (_, Response::Fetch(_, attrs)) = Response::parse(raw.as_bytes()).unwrap() else {
