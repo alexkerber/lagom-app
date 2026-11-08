@@ -75,6 +75,9 @@ const ROW_H: f32 = 2. * ROW_PAD + 2. * ROW_GAP + (2. * size::BASE + SNIPPET_LINE
 
 /// Selection highlight moving to the row J, K or a click selected.
 const GLIDE: Duration = Duration::from_millis(260);
+/// A press while the highlight still glides (a held arrow key) takes this shorter curve, so the
+/// highlight keeps up with key repeat instead of trailing rows behind.
+const GLIDE_REPEAT: Duration = Duration::from_millis(120);
 /// Padding around the rows in the list.
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
@@ -117,14 +120,24 @@ struct Glide {
     from: f32,
     to: f32,
     at: Instant,
+    dur: Duration,
     seq: usize,
 }
 
 impl Glide {
-    /// Where the highlight is now, so a new key press starts from there and never jumps.
-    fn y(&self) -> f32 {
-        let d = (self.at.elapsed().as_secs_f32() / GLIDE.as_secs_f32()).min(1.);
+    /// A glide to `to` that starts where `prev` is now, so a new key press never jumps.
+    fn new(prev: Option<Glide>, from: f32, to: f32, now: Instant, seq: usize) -> Self {
+        let dur = if prev.is_some_and(|g| !g.landed(now)) { GLIDE_REPEAT } else { GLIDE };
+        Glide { from: prev.map_or(from, |g| g.y(now)), to, at: now, dur, seq }
+    }
+
+    fn y(&self, now: Instant) -> f32 {
+        let d = (now.saturating_duration_since(self.at).as_secs_f32() / self.dur.as_secs_f32()).min(1.);
         self.from + (self.to - self.from) * ease_out_quint()(d)
+    }
+
+    fn landed(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) >= self.dur
     }
 }
 
@@ -739,7 +752,20 @@ impl MainWindow {
             (Some(what), Some(ix)) => self.act_at(ix, what, dx, cx),
             _ => {
                 self.seq += 1;
-                self.spring = Some((id, dx, self.seq));
+                let seq = self.seq;
+                self.spring = Some((id, dx, seq));
+                // Done springing, the row is an ordinary row again (its own fill, copies in a glide).
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SPRING).await;
+                    this.update(cx, |this, cx| {
+                        if this.spring.is_some_and(|s| s.2 == seq) {
+                            this.spring = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
             }
         }
         cx.notify();
@@ -761,9 +787,8 @@ impl MainWindow {
         self.prune();
         // While rows leave or come back, the rows paint the selection; a glide would start late.
         self.glide = (self.ghosts.is_empty() && self.entering.is_empty()).then(|| {
-            let from = self.glide.map_or(row_y(before), |g| g.y());
             self.seq += 1;
-            Glide { from, to: row_y(ix), at: Instant::now(), seq: self.seq }
+            Glide::new(self.glide, row_y(before), row_y(ix), Instant::now(), self.seq)
         });
         // Child 0 is the highlight; ghosts at or before `ix` sit in front of the row.
         let ghosts = self.ghosts.iter().filter(|g| g.ix <= ix).count();
@@ -1300,28 +1325,30 @@ impl MainWindow {
         };
         // The selection highlight glides between rows while nothing else moves the list.
         let gliding = self.glide.filter(|_| self.ghosts.is_empty() && self.entering.is_empty());
+        // One reading of the clock per frame: the highlight, its copies below and the row colours
+        // agree. Each with_animation would start when its element first appears instead.
+        let now = Instant::now();
+        let (landed, fill_y) = gliding.map_or((true, 0.), |g| (g.landed(now), g.y(now)));
         // shortcut: renders every row, fine for the sample inbox. Virtualise (uniform_list or
         // gpui::list, docs/performance.md rule 3) when real mail arrives; rows leaving and
         // coming back change height, which uniform_list cannot lay out.
         let mut rows: Vec<AnyElement> = vec![match gliding {
             // First child, so it paints under the rows. `child_ix` counts it.
+            // The animation only asks for the next frames; this render places the highlight.
             Some(g) => div()
                 .absolute()
+                .top(px(fill_y))
                 .left(px(LIST_PAD))
                 .right(px(LIST_PAD))
                 .h(px(ROW_H))
                 .rounded(px(radius::CONTROL))
                 .bg(sel_bg)
-                .with_animation(("glide", g.seq), Animation::new(GLIDE).with_easing(ease_out_quint()), move |el, d| {
-                    el.top(px(g.from + (g.to - g.from) * d))
-                })
+                .with_animation(("glide", g.seq), Animation::new(g.dur), |el, _| el)
                 .into_any_element(),
             None => div().into_any_element(),
         }];
         let dragging = self.mouse_swiping();
-        // White text waits for the gliding fill to arrive. The glide animates frame by frame,
-        // so the frame it lands on renders this again. One reading, so the row and its copy below agree.
-        let landed = gliding.is_none_or(|g| g.at.elapsed() >= GLIDE);
+        // White text waits for the gliding fill to arrive; until then its copies below show it.
         // Only rows near the viewport or the selection get text; the rest are empty boxes of the
         // same height. Shaping ~500 rows on every animation frame made E, L and the arrows stutter.
         // One element per row stays, so `scroll_to_item` indices still hold.
@@ -1344,7 +1371,9 @@ impl MainWindow {
                 continue;
             }
             let selected = i == self.inbox.selected;
-            let el = row(&self.inbox.mail[id], selected && gliding.is_none(), selected && landed)
+            // A row under the fingers or springing back paints its own fill and gets no copy.
+            let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
+            let el = row(&self.inbox.mail[id], selected && gliding.is_none(), selected && (landed || moving))
                 .id(("row", id))
                 // Arrow at rest, as in native lists.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.
@@ -1409,8 +1438,6 @@ impl MainWindow {
         // rows it crosses, in selection colours, show through the fill, clipped to each row: text
         // keeps its contrast wherever the fill is. Only rows near the viewport, as above.
         if let Some(g) = gliding.filter(|_| !landed) {
-            let glide = || Animation::new(GLIDE).with_easing(ease_out_quint());
-            let at = move |d: f32| g.from + (g.to - g.from) * d;
             // The fill starts on one row, or across two after a glide was cut short.
             let from = ((g.from - LIST_PAD) / ROW_H).floor() as isize;
             let (lo, hi) = (from.min(sel).max(first).max(0), (from + 1).max(sel).min(last));
@@ -1425,7 +1452,7 @@ impl MainWindow {
                     .absolute()
                     .left_0()
                     .right_0()
-                    .with_animation((SharedString::from(format!("glide-ink-{ix}")), g.seq), glide(), move |el, d| el.top(px(y - at(d))));
+                    .top(px(y - fill_y));
                 let fill = div()
                     .absolute()
                     .left_0()
@@ -1434,8 +1461,8 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .overflow_hidden()
                     .bg(sel_bg)
-                    .child(ink)
-                    .with_animation((SharedString::from(format!("glide-fill-{ix}")), g.seq), glide(), move |el, d| el.top(px(at(d) - y)));
+                    .top(px(fill_y - y))
+                    .child(ink);
                 rows.push(
                     div()
                         .absolute()
@@ -2237,6 +2264,27 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_arrow_key_highlight_keeps_up() {
+        let t0 = Instant::now();
+        let single = Glide::new(None, row_y(0), row_y(1), t0, 0);
+        assert_eq!(single.dur, GLIDE);
+        // macOS repeats a held key after a delay (225 ms at the shortest), then up to 30 times a
+        // second. Each repeat starts from where the highlight is.
+        let (delay, step) = (Duration::from_millis(225), Duration::from_millis(33));
+        let mut glide = single;
+        for n in 1..=20 {
+            let now = t0 + delay + step * (n - 1);
+            let lag = (row_y(n as usize) - glide.y(now)) / ROW_H;
+            assert!(lag < 0.5, "press {n}: highlight {lag:.2} rows behind");
+            glide = Glide::new(Some(glide), row_y(n as usize), row_y(n as usize + 1), now, n as usize);
+            assert_eq!(glide.dur, GLIDE_REPEAT);
+        }
+        // Once it lands, the next single press takes the full curve again.
+        let later = t0 + delay + step * 20 + GLIDE;
+        assert_eq!(Glide::new(Some(glide), row_y(21), row_y(22), later, 21).dur, GLIDE);
+    }
 
     #[test]
     fn move_stays_in_bounds() {
