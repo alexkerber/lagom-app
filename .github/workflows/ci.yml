@@ -1,0 +1,33 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # GPUI's Linux backends and the core's Secret Service keyring.
+      # https://github.com/zed-industries/zed/blob/main/script/linux
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libssl-dev libasound2-dev \
+            libglib2.0-dev libdbus-1-dev libzstd-dev libclang-dev cmake pkg-config
+      - name: Build workspace
+        run: cargo build --workspace --locked
+      - name: Test workspace
+        run: cargo test --workspace --locked
