@@ -10,6 +10,7 @@ mod main_window;
 mod markdown;
 mod motion;
 mod settings;
+mod notifications;
 mod sync;
 #[cfg(target_os = "macos")]
 mod menus;
@@ -57,8 +58,45 @@ impl AssetSource for Assets {
     }
 }
 
+fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHandle<MainWindow>> {
+    cx.activate(true);
+    if let Some(handle) = cx.windows().into_iter().find_map(|w| w.downcast::<MainWindow>()) {
+        handle.update(cx, |_, window, _| window.activate_window())?;
+        return Ok(handle);
+    }
+    // Demo captures can exercise narrow layouts without reading saved window preferences.
+    let width = if demo {
+        std::env::var("LAGOM_DEMO_WIDTH").ok().and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite()).unwrap_or(1440.).max(main_window::MIN_WINDOW.0)
+    } else { 1440. };
+    let bounds = Bounds::centered(None, size(px(width), px(900.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(main_window::MIN_WINDOW.0), px(main_window::MIN_WINDOW.1))),
+            // macOS: no visible title bar, traffic lights inside the sidebar. The invisible
+            // system title bar still moves the window. Windows and Linux keep their native bar.
+            titlebar: Some(TitlebarOptions {
+                // The list on screen; MainWindow keeps it current.
+                title: Some("Inbox".into()),
+                appears_transparent: cfg!(target_os = "macos"),
+                traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(18.))),
+            }),
+            window_background: WindowBackgroundAppearance::Blurred,
+            ..Default::default()
+        },
+        // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
+        move |window, cx| cx.new(|cx| MainWindow::new(demo, window, cx)),
+    )
+}
+
 fn main() {
-    Application::new().with_assets(Assets).run(|cx: &mut App| {
+    let demo = std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1");
+    let app = Application::new().with_assets(Assets);
+    app.on_reopen(move |cx| {
+        if let Err(error) = open_main_window(demo, cx) { eprintln!("Could not reopen mail: {error}"); }
+    });
+    app.run(move |cx: &mut App| {
         // All text is the system font. Geist Mono (palette key caps) comes from the system if
         // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.
         main_window::bind_keys(cx);
@@ -66,33 +104,8 @@ fn main() {
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
         #[cfg(target_os = "macos")]
         menus::init(cx);
-        let demo = std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1");
-        // Demo captures can exercise narrow layouts without reading saved window preferences.
-        let width = if demo {
-            std::env::var("LAGOM_DEMO_WIDTH").ok().and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| v.is_finite()).unwrap_or(1440.).max(main_window::MIN_WINDOW.0)
-        } else { 1440. };
-        let bounds = Bounds::centered(None, size(px(width), px(900.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(main_window::MIN_WINDOW.0), px(main_window::MIN_WINDOW.1))),
-                // macOS: no visible title bar, traffic lights inside the sidebar. The invisible
-                // system title bar still moves the window. Windows and Linux keep their native bar.
-                titlebar: Some(TitlebarOptions {
-                    // The list on screen; MainWindow keeps it current.
-                    title: Some("Inbox".into()),
-                    appears_transparent: cfg!(target_os = "macos"),
-                    traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(18.))),
-                }),
-                window_background: WindowBackgroundAppearance::Blurred,
-                ..Default::default()
-            },
-            // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
-            move |window, cx| cx.new(|cx| MainWindow::new(demo, window, cx)),
-        )
-        .expect("open main window");
-        cx.activate(true);
+        if !demo { notifications::init(cx, move |cx| open_main_window(false, cx)); }
+        open_main_window(demo, cx).expect("open main window");
         #[cfg(target_os = "macos")]
         icon::install();
     });

@@ -1,4 +1,4 @@
-//! Settings, minimal: the accounts, with Add and Remove. Remove asks inside the app, not in a
+//! Notification preference and accounts. Remove asks inside the app, not in a
 //! system dialog, and deletes the saved password and the local mail; the server keeps its mail.
 
 use gpui::{div, prelude::*, px, Context, Div, FontWeight, SharedString};
@@ -8,7 +8,7 @@ use crate::main_window::{button, mono, MainWindow, OneLine};
 use crate::theme::{radius, size, Theme};
 
 /// `confirm`: the id of the account whose removal waits for a yes.
-pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, cx: &mut Context<MainWindow>) -> Div {
+pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, notifications: bool, cx: &mut Context<MainWindow>) -> Div {
     let mut list = div().flex().flex_col().pt(px(20.)).border_t_1().border_color(t.line);
     for a in accounts {
         let id = a.id.clone();
@@ -51,6 +51,10 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, cx: &mut Con
             1 => "One account.".to_string(),
             n => format!("{n} accounts."),
         })))
+        .child(div().flex().items_center().justify_between()
+            .child("Notifications for new mail")
+            .child(button(t, if notifications { "On" } else { "Off" }, None)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx)))))
         .child(list)
         .child(div().flex().child(button(t, "Add account", None).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))
         .child(mono("Removing an account keeps its mail on the server.", t.ink2));

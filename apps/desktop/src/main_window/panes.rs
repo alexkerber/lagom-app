@@ -22,7 +22,11 @@ pub(super) struct Panes {
     pub sidebar: f32,
     pub list: f32,
     pub sidebar_hidden: bool,
+    #[serde(default = "notifications_default")]
+    pub notifications: bool,
 }
+
+fn notifications_default() -> bool { true }
 
 impl Panes {
     pub fn new(viewport: f32) -> Self {
@@ -30,6 +34,7 @@ impl Panes {
             sidebar: SIDEBAR_DEFAULT,
             list: default_list(viewport, SIDEBAR_DEFAULT),
             sidebar_hidden: false,
+            notifications: true,
         }
     }
 
@@ -144,6 +149,7 @@ mod tests {
             sidebar: 320.,
             list: 560.,
             sidebar_hidden: false,
+            notifications: true,
         };
         assert_eq!(panes.fit(1440.), (320., 560.));
         assert_eq!(panes.fit(1100.), (320., 330.));
@@ -196,6 +202,7 @@ mod tests {
                             sidebar,
                             list,
                             sidebar_hidden,
+                            notifications: true,
                         };
                         let (sidebar, list) = panes.fit(viewport);
                         assert!(sidebar == 0. || (180. ..=320.).contains(&sidebar));
@@ -218,7 +225,7 @@ mod tests {
             for i in 0..8 {
                 let path = &path;
                 scope.spawn(move || {
-                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0 };
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, notifications: true };
                     for _ in 0..100 {
                         panes.save(path).unwrap();
                         let saved = Panes::load(path, 1440.).unwrap();
@@ -243,9 +250,11 @@ mod tests {
         panes.resize_sidebar(300., 1440.);
         panes.resize_list(500., 1440.);
         panes.sidebar_hidden = true;
+        panes.notifications = false;
         panes.save(&path).unwrap();
         assert_eq!(Panes::load(&path, 970.).unwrap(), panes);
         fs::write(&path, r#"{"sidebar":900,"list":-5,"sidebar_hidden":false}"#).unwrap();
+        assert!(Panes::load(&path, 1440.).unwrap().notifications);
         assert_eq!(Panes::load(&path, 1440.).unwrap().fit(1440.), (320., 280.));
         fs::write(&path, "broken").unwrap();
         assert!(Panes::load(&path, 1440.).is_err());

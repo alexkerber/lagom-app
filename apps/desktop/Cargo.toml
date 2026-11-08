@@ -31,6 +31,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 wry = { version = "0.57", default-features = false }
 
 [dev-dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
 # GPUI's TestAppContext, to drive key dispatch in tests.
 gpui = { version = "0.2.2", features = ["test-support"] }
 
@@ -44,7 +45,14 @@ windows = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_U
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSBundle"] }
+
+block2 = "0.6.2"
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# D-Bus notifications and activation callbacks without a platform event loop.
+notify-rust = "4.18.2"
 
 [package.metadata.bundle]
 name = "Lagom"
