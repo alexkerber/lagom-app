@@ -99,6 +99,15 @@ addEventListener('keydown', e => {
 }, true);
 "#;
 
+/// A navigation passes only when the app has just started a load and `url` is that load:
+/// `loadHTMLString` with no base URL is `about:blank`. Another URL never takes the flag, so a
+/// `<meta refresh>` that fires as the user switches mail cannot spend the app's load.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn allow_navigation(ours: &std::cell::Cell<bool>, url: &str) -> bool {
+    // shortcut: on Windows the URL `NavigateToString` reports is not known from wry's source, so only the flag gates; check it on Windows and match it here.
+    (cfg!(target_os = "windows") || url == "about:blank") && ours.replace(false)
+}
+
 fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
     let mut clip = bounds.intersect(&mask);
     clip.size.width = clip.size.width.max(px(0.));
@@ -343,7 +352,7 @@ impl Web {
                 }
             })
             .with_initialization_script(format!("{BRIDGE}\n{}", include_str!("html/fit.js")))
-            .with_navigation_handler(move |_| ours.replace(false))
+            .with_navigation_handler(move |url| allow_navigation(&ours, &url))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
             .with_on_page_load_handler(move |e, _| {
@@ -532,6 +541,21 @@ mod tests {
         assert!(doc.contains(r#"<x-LINK rel="preconnect""#) && doc.contains("<x-link rel=dns-prefetch") && doc.contains("<p>&lt;link</p>"));
         assert!(!doc.to_ascii_lowercase().contains("<link"));
         assert!(doc.contains(r#"<meta http-equiv="x-dns-prefetch-control" content="off">"#));
+    }
+
+    #[test]
+    fn only_the_apps_own_load_navigates() {
+        let ours = std::cell::Cell::new(false);
+        assert!(!allow_navigation(&ours, "about:blank"), "no load started");
+        ours.set(true);
+        if !cfg!(target_os = "windows") {
+            for evil in ["https://evil.example/", "about:srcdoc", "data:text/html,x", "lagom-cid:x"] {
+                assert!(!allow_navigation(&ours, evil), "{evil}");
+            }
+            assert!(ours.get(), "a denied URL leaves the app's load its flag");
+        }
+        assert!(allow_navigation(&ours, "about:blank"));
+        assert!(!allow_navigation(&ours, "about:blank"), "one load, one navigation");
     }
 
     #[test]
