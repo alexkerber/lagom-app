@@ -98,6 +98,14 @@ impl Store {
         Path::new(self.db.path().expect("file-backed store"))
     }
 
+    pub fn with_busy_timeout<T>(&self, timeout: std::time::Duration, write: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let previous: u64 = self.db.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
+        self.db.busy_timeout(timeout)?;
+        let result = write(self);
+        self.db.busy_timeout(std::time::Duration::from_millis(previous))?;
+        result
+    }
+
     pub fn save_account(&self, account: &Account) -> Result<()> {
         account.validate()?;
         self.db.execute("INSERT INTO accounts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
@@ -159,6 +167,35 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_task_write_restores_timeout_and_leaves_worker_timeout_unchanged() {
+        use std::time::{Duration, Instant};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("busy.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let worker = Store::open(&path).unwrap();
+        let timeout = |s: &Store| s.db.pragma_query_value(None, "busy_timeout", |r| r.get::<_, u64>(0)).unwrap();
+        let list = store.default_task_list().unwrap();
+        worker.db.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = Instant::now();
+        let result = store.with_busy_timeout(Duration::from_millis(250), |s| {
+            assert_eq!(timeout(s), 250);
+            s.add_task(list, "Retry", "", None)
+        });
+        let elapsed = started.elapsed();
+        assert!(matches!(result, Err(Error::Store(rusqlite::Error::SqliteFailure(e, _))) if e.code == rusqlite::ErrorCode::DatabaseBusy));
+        assert!(elapsed < Duration::from_millis(750), "task write blocked for {elapsed:?}");
+        assert_eq!(timeout(&store), 5000);
+        assert_eq!(timeout(&worker), 5000);
+        worker.db.execute_batch("ROLLBACK;").unwrap();
+        assert!(store.tasks(list, true).unwrap().is_empty());
+        store.db.busy_timeout(Duration::from_millis(1234)).unwrap();
+        let task = store.with_busy_timeout(Duration::from_millis(250), |s| s.add_task(list, "Retry", "", None)).unwrap();
+        assert_eq!(store.tasks(list, false).unwrap(), [task]);
+        assert_eq!(timeout(&store), 1234);
+        assert_eq!(timeout(&worker), 5000);
+    }
+
     #[cfg(unix)]
     #[test]
     fn store_files_are_owner_only_also_when_they_existed() {

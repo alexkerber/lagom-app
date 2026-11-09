@@ -1017,6 +1017,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn local_task_busy_write_returns_quickly_and_keeps_editor_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let fixture = rusqlite::Connection::open(store.path()).unwrap();
+        let list = store.default_task_list().unwrap();
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Keep locked text");
+        fixture.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = std::time::Instant::now();
+        cx.simulate_keystrokes("enter");
+        let elapsed = started.elapsed();
+        assert!(toast(&view, cx).contains("database is locked"));
+        assert!(store.tasks(list, true).unwrap().is_empty());
+        fixture.execute_batch("ROLLBACK;").unwrap();
+        cx.simulate_input(" and retry");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(store.tasks(list, false).unwrap()[0].title, "Keep locked text and retry");
+        assert!(elapsed < Duration::from_millis(750), "task write blocked for {elapsed:?}");
+
+        for key in ["secondary-z", "space"] {
+            fixture.execute_batch("BEGIN IMMEDIATE;").unwrap();
+            let started = std::time::Instant::now();
+            cx.simulate_keystrokes(key);
+            let elapsed = started.elapsed();
+            assert!(toast(&view, cx).contains("database is locked"));
+            assert_eq!(store.tasks(list, false).unwrap().len(), 1);
+            fixture.execute_batch("ROLLBACK;").unwrap();
+            assert!(elapsed < Duration::from_millis(750), "{key} blocked for {elapsed:?}");
+        }
+        cx.simulate_keystrokes("space");
+        assert!(store.tasks(list, false).unwrap().is_empty());
+        assert!(store.tasks(list, true).unwrap()[0].done_at.is_some());
+    }
+
+    #[gpui::test]
     fn local_task_failed_write_keeps_editor_text(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());

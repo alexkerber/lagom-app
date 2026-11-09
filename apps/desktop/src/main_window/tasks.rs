@@ -102,7 +102,8 @@ impl MainWindow {
             self.notify("Tasks need the local store; unavailable in demo mode", cx);
             return false;
         };
-        match change.apply(&live.store) {
+        // shortcut: task writes can block the UI for 250 ms on locks; move off-thread if this budget becomes too large.
+        match live.store.with_busy_timeout(Duration::from_millis(250), |store| change.apply(store)) {
             Ok(created) => {
                 self.reload_tasks(cx);
                 if let Some(id) = created {
