@@ -184,14 +184,20 @@ account types; organization policy may require admin consent or enabling IMAP
 and authenticated SMTP. See [Microsoft's mail OAuth guide](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth)
 and [loopback redirect rules](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url).
 
-Pass your own registrations at build time; no real IDs are in the source:
+For a release, put your own registrations in the git-ignored `.env.oauth` at the
+repository root (shell assignments; omit providers you do not configure):
 
 ```sh
-LAGOM_GOOGLE_CLIENT_ID='<desktop-client-id>' \
-LAGOM_GOOGLE_CLIENT_SECRET='<desktop-client-secret>' \
-LAGOM_MICROSOFT_CLIENT_ID='<application-client-id>' \
-  cargo build --workspace
+LAGOM_GOOGLE_CLIENT_ID='<desktop-client-id>'
+LAGOM_GOOGLE_CLIENT_SECRET='<desktop-client-secret>'
+LAGOM_MICROSOFT_CLIENT_ID='<application-client-id>'
 ```
+
+Run `scripts/build-release.sh`, or `scripts/build-release.sh path/to/local.env`
+from the repository root. The script sources this trusted local shell file,
+exports its assignments without printing values, and runs
+`cargo build --release -p lagom`. Cargo embeds the values through `option_env!`;
+the release binary does not need the file at runtime. Never commit the env file.
 
 The same environment variables override compiled values at runtime. An empty
 runtime ID disables that provider; `oauth::available(provider)` lets the UI hide
@@ -210,6 +216,12 @@ defines the supported email placeholders.
 Desktop worker contract (`apps/desktop/src/sync.rs`):
 
 - `Cmd::SignIn(Provider)` replaces a pending sign-in; `Cmd::CancelSignIn` drops it.
+- `Cmd::Reauthenticate(String)` uses the stored account's provider and UUID.
+  `oauth::reauthenticate` rejects a different email before writing credentials.
+  `Event::Reauthenticated` returns success or a sanitized error for that account;
+  cancellation leaves it requiring sign-in. Success restarts IDLE, queues sync,
+  and resumes only outbox entries stopped by `ReauthRequired`.
+  The sidebar and account rows offer Sign in again and cancellation while pending.
 - `Event::OpenUrl(String)` must go to `cx.open_url` on the UI thread (wired in
   `main_window/live.rs`). Do not log or persist this URL.
 - `Event::SignedIn(Result<String, String>)` returns the saved account UUID or a
@@ -222,7 +234,7 @@ Desktop worker contract (`apps/desktop/src/sync.rs`):
 
 The worker owns these futures, so pending sign-in/discovery does not hold up
 other commands. Network work stays off the UI thread. Onboarding buttons and
-presentation of discovery/cancellation belong to the subsequent UI change.
+presentation of discovery belong to the subsequent UI change.
 `ImapSync::login` and `smtp::{send, verify}` retain their password argument for
 existing callers; OAuth accounts ignore that argument and use the memory cache
 and keychain. Only an explicit authentication rejection causes one refresh and

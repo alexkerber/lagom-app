@@ -321,7 +321,17 @@ impl MainWindow {
                 Event::Discovered { .. } | Event::SignInCancelled => {},
                 Event::ReauthRequired(account) => {
                     if let Some(live) = &mut self.live {
-                        live.sync.insert(account, SyncState::Failed("Sign in again".into()));
+                        live.sync.insert(account, SyncState::ReauthRequired);
+                    }
+                }
+                Event::Reauthenticated { account, result } => {
+                    if let Some(live) = &mut self.live {
+                        if !live.accounts.iter().any(|a| a.id == account) { continue; }
+                        live.sync.insert(account, if result.is_ok() { SyncState::Syncing } else { SyncState::ReauthRequired });
+                    }
+                    match result {
+                        Ok(()) => read = true,
+                        Err(error) => self.notify(format!("Could not sign in: {error}"), cx),
                     }
                 }
                 Event::Changed => read = true,
@@ -333,7 +343,9 @@ impl MainWindow {
                 }
                 Event::Sync(account, state) => {
                     if let Some(live) = &mut self.live {
-                        live.sync.insert(account, state);
+                        if state == SyncState::SigningIn || !matches!(live.sync.get(&account), Some(SyncState::ReauthRequired | SyncState::SigningIn)) {
+                            live.sync.insert(account, state);
+                        }
                     }
                 }
                 Event::Op { op, error } => {
@@ -719,8 +731,41 @@ impl MainWindow {
                 format!("synced {}", at.unwrap_or_default())
             }
             Some(SyncState::Failed(e)) => format!("offline: {e}"),
+            Some(SyncState::ReauthRequired) => "Sign in again".into(),
+            Some(SyncState::SigningIn) => "Signing in…".into(),
         };
         Some(state.into())
+    }
+
+    pub(super) fn reauth_control(&self, ix: usize, slot: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.live.as_ref()?;
+        let account = live.accounts.get(ix)?;
+        let signing_in = match live.sync.get(&account.id)? {
+            SyncState::ReauthRequired => false,
+            SyncState::SigningIn => true,
+            _ => return None,
+        };
+        let id = account.id.clone();
+        let t = &self.theme;
+        Some(pressable(div().id((slot, ix)), t, false)
+            .debug_selector(move || format!("{slot}-{ix}"))
+            .px(px(10.)).py(px(4.)).rounded(px(radius::CONTROL))
+            .text_size(px(size::SMALL)).text_color(t.ink2)
+            .child(if signing_in { "Signing in… Cancel" } else { "Sign in again" })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.reauthenticate(&id, cx);
+            })).into_any_element())
+    }
+
+    fn reauthenticate(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        let cmd = match live.sync.get(id) {
+            Some(SyncState::ReauthRequired) => Cmd::Reauthenticate(id.into()),
+            Some(SyncState::SigningIn) => Cmd::CancelSignIn,
+            _ => return,
+        };
+        if !live.bridge.send(cmd) { self.worker_gone(cx); }
     }
 
     /// ⌘K search hit: open its list (Later when snoozed) and select it. The hit is pinned into
@@ -1477,6 +1522,51 @@ mod tests {
             assert_eq!(v.drafts.len(), 1);
             assert_eq!(v.drafts[0].read(cx).body_text(cx), "Unfinished fixture draft");
             assert!(!v.hold_exit(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn reauthentication_actions_and_events_preserve_selection_and_retry_state(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let account = view.update(cx, |v, _| v.live.as_ref().unwrap().accounts[0].id.clone());
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::ReauthRequired(account.clone()), Event::Sync(account.clone(), SyncState::Failed("expired".into()))], window, cx);
+            assert_eq!(v.sync_state().unwrap().as_ref(), "Sign in again");
+        });
+        cx.run_until_parked();
+        let at = cx.debug_bounds("sidebar-reauth-0").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Reauthenticate(id) if id == account));
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::Sync(account.clone(), SyncState::SigningIn), Event::Sync(account.clone(), SyncState::Synced(0))], window, cx);
+            assert_eq!(v.sync_state().unwrap().as_ref(), "Signing in…");
+        });
+        cx.run_until_parked();
+        let at = cx.debug_bounds("account-reauth-0").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::CancelSignIn));
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::ReauthRequired(account.clone()), Event::Reauthenticated { account: account.clone(), result: Err("Sign in with the same email address as this account".into()) }], window, cx);
+            assert_eq!(v.sync_state().unwrap().as_ref(), "Sign in again");
+            assert!(v.toast.as_ref().unwrap().0.contains("same email address"));
+        });
+        cx.run_until_parked();
+        let at = cx.debug_bounds("account-reauth-0").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Reauthenticate(id) if id == account));
+        view.update_in(cx, |v, window, cx| {
+            let mut second = v.live.as_ref().unwrap().accounts[0].clone();
+            second.id = "second-fixture-account".into();
+            second.email = "second@example.com".into();
+            v.live.as_ref().unwrap().store.save_account(&second).unwrap();
+            v.live.as_mut().unwrap().accounts.push(second);
+            v.live.as_mut().unwrap().current = 1;
+            v.on_events(vec![Event::Reauthenticated { account: account.clone(), result: Ok(()) }, Event::Sync(account.clone(), SyncState::Synced(0))], window, cx);
+            let live = v.live.as_ref().unwrap();
+            assert_eq!(live.current, 1);
+            assert_eq!(live.sync[&account], SyncState::Synced(0));
+            assert!(v.reauth_control(0, "test", cx).is_none());
+            assert!(v.reauth_control(1, "test", cx).is_none());
         });
     }
 

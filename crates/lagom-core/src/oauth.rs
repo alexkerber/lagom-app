@@ -107,11 +107,19 @@ fn challenge(verifier: &str) -> String {
 /// Cancels when dropped; the listener and HTTP request are owned by this future.
 /// The callback runs on the caller's executor; desktop callers forward the URL to the UI thread.
 pub async fn sign_in(provider: Provider, open_url: impl FnOnce(&str)) -> Result<SignedIn> {
-    sign_in_with(provider, provider.config(), open_url).await
+    sign_in_with(provider, provider.config(), None, open_url).await
+}
+/// Replaces credentials only after the provider confirms the existing account's email.
+pub async fn reauthenticate(account: &Account, open_url: impl FnOnce(&str)) -> Result<SignedIn> {
+    let Auth::OAuth(provider) = account.auth else {
+        return Err(Error::Invalid("not an OAuth account"));
+    };
+    sign_in_with(provider, provider.config(), Some(account), open_url).await
 }
 async fn sign_in_with(
     provider: Provider,
     config: Config,
+    existing: Option<&Account>,
     open_url: impl FnOnce(&str),
 ) -> Result<SignedIn> {
     if config.id.trim().is_empty() {
@@ -153,35 +161,47 @@ async fn sign_in_with(
             ],
         )
         .await?;
-        let (email, display_name) = claims(
-            token
-                .id_token
-                .as_deref()
-                .ok_or(Error::Invalid("ID token missing"))?,
-        )?;
+        complete_sign_in(provider, existing, &mut token).await
+    })
+    .await
+    .map_err(|_| Error::Network("sign-in timed out"))?
+}
+
+async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token: &mut Token) -> Result<SignedIn> {
+    let (email, display_name) = claims(
+        token
+            .id_token
+            .as_deref()
+            .ok_or(Error::Invalid("ID token missing"))?,
+    )?;
+    let account = if let Some(account) = existing {
+        if account.auth != Auth::OAuth(provider) || !account.email.eq_ignore_ascii_case(&email) {
+            return Err(Error::Invalid("Sign in with the same email address as this account"));
+        }
+        account.clone()
+    } else {
         let (imap, smtp) = provider.servers(&email);
         let mut account = Account::new(email.clone(), imap, smtp)?;
         account.auth = Auth::OAuth(provider);
         account.display_name = display_name.clone();
-        account.validate()?;
-        let refresh = token
-            .refresh_token
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or(Error::ReauthRequired)?;
-        let cache = cache(&account.id);
-        let mut cached = cache.lock().await;
-        // No cancellation point between persisting the credential and returning its account.
-        account.set_password(refresh)?;
-        *cached = Some(Cached::from_token(&mut token));
-        Ok(SignedIn {
-            email,
-            display_name,
-            account,
-        })
+        account
+    };
+    account.validate()?;
+    let refresh = token
+        .refresh_token
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or(Error::ReauthRequired)?;
+    let cache = cache(&account.id);
+    let mut cached = cache.lock().await;
+    // No cancellation point between persisting the credential and returning its account.
+    account.set_password(refresh)?;
+    *cached = Some(Cached::from_token(token));
+    Ok(SignedIn {
+        email,
+        display_name,
+        account,
     })
-    .await
-    .map_err(|_| Error::Network("sign-in timed out"))?
 }
 
 fn parse_callback(target: &str, state: &str) -> Result<Zeroizing<String>> {

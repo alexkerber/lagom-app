@@ -134,6 +134,15 @@ impl Store {
         Ok(())
     }
 
+    /// Reauthorization resumes only sends stopped by a revoked grant, never uncertain delivery.
+    pub fn resume_outbox(&self, account: &str, now: i64) -> Result<()> {
+        // shortcut: outbox failures have text reasons; migrate them before changing the reauthorization message.
+        self.db.execute("UPDATE outbox SET state='ready',ready_at=?2,error=NULL
+            WHERE account=?1 AND started=0 AND state='failed' AND error=?3",
+            params![account, now, Error::ReauthRequired.to_string()])?;
+        Ok(())
+    }
+
     /// Only a deliberate user action re-enables an uncertain or permanently refused send.
     pub fn retry_send(&self, id: &str, now: i64) -> Result<bool> {
         Ok(self.db.execute("UPDATE outbox SET state='ready',ready_at=?2,error=NULL
@@ -224,6 +233,23 @@ mod tests {
         store.recover_outbox().unwrap();
         assert!(store.due_outbox(&account.id, i64::MAX).unwrap().is_empty());
         assert!(!store.claim_send(&id, i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn reauthorization_resumes_only_revoked_grants_for_that_account() {
+        for error in [Error::ReauthRequired, Error::Rejected, Error::Authentication, Error::MaybeSent, Error::Network("offline")] {
+            for submitted in [false, true] {
+                let (_dir, store, account, id) = queued();
+                assert!(store.claim_send(&id, 0).unwrap());
+                if submitted { store.submitted(&id).unwrap(); }
+                store.send_failed(&id, &error, 0).unwrap();
+                store.resume_outbox("another-account", 1).unwrap();
+                assert!(store.due_outbox(&account.id, 1).unwrap().is_empty());
+                store.resume_outbox(&account.id, 1).unwrap();
+                assert_eq!(!store.due_outbox(&account.id, 1).unwrap().is_empty(), matches!(error, Error::ReauthRequired));
+                assert_eq!(store.pending(&id).unwrap().submitted, submitted);
+            }
+        }
     }
 
     #[test]

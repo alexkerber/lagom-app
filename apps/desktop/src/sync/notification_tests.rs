@@ -81,7 +81,7 @@ async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
         let (events, mut out) = unbounded_channel();
         let session = ImapSync::login(&account, "fixture").await.unwrap();
         let mut worker = Worker { store, sessions: [(account.id.clone(), session)].into(), idle: HashMap::new(),
-            moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, discovery: None, me, events };
+            moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, reauth_required: HashSet::new(), discovery: None, me, events };
         if resolving {
             worker.moved.insert(id, (inbox, "incoming@example.test".into()));
             worker.resolve(id).await.unwrap();
