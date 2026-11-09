@@ -12,7 +12,7 @@ use the approved composite, including its rounded plate and transparency.
 The website copies are also updated by the exporter.
 
 `ios-light.png` composites `layer-envelope.png` over the full-bleed `layer-bg.png`.
-`ios-dark.png` uses the same envelope over a #1E2238 → #2A1F3C gradient.
+`ios-dark.png` uses the same envelope over a #0C1A35 → #2B1E26 gradient: night navy to a warm dark.
 Both are opaque 1024 px squares without baked-in rounding.
 `ios-tinted.png` is a white silhouette derived from the envelope layer's alpha,
 on transparency, as requested; it is a tint input, not an opaque App Store icon.
