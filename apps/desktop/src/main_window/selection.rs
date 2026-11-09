@@ -13,6 +13,18 @@ impl Inbox {
         self.selected_rows().into_iter().flat_map(|id| self.members(id)).collect()
     }
 
+    pub(super) fn single(&self) -> Option<usize> {
+        match &self.chosen {
+            Some(ids) if ids.len() == 1 => ids.iter().next().copied(),
+            Some(_) => None,
+            None => self.current(),
+        }
+    }
+
+    pub(super) fn selection_unread(&self) -> bool {
+        self.selected_members().iter().any(|&id| self.mail[id].unread)
+    }
+
     pub(super) fn multi(&self) -> bool {
         self.chosen.as_ref().is_some_and(|ids| ids.len() > 1)
     }
@@ -106,7 +118,7 @@ impl MainWindow {
     }
 
     pub(super) fn toggle_read(&mut self, cx: &mut Context<Self>) {
-        let seen = self.inbox.selected_members().iter().any(|&id| self.inbox.mail[id].unread);
+        let seen = self.inbox.selection_unread();
         self.act(Move::Read(seen), cx);
     }
 
@@ -124,7 +136,7 @@ impl MainWindow {
     pub(super) fn selection_pane(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let members = self.inbox.selected_members();
-        let seen = members.iter().any(|&id| self.inbox.mail[id].unread);
+        let seen = self.inbox.selection_unread();
         let trash = self.inbox.open_kind() == Some(Kind::Trash);
         let summary = div().id("selection-summary").flex_1().flex().items_center().justify_center().text_color(t.ink2)
             .child(format!("{} messages selected", members.len()));
@@ -148,6 +160,29 @@ impl MainWindow {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn review_thread_read_label_matches_aggregate_action(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        view.update(cx, |v, cx| {
+            v.inbox.mail[0].thread_id = "thread".into();
+            v.inbox.mail[1].thread_id = "thread".into();
+            v.inbox.mail[0].unread = true;
+            v.inbox.mail[1].unread = false;
+            v.inbox.mail[1].date = 1;
+            v.inbox.group = true;
+            v.inbox.regroup();
+            v.inbox.select(0);
+            assert_eq!(v.inbox.current(), Some(1));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(MIN_WINDOW.0), px(MIN_WINDOW.1)));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("Mark read").expect("an unread thread must offer Mark read").center();
+        cx.simulate_click(at, Default::default());
+        assert!(view.read_with(cx, |v, _| v.inbox.selected_members().iter().all(|&id| !v.inbox.mail[id].unread)));
+    }
 
     #[test]
     fn shift_arrows_extend_shrink_and_cross_anchor() {
@@ -284,7 +319,7 @@ mod tests {
         assert_eq!(inbox.mail.iter().map(|m| m.unread).collect::<Vec<_>>(), before);
         inbox.select_all();
         inbox.act_rows(&inbox.selected_rows(), Move::Read(true));
-        inbox.revert(0);
+        inbox.revert(0, None);
         assert!(inbox.mail[0].unread);
         assert!(!inbox.batches.last().unwrap().contains(&0));
         inbox.undo().unwrap();

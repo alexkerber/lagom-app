@@ -181,7 +181,7 @@ impl MainWindow {
     /// so the web view hides while one is open.
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
-        let want = self.inbox.current().filter(|&id| matches!(self.page, Page::Mail) && !empty && !self.inbox.multi() && self.inbox.is_selected(id) && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
+        let want = self.inbox.single().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
         let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
         self.web.frame(want, &self.theme, overlay, window, cx);
         let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());
@@ -375,6 +375,25 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[gpui::test]
+    fn review_cmd_toggle_keeps_sole_selected_html(cx: &mut gpui::TestAppContext) {
+        if !SUPPORTED { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        view.update_in(cx, |v, window, cx| {
+            v.inbox.group = false;
+            v.inbox.select(0);
+            let id = v.inbox.current().unwrap();
+            v.inbox.mail[id].html = Some("<p>Selected</p>".into());
+            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), false, v.theme.dark));
+            v.web.ready = true;
+            v.inbox.click(1, false, true);
+            v.inbox.click(1, false, true);
+            v.open_current(false, cx);
+            v.web_frame(window, cx);
+            assert_eq!(v.web.shown.map(|key| key.0), Some(id));
+        });
+    }
 
     #[gpui::test]
     fn review_task_toast_keeps_html_drawable(cx: &mut gpui::TestAppContext) {

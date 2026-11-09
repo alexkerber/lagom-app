@@ -268,7 +268,8 @@ impl MainWindow {
             Some((_, None)) => mail::View::Inbox,
         };
         self.inbox.group = self.panes.group_conversations;
-        match mail::load(&live.store, &account, view, live.limit, now(), live.pin, self.inbox.group) {
+        let pins = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(live.pin);
+        match mail::load(&live.store, &account, view, live.limit, now(), pins, self.inbox.group) {
             Ok(snap) => {
                 live.stale = false;
                 self.reading_dirty = true;
@@ -374,12 +375,12 @@ impl MainWindow {
                             self.notify(format!("Could not create folder: {e}"), cx);
                         }
                         (Op::Read(id), Some(e)) => {
-                            self.inbox.revert(id);
+                            self.inbox.revert(id, Some(op));
                             self.notify(format!("Could not change read status: {e}"), cx);
                         }
                         (Op::Move(id), Some(e)) => {
                             self.inbox.back(id);
-                            if let Some((what, id, ix)) = self.inbox.revert(id) {
+                            if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
                                 self.come_back(what, id, ix, false, cx);
                             }
                             self.notify(format!("Not moved: {e}"), cx);
@@ -508,17 +509,18 @@ impl MainWindow {
     pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
-        let ops: Vec<_> = live.ops.drain().map(|(_, op)| op).collect();
+        let mut ops: Vec<_> = live.ops.drain().collect();
+        ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
-        for op in ops {
-            match op {
+        for (op, action) in ops {
+            match action {
                 Op::Move(id) => {
                     self.inbox.back(id);
-                    if let Some((what, id, ix)) = self.inbox.revert(id) {
+                    if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
                         self.come_back(what, id, ix, false, cx);
                     }
                 }
-                Op::Read(id) => { self.inbox.revert(id); }
+                Op::Read(id) => { self.inbox.revert(id, Some(op)); }
                 Op::Undo | Op::EmptyTrash(_) => {}
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
@@ -533,6 +535,7 @@ impl MainWindow {
         if let Move::Read(seen) = what {
             live.seen.remove(&store);
             let op = live.op(Op::Read(id));
+            if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
             let sent = live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) });
             if !sent { self.worker_gone(cx); }
             return sent;
@@ -559,6 +562,7 @@ impl MainWindow {
         self.inbox.left(id, target);
         self.inbox.mail[id].snoozed_until = match act { Act::Snooze(until) => until, _ => None };
         let op = live.op(Op::Move(id));
+        if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
         let sent = live.bridge.send(Cmd::Op { op, id: store, act });
         if !sent { self.worker_gone(cx); }
         sent
@@ -613,7 +617,7 @@ impl MainWindow {
     /// Before a frame: the selected message's body comes from the store once, and opening a
     /// message marks it read. One indexed row read, only when the selection changed.
     pub(super) fn open_current(&mut self, mark_read: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.inbox.current().filter(|&id| !self.inbox.multi() && self.inbox.is_selected(id)) else {
+        let Some(id) = self.inbox.single() else {
             self.reading_thread = None;
             self.reading_members.clear();
             self.expanded.clear();
@@ -836,6 +840,7 @@ impl MainWindow {
             // INBOX is not in `folders`: no match means the inbox.
             self.inbox.folders.iter().position(|f| f.store == Some(m.summary.folder) && !f.gone)
         };
+        self.inbox.unread_only = false;
         self.open_box(list, cx);
         if let Some(live) = &mut self.live {
             (live.pin, live.want) = (Some(store), Some(store));
@@ -1016,6 +1021,173 @@ mod tests {
         }));
         view.update(cx, |v, _| v.live = Some(fixture_live(store, bridge)));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn review_failed_read_preserves_later_delete_undo(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=2 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            let reads = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            v.act(Move::Delete, cx);
+            let deletes = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            for cmd in reads {
+                let Cmd::Op { op, .. } = cmd else { panic!("expected read") };
+                v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            }
+            assert_eq!(v.inbox.batches.len(), 1);
+            assert!(v.inbox.history.iter().all(|h| h.0 == Move::Delete));
+            for cmd in deletes {
+                let Cmd::Op { op, .. } = cmd else { panic!("expected delete") };
+                v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            }
+            v.undo(cx);
+            assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|cmd| matches!(cmd, Cmd::Op { act: Act::Move(_), .. })).count(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn review_old_read_failure_cannot_revert_a_new_read(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            incoming(v, 1);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.toggle_read(cx);
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("expected read") };
+            v.undo(cx);
+            v.toggle_read(cx);
+            v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            assert!(!v.inbox.mail[0].unread);
+            assert_eq!(v.inbox.batches.len(), 1);
+            assert_eq!(v.inbox.history.len(), 1);
+            v.undo(cx);
+            assert!(v.inbox.mail[0].unread);
+        });
+    }
+
+    #[gpui::test]
+    fn review_stopped_worker_reverts_read_and_delete_in_reverse_order(cx: &mut TestAppContext) {
+        let (view, cx, rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=2 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            v.act(Move::Delete, cx);
+        });
+        drop(rx);
+        view.update(cx, |v, cx| {
+            v.worker_gone(cx);
+            assert!(v.inbox.history.is_empty() && v.inbox.batches.is_empty());
+            assert_eq!(v.inbox.items.len(), 2);
+            assert!(v.inbox.mail.iter().all(|m| m.unread));
+        });
+    }
+
+    #[gpui::test]
+    fn review_sync_keeps_selection_past_page_boundary(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=200 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let selected = v.inbox.selected_members();
+            incoming(v, 201);
+            v.reload(cx);
+            assert_eq!(v.inbox.selected_members(), selected);
+            assert_eq!(v.inbox.list().len(), 201);
+            v.act(Move::Done, cx);
+            assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|cmd| matches!(cmd, Cmd::Op { act: Act::Archive, .. })).count(), 200);
+        });
+    }
+
+    #[gpui::test]
+    fn review_sync_drops_selected_messages_that_leave_the_list(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let removed = incoming(v, 1);
+            let snoozed = incoming(v, 2);
+            incoming(v, 3);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let live = v.live.as_ref().unwrap();
+            live.store.delete_message(removed.id).unwrap();
+            live.store.snooze(snoozed.id, Some(now() + 3600)).unwrap();
+            v.reload(cx);
+            assert_eq!(v.inbox.selected_members().len(), 1);
+            assert!(v.inbox.selected_members().iter().all(|&id| ![removed.id, snoozed.id].contains(&v.inbox.mail[id].store.unwrap())));
+        });
+    }
+
+    #[gpui::test]
+    fn review_search_reveals_read_target_under_unread_filter(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let mut target = incoming(v, 1);
+            target.seen = true;
+            v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message { summary: target.clone(), ..Default::default() }).unwrap();
+            incoming(v, 2);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.open_found(target.id, cx);
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(target.id));
+            v.act(Move::Delete, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Op { id, act: Act::Trash, .. }) if id == target.id));
+        });
+    }
+
+    #[gpui::test]
+    fn review_trash_does_not_inherit_hidden_unread_filter(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let mut target = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            target.folder = live.store.save_folder(&target.account, "Trash", None, lagom_core::store::FolderRole::Trash).unwrap();
+            target.seen = true;
+            let target = live.store.save_message(&lagom_core::store::Message { summary: target, ..Default::default() }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.open_box(v.inbox.find_kind(Kind::Trash), cx);
+            assert!(!v.inbox.unread_only);
+            assert!(v.inbox.list().iter().any(|&id| v.inbox.mail[id].store == Some(target)));
+        });
+    }
+
+    #[gpui::test]
+    fn review_cmd_toggle_reads_sole_selection_not_cursor(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=2 {
+                let summary = incoming(v, uid);
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                    summary, body_text: format!("Body {uid}"), body_html: Some(format!("<p>Body {uid}</p>")), ..Default::default()
+                }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.current().unwrap();
+            v.inbox.click(1, false, true);
+            v.inbox.click(1, false, true);
+            assert_ne!(v.inbox.current(), Some(selected));
+            v.open_current(false, cx);
+            assert_eq!(v.reading_thread, Some(selected));
+            assert_eq!(v.inbox.mail[selected].body, ["Body 2"]);
+            assert_eq!(v.inbox.mail[selected].html.as_ref().map(|html| html.as_ref()), Some("<p>Body 2</p>"));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Reply").is_some());
     }
 
     #[gpui::test]

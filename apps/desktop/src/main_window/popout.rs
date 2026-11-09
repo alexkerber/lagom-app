@@ -161,7 +161,7 @@ const CASCADE: f32 = 24.;
 impl MainWindow {
     /// The selected message in its own window, or that window to the front if it is open.
     pub(super) fn open_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.inbox.current() else { return };
+        let Some(id) = self.inbox.single() else { return };
         // The body and HTML come from the store here; the new window only reads them.
         self.open_message(id, true, cx);
         self.popouts.retain(|(_, h)| h.read(cx).is_ok());

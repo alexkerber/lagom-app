@@ -61,7 +61,7 @@
 - [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
 - [x] Typeface: the system font (SF Pro on macOS) is the UI default. `LAGOM_UI_FONT=inter` switches back.
 - [x] Message list: visible rows plus two-row overscan, with animated-height spacers; integrated with persisted drafts, outbox and non-blocking quit.
-- [x] Message list: Shift-arrow/Shift-click ranges, Cmd-click toggles, Cmd+A and Escape, stable selection across sync, conversation-aware batch Done/Later/Delete/Move/read status with one Undo, and a selection summary. All/Unread filters the loaded rows. Fixture and headless tests cover selection, filtering, batch undo and worker read flags.
+- [x] Message list: Shift-arrow/Shift-click ranges, Cmd-click toggles, Cmd+A and Escape, stable selection across sync, conversation-aware batch Done/Later/Delete/Move/read status with one Undo, and a selection summary. All/Unread filters the loaded rows. Fixture and headless tests cover selection, filtering, batch undo and worker read flags. Review fixes bind rollback to worker operations, retain selected mail past page boundaries, reveal search targets, clear the hidden Trash filter, keep the sole selection readable after Cmd-click, and share thread read state between labels and actions.
 
 ## Folders: open questions
 
