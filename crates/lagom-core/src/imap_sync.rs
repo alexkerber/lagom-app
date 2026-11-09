@@ -91,12 +91,12 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
             client
         }
         Security::StartTls => {
-            let mut client = Client::new(Guarded::new(socket));
+            let mut client = Client::new(Bounded::new(Guarded::new(socket)));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
             net(client.run_command_and_check_ok("STARTTLS", None)).await?;
-            Client::new(Bounded::new(tls(client.into_inner().inner, &config.host).await?))
+            Client::new(Bounded::new(tls(client.into_inner().inner.inner, &config.host).await?))
         }
         Security::Plain => {
             let mut client = Client::new(Bounded::new(Box::new(Guarded::new(socket)) as Wire));
