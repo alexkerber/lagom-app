@@ -100,13 +100,19 @@ impl Store {
 
     /// Runs `write` with at most ~250 ms of lock waiting, then restores the normal timeout.
     pub fn with_short_lock_wait<T>(&self, write: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        // Our own 5 ms steps: SQLite's built-in handler may sleep in whole seconds when built without usleep.
-        fn short_wait(attempt: i32) -> bool {
-            attempt < 50 && { std::thread::sleep(std::time::Duration::from_millis(5)); true }
+        use std::time::{Duration, Instant};
+        // A wall-clock deadline, not a count of sleeps: macOS can oversleep short sleeps severalfold,
+        // so SQLite's own timeout and any fixed number of naps ran to about a second on CI.
+        thread_local!(static DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
+        fn short_wait(_attempt: i32) -> bool {
+            let left = DEADLINE.with(|d| d.get()).map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
+            !left.is_zero() && { std::thread::sleep(left.min(Duration::from_millis(5))); true }
         }
         let previous: u64 = self.db.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
+        DEADLINE.with(|d| d.set(Some(Instant::now() + Duration::from_millis(250))));
         self.db.busy_handler(Some(short_wait))?;
         let result = write(self);
+        DEADLINE.with(|d| d.set(None));
         self.db.busy_timeout(std::time::Duration::from_millis(previous))?;
         result
     }
