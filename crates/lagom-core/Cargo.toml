@@ -40,6 +40,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
 quick-xml = { version = "0.41", features = ["serialize"] }
 
+# keyring's iOS backend stores with the default accessibility class; this sets ThisDeviceOnly. Same 3.7.0 as keyring's macOS backend.
+[target.'cfg(target_os = "ios")'.dependencies]
+security-framework = { version = "3", default-features = false }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
