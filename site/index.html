@@ -20,10 +20,10 @@
     @font-face { font-family: "Hauora Sans"; font-weight: 600; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-600.woff2") format("woff2"); }
     @font-face { font-family: "Hauora Sans"; font-weight: 800; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-800.woff2") format("woff2"); }
 
-    /* White and calm. The only colour is the icon's dusk gradient. */
+    /* White and calm. The only colour is the app icon. */
     :root {
       --bg: #FFFFFF; --card: #F6F6F4; --ink: #111110; --ink2: #6B6B66; --line: #EBEBE7;
-      --blue: #2F55C8; --violet: #9A4BE0; --accent: #3A4FCF;
+      --accent: #111110;
     }
     * { box-sizing: border-box; }
     html { overflow-x: hidden; }
@@ -42,7 +42,7 @@
     .links a { display: flex; align-items: center; height: 40px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
     .links a:hover { background: var(--card); }
 
-    /* Hero: the icon is larger than its column and spills over the right edge, its glow bleeding into the white. */
+    /* Hero: the icon is larger than its column and runs off the right edge. */
     .hero { position: relative; display: grid; grid-template-columns: 1fr; align-items: center; min-height: min(86vh, 820px); padding: 48px 0 120px; }
     .hero > * { min-width: 0; }
     .copy { position: relative; z-index: 2; display: flex; flex-direction: column; gap: 28px; max-width: 34rem; }
@@ -55,33 +55,28 @@
     .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
     .btn { display: flex; align-items: center; height: 52px; padding: 0 26px; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; font-size: 16px; font-weight: 600; background: var(--bg); }
     .btn:hover { background: var(--card); }
-    .btn.primary { border: 0; color: #fff; background: linear-gradient(135deg, var(--blue), var(--violet)); }
-    .btn.primary:hover { filter: brightness(1.08); }
+    .btn.primary { border-color: var(--ink); color: #fff; background: var(--ink); }
+    .btn.primary:hover { background: #33332F; }
     .status { margin: 0; font-size: 13px; color: var(--ink2); }
-    .spill { position: absolute; z-index: 1; top: 50%; right: max(-26vw, -340px); width: clamp(420px, 58vw, 860px); transform: translateY(-48%) rotate(-8deg); pointer-events: none; }
-    .spill::before { content: ""; position: absolute; inset: -18%; z-index: -1; border-radius: 50%; background: radial-gradient(closest-side, rgba(90, 92, 222, 0.30), rgba(154, 75, 224, 0.14) 55%, transparent); filter: blur(30px); }
+    .spill { position: absolute; z-index: 1; top: 50%; right: max(-26vw, -340px); width: clamp(420px, 58vw, 860px); transform: translateY(-50%); pointer-events: none; }
     @media (max-width: 899px) {
       .hero { min-height: 0; padding-top: 24px; }
-      .spill { position: relative; top: auto; right: auto; width: 115%; margin: -40px -30% -40px auto; transform: rotate(-8deg); }
+      .spill { position: relative; top: auto; right: auto; width: 115%; margin: -24px -30% -24px auto; transform: none; }
     }
 
     section { padding: clamp(80px, 12vw, 160px) 0 0; }
-    .kicker { margin: 0 0 14px; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
-    h2 { margin: 0 0 clamp(40px, 6vw, 72px); max-width: 16em; font-size: clamp(34px, 4.6vw, 60px); line-height: 1.04; text-wrap: balance; }
+    h2 { margin: 0 0 clamp(32px, 4vw, 48px); max-width: 18em; font-size: clamp(28px, 3.2vw, 40px); font-weight: 700; line-height: 1.1; letter-spacing: -0.03em; text-wrap: balance; }
 
-    .shot { border-radius: 20px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 40px 80px -40px rgba(47, 85, 200, 0.28), 0 2px 6px rgba(0, 0, 0, 0.04); }
+    .shot { border-radius: 20px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 24px 48px -32px rgba(0, 0, 0, 0.18); }
 
-    /* Detail tiles: one crop of the real app each, shown at its natural size on a warm grey card. */
+    /* Detail tiles: one crop of the real app each, at its natural size on a grey card. */
     .details { display: grid; grid-template-columns: 1fr; gap: 24px; }
-    @media (min-width: 900px) { .details { grid-template-columns: repeat(6, 1fr); } .t1 { grid-column: span 4; } .t2 { grid-column: span 2; grid-row: span 2; } .t3 { grid-column: span 2; } .t4 { grid-column: span 2; } .t5 { grid-column: span 3; } .t6 { grid-column: span 3; } }
-    .tile { display: flex; flex-direction: column; gap: 24px; padding: clamp(24px, 3vw, 40px); border-radius: 24px; background: var(--card); }
+    @media (min-width: 900px) { .details { grid-template-columns: repeat(6, 1fr); } .t1 { grid-column: span 4; } .t2 { grid-column: span 2; grid-row: span 2; } .t3 { grid-column: span 4; } .t5 { grid-column: span 3; } .t6 { grid-column: span 3; } }
+    .tile { display: flex; flex-direction: column; gap: 24px; padding: clamp(24px, 3vw, 40px); border-radius: 16px; background: var(--card); }
     .tile figure { flex: 1; display: flex; align-items: center; justify-content: center; margin: 0; }
-    .tile figure img { border-radius: 12px; box-shadow: 0 18px 40px -24px rgba(17, 17, 16, 0.35); }
-    .tile h3 { margin: 0 0 4px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+    .tile figure img { border-radius: 10px; border: 1px solid var(--line); }
+    .tile h3 { margin: 0 0 2px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
     .tile p { margin: 0; font-size: 15px; color: var(--ink2); }
-    .tile.dusk { justify-content: flex-end; color: #fff; background: linear-gradient(160deg, var(--blue), #6A55DA 55%, var(--violet)); }
-    .tile.dusk p { color: #fff; }
-    .tile.dusk .big { margin: 0 0 auto; font-size: clamp(56px, 6vw, 84px); font-weight: 800; line-height: 0.9; letter-spacing: -0.05em; }
 
     .about { display: grid; grid-template-columns: 1fr; gap: clamp(40px, 6vw, 96px); }
     @media (min-width: 900px) { .about { grid-template-columns: 5fr 7fr; } }
@@ -93,7 +88,7 @@
     .principles { display: grid; grid-template-columns: 1fr; gap: 40px; padding-top: 8px; border-top: 1px solid var(--line); }
     @media (min-width: 800px) { .principles { grid-template-columns: repeat(3, 1fr); } }
     .principles div { padding-top: 32px; }
-    .principles h3 { margin: 0 0 8px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+    .principles h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
     .principles p { margin: 0; color: var(--ink2); }
 
     footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: clamp(96px, 12vw, 160px); padding: 24px 0 48px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
@@ -134,47 +129,40 @@
       </div>
 
       <section aria-labelledby="whole">
-        <p class="kicker">The app</p>
-        <h2 id="whole" class="display">One window. Everything in reach of a key.</h2>
+        <h2 id="whole">One window, three panes.</h2>
         <div class="shot">
           <img src="lagom-light.webp" width="1600" height="1000" alt="The Lagom main window: a sidebar with Inbox, Later, Sent and Done, a message list, and an open email with Done, Reply, Later and Forward buttons, each labelled with its shortcut key.">
         </div>
       </section>
 
       <section aria-labelledby="details">
-        <p class="kicker">In detail</p>
-        <h2 id="details" class="display">Small things, done properly.</h2>
+        <h2 id="details">Details</h2>
         <div class="details">
           <article class="tile t1">
             <figure><img src="detail-toolbar.webp" width="840" height="230" alt="The reading toolbar: Done, Reply, Later and Forward, each with its key: E, R, L and F."></figure>
-            <div><h3>One key per decision.</h3><p>Done is E. Reply is R. Later is L. The keys sit on the buttons, so you learn them by looking.</p></div>
+            <div><h3>Keys on the buttons</h3><p>E is Done, R is Reply, L is Later. You learn them by looking.</p></div>
           </article>
           <article class="tile t2">
             <figure><img src="detail-sidebar.webp" width="276" height="480" alt="The sidebar: search, Inbox with seven unread, Later, Sent and Done, and two accounts."></figure>
-            <div><h3>Three places, not thirty.</h3><p>Inbox, Later and Done. Folders are there when you need them.</p></div>
+            <div><h3>Inbox, Later, Done</h3><p>Three places for mail. Folders when you need them.</p></div>
           </article>
           <article class="tile t3">
             <figure><img src="detail-list.webp" width="456" height="312" alt="Three rows of the message list, each with sender, subject, preview and time."></figure>
-            <div><h3>Read the list, not the clutter.</h3><p>Sender, subject, one line. Unread gets a dot.</p></div>
-          </article>
-          <article class="tile t4 dusk">
-            <p class="big">0</p>
-            <div><h3>The point is an empty inbox.</h3><p>Every mail is done, later or answered.</p></div>
+            <div><h3>The list</h3><p>Sender, subject and one line. Unread mail has a dot.</p></div>
           </article>
           <article class="tile t5">
             <figure><img src="detail-letter.webp" width="830" height="300" alt="An open email: a short letter from Ingrid with a PDF attachment."></figure>
-            <div><h3>Mail that reads like a letter.</h3><p>Calm type, wide margins, attachments where you expect them.</p></div>
+            <div><h3>Reading</h3><p>Plain type, wide margins and attachments at the end.</p></div>
           </article>
           <article class="tile t6">
             <figure><img src="detail-status.webp" width="462" height="96" alt="The status bar: 7 left, J K move, E done, Command K run."></figure>
-            <div><h3>Always know what is left.</h3><p>The status bar counts down and reminds you of the keys.</p></div>
+            <div><h3>Status bar</h3><p>How many are left, and the keys you need next.</p></div>
           </article>
         </div>
       </section>
 
       <section aria-labelledby="about">
-        <p class="kicker">About</p>
-        <h2 id="about" class="display">An email app that only does email.</h2>
+        <h2 id="about">An email app that only does email.</h2>
         <div class="about">
           <p class="story">We are a group of friends who got tired of looking for a mail app that does what we need, and not a hundred thousand other things. So we are building one.</p>
           <div class="word">
@@ -189,9 +177,9 @@
 
       <section aria-label="Principles">
         <div class="principles">
-          <div><h3>Fast.</h3><p>Written in Rust and drawn on the GPU. Opens in a blink.</p></div>
-          <div><h3>Yours.</h3><p>Local-first. Your mail stays on your computer and your server.</p></div>
-          <div><h3>Lagom.</h3><p>No AI features, no team features, no sign-up wall.</p></div>
+          <div><h3>Fast</h3><p>Written in Rust and drawn on the GPU.</p></div>
+          <div><h3>Local-first</h3><p>Your mail stays on your computer and your server.</p></div>
+          <div><h3>Nothing extra</h3><p>No AI features, no team features, no sign-up wall.</p></div>
         </div>
       </section>
     </main>
