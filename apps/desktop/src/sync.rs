@@ -1015,7 +1015,9 @@ mod tests {
         let requests = http_server.await.unwrap();
         assert!(requests[5].starts_with("POST /lists/work/tasks "));
         assert!(requests[5].contains("Edited during IMAP"));
-        std::fs::remove_file(path).unwrap();
+        drop(editor);
+        // The pinned worker still holds the database open here, and Windows cannot delete an open file.
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
