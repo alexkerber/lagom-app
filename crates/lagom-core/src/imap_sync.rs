@@ -134,6 +134,8 @@ pub struct ImapSync {
     session: Session<Bounded<Wire>>,
     capabilities: Capabilities,
     refresh_error: Option<Error>,
+    /// Kept to reconnect after a message whose response left the session unusable.
+    password: zeroize::Zeroizing<String>,
 }
 impl ImapSync {
     pub async fn login(account: &Account, password: &str) -> Result<Self> {
@@ -157,7 +159,30 @@ impl ImapSync {
             session,
             capabilities,
             refresh_error: None,
+            password: zeroize::Zeroizing::new(password.to_owned()),
         })
+    }
+    /// A fresh session with `folder` selected again, as it was before the failed command.
+    async fn reconnect(&mut self, store: &mut Store, folder: &Folder) -> Result<()> {
+        let fresh = Self::login(&self.account, &self.password).await?;
+        (self.session, self.capabilities) = (fresh.session, fresh.capabilities);
+        let (selected, _) = self.select(store, folder.id).await?;
+        if selected.uidvalidity != folder.uidvalidity {
+            return Err(Error::Invalid("mailbox changed; resync"));
+        }
+        Ok(())
+    }
+    /// False when the message failed on a fresh session too; the session is usable either way.
+    async fn try_fetch(&mut self, store: &mut Store, folder: &Folder, uid: u32) -> Result<bool> {
+        for _ in 0..2 {
+            match self.fetch_message(store, folder, uid).await {
+                Ok(()) => return Ok(true),
+                Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
+                // A rejected response may be half-read; the first retry also covers a dropped connection.
+                Err(_) => self.reconnect(store, folder).await?,
+            }
+        }
+        Ok(false)
     }
     /// A confirmed move can succeed while its subsequent refresh fails.
     pub fn take_refresh_error(&mut self) -> Option<Error> {
@@ -265,13 +290,18 @@ impl ImapSync {
             sorted.iter().filter(|u| **u > last).copied().collect()
         };
         for &uid in &candidates {
-            if !known.contains(&uid) {
-                self.fetch_message(store, &folder, uid).await?;
+            if !known.contains(&uid) && !self.try_fetch(store, &folder, uid).await? {
+                // Otherwise one unreadable message holds the checkpoint below it on every sync.
+                let mut message = mime::placeholder();
+                message.summary.subject = "(message could not be read)".into();
+                message.body_text = "Lagom could not read this message. Open it in another mail app.".into();
+                self.save(store, &folder, uid, None, message, &[])?;
             }
         }
         for uid in store.missing_metadata(id, limit)? {
             if present.contains(&uid) {
-                self.fetch_message(store, &folder, uid).await?;
+                // On failure the stored row stays as it is.
+                self.try_fetch(store, &folder, uid).await?;
             }
         }
         let query =
@@ -346,7 +376,7 @@ impl ImapSync {
         // never stops the folder's later UIDs.
         if header.len() >= 262144 {
             let message = mime::metadata_only(header).unwrap_or_else(|_| mime::placeholder());
-            return self.save(store, folder, uid, fetch, message, &attachments).map(|_| ());
+            return self.save(store, folder, uid, Some(fetch), message, &attachments).map(|_| ());
         }
         let mut message;
         // The first text part (search, and the reading pane where HTML does not render) and the
@@ -357,7 +387,7 @@ impl ImapSync {
             message = mime::parse(header)?;
         } else {
             if picks.iter().map(|p| p.2 as usize).sum::<usize>() > mime::MAX_MIME_BYTES {
-                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments).map(|_| ());
+                return self.save(store, folder, uid, Some(fetch), mime::metadata_only(header)?, &attachments).map(|_| ());
             }
             let section = |path: &[u32]| path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
             // GreenMail emits malformed partial text responses; check octets before full part fetch.
@@ -391,7 +421,7 @@ impl ImapSync {
                 .ok_or(Error::Network("MIME text part missing"))?;
                 total += headers.len() + text.len();
                 if headers.len() >= 65536 || total > mime::MAX_MIME_BYTES {
-                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments).map(|_| ());
+                    return self.save(store, folder, uid, Some(fetch), mime::metadata_only(header)?, &attachments).map(|_| ());
                 }
                 let mut raw = headers.to_vec();
                 if !raw.ends_with(b"\r\n") {
@@ -417,12 +447,12 @@ impl ImapSync {
             message.summary.snippet = mime::snippet(&message.body_text, message.body_html.as_deref());
         }
         let inline = self.inline_parts(uid, body, message.body_html.as_deref().unwrap_or_default()).await?;
-        let id = self.save(store, folder, uid, fetch, message, &attachments)?;
+        let id = self.save(store, folder, uid, Some(fetch), message, &attachments)?;
         store.save_inline_parts(id, &inline)
     }
     /// Fills the IMAP-side fields of a parsed message and stores it.
-    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: &[Attachment]) -> Result<i64> {
-        let (seen, flagged) = flags(fetch);
+    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: Option<&Fetch>, mut message: Message, attachments: &[Attachment]) -> Result<i64> {
+        let (seen, flagged) = fetch.map(flags).unwrap_or_default();
         let m = &mut message.summary;
         m.account = self.account.id.clone();
         m.folder = folder.id;
@@ -437,10 +467,10 @@ impl ImapSync {
         m.seen = seen;
         m.flagged = flagged;
         m.has_attachments = !attachments.is_empty();
-        m.size = fetch.size.unwrap_or_default();
+        m.size = fetch.and_then(|f| f.size).unwrap_or_default();
         if m.date == 0 {
             m.date = fetch
-                .internal_date()
+                .and_then(|f| f.internal_date())
                 .map(|d| d.timestamp())
                 .unwrap_or_default();
         }
@@ -912,7 +942,7 @@ mod protocol_tests {
         let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities, refresh_error: None };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, password: Default::default() };
         let start = tokio::time::Instant::now();
         let result = imap.all_uids().await;
         assert!(matches!(result, Err(Error::Network("IMAP operation timed out"))), "{result:?}");
@@ -956,11 +986,73 @@ mod protocol_tests {
         let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities, refresh_error: None };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, password: Default::default() };
         let result = tokio::time::timeout(Duration::from_secs(2), imap.fetch_attachment(&mut store, id, "1")).await;
         drop(imap);
         server.await.unwrap();
         assert!(result.expect("must reject the literal header without waiting for its body").is_err());
+    }
+
+    #[tokio::test]
+    async fn unreadable_message_is_skipped_and_the_checkpoint_moves() {
+        // UID 2 has 39 nested multiparts: the wire guard rejects its FETCH and the session.
+        let text = r#"("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1)"#;
+        let deep = format!("{}{text}{}", "(".repeat(39), " \"MIXED\")".repeat(39));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else { return };
+                let deep = deep.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = socket.into_split();
+                    let mut r = BufReader::new(r);
+                    w.write_all(b"* OK fake\r\n").await.unwrap();
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                        let mut out = String::new();
+                        if cmd.starts_with("LIST") { out += "* LIST () \"/\" \"INBOX\"\r\n"; }
+                        else if cmd == "CAPABILITY" { out += "* CAPABILITY IMAP4rev1\r\n"; }
+                        else if cmd.starts_with("SELECT") { out += "* 3 EXISTS\r\n* OK [UIDVALIDITY 7] v\r\n* OK [UIDNEXT 4] n\r\n"; }
+                        else if cmd == "UID SEARCH ALL" { out += "* SEARCH 1 2 3\r\n"; }
+                        else if let Some(rest) = cmd.strip_prefix("UID FETCH ") {
+                            let (set, items) = rest.split_once(' ').unwrap();
+                            for uid in set.split(',').filter_map(|u| u.parse::<u32>().ok()) {
+                                if items.contains("BODYSTRUCTURE") {
+                                    let header = format!("From: a@example.com\r\nSubject: mail {uid}\r\nMessage-ID: <{uid}@x>\r\n\r\n");
+                                    let body = if uid == 2 { deep.as_str() } else { text };
+                                    out += &format!("* {uid} FETCH (UID {uid} FLAGS () RFC822.SIZE 10 BODYSTRUCTURE {body} BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len());
+                                } else if items.contains("BODY.PEEK[TEXT]") {
+                                    out += &format!("* {uid} FETCH (UID {uid} BODY[TEXT] {{4}}\r\nbody)\r\n");
+                                } else {
+                                    out += &format!("* {uid} FETCH (UID {uid} FLAGS ())\r\n");
+                                }
+                            }
+                        } else if cmd == "LOGOUT" { out += "* BYE bye\r\n"; }
+                        out += &format!("{tag} OK done\r\n");
+                        if w.write_all(out.as_bytes()).await.is_err() { return; }
+                    }
+                });
+            }
+        });
+        let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "u".into() };
+        let account = Account::new("u@example.com".into(), config.clone(), config).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+        store.save_account(&account).unwrap();
+        for _ in 0..2 {
+            let mut imap = ImapSync::login(&account, "pw").await.unwrap();
+            imap.sync(&mut store, DEFAULT_LIMIT).await.unwrap();
+            imap.logout().await.unwrap();
+            let inbox = store.folders(&account.id, 0).unwrap().into_iter().find(|f| f.name == "INBOX").unwrap();
+            assert_eq!(inbox.last_uid, 3);
+            let mut stored: Vec<_> = store.list_messages(inbox.id, i64::MAX, 100, 0).unwrap().into_iter().map(|m| (m.uid, m.subject)).collect();
+            stored.sort();
+            assert_eq!(stored, [(1, "mail 1".into()), (2, "(message could not be read)".into()), (3, "mail 3".into())]);
+        }
+        server.abort();
     }
 
     #[tokio::test]
