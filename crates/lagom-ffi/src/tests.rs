@@ -170,6 +170,62 @@ async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
     }).await.unwrap();
 }
 
+#[tokio::test]
+async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for all in [false, true] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let (_dir, core) = fixture();
+            let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
+            let server = tokio::spawn(async move {
+                let mut selected = Vec::new();
+                for connection in 0..2 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = BufReader::new(socket);
+                    socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                    let mut failed = false;
+                    loop {
+                        let mut line = String::new();
+                        if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                        assert!(!failed, "a failed session must be dropped without another command");
+                        let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                        let data = if cmd.starts_with("LOGIN ") { String::new() }
+                        else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n".into() }
+                        else if cmd.starts_with("LIST ") {
+                            "* LIST (\\Archive) NIL \"Archive\"\r\n* LIST () NIL \"INBOX\"\r\n* LIST (\\Sent) NIL \"Sent\"\r\n".into()
+                        } else if let Some(name) = cmd.strip_prefix("SELECT ") {
+                            selected.push((connection, name.to_owned()));
+                            if name == "\"Archive\"" {
+                                failed = true;
+                                socket.get_mut().write_all(format!("{tag} NO refused\r\n").as_bytes()).await.unwrap();
+                                continue;
+                            }
+                            "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+                        } else if cmd == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
+                        else if cmd.contains("BODYSTRUCTURE") {
+                            let header = "From: sender@example.test\r\nSubject: Fixture\r\nMessage-ID: <fixture@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                            format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                        } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                        else if cmd == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
+                        else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                        else { panic!("unexpected command {cmd}"); };
+                        socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                        if cmd == "LOGOUT" { break; }
+                    }
+                }
+                selected
+            });
+            let result = if all { core.sync_all().await } else { core.sync(a.id.clone()).await };
+            assert!(result.unwrap_err().to_string().contains("Archive"));
+            let inbox = core.inbox(10, 0).await.unwrap();
+            assert_eq!(inbox.len(), 1, "Archive failure must not prevent incoming mail");
+            assert_eq!(core.message(inbox[0].id).await.unwrap().text_body, "body");
+            assert_eq!(core.mailbox(Some(a.id), Mailbox::Sent, 10, 0).await.unwrap().len(), 1);
+            assert_eq!(server.await.unwrap(), [(0, "\"INBOX\"".into()), (0, "\"Archive\"".into()), (1, "\"Sent\"".into())]);
+        }
+    }).await.unwrap();
+}
+
 #[test]
 fn local_later_is_tomorrow_at_eight() {
     use chrono::{Local, TimeZone, Timelike};

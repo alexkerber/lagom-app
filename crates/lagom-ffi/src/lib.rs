@@ -110,9 +110,24 @@ async fn sync_account(store: &mut Store, a: &Account) -> lagom_core::Result<()> 
         }
     }
     let mut session = ImapSync::login(a, &password).await?;
-    let result = session.sync(store, DEFAULT_LIMIT).await;
-    if result.is_ok() { let _ = session.logout().await; }
-    result?;
+    let mut folders = session.list_folders(store).await?;
+    folders.sort_by_key(|f| f.role != FolderRole::Inbox);
+    let mut session = Some(session);
+    let mut first = None;
+    for folder in folders {
+        let result = async {
+            if session.is_none() { session = Some(ImapSync::login(a, &password).await?); }
+            session.as_mut().unwrap().sync_folder(store, folder.id, DEFAULT_LIMIT).await
+        }.await;
+        if let Err(e) = result {
+            // A failed session may hold a half-read response; reconnect for the next folder.
+            session = None;
+            if e.is_account_wide() { return Err(e); }
+            first.get_or_insert(lagom_core::Error::Folder { folder: folder.name, source: Box::new(e) });
+        }
+    }
+    if let Some(session) = session { let _ = session.logout().await; }
+    if let Some(error) = first { return Err(error); }
     match error { Some(error) => Err(error), None => Ok(()) }
 }
 
