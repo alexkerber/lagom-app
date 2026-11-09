@@ -375,7 +375,7 @@ impl MainWindow {
                 None
             }
         };
-        let panes = match preferences_path.as_ref().map(|p| Panes::load(p, viewport)).transpose() {
+        let panes = match preferences_path.as_ref().map(|p| panes::Writes::load(p, viewport, cx)).transpose() {
             Ok(panes) => panes.unwrap_or_else(|| Panes::new(viewport)),
             Err(e) => {
                 preference_problem = Some(format!("Could not read window preferences: {e}"));
@@ -1245,9 +1245,7 @@ impl MainWindow {
 
     fn save_panes(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = &self.preferences_path {
-            if let Err(e) = self.panes.save(path) {
-                self.notify(format!("Could not save window preferences: {e}"), cx);
-            }
+            panes::Writes::save(self.panes, path.clone(), cx);
         }
     }
 

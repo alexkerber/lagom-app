@@ -108,17 +108,95 @@ mod tests {
         }
     }
 
-    #[test]
-    fn saved_calendar_and_other_sections_restore() {
-        let path = std::env::temp_dir().join(format!("lagom-start-page-{}.json", std::process::id()));
-        for page in [StartPage::Calendar, StartPage::Home, StartPage::Todo, StartPage::Mail] {
-            let mut panes = Panes::new(1440.);
-            panes.start_page = page;
-            panes.save(&path).unwrap();
-            let restored = Page::restore(Panes::load(&path, 1440.).unwrap().start_page);
-            assert!(matches!((restored, page), (Page::Calendar, StartPage::Calendar) | (Page::Home, StartPage::Home) | (Page::Todo, StartPage::Todo) | (Page::Mail, StartPage::Mail)));
-        }
+    #[gpui::test]
+    fn review_navigation_defers_preference_io(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-deferred-page-{}.json", std::process::id()));
+        let original = Panes::new(1440.);
+        original.save(&path).unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update_in(cx, |v, window, cx| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            for section in [2, 3, 0] { v.show_section(section, window, cx); }
+            assert!(matches!(v.page, Page::Home));
+            assert_eq!(Panes::load(&path, 1440.).unwrap(), original, "navigation must return before file I/O");
+        });
+        cx.run_until_parked();
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Home);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_blocked_preference_writes_keep_navigation_responsive_and_ordered(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-ordered-page-{}.json", std::process::id()));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, cx| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            v.save_panes(cx);
+        });
+        cx.run_until_parked();
+        let original = Panes::load(&path, 1440.).unwrap();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        view.update(cx, |_, cx| {
+            let tail = cx.background_executor().spawn(async move { wait.await.unwrap(); });
+            cx.global_mut::<panes::Writes>().tail = Some(tail);
+        });
+        for section in [2, 3, 2] {
+            view.update_in(cx, |v, window, cx| {
+                v.show_section(section, window, cx);
+                assert!(matches!((&v.page, section), (Page::Calendar, 2) | (Page::Todo, 3)));
+            });
+            cx.run_until_parked();
+            assert_eq!(Panes::load(&path, 1440.).unwrap(), original);
+        }
+        view.update(cx, |v, cx| {
+            v.toggle_notifications(cx);
+            assert_eq!(panes::Writes::load(&path, 1440., cx).unwrap(), v.panes);
+        });
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        resume.send(()).unwrap();
+        cx.run_until_parked();
+        let saved = Panes::load(&path, 1440.).unwrap();
+        assert_eq!(saved.start_page, StartPage::Calendar);
+        assert!(!saved.notifications);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_quit_flushes_queued_preferences(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-quit-page-{}.json", std::process::id()));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, cx| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            v.set_page(Page::Calendar, cx);
+            v.set_page(Page::Todo, cx);
+        });
+        cx.cx.update(|cx| cx.shutdown());
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Todo);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_preference_errors_are_reported_and_later_writes_continue(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("lagom-page-error-{}.json", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("window.json");
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, cx| {
+            v.demo = false;
+            v.preferences_path = Some(dir.clone());
+            v.set_page(Page::Calendar, cx);
+            v.preferences_path = Some(path.clone());
+            v.set_page(Page::Todo, cx);
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.toast.as_ref().unwrap().0.starts_with("Could not save window preferences:")));
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Todo);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[gpui::test]
@@ -132,11 +210,13 @@ mod tests {
         });
         for (section, page) in [(2, StartPage::Calendar), (3, StartPage::Todo), (0, StartPage::Home), (1, StartPage::Mail), (2, StartPage::Calendar)] {
             view.update_in(cx, |v, window, cx| v.show_section(section, window, cx));
+            cx.run_until_parked();
             let saved = Panes::load(&path, 1440.).unwrap();
             assert_eq!(saved.start_page, page);
             assert!(!saved.group_conversations);
         }
         view.update(cx, |v, cx| v.open_settings(cx));
+        cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(_))));
         assert!(matches!(Page::restore(Panes::load(&path, 1440.).unwrap().start_page), Page::Mail));
         view.update_in(cx, |v, window, cx| {
@@ -145,6 +225,7 @@ mod tests {
             v.resize_to(px(240.), window, cx);
             v.finish_resize(cx);
         });
+        cx.run_until_parked();
         assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Calendar);
         std::fs::remove_file(path).unwrap();
     }

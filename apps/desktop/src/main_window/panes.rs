@@ -7,6 +7,61 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Default)]
+pub(super) struct Writes {
+    pending: std::collections::HashMap<std::path::PathBuf, (Panes, usize)>,
+    pub tail: Option<gpui::Task<()>>,
+}
+
+impl gpui::Global for Writes {}
+
+impl Writes {
+    pub fn load(path: &Path, viewport: f32, cx: &gpui::App) -> anyhow::Result<Panes> {
+        // Reopening and notifications must see changes still waiting for disk.
+        match cx.try_global::<Self>().and_then(|writes| writes.pending.get(path)) {
+            Some((panes, _)) => Ok(*panes),
+            None => Panes::load(path, viewport),
+        }
+    }
+
+    pub fn save(panes: Panes, path: std::path::PathBuf, cx: &mut gpui::Context<super::MainWindow>) {
+        if !cx.has_global::<Self>() {
+            cx.set_global(Self::default());
+            gpui::App::on_app_quit(cx, |cx| {
+                let tail = cx.global_mut::<Self>().tail.take();
+                // shortcut: GPUI allows 100 ms at quit, extend shutdown handling if slow storage exceeds it.
+                async move { if let Some(tail) = tail { tail.await; } }
+            }).detach();
+        }
+        let writes = cx.global_mut::<Self>();
+        let pending = writes.pending.entry(path.clone()).or_insert((panes, 0));
+        *pending = (panes, pending.1 + 1);
+        let previous = writes.tail.take();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let target = path.clone();
+        let tail = cx.background_executor().spawn(async move {
+            if let Some(previous) = previous { previous.await; }
+            let result = panes.save(&target).map_err(|e| format!("Could not save window preferences: {e}"));
+            if let Err(error) = &result { eprintln!("{error}"); }
+            let _ = tx.send(result);
+        });
+        cx.global_mut::<Self>().tail = Some(tail);
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else { return };
+            cx.update(|cx| {
+                let writes = cx.global_mut::<Self>();
+                if let Some((_, remaining)) = writes.pending.get_mut(&path) {
+                    *remaining -= 1;
+                    if *remaining == 0 { writes.pending.remove(&path); }
+                }
+                if let Err(error) = result {
+                    this.update(cx, |this, cx| this.notify(error, cx)).ok();
+                }
+            }).ok();
+        }).detach();
+    }
+}
+
 pub(super) const SIDEBAR_DEFAULT: f32 = 220.;
 pub(super) const SIDEBAR_MIN: f32 = 180.;
 const SIDEBAR_MAX: f32 = 320.;

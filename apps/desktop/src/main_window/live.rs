@@ -119,7 +119,7 @@ pub(crate) fn notify_without_window(messages: Vec<lagom_core::store::MessageSumm
     if messages.is_empty() { return; }
     let Some(mail) = cx.try_global::<Mail>() else { return };
     let store = mail.store.clone();
-    match Panes::load(&store.path().with_file_name("window.json"), 1440.) {
+    match panes::Writes::load(&store.path().with_file_name("window.json"), 1440., cx) {
         Ok(panes) if panes.notifications => show_mail(&store, messages, cx),
         Ok(_) => {},
         Err(error) => eprintln!("Could not read notification preferences: {error}"),
@@ -1215,6 +1215,58 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use lagom_core::account::{Security, ServerConfig};
+
+    #[gpui::test]
+    fn review_normal_startup_restores_saved_pages(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("lagom-startup-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let store = Rc::new(Store::open(dir.join("mail.sqlite3")).unwrap());
+        let (bridge, _rx) = Bridge::detached();
+        cx.update(|cx| cx.set_global(Mail {
+            store, bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: Task::ready(()),
+        }));
+        let path = dir.join("window.json");
+        for page in [StartPage::Calendar, StartPage::Home, StartPage::Todo, StartPage::Mail] {
+            let mut panes = Panes::new(1440.);
+            panes.start_page = page;
+            panes.save(&path).unwrap();
+            let handle = cx.update(|cx| crate::open_main_window(false, cx).unwrap());
+            handle.update(cx, |v, window, _| {
+                assert!(!v.demo);
+                assert_eq!(v.preferences_path.as_ref(), Some(&path));
+                assert!(matches!((&v.page, page), (Page::Calendar, StartPage::Calendar) | (Page::Home, StartPage::Home) | (Page::Todo, StartPage::Todo) | (Page::Mail, StartPage::Mail)));
+                window.remove_window();
+            }).unwrap();
+            cx.run_until_parked();
+        }
+        let handle = cx.update(|cx| crate::open_main_window(false, cx).unwrap());
+        handle.update(cx, |v, _, cx| v.save_panes(cx)).unwrap();
+        cx.run_until_parked();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        cx.update(|cx| {
+            let tail = cx.background_executor().spawn(async move { wait.await.unwrap(); });
+            cx.global_mut::<panes::Writes>().tail = Some(tail);
+        });
+        handle.update(cx, |v, window, cx| {
+            v.show_section(2, window, cx);
+            window.remove_window();
+        }).unwrap();
+        cx.run_until_parked();
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Mail);
+        let handle = cx.update(|cx| crate::open_main_window(false, cx).unwrap());
+        handle.update(cx, |v, window, cx| {
+            assert!(matches!(v.page, Page::Calendar));
+            v.show_section(3, window, cx);
+            window.remove_window();
+        }).unwrap();
+        resume.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Todo);
+        cx.update(|cx| cx.remove_global::<Mail>());
+        for entry in std::fs::read_dir(&dir).unwrap() { std::fs::remove_file(entry.unwrap().path()).unwrap(); }
+        std::fs::remove_dir(dir).unwrap();
+    }
 
     /// A demo window with a live side whose worker is `rx`: kept alive it never answers,
     /// dropped it has stopped.

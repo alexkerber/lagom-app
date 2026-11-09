@@ -87,7 +87,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 ## Calendar
 
-- [x] Start page: restore Today, Mail, Calendar or Todo from the existing window preferences, saved on each page change. First start and Settings fall back to Mail. Demo defaults to Mail, keeps launch-screen overrides and never saves the page; fixture/headless regressions cover defaults, restoration, navigation and demo isolation.
+- [x] Start page: restore Today, Mail, Calendar or Todo from the existing window preferences, queued off the UI thread on each page change. All window preference writes retain their order across window closure, report failures, and expose pending values to reopening and notifications. First start and Settings fall back to Mail. Demo defaults to Mail, keeps launch-screen overrides and never saves the page; fixture/headless regressions cover normal window startup, blocked writes, ordering, errors, reopening, navigation and demo isolation. GPUI's 100 ms quit deadline still limits flushing on slow storage; native Windows timing remains unverified.
 
 Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last section.
 
