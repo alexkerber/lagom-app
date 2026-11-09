@@ -499,3 +499,35 @@ async fn review_task_responses_remain_bounded() {
     assert!(matches!(result, Err(Error::Network("HTTP response too large"))));
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn remote_list_deletion_never_uploads_work_tasks_to_personal_default() {
+    let (_dir, mut store, personal, default) = setup(true);
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let work = Account::new("work@example.test".into(), imap, smtp).unwrap();
+    store.save_authorized_account(&work, oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+    let list = store.add_task_list("Extra").unwrap().id;
+    store.db.execute("UPDATE task_lists SET account=?2,remote_id='extra',dirty=0 WHERE id=?1", params![list, work.id]).unwrap();
+    let task = store.add_task(list, "Work task", "Private work notes", None).unwrap();
+    store.db.execute("UPDATE tasks SET remote_id='old-task',remote_list_id='extra',dirty=0,mail_account=?2,mail_message_id='<work@example.test>',mail_subject='Work mail' WHERE id=?1", params![task.id, work.id]).unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+    assert!(store.tasks(default, true).unwrap().is_empty(), "work tasks must never enter the personal default list");
+    assert_eq!(store.task_lists().unwrap().iter().find(|l| l.id == list).unwrap().account.as_deref(), Some(work.id.as_str()));
+    let kept = store.tasks(list, true).unwrap().remove(0);
+    assert_eq!((kept.id, kept.notes.as_str(), kept.mail_account.as_deref(), kept.mail_message_id.as_deref(), kept.mail_subject.as_deref()),
+        (task.id, "Private work notes", Some(work.id.as_str()), Some("<work@example.test>"), Some("Work mail")));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &personal.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ") && !r.contains("Private work notes")));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", r#"{"id":"recovered","title":"Extra"}"#),
+        ("200 OK", TASK), ("200 OK", EMPTY), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(requests[1].starts_with("POST /users/@me/lists "));
+    assert!(requests[2].starts_with("POST /lists/recovered/tasks "));
+    assert!(requests[2].contains("Private work notes") && requests[2].contains(&work.id));
+    assert_eq!(store.tasks(list, true).unwrap()[0].id, task.id);
+    assert_eq!(store.default_task_list().unwrap(), default);
+}

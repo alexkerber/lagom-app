@@ -119,6 +119,43 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn failed_account_removal_resumes_task_scheduling() {
+        let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
+        let mut account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+        account.auth = lagom_core::account::Auth::OAuth(Provider::Google);
+        let path = std::env::temp_dir().join(format!("lagom-task-removal-{}.db", account.id));
+        let store = Store::open(&path).unwrap();
+        store.save_authorized_account(&account, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let (task_tx, mut task_rx) = unbounded_channel();
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), task_sync: Some(task_tx), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut tasks = TaskWorker::new(Store::open(&path).unwrap(), worker.me.clone(), worker.events.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        tasks.endpoint = Some(format!("http://{}/", listener.local_addr().unwrap()));
+        tasks.tick.tick().await;
+        tasks.pause(&account.id);
+        worker.remove_with(&account.id, |removing| {
+            assert_eq!(removing.id, account.id);
+            Err(Error::Secret)
+        });
+        while !task_rx.is_empty() { assert!(tasks.step(&mut task_rx).await); }
+        assert_eq!(worker.store.accounts().unwrap(), [account.clone()]);
+        assert!(matches!(out.try_recv().unwrap(), Event::Sync(id, SyncState::Failed(_)) if id == account.id));
+        worker.sync_tasks(&account);
+        assert!(tasks.step(&mut task_rx).await);
+        assert!(tasks.task_jobs.contains_key(&account.id), "failed removal must allow manual task sync to start again");
+        tasks.pause(&account.id);
+        worker.remove_with(&account.id, |_| Ok(()));
+        while !task_rx.is_empty() { assert!(tasks.step(&mut task_rx).await); }
+        assert!(worker.store.accounts().unwrap().is_empty());
+        assert!(tasks.paused.contains(&account.id), "successful removal must stay paused");
+        drop(tasks);
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn task_edits_debounce_jobs_deduplicate_and_cancelled_results_stay_quiet() {
         let path = std::env::temp_dir().join(format!("lagom-task-jobs-{}-{}.db", std::process::id(), now()));
         let store = Store::open(&path).unwrap();

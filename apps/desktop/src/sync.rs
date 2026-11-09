@@ -504,6 +504,10 @@ impl Worker {
     }
 
     fn remove(&mut self, id: &str) {
+        self.remove_with(id, Account::delete_password);
+    }
+
+    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>) {
         self.cancel_calendar(id);
         if self.reauth.as_deref() == Some(id) { self.cancel_sign_in(); }
         if let Some(task) = self.idle.remove(id) {
@@ -512,7 +516,8 @@ impl Worker {
         self.sessions.remove(id);
         if let Ok(account) = self.account(id) {
             // Keep the row while the secret stays: without it nobody could find the secret again.
-            if account.delete_password().is_err() {
+            if delete_password(&account).is_err() {
+                if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(id.into())); }
                 self.emit(Event::Sync(id.to_string(), SyncState::Failed("could not remove the saved password; try Remove again".into())));
                 self.emit(Event::Changed);
                 return;

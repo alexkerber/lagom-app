@@ -249,7 +249,10 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             if let Some(remote) = remote.iter().find(|r| r.id == *remote_id) {
                 store.db.execute("UPDATE task_lists SET name=?2,etag=?3,remote_updated=?4 WHERE id=?1 AND dirty=0 AND deleted=0", params![list.id, remote.title, remote.etag, remote.updated])?;
             } else if !list.dirty {
-                if list.id == store.default_task_list()? {
+                let default = store.default_task_list()?;
+                let owner: Option<String> = store.db.query_row("SELECT account FROM task_lists WHERE id=?1", [default], |r| r.get(0))?;
+                // Recovery must not upload private tasks through another account's default list.
+                if list.id == default || owner.as_deref() != Some(account) {
                     store.db.execute("UPDATE task_lists SET remote_id=NULL,dirty=1,pulled_through=NULL WHERE id=?1", [list.id])?;
                     store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,dirty=1 WHERE list=?1", [list.id])?;
                 } else {

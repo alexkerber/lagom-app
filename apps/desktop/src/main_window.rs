@@ -3971,7 +3971,7 @@ mod dispatch {
         frame(cx);
         assert!(cx.debug_bounds("default-task-lists").is_none());
         view.update(cx, |v, cx| {
-            v.today.lists.push(lagom_core::tasks::TaskList { id: 1, account: None, remote_id: None, name: "Tasks".into(), position: 0 });
+            v.today.lists.push(lagom_core::tasks::TaskList { id: 1, account: None, remote_id: None, name: "Tasks".into(), position: 0, google_default: false });
             v.today.default = Some(1);
             cx.notify();
         });
