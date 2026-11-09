@@ -90,10 +90,10 @@ const SNIPPET_LINES: usize = 2;
 const ROW_H: f32 = 2. * ROW_PAD + 2. * ROW_GAP + (2. * size::BASE + SNIPPET_LINES as f32 * size::SNIPPET) * LEADING;
 
 /// Selection highlight moving to the row J, K or a click selected.
-const GLIDE: Duration = Duration::from_millis(260);
+const GLIDE: Duration = Duration::from_millis(140);
 /// A press while the highlight still glides (a held arrow key) takes this shorter curve, so the
 /// highlight keeps up with key repeat instead of trailing rows behind.
-const GLIDE_REPEAT: Duration = Duration::from_millis(120);
+const GLIDE_REPEAT: Duration = Duration::from_millis(70);
 /// Padding around the rows in the list.
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
