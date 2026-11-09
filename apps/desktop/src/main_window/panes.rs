@@ -64,15 +64,15 @@ impl Panes {
         if !self.sidebar_hidden {
             self.sidebar = width
                 .clamp(SIDEBAR_MIN, SIDEBAR_MAX)
-                .min(viewport - PANEL_INSET - READING_MIN - LIST_MIN);
+                .min((viewport - PANEL_INSET - READING_MIN - LIST_MIN).max(SIDEBAR_MIN));
         }
-        self.list = list.min(viewport - PANEL_INSET - READING_MIN - self.fit(viewport).0);
+        self.list = list.min((viewport - PANEL_INSET - READING_MIN - self.fit(viewport).0).max(LIST_MIN));
     }
 
     pub fn resize_list(&mut self, width: f32, viewport: f32) {
         self.list = width
             .clamp(LIST_MIN, LIST_MAX)
-            .min(viewport - PANEL_INSET - READING_MIN - self.fit(viewport).0);
+            .min((viewport - PANEL_INSET - READING_MIN - self.fit(viewport).0).max(LIST_MIN));
     }
 
     pub fn load(path: &Path, viewport: f32) -> anyhow::Result<Self> {
@@ -140,6 +140,18 @@ pub(super) fn default_list(viewport: f32, sidebar: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_window_resizing_keeps_valid_pane_preferences() {
+        for width in [720., 800., 899.] {
+            let mut panes = Panes::new(width);
+            panes.resize_sidebar(220., width);
+            panes.resize_list(320., width);
+            let (sidebar, list) = panes.fit(width);
+            assert!(panes.sidebar >= SIDEBAR_MIN && panes.list >= LIST_MIN);
+            assert!(sidebar + list + PANEL_INSET < width);
+        }
+    }
 
     #[test]
     fn old_preferences_group_by_default_and_off_roundtrips() {

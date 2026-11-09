@@ -160,7 +160,6 @@ impl Compose {
                             .debug_selector(move || format!("suggestion-{field}-{at}"))
                             .px(px(10.)).py(px(6.)).text_color(t.ink)
                             .when(at == self.addresses.selected, |d| d.bg(t.sel))
-                            .when(at != self.addresses.selected, |d| d.hover(move |s| s.bg(t.subtle)))
                             .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| { window.prevent_default(); cx.stop_propagation(); })
                             .on_mouse_up(gpui::MouseButton::Left, cx.listener(move |this, _, _, cx| { this.accept_address(field, at, cx); cx.stop_propagation(); }))
                             .child(contact.recipient())

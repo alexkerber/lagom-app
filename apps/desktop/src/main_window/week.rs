@@ -9,7 +9,7 @@ pub(super) struct Week {
     start: NaiveDate,
     days: Vec<Vec<AgendaEvent>>,
     windows: Vec<Option<(i64, i64)>>,
-    detail: Option<AgendaEvent>,
+    pub(super) detail: Option<AgendaEvent>,
     scroll: ScrollHandle,
     tick: Option<Task<()>>,
     loaded_day: Option<NaiveDate>,
@@ -132,7 +132,7 @@ impl MainWindow {
         }
     }
 
-    fn move_week(&mut self, delta: i64, cx: &mut Context<Self>) {
+    pub(super) fn move_week(&mut self, delta: i64, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.week.start = if delta == 0 { monday(chrono::Local::now().date_naive()) }
             else { self.week.start.checked_add_signed(chrono::Duration::weeks(delta)).unwrap_or(self.week.start) };
@@ -183,9 +183,9 @@ impl MainWindow {
             .child(div().flex().items_center().gap(px(8.))
                 .child(div().flex_1().text_size(px(size::TITLE)).font_weight(FontWeight::SEMIBOLD).child("Calendar"))
                 .child(mono(format!("{} – {}", start.format("%-d %b %Y"), (start + chrono::Duration::days(6)).format("%-d %b %Y")), t.ink2))
-                .child(button(&t, "‹", None).debug_selector(|| "previous-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(-1, cx))))
+                .child(icon_button(&t, "previous-week", "icons/chevron-left.svg", "Previous week · ←").debug_selector(|| "previous-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(-1, cx))))
                 .child(button(&t, "Today", None).on_click(cx.listener(|this, _, _, cx| this.move_week(0, cx))))
-                .child(button(&t, "›", None).debug_selector(|| "next-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(1, cx)))));
+                .child(icon_button(&t, "next-week", "icons/chevron-right.svg", "Next week · →").debug_selector(|| "next-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(1, cx)))));
         page = page.child(self.calendar_controls(cx));
         if !allowed { return page; }
         let mut headers = div().flex().flex_shrink_0().pl(px(48.));
@@ -342,12 +342,12 @@ mod tests {
         view.update(cx, |v, cx| {
             assert!(v.live.is_none());
             assert_eq!(v.week.days[day], v.today.events);
-            assert_eq!(v.week.days.iter().map(Vec::len).sum::<usize>(), 3);
+            assert_eq!(v.week.days.iter().map(Vec::len).sum::<usize>(), 4);
             v.move_week(1, cx);
             assert!(v.week.days.iter().all(Vec::is_empty));
             v.move_week(-1, cx);
             assert_eq!(v.week.days[day], v.today.events);
-            assert_eq!(v.week.days.iter().map(Vec::len).sum::<usize>(), 3);
+            assert_eq!(v.week.days.iter().map(Vec::len).sum::<usize>(), 4);
         });
     }
 
