@@ -81,7 +81,8 @@ impl LagomCore {
         let stores = self.stores.clone();
         // Network futures borrow SQLite across awaits; a separate WAL connection keeps local work available.
         tokio::task::spawn_blocking(move || {
-            let mut store = (if network { &stores.network } else { &stores.local }).lock().map_err(|_| failure("mail worker stopped; reopen the app"))?;
+            // A panic in one action must not disable the app: SQLite transactions keep the store consistent.
+            let mut store = (if network { &stores.network } else { &stores.local }).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             action(&mut store).map_err(MailError::from)
         }).await.map_err(|_| failure("mail worker stopped unexpectedly"))?
     }

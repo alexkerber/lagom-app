@@ -458,3 +458,12 @@ async fn next_snooze_uses_earliest_future_deadline_across_accounts() {
     core.stores.local.lock().unwrap().snooze(first, None).unwrap();
     assert_eq!(core.next_snooze().await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn a_panic_in_one_action_leaves_the_store_usable() {
+    let (_dir, core) = fixture();
+    for network in [false, true] {
+        assert!(core.run_on(network, |_| -> lagom_core::Result<()> { panic!("action panicked") }).await.is_err());
+        assert!(core.run_on(network, |s| s.accounts()).await.unwrap().is_empty());
+    }
+}
