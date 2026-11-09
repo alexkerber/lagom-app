@@ -1,6 +1,32 @@
 use super::*;
 
+impl Page {
+    pub(super) fn restore(page: StartPage) -> Self {
+        match page {
+            StartPage::Home => Self::Home,
+            StartPage::Mail => Self::Mail,
+            StartPage::Calendar => Self::Calendar,
+            StartPage::Todo => Self::Todo,
+        }
+    }
+}
+
 impl MainWindow {
+    pub(super) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.page = page;
+        if self.demo { return; }
+        let saved = match self.page {
+            Page::Home => StartPage::Home,
+            Page::Calendar => StartPage::Calendar,
+            Page::Todo => StartPage::Todo,
+            Page::Mail | Page::Settings(_) | Page::AddAccount(_) => StartPage::Mail,
+        };
+        if self.panes.start_page != saved {
+            self.panes.start_page = saved;
+            self.save_panes(cx);
+        }
+    }
+
     pub(super) fn show_section(&mut self, section: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.reset_task_focus();
@@ -11,7 +37,7 @@ impl MainWindow {
                 self.release(false, cx);
                 self.clear_motion();
                 if section == 2 && !matches!(self.page, Page::Calendar) { self.week.scroll_to_now = true; }
-                self.page = if section == 2 { Page::Calendar } else { Page::Todo };
+                self.set_page(if section == 2 { Page::Calendar } else { Page::Todo }, cx);
                 self.reload_tasks(cx);
             }
             _ => return,
@@ -63,6 +89,169 @@ impl MainWindow {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn first_start_and_legacy_preferences_open_mail() {
+        let path = std::env::temp_dir().join(format!("lagom-first-start-{}.json", std::process::id()));
+        assert!(!path.exists());
+        assert!(matches!(Page::restore(Panes::load(&path, 1440.).unwrap().start_page), Page::Mail));
+        let panes: Panes = serde_json::from_str(r#"{"sidebar":220,"list":420,"sidebar_hidden":false}"#).unwrap();
+        assert!(matches!(Page::restore(panes.start_page), Page::Mail));
+    }
+
+    #[test]
+    fn saved_settings_and_unknown_pages_open_mail() {
+        for page in ["Settings", "AddAccount", "Unknown"] {
+            let json = format!(r#"{{"sidebar":220,"list":420,"sidebar_hidden":false,"start_page":"{page}"}}"#);
+            let panes: Panes = serde_json::from_str(&json).unwrap();
+            assert!(matches!(Page::restore(panes.start_page), Page::Mail));
+        }
+    }
+
+    #[gpui::test]
+    fn review_navigation_defers_preference_io(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-deferred-page-{}.json", std::process::id()));
+        let original = Panes::new(1440.);
+        original.save(&path).unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update_in(cx, |v, window, cx| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            for section in [2, 3, 0] { v.show_section(section, window, cx); }
+            assert!(matches!(v.page, Page::Home));
+            assert_eq!(Panes::load(&path, 1440.).unwrap(), original, "navigation must return before file I/O");
+        });
+        cx.run_until_parked();
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Home);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_blocked_preference_writes_keep_navigation_responsive_and_ordered(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-ordered-page-{}.json", std::process::id()));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, cx| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            v.save_panes(cx);
+        });
+        cx.run_until_parked();
+        let original = Panes::load(&path, 1440.).unwrap();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        view.update(cx, |_, cx| {
+            let tail = cx.background_executor().spawn(async move { wait.await.unwrap(); });
+            cx.global_mut::<panes::Writes>().tail = Some(tail);
+        });
+        for section in [2, 3, 2] {
+            view.update_in(cx, |v, window, cx| {
+                v.show_section(section, window, cx);
+                assert!(matches!((&v.page, section), (Page::Calendar, 2) | (Page::Todo, 3)));
+            });
+            cx.run_until_parked();
+            assert_eq!(Panes::load(&path, 1440.).unwrap(), original);
+        }
+        view.update(cx, |v, cx| {
+            v.toggle_notifications(cx);
+            assert_eq!(panes::Writes::load(&path, 1440., cx).unwrap(), v.panes);
+        });
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        resume.send(()).unwrap();
+        cx.run_until_parked();
+        let saved = Panes::load(&path, 1440.).unwrap();
+        assert_eq!(saved.start_page, StartPage::Calendar);
+        assert!(!saved.notifications);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_quit_flushes_queued_preferences(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-quit-page-{}.json", std::process::id()));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, cx| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            v.set_page(Page::Calendar, cx);
+            v.set_page(Page::Todo, cx);
+        });
+        cx.cx.update(|cx| cx.shutdown());
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Todo);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_preference_errors_are_reported_and_later_writes_continue(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("lagom-page-error-{}.json", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("window.json");
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, cx| {
+            v.demo = false;
+            v.preferences_path = Some(dir.clone());
+            v.set_page(Page::Calendar, cx);
+            v.preferences_path = Some(path.clone());
+            v.set_page(Page::Todo, cx);
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.toast.as_ref().unwrap().0.starts_with("Could not save window preferences:")));
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Todo);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[gpui::test]
+    fn navigation_saves_before_close_and_settings_falls_back_to_mail(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-navigation-page-{}.json", std::process::id()));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, _| {
+            v.demo = false;
+            v.preferences_path = Some(path.clone());
+            v.panes.group_conversations = false;
+        });
+        for (section, page) in [(2, StartPage::Calendar), (3, StartPage::Todo), (0, StartPage::Home), (1, StartPage::Mail), (2, StartPage::Calendar)] {
+            view.update_in(cx, |v, window, cx| v.show_section(section, window, cx));
+            cx.run_until_parked();
+            let saved = Panes::load(&path, 1440.).unwrap();
+            assert_eq!(saved.start_page, page);
+            assert!(!saved.group_conversations);
+        }
+        view.update(cx, |v, cx| v.open_settings(cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(_))));
+        assert!(matches!(Page::restore(Panes::load(&path, 1440.).unwrap().start_page), Page::Mail));
+        view.update_in(cx, |v, window, cx| {
+            v.resize = Some(Resize { divider: Divider::Sidebar, start_x: px(220.), start_width: 220., start_panes: v.panes, moved: false });
+            v.show_section(2, window, cx);
+            v.resize_to(px(240.), window, cx);
+            v.finish_resize(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Calendar);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn demo_starts_on_mail_and_never_saves_page_changes(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("lagom-demo-page-{}.json", std::process::id()));
+        let mut panes = Panes::new(1440.);
+        panes.start_page = StartPage::Calendar;
+        panes.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "", window, cx));
+        view.update(cx, |v, _| {
+            assert!(matches!(v.page, Page::Mail));
+            assert!(v.preferences_path.is_none());
+            v.preferences_path = Some(path.clone());
+        });
+        for section in [0, 2, 3, 1] {
+            view.update_in(cx, |v, window, cx| v.show_section(section, window, cx));
+        }
+        view.update(cx, |v, cx| v.open_settings(cx));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_file(&path).unwrap();
+        view.update_in(cx, |v, window, cx| v.show_section(2, window, cx));
+        assert!(!path.exists());
+    }
 
     #[test]
     fn review_task_creation_uses_a_plain_plus() {
@@ -120,7 +309,7 @@ mod tests {
         cx.update(|cx| bind_keys(cx));
         for dark in [false, true] {
             let (view, cx) = cx.add_window_view(|window, cx| {
-                let mut v = MainWindow::new(true, window, cx);
+                let mut v = MainWindow::with_screen(true, "home", window, cx);
                 v.theme = if dark { Theme::dark(DEFAULT_ACCENT) } else { Theme::light(DEFAULT_ACCENT) }; v
             });
             for width in [1100., 900., 899., 720.] {
@@ -145,7 +334,7 @@ mod tests {
     #[gpui::test]
     fn sidebar_mail_group_is_conditional_and_top_rows_stay_put(cx: &mut TestAppContext) {
         cx.update(|cx| bind_keys(cx));
-        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
         cx.run_until_parked();
         let top = cx.debug_bounds("section-0").unwrap();
         assert!(cx.debug_bounds("mail-sidebar").is_none());
@@ -172,7 +361,7 @@ mod tests {
 
     #[gpui::test]
     fn review_demo_home_has_events_without_consent_or_task_controls(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("Show your Google Calendar").is_none());
         assert!(cx.debug_bounds("new-list").is_none());
@@ -226,7 +415,7 @@ mod tests {
     #[gpui::test]
     fn home_start_sidebar_order_icons_shortcuts_and_mail_opens_inbox(cx: &mut TestAppContext) {
         cx.update(|cx| bind_keys(cx));
-        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Home)));
         assert_eq!(SECTIONS.map(|s| s.0), ["Today", "Mail", "Calendar", "Todo"]);
         assert_eq!(SECTIONS.map(|s| s.2), ["⌘1", "⌘2", "⌘3", "⌘4"]);

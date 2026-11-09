@@ -7,6 +7,61 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Default)]
+pub(super) struct Writes {
+    pending: std::collections::HashMap<std::path::PathBuf, (Panes, usize)>,
+    pub tail: Option<gpui::Task<()>>,
+}
+
+impl gpui::Global for Writes {}
+
+impl Writes {
+    pub fn load(path: &Path, viewport: f32, cx: &gpui::App) -> anyhow::Result<Panes> {
+        // Reopening and notifications must see changes still waiting for disk.
+        match cx.try_global::<Self>().and_then(|writes| writes.pending.get(path)) {
+            Some((panes, _)) => Ok(*panes),
+            None => Panes::load(path, viewport),
+        }
+    }
+
+    pub fn save(panes: Panes, path: std::path::PathBuf, cx: &mut gpui::Context<super::MainWindow>) {
+        if !cx.has_global::<Self>() {
+            cx.set_global(Self::default());
+            gpui::App::on_app_quit(cx, |cx| {
+                let tail = cx.global_mut::<Self>().tail.take();
+                // shortcut: GPUI allows 100 ms at quit, extend shutdown handling if slow storage exceeds it.
+                async move { if let Some(tail) = tail { tail.await; } }
+            }).detach();
+        }
+        let writes = cx.global_mut::<Self>();
+        let pending = writes.pending.entry(path.clone()).or_insert((panes, 0));
+        *pending = (panes, pending.1 + 1);
+        let previous = writes.tail.take();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let target = path.clone();
+        let tail = cx.background_executor().spawn(async move {
+            if let Some(previous) = previous { previous.await; }
+            let result = panes.save(&target).map_err(|e| format!("Could not save window preferences: {e}"));
+            if let Err(error) = &result { eprintln!("{error}"); }
+            let _ = tx.send(result);
+        });
+        cx.global_mut::<Self>().tail = Some(tail);
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else { return };
+            cx.update(|cx| {
+                let writes = cx.global_mut::<Self>();
+                if let Some((_, remaining)) = writes.pending.get_mut(&path) {
+                    *remaining -= 1;
+                    if *remaining == 0 { writes.pending.remove(&path); }
+                }
+                if let Err(error) = result {
+                    this.update(cx, |this, cx| this.notify(error, cx)).ok();
+                }
+            }).ok();
+        }).detach();
+    }
+}
+
 pub(super) const SIDEBAR_DEFAULT: f32 = 220.;
 pub(super) const SIDEBAR_MIN: f32 = 180.;
 const SIDEBAR_MAX: f32 = 320.;
@@ -17,6 +72,16 @@ pub(super) const READING_MIN: f32 = 440.;
 // The panel's right margin and its two borders.
 pub(super) const PANEL_INSET: f32 = 10.;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(super) enum StartPage {
+    Home,
+    Calendar,
+    Todo,
+    #[default]
+    #[serde(other)]
+    Mail,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub(super) struct Panes {
     pub sidebar: f32,
@@ -26,6 +91,8 @@ pub(super) struct Panes {
     pub group_conversations: bool,
     #[serde(default = "notifications_default")]
     pub notifications: bool,
+    #[serde(default)]
+    pub start_page: StartPage,
 }
 
 fn group_default() -> bool { true }
@@ -39,6 +106,7 @@ impl Panes {
             sidebar_hidden: false,
             group_conversations: true,
             notifications: true,
+            start_page: StartPage::Mail,
         }
     }
 
@@ -190,6 +258,7 @@ mod tests {
             sidebar_hidden: false,
             group_conversations: true,
             notifications: true,
+            start_page: StartPage::Mail,
         };
         assert_eq!(panes.fit(1440.), (320., 560.));
         assert_eq!(panes.fit(1100.), (320., 330.));
@@ -244,6 +313,7 @@ mod tests {
                             sidebar_hidden,
                             group_conversations: true,
                             notifications: true,
+                            start_page: StartPage::Mail,
                         };
                         let (sidebar, list) = panes.fit(viewport);
                         assert!(sidebar == 0. || (180. ..=320.).contains(&sidebar));
@@ -266,7 +336,7 @@ mod tests {
             for i in 0..8 {
                 let path = &path;
                 scope.spawn(move || {
-                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true, notifications: true };
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true, notifications: true, start_page: StartPage::Mail };
                     for _ in 0..100 {
                         panes.save(path).unwrap();
                         let saved = Panes::load(path, 1440.).unwrap();

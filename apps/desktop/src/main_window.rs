@@ -120,10 +120,11 @@ const HEADER_H: f32 = 52.;
 /// Compact windows scroll the sidebar groups beneath Search.
 pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 
+mod glass;
 mod polish;
 pub(crate) use polish::action_icon;
 mod panes;
-use panes::{default_list, Panes, SIDEBAR_DEFAULT};
+use panes::{default_list, Panes, StartPage, SIDEBAR_DEFAULT};
 
 #[derive(Clone, Copy)]
 enum Divider { Sidebar, List }
@@ -314,6 +315,7 @@ pub struct MainWindow {
     // The list column's width for this render's window size.
     list_w: f32,
     sidebar_w: f32,
+    glass: glass::Glass,
     panes: Panes,
     preferences_path: Option<std::path::PathBuf>,
     resize: Option<Resize>,
@@ -375,7 +377,7 @@ impl MainWindow {
                 None
             }
         };
-        let panes = match preferences_path.as_ref().map(|p| Panes::load(p, viewport)).transpose() {
+        let panes = match preferences_path.as_ref().map(|p| panes::Writes::load(p, viewport, cx)).transpose() {
             Ok(panes) => panes.unwrap_or_else(|| Panes::new(viewport)),
             Err(e) => {
                 preference_problem = Some(format!("Could not read window preferences: {e}"));
@@ -402,7 +404,7 @@ impl MainWindow {
             sending: Vec::new(),
             live,
             demo,
-            page: if demo && !screen.is_empty() { Page::Mail } else { Page::Home },
+            page: Page::restore(panes.start_page),
             today: tasks::Today::default(),
             week: week::Week::default(),
             task_undo: None,
@@ -424,6 +426,7 @@ impl MainWindow {
             window_active: false,
             list_w,
             sidebar_w,
+            glass: glass::Glass::new(window),
             panes,
             preferences_path,
             resize: None,
@@ -474,7 +477,7 @@ impl MainWindow {
                 let first = folders::tree(&this.inbox.folders, false).first().map(|r| r.0);
                 this.open_box(first, cx);
             }
-            "settings" => this.page = Page::Settings(None),
+            "settings" => this.set_page(Page::Settings(None), cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
@@ -846,7 +849,7 @@ impl MainWindow {
     fn open_box(&mut self, f: Option<usize>, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.clear_motion();
-        self.page = Page::Mail;
+        self.set_page(Page::Mail, cx);
         self.inbox.open(f);
         self.reading_thread = None;
         if let Some(live) = &mut self.live {
@@ -1245,9 +1248,7 @@ impl MainWindow {
 
     fn save_panes(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = &self.preferences_path {
-            if let Err(e) = self.panes.save(path) {
-                self.notify(format!("Could not save window preferences: {e}"), cx);
-            }
+            panes::Writes::save(self.panes, path.clone(), cx);
         }
     }
 
@@ -1264,7 +1265,7 @@ impl MainWindow {
         let Some(resize) = self.resize.as_mut() else { return };
         if x == resize.start_x && !resize.moved { return; }
         resize.moved = true;
-        self.panes = resize.start_panes;
+        self.panes = Panes { start_page: self.panes.start_page, ..resize.start_panes };
         let width = resize.start_width + f32::from(x - resize.start_x);
         let viewport = f32::from(window.viewport_size().width);
         match resize.divider {
@@ -1354,7 +1355,7 @@ impl MainWindow {
                 .child(div().flex_1().child(label))
         };
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
-        let nav = |path, label, count, active| sidebar_nav(t, path, label, count, active, self.window_active);
+        let nav = |path, label, count, active| sidebar_nav(t, path, label, count, active, self.window_active, false);
         let account = |ix: usize, name: SharedString, address: SharedString, active: bool| {
             pressable(div().id(("account", ix)), t, false)
                 .flex()
@@ -1399,6 +1400,9 @@ impl MainWindow {
         let in_settings = matches!(self.page, Page::Settings(_));
 
         div()
+            .debug_selector(|| "sidebar".into())
+            .relative()
+            .child(self.glass.background(if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) }))
             .w(px(self.sidebar_w))
             .h_full()
             .flex_shrink_0()
@@ -1450,7 +1454,7 @@ impl MainWindow {
                         let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
                         // Unread mail is a filled badge, so it never reads as a shortcut; every row keeps its ⌘ key.
-                        nav(path, label, None, active).debug_selector(move || format!("section-{ix}"))
+                        sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
                             .when(ix == 1 && unread > 0, |d| d.child(
                                 div().debug_selector(|| "mail-unread-badge".into()).h(px(16.)).min_w(px(16.)).px(px(5.)).rounded_full()
                                     .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
@@ -1520,7 +1524,7 @@ impl MainWindow {
         let t = &self.theme;
         let all = &self.inbox.folders;
         let row = |id: ElementId, active: bool| {
-            pressable(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
+            polish::mailbox_style(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
         let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder")
             .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
@@ -1540,14 +1544,12 @@ impl MainWindow {
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
         let slot = || div().size(px(16.)).flex_shrink_0();
-        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
         for &(f, depth) in &rows[..shown] {
             let unread = self.inbox.unread(f);
-            let active = self.inbox.open == Some(f);
-            let color = if active || unread > 0 { t.ink } else { t.ink2 };
-            let folder_icon = if active { active_icon } else { color };
+            let active = matches!(self.page, Page::Mail) && self.inbox.open == Some(f);
+            let color = if active { t.accent } else if unread > 0 { t.ink } else { t.ink2 };
             let chevron = folders::has_children(all, f).then(|| {
                 let path = if all[f].open { "icons/chevron.svg" } else { "icons/chevron-right.svg" };
                 icon_button(t, "folder-disclosure", path, if all[f].open { "Collapse folder" } else { "Expand folder" }).id(("chevron", f)).size(px(16.)).on_click(cx.listener(move |this, _, _, cx| {
@@ -1561,14 +1563,15 @@ impl MainWindow {
                     .debug_selector(move || format!("folder-{f}"))
                     .pl(px(10. + 22. * depth as f32))
                     .text_color(color)
-                    .when(active, |d| d.bg(t.sel))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_box(Some(f), cx)))
                     .when(nested, |d| match chevron {
                         Some(c) => d.child(c),
                         None => d.child(slot()),
                     })
-                    .child(icon("icons/folder.svg", folder_icon, 16.))
-                    .child(div().flex_1().min_w(px(0.)).one_line().child(all[f].name.clone()))
+                    .child(icon("icons/folder.svg", color, 16.))
+                    .child(div().flex_1().min_w(px(0.)).one_line()
+                        .debug_selector(move || format!("folder-{f}-{}", if active { "accent" } else { "idle" }))
+                        .child(all[f].name.clone()))
                     // A zero count is calm: no number at all.
                     .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}")))),
             );
@@ -1850,6 +1853,7 @@ impl MainWindow {
             }
         };
         div()
+            .debug_selector(|| "list-pane".into())
             .relative()
             .w(px(self.list_w))
             .h_full()
@@ -1864,6 +1868,7 @@ impl MainWindow {
                     .items_center()
                     .justify_between()
                     .gap(px(8.))
+                    .debug_selector(|| "list-header".into())
                     .h(px(self.list_header_height()))
                     .when(self.confirm_empty_trash, |d| d.flex_col().items_start().py(px(8.)))
                     .flex_shrink_0()
@@ -2042,21 +2047,20 @@ impl Render for Tip {
     }
 }
 
-fn sidebar_nav(t: &Theme, path: &'static str, label: &'static str, count: Option<usize>, active: bool, window_active: bool) -> Stateful<Div> {
-    let active_icon = if window_active { t.sel_icon } else { t.ink2 };
-    let selected = active && label != "Mail";
-    pressable(div().id(SharedString::from(format!("nav-{label}"))), t, selected)
-        .debug_selector(move || format!("nav-{label}"))
+fn sidebar_nav(t: &Theme, path: &'static str, label: &'static str, count: Option<usize>, active: bool, window_active: bool, section: bool) -> Stateful<Div> {
+    let active_icon = if section { if window_active { t.sel_icon } else { t.ink2 } } else { t.accent };
+    let row = div().id(SharedString::from(format!("nav-{label}")));
+    let row = if section { pressable(row, t, active).text_color(t.ink).when(active, |d| d.bg(t.sel)) }
+        else { polish::mailbox_style(row, t, active) };
+    row.debug_selector(move || format!("nav-{label}"))
         .flex()
         .items_center()
         .gap(px(8.))
         .h(px(SIDEBAR_ROW))
         .px(px(10.))
         .rounded(px(radius::CONTROL))
-        .text_color(t.ink)
-        .when(selected, |d| d.bg(t.sel))
         .child(icon(path, if active { active_icon } else { t.ink2 }, 16.))
-        .child(div().flex_1().child(label))
+        .child(div().flex_1().debug_selector(move || format!("nav-{label}-{}", if !active { "idle" } else if section { "filled" } else { "accent" })).child(label))
         // A zero count is calm: no number at all.
         .when_some(count.filter(|&c| c > 0), |d, c| d.child(roll(mono(c.to_string(), t.ink2), format!("{label}-{c}"))))
 }
@@ -2218,10 +2222,8 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        // The sidebar is a solid step lighter than the page in dark mode (darker in light mode).
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
-        // Opaque: on macOS 27 the blur did not apply and text behind the window showed through.
-        let tint = Rgba { a: 1.0, ..frost };
+        if welcome || self.panes.sidebar_hidden { self.glass.hide(); }
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
@@ -2291,14 +2293,13 @@ impl Render for MainWindow {
             .size_full()
             .relative()
             .flex()
-            .bg(tint)
             .text_color(t.ink)
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
             .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.sidebar(cx)))
             .child(
-                div()
+                div().flex_1().min_w(px(0.)).h_full().flex().bg(frost).child(div()
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
@@ -2314,7 +2315,7 @@ impl Render for MainWindow {
                     .relative()
                     .child(panel)
                     .children(toasts)
-                    .when(matches!(self.page, Page::Mail) && !empty, |d| d.child(self.divider(Divider::List, self.list_w - 3., cx))),
+                    .when(matches!(self.page, Page::Mail) && !empty, |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
             )
             .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
             .child(self.resize_events(cx))
@@ -3818,7 +3819,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true, start_page: StartPage::Mail };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();
