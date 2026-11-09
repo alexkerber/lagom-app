@@ -46,7 +46,6 @@ impl AssetSource for Assets {
             "icons/new-event.svg" => include_bytes!("../assets/icons/new-event.svg"),
             "icons/new-folder.svg" => include_bytes!("../assets/icons/new-folder.svg"),
             "icons/new-list.svg" => include_bytes!("../assets/icons/new-list.svg"),
-            "icons/new-task.svg" => include_bytes!("../assets/icons/new-task.svg"),
             "icons/read.svg" => include_bytes!("../assets/icons/read.svg"),
             "icons/rename.svg" => include_bytes!("../assets/icons/rename.svg"),
             "icons/reply-all.svg" => include_bytes!("../assets/icons/reply-all.svg"),

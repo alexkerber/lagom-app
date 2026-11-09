@@ -1194,7 +1194,7 @@ fn action_icon(label: &str) -> Option<&'static str> {
         "Done" | "Keep" => "icons/done.svg", "Move to Inbox" => "icons/inbox.svg",
         "Delete" | "Delete all" | "Delete list" | "Empty Trash" | "Remove" => "icons/trash.svg",
         "Cancel" | "Close" | "Cancel sign-in" => "icons/close.svg",
-        "New task" | "Add task" => "icons/new-task.svg", "New list" | "Add list" => "icons/new-list.svg",
+        "New task" | "Add task" => "icons/plus.svg", "New list" | "Add list" => "icons/new-list.svg",
         "New event" => "icons/new-event.svg", "Rename" | "Edit draft" => "icons/rename.svg",
         "Join" | "Join meeting" => "icons/video.svg", "Today" => "icons/sun.svg",
         "Show your Google Calendar" | "Open in Google Calendar" => "icons/calendar.svg",
@@ -1980,16 +1980,23 @@ fn toolbar(t: &Theme) -> Div {
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
 fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
-    pressable(div().id(id), t, false)
+    pressable(div().id(id), t, false).group("icon-button")
         .debug_selector(move || id.into())
         .flex()
         .items_center()
         .justify_center()
         .size(px(28.))
+        .flex_shrink_0()
         .rounded(px(radius::CONTROL))
         .text_color(t.ink2)
-        .child(svg().path(path).size(px(16.)).flex_shrink_0())
+        .child(icon_button_glyph(t, path))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
+}
+
+fn icon_button_glyph(t: &Theme, path: &'static str) -> gpui::Svg {
+    // GPUI's SVG paint path requires an explicit color on the SVG itself.
+    svg().path(path).size(px(16.)).flex_shrink_0()
+        .text_color(t.ink2).group_hover("icon-button", |s| s.text_color(t.ink))
 }
 
 struct Tip(Theme, &'static str);

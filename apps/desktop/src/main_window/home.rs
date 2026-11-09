@@ -64,6 +64,29 @@ mod tests {
     use gpui::TestAppContext;
 
     #[test]
+    fn review_task_creation_uses_a_plain_plus() {
+        use gpui::AssetSource;
+        for label in ["New task", "Add task"] {
+            assert_eq!(action_icon(label), Some("icons/plus.svg"));
+        }
+        let bytes = crate::Assets.load("icons/plus.svg").unwrap().unwrap();
+        let svg = std::str::from_utf8(&bytes).unwrap();
+        assert!(svg.contains("viewBox=\"0 0 16 16\""));
+        assert!(svg.contains("stroke-width=\"1.5\""));
+        assert!(!svg.contains("<circle"));
+    }
+
+    #[test]
+    fn review_icon_buttons_give_the_svg_its_own_visible_color() {
+        for theme in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
+            for path in ["icons/mail.svg", "icons/plus.svg", "icons/more.svg"] {
+                let mut glyph = icon_button_glyph(&theme, path);
+                assert_eq!(glyph.style().text.as_ref().and_then(|text| text.color), Some(theme.ink2.into()), "{path}");
+            }
+        }
+    }
+
+    #[test]
     fn review_section_icons_are_embedded_and_distinct() {
         use gpui::AssetSource;
         let icons: HashSet<_> = SECTIONS.iter().map(|(_, path, _)| {

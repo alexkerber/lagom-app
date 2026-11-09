@@ -3,6 +3,11 @@ use gpui::Focusable;
 use lagom_core::store::Store;
 use lagom_core::tasks::{Task as LocalTask, TaskList};
 
+static DATE_LOCALE: std::sync::LazyLock<chrono::Locale> = std::sync::LazyLock::new(|| {
+    // shortcut: unsupported locale tags use English; expand matching when language preferences are added.
+    sys_locale::get_locale().and_then(|locale| locale.replace('-', "_").parse().ok()).unwrap_or(chrono::Locale::en_US)
+});
+
 pub(crate) enum TaskChange {
     Add { list: i64, title: String },
     FromMail(lagom_core::store::MessageSummary),
@@ -400,7 +405,7 @@ impl MainWindow {
         if let Some(input) = list.and_then(|id| self.task_input(Edit::Add(id))) { return row.child(div().flex_1().child(input)); }
         pressable(row, &t, false).debug_selector(move || if home { "new-task".into() } else { format!("add-task-{}", list.unwrap_or(0)) })
             .rounded(px(radius::CONTROL)).text_color(t.ink2)
-            .child(icon("icons/new-task.svg", t.ink2, 16.)).child(if home { "New task" } else { "Add task" })
+            .child(icon("icons/plus.svg", t.ink2, 16.)).child(if home { "New task" } else { "Add task" })
             .tooltip(move |_, cx| cx.new(|_| Tip(t, "New task · T")).into())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(list) = list { this.edit_task(Edit::Add(list), window, cx); }
@@ -428,14 +433,14 @@ impl MainWindow {
                 .when(done, |d| d.child(icon("icons/done.svg", t.ink2, 16.)))
                 .tooltip(move |_, cx| cx.new(|_| Tip(t, "Complete task · Space")).into())
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.complete_task(id, cx); })))
-            .child(div().flex_1().min_w(px(0.)).map(|d| match self.task_input(Edit::Rename(id)) {
+            .child(div().debug_selector(move || format!("task-title-{id}")).flex_1().min_w(px(0.)).map(|d| match self.task_input(Edit::Rename(id)) {
                 Some(input) => d.child(input), None => d.one_line().when(done, |d| d.text_color(t.ink2).line_through()).child(task.title.clone()),
             }))
-            .when(task.mail_message_id.is_some(), |d| d.child(icon_button(&t, "task-mail", "icons/mail.svg", "Open linked mail")
+            .when(task.mail_message_id.is_some(), |d| d.child(icon_button(&t, "task-mail", "icons/mail.svg", "Open mail")
                 .debug_selector(move || format!("task-mail-{id}"))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
-            .when_some(task.due.clone().filter(|_| matches!(self.page, Page::Todo)), |d, due| d.child(mono(due.chars().take(10).collect::<String>(), t.ink2)
-                .px(px(6.)).py(px(3.)).rounded(px(radius::KEY)).bg(t.subtle)))
+            .when_some(task.due.as_deref().and_then(|due| due_label(due, &self.today.day, *DATE_LOCALE)),
+                |d, (label, overdue)| d.child(due_chip(label, overdue, &t)))
             .when(matches!(self.page, Page::Todo), |d| d.child(icon_button(&t, "task-menu", "icons/more.svg", "Task actions · ⌥Enter")
                 .debug_selector(move || format!("task-menu-{id}")).opacity(if selected { 1. } else { 0.2 }).group_hover("task-row", |s| s.opacity(1.))
                 .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_task_menu(TaskMenu::Task(id), window, cx); }))));
@@ -610,7 +615,7 @@ impl MainWindow {
         div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
             .child(div().flex().items_center().justify_between()
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Todo"))
-                .child(icon_button(&t, "new-list", "icons/new-list.svg", "New list")
+                .child(icon_button(&t, "new-list", "icons/plus.svg", "New list")
                     .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
             .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
                 .when(matches!(self.page, Page::Todo), |d| d.children(self.today.calendar_accounts.iter().filter_map(|(account, _)| {
@@ -643,6 +648,26 @@ impl MainWindow {
 
 }
 
+fn due_label(due: &str, day: &str, locale: chrono::Locale) -> Option<(String, bool)> {
+    use chrono::{Datelike, NaiveDate};
+    let due = NaiveDate::parse_from_str(due.get(..10)?, "%Y-%m-%d").ok()?;
+    let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    let label = match (due - day).num_days() {
+        -1 => "Yesterday".into(),
+        0 => "Today".into(),
+        1 => "Tomorrow".into(),
+        2..=6 => due.format_localized("%A", locale).to_string(),
+        _ => due.format_localized(if due.year() == day.year() { "%-d %b" } else { "%-d %b %Y" }, locale).to_string(),
+    };
+    Some((label, due < day))
+}
+
+fn due_chip(label: String, overdue: bool, t: &Theme) -> Div {
+    mono(label.clone(), if overdue { t.danger } else { t.ink2 }).debug_selector(move || format!("due-{label}"))
+        .flex_shrink_0().px(px(6.)).py(px(3.)).rounded(px(radius::KEY))
+        .bg(if overdue { Rgba { a: 0.1, ..t.danger } } else { t.subtle })
+}
+
 fn today_tasks<'a>(tasks: &'a [LocalTask], default: Option<i64>, day: &str) -> Vec<&'a LocalTask> {
     let due = |task: &&LocalTask| task.done_at.is_none() && !task.deleted
         && task.due.as_deref().is_some_and(|due| due.get(..10).unwrap_or(due) <= day);
@@ -656,6 +681,60 @@ fn today_tasks<'a>(tasks: &'a [LocalTask], default: Option<i64>, day: &str) -> V
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn review_due_dates_are_relative_then_localized_without_unneeded_years() {
+        use chrono::Locale;
+        for (due, label, overdue) in [
+            ("2026-11-08", "Yesterday", true), ("2026-11-09T23:00:00Z", "Today", false),
+            ("2026-11-10", "Tomorrow", false), ("2026-11-11", "Wednesday", false),
+            ("2026-11-15", "Sunday", false), ("2026-11-16", "16 Nov", false),
+            ("2026-11-07", "7 Nov", true), ("2027-01-12", "12 Jan 2027", false),
+            ("2025-11-12", "12 Nov 2025", true),
+        ] {
+            assert_eq!(due_label(due, "2026-11-09", Locale::en_US), Some((label.into(), overdue)));
+        }
+        assert_eq!(due_label("2026-11-12", "2026-11-01", Locale::en_US), Some(("12 Nov".into(), false)));
+        assert_eq!(due_label("2026-12-12", "2026-11-09", Locale::fr_FR), Some(("12 déc.".into(), false)));
+        assert_eq!(due_label("2026-11-11", "2026-11-09", Locale::sv_SE), Some(("onsdag".into(), false)));
+        assert_eq!(due_label("2027-01-01", "2026-12-31", Locale::en_US), Some(("Tomorrow".into(), false)));
+        assert_eq!(due_label("2028-02-29", "2028-03-01", Locale::en_US), Some(("Yesterday".into(), true)));
+        for due in ["", "2026-02-30", "not a date", "🗓🗓🗓"] {
+            assert!(due_label(due, "2026-11-09", Locale::en_US).is_none());
+        }
+        assert!(due_label("2026-11-09", "", Locale::en_US).is_none());
+    }
+
+    #[test]
+    fn review_only_overdue_chips_use_faint_danger_colors_in_both_themes() {
+        for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
+            for overdue in [false, true] {
+                let mut chip = due_chip("Date".into(), overdue, &t);
+                assert_eq!(chip.style().text.as_ref().unwrap().color, Some(if overdue { t.danger } else { t.ink2 }.into()));
+                assert_eq!(chip.style().background, Some(if overdue { Rgba { a: 0.1, ..t.danger } } else { t.subtle }.into()));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn review_today_renders_overdue_today_then_rest_with_due_chips(cx: &mut TestAppContext) {
+        for dark in [false, true] {
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                let mut v = MainWindow::with_screen(true, "home", window, cx);
+                v.theme = if dark { Theme::dark(DEFAULT_ACCENT) } else { Theme::light(DEFAULT_ACCENT) };
+                v.today.tasks.reverse();
+                v
+            });
+            cx.run_until_parked();
+            let overdue = cx.debug_bounds("task-4").unwrap();
+            let today = cx.debug_bounds("task-1").unwrap();
+            let rest = cx.debug_bounds("task-2").unwrap();
+            assert!(overdue.bottom() <= today.top() && today.bottom() <= rest.top());
+            assert_eq!(view.read_with(cx, |v, _| v.visible_tasks().iter().map(|t| t.id).collect::<Vec<_>>()), [4, 1, 2]);
+            assert!(cx.debug_bounds("due-Yesterday").is_some());
+            assert!(cx.debug_bounds("due-Today").is_some());
+        }
+    }
 
     #[test]
     fn today_prioritizes_due_tasks_then_five_default_tasks_without_duplicates() {
@@ -898,6 +977,78 @@ mod tests {
         });
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         assert_eq!(view.read_with(cx, |v, _| v.today.tasks.len()), 5);
+    }
+
+    #[gpui::test]
+    fn review_mail_button_follows_task_title_and_opens_mail_on_both_pages(cx: &mut TestAppContext) {
+        for dark in [false, true] {
+            for screen in ["home", "todo"] {
+                let (view, cx) = cx.add_window_view(|window, cx| {
+                    let mut v = MainWindow::with_screen(true, screen, window, cx);
+                    v.theme = if dark { Theme::dark(DEFAULT_ACCENT) } else { Theme::light(DEFAULT_ACCENT) };
+                    v
+                });
+                cx.run_until_parked();
+                let title = cx.debug_bounds("task-title-1").unwrap();
+                let mail = cx.debug_bounds("task-mail-1").unwrap();
+                let due = cx.debug_bounds("due-Today").unwrap();
+                assert!(title.right() <= mail.left() && mail.right() <= due.left());
+                assert_eq!(mail.size, gpui::size(px(28.), px(28.)));
+                assert!(cx.debug_bounds("task-mail-2").is_none());
+                cx.simulate_click(mail.center(), Default::default());
+                view.read_with(cx, |v, _| {
+                    assert!(matches!(v.page, Page::Mail));
+                    assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].subject, "Board meeting moved to Thursday");
+                    assert!(v.today.editor.is_none());
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn review_todo_header_and_list_buttons_work_at_rest_in_both_themes(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        for dark in [false, true] {
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                let mut v = MainWindow::with_screen(true, "todo", window, cx);
+                v.theme = if dark { Theme::dark(DEFAULT_ACCENT) } else { Theme::light(DEFAULT_ACCENT) };
+                v
+            });
+            cx.run_until_parked();
+            let new = cx.debug_bounds("new-list").unwrap();
+            for (list, menu) in [("task-list-1", "list-menu-1"), ("task-list-2", "list-menu-2")] {
+                let list = cx.debug_bounds(list).unwrap();
+                let menu = cx.debug_bounds(menu).unwrap();
+                assert_eq!(menu.right(), list.right());
+                assert_eq!(menu.size, gpui::size(px(28.), px(28.)));
+                assert!(new.bottom() <= menu.top());
+            }
+            let at = cx.debug_bounds("list-menu-2").unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                let items = v.task_menu_items();
+                assert_eq!(items.iter().map(|i| (i.label.as_str(), i.icon)).collect::<Vec<_>>(),
+                    [("Rename", "icons/rename.svg"), ("Delete list", "icons/trash.svg")]);
+            });
+            let at = cx.debug_bounds("rename-list-2").unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_keystrokes("secondary-a"); cx.simulate_input("Renamed fixture"); cx.simulate_keystrokes("enter");
+            assert_eq!(view.read_with(cx, |v, _| v.today.lists[1].name.clone()), "Renamed fixture");
+            cx.run_until_parked();
+            let at = cx.debug_bounds("list-menu-2").unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.run_until_parked();
+            let at = cx.debug_bounds("delete-list-2").unwrap().center();
+            cx.simulate_click(at, Default::default());
+            assert!(view.read_with(cx, |v, _| matches!(v.today.menu, Some(TaskMenu::DeleteList(2)))));
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            let at = cx.debug_bounds("new-list").unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_input("Created fixture"); cx.simulate_keystrokes("enter");
+            assert_eq!(view.read_with(cx, |v, _| v.today.lists.last().unwrap().name.clone()), "Created fixture");
+        }
     }
 
     #[gpui::test]
