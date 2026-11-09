@@ -1,5 +1,5 @@
 use super::*;
-use chrono::{NaiveDate, NaiveTime, TimeZone, Timelike};
+use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone, Timelike};
 use lagom_core::{calendar::{AgendaEvent, NewEvent}, oauth};
 
 pub(super) struct Editor {
@@ -26,9 +26,30 @@ pub(super) fn drag_interval(from: u32, to: u32) -> (u32, u32) {
     (start, from.max(to).max(start + 15).min(1440))
 }
 
+fn date_label(day: NaiveDate, year: i32) -> String {
+    day.format(if day.year() == year { "%a %-d %b" } else { "%a %-d %b %Y" }).to_string()
+}
+
+fn parse_date(value: &str, year: i32, month_first: bool) -> Result<NaiveDate, String> {
+    let value = value.trim();
+    // shortcut: named months are English; add localized month parsing when the calendar UI is translated.
+    let formats = ["%Y-%m-%d", "%a %d %b %Y", "%d %b %Y", "%b %d %Y", "%d.%m.%Y",
+        if month_first { "%m/%d/%Y" } else { "%d/%m/%Y" }];
+    formats.iter().find_map(|format| NaiveDate::parse_from_str(value, format).ok())
+        .or_else(|| formats[1..].iter().find_map(|format| NaiveDate::parse_from_str(&format!("{value} {year}"), format).ok()))
+        .or_else(|| NaiveDate::parse_from_str(&format!("{value}/{year}"), formats[5]).ok())
+        .or_else(|| NaiveDate::parse_from_str(&format!("{value}.{year}"), formats[4]).ok())
+        .ok_or_else(|| "Enter a date such as 9 Nov or YYYY-MM-DD".into())
+}
+
+fn local_date(value: &str) -> Result<NaiveDate, String> {
+    let month_first = sys_locale::get_locale().is_some_and(|locale| matches!(locale.replace('-', "_").as_str(), "en_US" | "en_PH"));
+    parse_date(value, chrono::Local::now().year(), month_first)
+}
+
 fn interval<T: TimeZone>(date: &str, end_date: &str, start: &str, end: &str, all_day: bool, zone: &T) -> Result<(String, String), String> {
-    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| "Enter dates as YYYY-MM-DD")?;
-    let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d").map_err(|_| "Enter dates as YYYY-MM-DD")?;
+    let date = local_date(date)?;
+    let end_date = local_date(end_date)?;
     if all_day {
         if end_date < date { return Err("Last day must be on or after the first day".into()); }
         return Ok((date.to_string(), end_date.succ_opt().ok_or("End date is out of range")?.to_string()));
@@ -78,9 +99,10 @@ impl MainWindow {
             Err(error) => { self.notify(format!("Could not read calendars: {error}"), cx); return; }
         };
         let at = |minutes: u32| day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::minutes(minutes as i64);
-        let values = [String::new(), day.to_string(), at(start).format("%H:%M").to_string(), at(end).date().to_string(),
+        let year = chrono::Local::now().year();
+        let values = [String::new(), date_label(day, year), at(start).format("%H:%M").to_string(), date_label(at(end).date(), year),
             at(end).format("%H:%M").to_string(), self.calendar_guests(cx).join(", "), String::new()];
-        let placeholders = ["Event title", "YYYY-MM-DD", "09:00", "YYYY-MM-DD", "10:00", "guest@example.com, guest2@example.com", "Description (optional)"];
+        let placeholders = ["Event title", "Mon 9 Nov", "09:00", "Mon 9 Nov", "10:00", "guest@example.com, guest2@example.com", "Description (optional)"];
         let fields = std::array::from_fn(|i| cx.new(|cx| TextInput::new(window, cx).bordered().placeholder(placeholders[i]).with_text(&values[i])));
         let current = self.live.as_ref().and_then(|l| l.account());
         let calendar = current.and_then(|account| calendars.iter().position(|c| c.0 == account.id)).unwrap_or(0);
@@ -182,9 +204,9 @@ impl MainWindow {
         let date_field = if field == START { DATE } else { END_DATE };
         if !(0..1440).contains(&minute) {
             let date = editor.fields[date_field].clone();
-            let Ok(day) = NaiveDate::parse_from_str(date.read(cx).text(), "%Y-%m-%d") else { return };
+            let Ok(day) = local_date(date.read(cx).text()) else { return };
             let Some(day) = day.checked_add_signed(chrono::Duration::days(minute.div_euclid(1440))) else { return };
-            date.update(cx, |input, cx| input.set_text(&day.to_string(), cx));
+            date.update(cx, |input, cx| input.set_text(&date_label(day, chrono::Local::now().year()), cx));
         }
         let minute = minute.rem_euclid(1440);
         input.update(cx, |input, cx| input.set_text(&format!("{:02}:{:02}", minute / 60, minute % 60), cx));

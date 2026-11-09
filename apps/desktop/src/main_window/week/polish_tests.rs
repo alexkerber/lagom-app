@@ -155,7 +155,7 @@ fn today_and_weekend_fills_follow_each_appearance() {
 }
 
 #[gpui::test]
-fn opening_calendar_scrolls_to_now_once_and_preserves_manual_scroll(cx: &mut TestAppContext) {
+fn opening_calendar_scrolls_to_events_once_and_preserves_manual_scroll(cx: &mut TestAppContext) {
     cx.update(|cx| super::super::bind_keys(cx));
     let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
     cx.simulate_resize(gpui::size(px(1440.), px(900.)));
@@ -164,11 +164,90 @@ fn opening_calendar_scrolls_to_now_once_and_preserves_manual_scroll(cx: &mut Tes
     view.update(cx, |v, cx| {
         let now = chrono::Local::now();
         let height = f32::from(v.week.scroll.bounds().size.height);
-        let expected = now_scroll((now.hour() * 60 + now.minute()) as f32, height);
+        let expected = v.week.initial_scroll(now, height);
         assert!((f32::from(v.week.scroll.offset().y) + expected).abs() <= 1., "offset {:?}, expected {expected}, height {height}, pending {}", v.week.scroll.offset().y, v.week.scroll_to_now);
         v.week.scroll.set_offset(gpui::point(px(0.), px(-300.)));
         cx.notify();
     });
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.week.scroll.offset().y), px(-300.));
+}
+
+thread_local! {
+    pub(super) static TITLE_LAYOUTS: std::cell::RefCell<Option<Vec<gpui::TextLayout>>> = Default::default();
+}
+
+#[gpui::test]
+fn review_month_and_all_day_titles_use_available_width(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    for mode in [View::Month, View::Week] {
+        for (width, fits) in [(1600., true), (760., false)] {
+            cx.simulate_resize(gpui::size(px(width), px(1000.)));
+            view.update(cx, |v, cx| {
+                v.week.panel = Some(false);
+                v.calendar_date(NaiveDate::from_ymd_opt(2026, 11, 9).unwrap(), mode, cx);
+                let mut entry = super::tests::entry(v.week.start, 0, 1440, true);
+                entry.event.title = "Planning day".into();
+                v.week.days = vec![vec![]; mode.days()];
+                v.week.days[0] = vec![entry];
+                cx.notify();
+            });
+            cx.run_until_parked();
+            TITLE_LAYOUTS.with(|layouts| *layouts.borrow_mut() = Some(vec![]));
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            TITLE_LAYOUTS.with(|layouts| {
+                let layouts = layouts.borrow_mut().take().unwrap();
+                assert_eq!(layouts.len(), 1);
+                let text = layouts[0].text();
+                if fits { assert_eq!(text, "Planning day", "{mode:?} at {width}"); }
+                else { assert!(text.ends_with('…'), "{mode:?} at {width}: {text:?}"); }
+            });
+        }
+    }
+}
+
+#[test]
+fn review_initial_scroll_keeps_morning_events_unless_now_would_be_below_viewport() {
+    use chrono::TimeZone;
+    let day = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+    let now = chrono::Utc.with_ymd_and_hms(2026, 11, 9, 18, 22, 0).unwrap();
+    let mut week = Week { start: day, ..Default::default() };
+    week.days[0] = vec![super::tests::entry(day, 660, 720, false), super::tests::entry(day, 0, 1440, true)];
+    week.days[1] = vec![super::tests::entry(day.succ_opt().unwrap(), 540, 600, false)];
+    assert_eq!(week.initial_scroll(now, 600.), 510., "09:00 near the top, 18:22 still visible");
+    assert_eq!(week.initial_scroll(now, 450.), 952., "now a third down when both cannot fit");
+    let past = now - chrono::Duration::weeks(1);
+    assert_eq!(week.initial_scroll(past, 450.), 510., "no now line outside the visible dates");
+    week.days = vec![vec![]; 7];
+    assert_eq!(week.initial_scroll(past, 600.), 450., "empty week starts near 08:00");
+    assert_eq!(week.initial_scroll(now, 600.), 840., "empty week still keeps now visible");
+    week.days[0] = vec![super::tests::entry(day, 0, 60, false)];
+    assert_eq!(week.initial_scroll(past, 600.), 0.);
+    assert_eq!(week.initial_scroll(now, 1600.), 0.);
+}
+
+#[gpui::test]
+fn review_panel_and_detail_titles_have_full_width(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    cx.simulate_resize(gpui::size(px(1440.), px(1000.)));
+    view.update(cx, |v, cx| {
+        v.week.panel = Some(true);
+        v.week.days = vec![vec![]; 7];
+        v.week.guests = vec!["Planning team".into()];
+        let mut entry = super::tests::entry(v.week.start, 0, 1440, true);
+        entry.event.title = "Planning day".into();
+        v.week.detail = Some(entry);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    TITLE_LAYOUTS.with(|layouts| *layouts.borrow_mut() = Some(vec![]));
+    cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+    TITLE_LAYOUTS.with(|layouts| {
+        let text: Vec<_> = layouts.borrow_mut().take().unwrap().iter().map(gpui::TextLayout::text).collect();
+        assert_eq!(text.len(), 3);
+        assert!(text.contains(&"Planning day".into()), "{text:?}");
+        assert!(text.contains(&"Planning team".into()), "{text:?}");
+        let month = view.read_with(cx, |v, _| v.week.mini_month.format("%B %Y").to_string());
+        assert!(text.contains(&month), "{text:?}");
+    });
 }

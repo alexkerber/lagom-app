@@ -134,13 +134,13 @@ fn demo_screen_nudges_times_across_midnight_and_validates_before_saving(cx: &mut
     view.read_with(cx, |v, cx| {
         let editor = v.week.editor.as_ref().unwrap();
         assert_eq!(editor.fields[END].read(cx).text(), "00:00");
-        assert_eq!(editor.fields[END_DATE].read(cx).text(), "2027-01-01");
+        assert_eq!(editor.fields[END_DATE].read(cx).text(), date_label(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(), chrono::Local::now().year()));
     });
     cx.simulate_keystrokes("down");
     view.read_with(cx, |v, cx| {
         let editor = v.week.editor.as_ref().unwrap();
         assert_eq!(editor.fields[END].read(cx).text(), "23:45");
-        assert_eq!(editor.fields[END_DATE].read(cx).text(), "2026-12-31");
+        assert_eq!(editor.fields[END_DATE].read(cx).text(), date_label(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(), chrono::Local::now().year()));
     });
     cx.simulate_keystrokes("escape");
     assert!(view.read_with(cx, |v, _| v.week.editor.is_none()));
@@ -154,7 +154,7 @@ fn n_opens_demo_sheet_outside_cached_weeks(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("new-event-sheet").is_some());
     view.read_with(cx, |v, cx| {
-        assert_eq!(v.week.editor.as_ref().unwrap().fields[DATE].read(cx).text(), v.week.start.to_string());
+        assert_eq!(v.week.editor.as_ref().unwrap().fields[DATE].read(cx).text(), date_label(v.week.start, chrono::Local::now().year()));
     });
     cx.simulate_keystrokes("escape");
     assert!(view.read_with(cx, |v, _| v.week.editor.is_none() && v.week.created.is_empty()));
@@ -212,7 +212,7 @@ fn calendar_toolbar_and_n_share_guests_and_selected_day(cx: &mut TestAppContext)
     cx.run_until_parked();
     view.update(cx, |v, cx| {
         let editor = v.week.editor.as_ref().unwrap();
-        assert_eq!(editor.fields[DATE].read(cx).text(), "2027-01-03");
+        assert_eq!(editor.fields[DATE].read(cx).text(), date_label(NaiveDate::from_ymd_opt(2027, 1, 3).unwrap(), chrono::Local::now().year()));
         assert_eq!(editor.fields[GUESTS].read(cx).text(), "Planning team <planning@example.com>, guest@example.test");
         editor.fields[TITLE].update(cx, |f, cx| f.set_text("Fixture meeting", cx));
         assert_eq!(v.event_draft(cx).unwrap().attendees, ["planning@example.com", "guest@example.test"]);
@@ -237,5 +237,51 @@ fn named_calendar_guests_extract_addresses_without_accepting_invalid_tokens() {
     assert_eq!(guests.iter().map(|g| recipient_address(g)).collect::<Vec<_>>(), [Some("planning@example.test".into()), Some("other@example.test".into())]);
     for invalid in ["invalid", "Planning <>", "a@example.test\r\nBcc: b@example.test", "\"unbalanced <a@example.test>"] {
         assert_eq!(recipient_address(invalid), None);
+    }
+}
+
+#[gpui::test]
+fn review_new_event_dates_are_readable_and_submit_unchanged(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    let year = chrono::Local::now().year();
+    for year in [year, year + 1] {
+        let day = NaiveDate::from_ymd_opt(year, 11, 9).unwrap();
+        view.update_in(cx, |v, window, cx| {
+            v.open_new_event(day, 540, 600, window, cx);
+            let editor = v.week.editor.as_ref().unwrap();
+            let expected = day.format(if year == chrono::Local::now().year() { "%a %-d %b" } else { "%a %-d %b %Y" }).to_string();
+            for field in [DATE, END_DATE] { assert_eq!(editor.fields[field].read(cx).text(), expected); }
+            editor.fields[TITLE].update(cx, |f, cx| f.set_text("Fixture", cx));
+            assert!(v.event_draft(cx).unwrap().start.starts_with(&day.to_string()));
+            v.cancel_new_event(window, cx);
+        });
+    }
+}
+
+#[test]
+fn review_new_event_accepts_common_date_formats() {
+    for date in ["2026-11-09", "Mon 9 Nov 2026", "9 Nov 2026", "9.11.2026", "Nov 9 2026"] {
+        assert_eq!(interval(date, date, "", "", true, &chrono::Utc).unwrap(), ("2026-11-09".into(), "2026-11-10".into()), "{date}");
+    }
+}
+
+#[test]
+fn review_date_formats_round_trip_and_numeric_order_follows_locale() {
+    let day = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+    assert_eq!(date_label(day, 2026), "Mon 9 Nov");
+    assert_eq!(date_label(day.with_year(2027).unwrap(), 2026), "Tue 9 Nov 2027");
+    for value in ["Mon 9 Nov", "9 Nov", "Nov 9", "9/11", "9.11", "9/11/2026", " 2026-11-09 "] {
+        assert_eq!(parse_date(value, 2026, false).unwrap(), day, "{value}");
+    }
+    assert_eq!(parse_date("11/9/2026", 2026, true).unwrap(), day);
+    assert_eq!(parse_date("11/9", 2026, true).unwrap(), day);
+    for value in ["2026-02-29", "31 Nov", "13/32/2026", "", "tomorrow", "Mon 9 Nov 2027"] {
+        assert!(parse_date(value, 2026, false).is_err(), "{value}");
+    }
+    for year in [2026, 2027, 2028] {
+        for month in 1..=12 {
+            let day = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            assert_eq!(parse_date(&date_label(day, 2026), 2026, false).unwrap(), day);
+        }
     }
 }

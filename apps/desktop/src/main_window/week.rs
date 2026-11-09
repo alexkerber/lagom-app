@@ -74,6 +74,20 @@ impl Default for Week {
     }
 }
 
+impl Week {
+    fn initial_scroll<T: chrono::TimeZone>(&self, now: chrono::DateTime<T>, height: f32) -> f32 {
+        let first = self.days.iter().enumerate().flat_map(|(i, events)|
+            layout(events, self.start + chrono::Duration::days(i as i64), &now.timezone()))
+            .map(|block| block.start).min_by(f32::total_cmp).unwrap_or(480.);
+        let top = (first * HOUR / 60. - HOUR / 2.).clamp(0., (24. * HOUR - height).max(0.));
+        let minute = (now.hour() * 60 + now.minute()) as f32;
+        let today = (now.date_naive() - self.start).num_days();
+        if (0..self.view.days() as i64).contains(&today) && minute * HOUR / 60. >= top + height {
+            now_scroll(minute, height)
+        } else { top }
+    }
+}
+
 fn monday(day: NaiveDate) -> NaiveDate { day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64) }
 fn synced_day(day: NaiveDate, windows: &[Option<(i64, i64)>]) -> bool {
     let start = agenda::day_start(day, &chrono::Local);
@@ -121,6 +135,15 @@ fn compact(event: &CalendarEvent) -> bool { !event.all_day && event.end_utc - ev
 
 fn event_title(event: &CalendarEvent) -> gpui::StyledText {
     gpui::StyledText::new(if compact(event) { format!("{} · {}", event.title, short_time(event)) } else { event.title.clone() })
+}
+
+fn calendar_title(title: gpui::StyledText) -> Div {
+    #[cfg(test)]
+    polish_tests::TITLE_LAYOUTS.with(|layouts| {
+        if let Some(layouts) = layouts.borrow_mut().as_mut() { layouts.push(title.layout().clone()); }
+    });
+    // A full-width line in normal flow gives GPUI a width before it shapes and truncates text.
+    div().w_full().min_w(px(0.)).flex_shrink_0().one_line().child(title)
 }
 
 fn event_time(event: &CalendarEvent) -> String {
@@ -205,7 +228,6 @@ impl MainWindow {
         let day = if delta == 0 { today } else if self.week.view == View::Month { shift_month(self.week.anchor, delta) }
             else { self.week.anchor.checked_add_signed(chrono::Duration::days(delta * if self.week.view == View::Week { 7 } else { 1 })).unwrap_or(self.week.anchor) };
         self.calendar_date(day, self.week.view, cx);
-        if delta == 0 { self.week.scroll_to_now = true; }
         cx.notify();
     }
 
@@ -216,6 +238,7 @@ impl MainWindow {
         self.week.mini_month = day.with_day(1).unwrap();
         self.week.detail = None;
         self.week.drag = None;
+        self.week.scroll_to_now = true;
         self.reload_week(cx);
         cx.notify();
     }
@@ -243,9 +266,9 @@ impl MainWindow {
         let entry = entry.clone();
         pressable(div().id(("week-event", day * 100_000 + ix)), &t, false)
             .debug_selector(move || format!("week-event-{day}-{ix}"))
-            .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
+            .min_w(px(0.)).flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
-            .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).whitespace_nowrap().text_ellipsis().child(title))
+            .child(calendar_title(title).debug_selector(|| "week-title".into()).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM))
             .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/camera.svg", t.ink2, 16.))).child(mono(short_time(&entry.event), t.ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -405,7 +428,7 @@ impl MainWindow {
                                     entity.update(cx, |this, cx| {
                                         if this.week.scroll_to_now && height > px(0.) {
                                             this.week.scroll_to_now = false;
-                                            this.week.scroll.set_offset(gpui::point(px(0.), px(-now_scroll((now.hour() * 60 + now.minute()) as f32, f32::from(height)))));
+                                            this.week.scroll.set_offset(gpui::point(px(0.), px(-this.week.initial_scroll(now, f32::from(height)))));
                                             cx.notify();
                                         }
                                     }).ok();
@@ -421,7 +444,7 @@ impl MainWindow {
                 .occlude().max_h(px(400.)).overflow_y_scroll().p(px(16.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).shadow_md()
                 .flex().flex_col().gap(px(12.))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(entry.event.title.clone()))
+                .child(calendar_title(gpui::StyledText::new(entry.event.title.clone())).font_weight(FontWeight::SEMIBOLD))
                 .child(div().flex().items_center().gap(px(6.))
                     .when(entry.event.all_day, |d| d.child(icon("icons/sun.svg", t.ink2, 16.)))
                     .child(mono(event_time(&entry.event), t.ink2)))
@@ -447,7 +470,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
-    fn entry(day: NaiveDate, start: u32, end: u32, all_day: bool) -> AgendaEvent {
+    pub(super) fn entry(day: NaiveDate, start: u32, end: u32, all_day: bool) -> AgendaEvent {
         let midnight = day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
         AgendaEvent { account: "fixture".into(), calendar: "Fixture calendar".into(), calendar_id: "primary".into(), event: CalendarEvent {
             remote_id: format!("{start}-{end}"), title: "Fixture event".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),

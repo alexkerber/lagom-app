@@ -83,7 +83,8 @@ impl MainWindow {
                 .child(icon_button(&t, "mini-previous", "icons/previous.svg", "Previous month").on_click(cx.listener(|this, _, _, cx| {
                     this.week.mini_month = shift_month(this.week.mini_month, -1); cx.notify();
                 })))
-                .child(div().flex_1().text_center().font_weight(FontWeight::MEDIUM).child(month.format("%B %Y").to_string()))
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col()
+                    .child(calendar_title(gpui::StyledText::new(month.format("%B %Y").to_string())).text_center().font_weight(FontWeight::MEDIUM)))
                 .child(icon_button(&t, "mini-next", "icons/next.svg", "Next month").on_click(cx.listener(|this, _, _, cx| {
                     this.week.mini_month = shift_month(this.week.mini_month, 1); cx.notify();
                 }))))
@@ -142,7 +143,7 @@ impl MainWindow {
                     .on_mouse_down(MouseButton::Left, |_, window, cx| { window.prevent_default(); cx.stop_propagation(); })
                     .on_click(cx.listener(move |this, _, _, cx| { this.week.suggestion = index; this.add_calendar_guest(cx); })))))
             .children(self.week.guests.iter().enumerate().map(|(index, guest)| div().flex().items_center().gap(px(4.))
-                .child(div().flex_1().min_w(px(0.)).one_line().child(guest.clone()))
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(calendar_title(gpui::StyledText::new(guest.clone()))))
                 .child(icon_button(&t, "remove-guest", "icons/remove-guest.svg", "Remove guest").id(("remove-guest", index))
                     .on_click(cx.listener(move |this, _, _, cx| { this.week.guests.remove(index); cx.notify(); })))))
             .when_some(self.week.guest_error.clone(), |d, error| d.child(mono(error, t.danger)))
@@ -156,9 +157,10 @@ impl MainWindow {
         let entry = entry.clone();
         pressable(div().id(("week-event", day * 100_000 + ix)), &t, false)
             .debug_selector(move || format!("week-event-{day}-{ix}"))
-            .flex().items_center().gap(px(5.)).min_h(px(22.)).min_w(px(0.)).px(px(4.)).rounded(px(radius::KEY))
+            .w_full().flex().items_center().gap(px(5.)).min_h(px(22.)).min_w(px(0.)).px(px(4.)).rounded(px(radius::KEY))
             .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(self.account_accent(index)))
-            .child(div().flex_1().min_w(px(0.)).text_size(px(size::SMALL)).one_line().child(entry.event.title.clone()))
+            .child(div().flex_1().min_w(px(0.)).flex().flex_col()
+                .child(calendar_title(gpui::StyledText::new(entry.event.title.clone())).text_size(px(size::SMALL))))
             .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.week.detail = Some(entry.clone()); window.focus(&this.focus); cx.notify(); }))
     }
 
