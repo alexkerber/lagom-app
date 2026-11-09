@@ -16,6 +16,7 @@ pub struct MessageWindow {
 }
 
 impl html::WebHost for MessageWindow {
+    fn new_task(&mut self, cx: &mut Context<Self>) { self.task(cx); }
     fn web(&mut self) -> &mut html::Web {
         &mut self.web
     }
@@ -26,6 +27,13 @@ impl html::WebHost for MessageWindow {
 }
 
 impl MessageWindow {
+    fn task(&mut self, cx: &mut Context<Self>) {
+        let id = self.id;
+        self.main.update(cx, |main, window, cx| {
+            main.task_from_mail(id, cx);
+            window.activate_window();
+        }).ok();
+    }
     fn new(main: WindowHandle<MainWindow>, inbox: &Entity<MainWindow>, id: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
@@ -88,6 +96,7 @@ impl Render for MessageWindow {
             .key_context("MessageWindow")
             .track_focus(&self.focus)
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
+            .on_action(cx.listener(|this, _: &NewTask, _, cx| this.task(cx)))
             .on_action(cx.listener(|this, _: &Done, _, cx| this.act(Move::Done, cx)))
             .on_action(cx.listener(|this, _: &Later, _, cx| this.act(Move::Later, cx)))
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| this.act(Move::Delete, cx)))

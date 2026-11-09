@@ -152,7 +152,8 @@ enum TasksCommand {
 fn selected_task_list(store: &Store, selector: Option<&str>) -> Result<TaskList> {
     let lists = store.task_lists()?;
     let Some(selector) = selector else {
-        return lists.into_iter().next().context("No task lists");
+        let default = store.default_task_list()?;
+        return lists.into_iter().find(|list| list.id == default).context("No default task list");
     };
     if let Some(list) = lists.iter().find(|l| l.id.to_string() == selector) {
         return Ok(list.clone());

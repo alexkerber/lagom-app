@@ -27,6 +27,7 @@ enum Hint {
 /// A command the main window runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Run {
+    NewTask,
     Done,
     Later(LaterWhen),
     Delete,
@@ -57,6 +58,7 @@ struct Command {
 }
 
 const COMMANDS: &[Command] = &[
+    Command { section: "Actions", label: "New task", hint: Hint::Key("T"), action: Action::Run(Run::NewTask) },
     Command { section: "Actions", label: "Done", hint: Hint::Key("E"), action: Action::Run(Run::Done) },
     Command { section: "Actions", label: LaterWhen::Evening.label(), hint: Hint::Note("18:00"), action: Action::Run(Run::Later(LaterWhen::Evening)) },
     Command { section: "Actions", label: LaterWhen::Tomorrow.label(), hint: Hint::Key("L"), action: Action::Run(Run::Later(LaterWhen::Tomorrow)) },
@@ -154,6 +156,7 @@ pub type Search = Rc<dyn Fn(&str) -> Vec<(i64, String)>>;
 pub struct CommandPalette {
     input: Entity<TextInput>,
     composing: bool,
+    mail: bool,
     selected: usize,
     folders: Vec<(usize, String)>,
     // Subject of the message a move would take.
@@ -189,6 +192,7 @@ impl CommandPalette {
     pub fn new(
         query: &str,
         composing: bool,
+        mail: bool,
         folders: Vec<(usize, String)>,
         subject: Option<String>,
         search: Option<Search>,
@@ -206,7 +210,7 @@ impl CommandPalette {
             TextInputEvent::Enter => this.run(this.matches(cx), cx),
             TextInputEvent::Escape => cx.emit(DismissEvent),
         });
-        let mut this = Self { input, composing, selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
+        let mut this = Self { input, composing, mail, selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
         this.find_hits(cx);
         this
     }
@@ -230,7 +234,9 @@ impl CommandPalette {
         if self.composing {
             commands(query).into_iter().filter(|item| item.action == Action::Run(Run::InsertFile)).collect()
         } else {
-            matches(query, &self.folders, &self.hits)
+            matches(query, &self.folders, &self.hits).into_iter().filter(|item| {
+                self.mail || !matches!(item.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply) | Action::Move(_) | Action::Fill(_))
+            }).collect()
         }
     }
 
@@ -426,12 +432,22 @@ mod tests {
 
     #[gpui::test]
     fn compose_palette_offers_file_insertion_only(cx: &mut gpui::TestAppContext) {
-        let (palette, cx) = cx.add_window_view(|window, cx| CommandPalette::new("", true, vec![], None, None, window, cx));
+        let (palette, cx) = cx.add_window_view(|window, cx| CommandPalette::new("", true, true, vec![], None, None, window, cx));
         palette.read_with(cx, |p, cx| {
             let items = p.matches(cx);
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].label, "Insert file…");
             assert_eq!(items[0].action, Action::Run(Run::InsertFile));
+        });
+    }
+
+    #[gpui::test]
+    fn palette_without_mail_offers_new_task_but_no_mail_actions(cx: &mut gpui::TestAppContext) {
+        let (palette, cx) = cx.add_window_view(|window, cx| CommandPalette::new("", false, false, vec![], None, None, window, cx));
+        palette.read_with(cx, |p, cx| {
+            let items = p.matches(cx);
+            assert!(items.iter().any(|i| i.action == Action::Run(Run::NewTask)));
+            assert!(!items.iter().any(|i| matches!(i.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply) | Action::Move(_) | Action::Fill(_))));
         });
     }
 

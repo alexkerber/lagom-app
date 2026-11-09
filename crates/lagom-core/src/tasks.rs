@@ -3,7 +3,7 @@ use crate::{
     store::{MessageSummary, Store},
     Error, Result,
 };
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskList {
@@ -27,12 +27,13 @@ pub struct Task {
     pub mail_account: Option<String>,
     pub mail_message_id: Option<String>,
     pub mail_subject: Option<String>,
+    pub created: i64,
     pub updated: i64,
     pub dirty: bool,
     pub deleted: bool,
 }
 
-const TASK_COLUMNS: &str = "id,list,remote_id,title,notes,due,done_at,position,mail_account,mail_message_id,mail_subject,updated,dirty,deleted";
+const TASK_COLUMNS: &str = "id,list,remote_id,title,notes,due,done_at,position,mail_account,mail_message_id,mail_subject,updated,dirty,deleted,created";
 fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
@@ -49,6 +50,7 @@ fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         updated: r.get(11)?,
         dirty: r.get(12)?,
         deleted: r.get(13)?,
+        created: r.get(14)?,
     })
 }
 fn list_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskList> {
@@ -91,22 +93,31 @@ impl Store {
             params![id, title(name)?],
         )?)
     }
-    /// Deleting a list also deletes its tasks. At least one list must remain.
+    pub fn default_task_list(&self) -> Result<i64> {
+        Ok(self.db.query_row("SELECT list FROM task_settings WHERE id=1", [], |r| r.get(0))?)
+    }
+    pub fn set_default_task_list(&self, id: i64) -> Result<()> {
+        changed(self.db.execute("UPDATE task_settings SET list=?1 WHERE id=1 AND EXISTS(SELECT 1 FROM task_lists WHERE id=?1)", [id])?)
+    }
     pub fn delete_task_list(&self, id: i64) -> Result<()> {
-        let rows = self.db.execute(
-            "DELETE FROM task_lists WHERE id=?1 AND (SELECT COUNT(*) FROM task_lists)>1",
-            [id],
-        )?;
-        if rows == 0
-            && self.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM task_lists WHERE id=?1)",
-                [id],
-                |r| r.get::<_, bool>(0),
-            )?
-        {
-            return Err(Error::Invalid("cannot delete the last task list"));
+        let tx = self.db.unchecked_transaction()?;
+        let default = self.default_task_list()?;
+        if id == default {
+            return Err(Error::Invalid("cannot delete the default task list"));
         }
-        changed(rows)
+        // Keep completed tasks and tombstones too, so deleting a list never loses task history.
+        tx.execute("UPDATE tasks SET list=?2,position=COALESCE(position,0)+(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?2),updated=unixepoch(),dirty=1 WHERE list=?1", params![id, default])?;
+        changed(tx.execute("DELETE FROM task_lists WHERE id=?1", [id])?)?;
+        Ok(tx.commit()?)
+    }
+    /// Undated and overdue tasks stay visible until completed.
+    pub fn today_tasks(&self, today: &str) -> Result<Vec<Task>> {
+        let mut stmt = self.db.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks WHERE deleted=0 AND done_at IS NULL AND (due IS NULL OR substr(due,1,10)<=?1) ORDER BY list,position,id"))?;
+        let rows = stmt.query_map([today], task_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn task_mail(&self, id: i64) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT m.id FROM tasks t JOIN messages m ON m.account=t.mail_account AND m.message_id=t.mail_message_id WHERE t.id=?1 AND t.deleted=0 AND t.mail_message_id<>'' ORDER BY m.date DESC,m.id DESC LIMIT 1", [id], |r| r.get(0)).optional()?)
     }
     /// Active tasks first, then completed tasks, each ordered by position and id.
     pub fn tasks(&self, list: i64, include_done: bool) -> Result<Vec<Task>> {
@@ -131,9 +142,12 @@ impl Store {
         due: Option<String>,
         mail: Option<&MessageSummary>,
     ) -> Result<Task> {
-        Ok(self.db.query_row(&format!("INSERT INTO tasks(list,title,notes,due,position,mail_account,mail_message_id,mail_subject,updated,dirty)
-            VALUES(?1,?2,?3,?4,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1 AND deleted=0),?5,?6,?7,unixepoch(),1) RETURNING {TASK_COLUMNS}"),
+        Ok(self.db.query_row(&format!("INSERT INTO tasks(list,title,notes,due,position,mail_account,mail_message_id,mail_subject,updated,dirty,created)
+            VALUES(?1,?2,?3,?4,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1 AND deleted=0),?5,?6,?7,unixepoch(),1,unixepoch()) RETURNING {TASK_COLUMNS}"),
             params![list, title(name)?, notes, due, mail.map(|m| &m.account), mail.map(|m| &m.message_id), mail.map(|m| &m.subject)], task_row)?)
+    }
+    pub fn rename_task(&self, id: i64, name: &str) -> Result<()> {
+        changed(self.db.execute("UPDATE tasks SET title=?2,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?])?)
     }
     pub fn update_task(&self, id: i64, name: &str, notes: &str, due: Option<String>) -> Result<()> {
         changed(self.db.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?, notes, due])?)
@@ -192,6 +206,84 @@ mod tests {
         let store = Store::open(temp.path().join("tasks.db")).unwrap();
         (temp, store)
     }
+    #[test]
+    fn today_keeps_undated_and_overdue_tasks_but_not_future_or_done() {
+        let (_temp, s) = setup();
+        let list = s.default_task_list().unwrap();
+        let undated = s.add_task(list, "Undated", "", None).unwrap();
+        let overdue = s.add_task(list, "Overdue", "", Some("2026-11-08".into())).unwrap();
+        let today = s.add_task(list, "Today", "", Some("2026-11-09".into())).unwrap();
+        let future = s.add_task(list, "Future", "", Some("2026-11-10".into())).unwrap();
+        let done = s.add_task(list, "Done", "", None).unwrap();
+        let deleted = s.add_task(list, "Deleted", "", None).unwrap();
+        s.set_done(done.id, true).unwrap();
+        s.delete_task(deleted.id).unwrap();
+        assert_eq!(s.today_tasks("2026-11-09").unwrap(), [undated.clone(), overdue.clone(), today.clone()]);
+        assert_eq!(s.today_tasks("2026-11-10").unwrap(), [undated, overdue, today, future]);
+    }
+
+    #[test]
+    fn selected_default_persists_and_list_deletion_keeps_every_task() {
+        let (temp, s) = setup();
+        let lists = s.task_lists().unwrap();
+        let (from, to) = (lists[0].id, lists[1].id);
+        let first = s.add_task(to, "First", "", None).unwrap();
+        let open = s.add_task(from, "Open", "notes", Some("2026-11-09".into())).unwrap();
+        let done = s.add_task(from, "Done", "", None).unwrap();
+        let deleted = s.add_task(from, "Deleted", "", None).unwrap();
+        s.set_done(done.id, true).unwrap();
+        s.delete_task(deleted.id).unwrap();
+        s.set_default_task_list(to).unwrap();
+        assert!(matches!(s.set_default_task_list(999), Err(Error::NotFound)));
+        assert!(matches!(s.delete_task_list(to), Err(Error::Invalid(_))));
+        s.delete_task_list(from).unwrap();
+        let moved = s.tasks(to, true).unwrap();
+        assert_eq!(moved.iter().map(|t| t.id).collect::<Vec<_>>(), [first.id, open.id, done.id]);
+        assert_eq!((moved[1].notes.as_str(), moved[1].due.as_deref(), moved[1].created), ("notes", Some("2026-11-09"), open.created));
+        assert_eq!(moved.iter().map(|t| t.position).collect::<Vec<_>>(), [Some(0), Some(1), Some(2)]);
+        assert!(moved[2].done_at.is_some());
+        assert_eq!(s.db.query_row("SELECT list,deleted FROM tasks WHERE id=?1", [deleted.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))).unwrap(), (to, true));
+        s.rename_task(open.id, "Renamed").unwrap();
+        assert!(s.rename_task(open.id, " ").is_err());
+        assert!(s.rename_task(deleted.id, "Gone").is_err());
+        drop(s);
+        let s = Store::open(temp.path().join("tasks.db")).unwrap();
+        assert_eq!(s.default_task_list().unwrap(), to);
+        assert_eq!(s.task_lists().unwrap(), [lists[1].clone()]);
+        assert_eq!(s.tasks(to, false).unwrap()[1].title, "Renamed");
+    }
+
+    #[test]
+    fn v8_upgrade_keeps_custom_lists_tasks_and_timestamps_and_seeds_only_when_empty() {
+        for empty in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("v8.db");
+            let db = rusqlite::Connection::open(&path).unwrap();
+            for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql")] {
+                db.execute_batch(&schema.replace("INSERT INTO task_lists(name,position) VALUES('Work',0),('Private',1);", "")).unwrap();
+            }
+            db.pragma_update(None, "user_version", 8).unwrap();
+            if !empty {
+                db.execute_batch("INSERT INTO task_lists(id,name,position) VALUES(7,'Custom',0);
+                    INSERT INTO tasks(id,list,title,notes,due,updated) VALUES(42,7,'Keep','Notes','2026-11-10',123);").unwrap();
+            }
+            drop(db);
+            let s = Store::open(&path).unwrap();
+            let lists = s.task_lists().unwrap();
+            if empty {
+                assert_eq!(lists.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Work", "Private"]);
+            } else {
+                assert_eq!(lists.len(), 1);
+                assert_eq!((lists[0].id, lists[0].name.as_str()), (7, "Custom"));
+                assert_eq!(s.default_task_list().unwrap(), 7);
+                let task = &s.tasks(7, false).unwrap()[0];
+                assert_eq!((task.id, task.title.as_str(), task.notes.as_str(), task.due.as_deref(), task.updated, task.created), (42, "Keep", "Notes", Some("2026-11-10"), 123, 123));
+            }
+            drop(s);
+            assert_eq!(Store::open(path).unwrap().task_lists().unwrap(), lists);
+        }
+    }
+
     fn reset_dirty(store: &Store, id: i64) {
         store
             .db
@@ -213,7 +305,7 @@ mod tests {
         assert!(dirty);
     }
     #[test]
-    fn lists_crud_order_and_last_list_guard() {
+    fn lists_crud_move_tasks_and_default_guard() {
         let (_temp, s) = setup();
         let lists = s.task_lists().unwrap();
         assert_eq!(
@@ -238,8 +330,9 @@ mod tests {
                 0
             ))
             .unwrap(),
-            0
+            1
         );
+        assert_eq!(s.tasks(lists[0].id, true).unwrap()[0].id, task.id);
         s.delete_task_list(lists[1].id).unwrap();
         let kept = s.add_task(lists[0].id, "Keep me", "", None).unwrap();
         assert!(matches!(
@@ -247,7 +340,7 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         assert_eq!(s.task_lists().unwrap(), [lists[0].clone()]);
-        assert_eq!(s.tasks(lists[0].id, true).unwrap(), [kept]);
+        assert_eq!(s.tasks(lists[0].id, true).unwrap()[1], kept);
         for name in ["", " \n\t"] {
             assert!(matches!(s.add_task_list(name), Err(Error::Invalid(_))));
             assert!(matches!(
@@ -277,6 +370,8 @@ mod tests {
             ("Plan", "Keep notes\n", Some("2026-11-09"))
         );
         assert_eq!(task.position, Some(0));
+        assert_eq!(task.created, task.updated);
+        assert!(task.created > 0);
         assert!(task.done_at.is_none() && task.remote_id.is_none() && !task.deleted);
         assert_dirty(&s, task.id);
         for name in ["", " \n"] {
@@ -435,6 +530,7 @@ mod tests {
             })
             .unwrap();
         assert_ne!(id, moved_id);
+        assert_eq!(s.task_mail(task.id).unwrap(), Some(moved_id));
         assert_eq!(
             s.tasks_for_mail(&account.id, &mail.message_id).unwrap(),
             std::slice::from_ref(&task)
@@ -460,6 +556,7 @@ mod tests {
         s.delete_task(second.id).unwrap();
         s.delete_account(&account.id).unwrap();
         assert!(s.message(moved_id).is_err());
+        assert_eq!(s.task_mail(task.id).unwrap(), None);
         assert_eq!(s.task_lists().unwrap(), lists);
         assert_eq!(s.tasks(lists[0].id, true).unwrap().len(), 1);
         let linked = s.tasks_for_mail(&account.id, &mail.message_id).unwrap();
