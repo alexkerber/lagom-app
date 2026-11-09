@@ -510,6 +510,13 @@ impl Store {
     pub fn message(&self, id: i64) -> Result<Message> {
         self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(20)?,body_html:r.get(21)? })).optional()?.ok_or(Error::NotFound)
     }
+    /// Count unread Inbox mail across accounts, excluding snoozed mail and pending moves.
+    pub fn unread_inbox_count(&self, now: i64, pending: &[i64]) -> Result<usize> {
+        Ok(self.db.query_row("SELECT count(*) FROM messages m JOIN folders f ON f.id=m.folder
+            WHERE f.role='inbox' AND m.seen=0 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?1)
+            AND m.id NOT IN (SELECT value FROM json_each(?2))", params![now, serde_json::to_string(pending).expect("integer IDs serialize")], |r| r.get(0))?)
+    }
+
     /// The newest unread Inbox mail across accounts, excluding mail still snoozed.
     pub fn unread_mail(&self, now: i64, limit: u32) -> Result<Vec<MessageSummary>> {
         let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m JOIN folders f ON f.id=m.folder
@@ -682,6 +689,9 @@ mod mail_tests {
         assert_eq!(store.unread_mail(100, 5).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), expected[..5]);
         assert_eq!(store.unread_mail(101, 1).unwrap()[0].date, 8);
         assert!(store.unread_mail(100, 0).unwrap().is_empty());
+        assert_eq!(store.unread_inbox_count(100, &[]).unwrap(), expected.len());
+        assert_eq!(store.unread_inbox_count(100, &expected[..2]).unwrap(), expected.len() - 2);
+        assert_eq!(store.unread_inbox_count(100, &expected).unwrap(), 0);
     }
 
     fn mail(a: &Account, f: i64, uid: u32) -> Message {

@@ -859,6 +859,15 @@ impl MainWindow {
         Some(state.into())
     }
 
+    pub(super) fn sync_icon(&self) -> &'static str {
+        let Some(live) = &self.live else { return "icons/cloud.svg" };
+        match live.account().and_then(|a| live.sync.get(&a.id)) {
+            Some(SyncState::Failed(_) | SyncState::ReauthRequired) => "icons/cloud-off.svg",
+            Some(SyncState::Synced(_)) => "icons/cloud.svg",
+            _ => "icons/sync.svg",
+        }
+    }
+
     pub(super) fn reauth_control(&self, ix: usize, slot: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let live = self.live.as_ref()?;
         let account = live.accounts.get(ix)?;
@@ -1136,7 +1145,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn review_home_hides_pending_moves_and_fills_five_rows(cx: &mut TestAppContext) {
+    fn review_home_count_excludes_pending_moves(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         view.update_in(cx, |v, window, cx| {
             for uid in 1..=7 { incoming(v, uid); }
@@ -1147,8 +1156,7 @@ mod tests {
             v.act(Move::Done, cx);
             assert!(matches!(rx.try_recv(), Ok(Cmd::Op { id, act: Act::Archive, .. }) if id == moved));
             v.show_home(window, cx);
-            assert_eq!(v.today.unread.len(), 5);
-            assert!(!v.today.unread.iter().any(|m| m.store == Some(moved)));
+            assert_eq!(v.today.unread, 6);
         });
     }
 
@@ -1241,30 +1249,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn home_unread_opens_cached_message_and_todo_includes_future_tasks(cx: &mut TestAppContext) {
+    fn home_unread_opens_inbox_and_default_tasks_include_future_tasks(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
-        let expected = view.update_in(cx, |v, window, cx| {
+        view.update_in(cx, |v, window, cx| {
             for uid in 1..=7 { incoming(v, uid); }
             let store = &v.live.as_ref().unwrap().store;
             let list = store.default_task_list().unwrap();
             store.add_task(list, "Future task", "", Some("2099-12-31".into())).unwrap();
             v.reload(cx);
             v.show_home(window, cx);
-            assert_eq!(v.today.unread.len(), 5);
-            assert!(v.today.tasks.is_empty());
-            v.today.unread[0].store.unwrap()
+            assert_eq!(v.today.unread, 7);
+            assert_eq!(v.today.tasks.len(), 1);
         });
         cx.run_until_parked();
-        let at = cx.debug_bounds("unread-mail-0").unwrap().center();
+        let at = cx.debug_bounds("home-unread").unwrap().center();
         cx.simulate_click(at, Default::default());
         view.read_with(cx, |v, _| {
             assert!(matches!(v.page, Page::Mail));
-            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(expected));
+            assert!(v.inbox.open.is_none());
         });
         cx.simulate_keystrokes("secondary-4");
         view.read_with(cx, |v, _| { assert!(matches!(v.page, Page::Todo)); assert_eq!(v.today.tasks[0].title, "Future task"); });
         cx.simulate_keystrokes("secondary-1");
-        assert!(view.read_with(cx, |v, _| v.today.tasks.is_empty()));
+        assert_eq!(view.read_with(cx, |v, _| v.today.tasks.len()), 1);
     }
 
     #[gpui::test]
@@ -2161,10 +2168,8 @@ mod tests {
             v.show_home(window, cx);
         });
         cx.run_until_parked();
-        let consent = cx.debug_bounds("allow-calendar-0").expect("Today must offer calendar access");
-        let list = view.read_with(cx, |v, _| v.today.lists[0].id);
-        let groups = cx.debug_bounds(format!("task-list-{list}").leak()).unwrap();
-        assert!(consent.bottom() <= groups.top(), "consent belongs above tasks");
+        let consent = cx.debug_bounds("Show your Google Calendar").expect("Today must offer calendar access");
+        assert!(cx.debug_bounds("home-tasks").is_some());
         assert!(cx.debug_bounds("calendar-heading").is_none(), "unconsented accounts get only a quiet row");
         let button = consent.center();
         cx.simulate_click(button, Default::default());
@@ -2194,13 +2199,10 @@ mod tests {
         cx.simulate_click(button, Default::default());
         assert!(rx.try_recv().is_err());
         let event = cx.debug_bounds("agenda-event-0").unwrap();
-        let list = view.read_with(cx, |v, _| v.today.lists[0].id);
-        let groups = cx.debug_bounds(format!("task-list-{list}").leak()).unwrap();
+        let groups = cx.debug_bounds("home-tasks").unwrap();
         let next = cx.debug_bounds("agenda-event-1").unwrap();
         assert!(event.bottom() <= next.top(), "events stay in agenda order");
-        assert!(next.bottom() <= groups.top(), "events belong above tasks");
-        assert_eq!(event.left(), groups.left());
-        assert_eq!(event.size.width, groups.size.width);
+        assert!(event.right() <= groups.left() || next.bottom() <= groups.top(), "columns sit alongside or stack");
     }
 
     #[gpui::test]
@@ -2304,18 +2306,18 @@ mod tests {
         let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
         view.update_in(cx, |v, window, cx| v.show_home(window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-        assert!(cx.debug_bounds("Add list").is_none());
+        assert!(cx.debug_bounds("new-list").is_none());
         assert!(cx.debug_bounds("task-hint").is_none());
         let task = store.add_task(store.default_task_list().unwrap(), "Fixture task", "", None).unwrap();
         view.update_in(cx, |v, window, cx| v.show_home(window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-        assert!(cx.debug_bounds("Add list").is_none());
-        assert!(cx.debug_bounds("task-hint").is_some());
+        assert!(cx.debug_bounds("new-list").is_none());
+        assert!(cx.debug_bounds("task-hint").is_none());
         store.set_done(task.id, true).unwrap();
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-        assert!(cx.debug_bounds("Add list").is_some());
-        assert!(cx.debug_bounds("task-hint").is_some());
+        assert!(cx.debug_bounds("new-list").is_some());
+        assert!(cx.debug_bounds("task-hint").is_none());
     }
 
     #[gpui::test]
@@ -2325,7 +2327,12 @@ mod tests {
         let fixture = rusqlite::Connection::open(store.path()).unwrap();
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         for rename in [false, true] {
-            let selector = if rename { format!("rename-list-{}", store.task_lists().unwrap().last().unwrap().id) } else { "Add list".into() };
+            if rename {
+                cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+                let at = cx.debug_bounds(format!("list-menu-{}", store.task_lists().unwrap().last().unwrap().id).leak()).unwrap().center();
+                cx.simulate_click(at, Default::default());
+            }
+            let selector = if rename { format!("rename-list-{}", store.task_lists().unwrap().last().unwrap().id) } else { "new-list".into() };
             cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
             let at = cx.debug_bounds(selector.leak()).unwrap().center();
             cx.simulate_click(at, Default::default());
@@ -2597,12 +2604,15 @@ mod tests {
         let (view, cx, _rx) = window(cx);
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-        let at = cx.debug_bounds("Add list").unwrap().center();
+        let at = cx.debug_bounds("new-list").unwrap().center();
         cx.simulate_click(at, Default::default());
         cx.simulate_input("Custom list");
         cx.simulate_keystrokes("enter");
         let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
         let list = store.task_lists().unwrap().last().unwrap().id;
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let at = cx.debug_bounds(format!("list-menu-{list}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         let at = cx.debug_bounds(format!("rename-list-{list}").leak()).unwrap().center();
         cx.simulate_click(at, Default::default());
@@ -2620,7 +2630,14 @@ mod tests {
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         assert_eq!(view.read_with(cx, |v, _| v.today.default), Some(default));
+        let at = cx.debug_bounds(format!("list-menu-{list}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         let at = cx.debug_bounds(format!("delete-list-{list}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(store.task_lists().unwrap().iter().any(|l| l.id == list));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let at = cx.debug_bounds("confirm-delete-list").unwrap().center();
         cx.simulate_click(at, Default::default());
         assert!(!store.task_lists().unwrap().iter().any(|l| l.id == list));
         assert_eq!(store.tasks(default, false).unwrap()[0].id, task.id);
@@ -3203,14 +3220,16 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::ReauthRequired(account.clone()), Event::Sync(account.clone(), SyncState::Failed("expired".into()))], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "Sign in again");
+            assert_eq!(v.sync_icon(), "icons/cloud-off.svg");
         });
         cx.run_until_parked();
-        let at = cx.debug_bounds("sidebar-reauth-0").unwrap().center();
+        let at = cx.debug_bounds("account-reauth-0").unwrap().center();
         cx.simulate_click(at, Default::default());
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Reauthenticate(id) if id == account));
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::Sync(account.clone(), SyncState::SigningIn), Event::Sync(account.clone(), SyncState::Synced(0))], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "Signing in…");
+            assert_eq!(v.sync_icon(), "icons/sync.svg");
         });
         cx.run_until_parked();
         let at = cx.debug_bounds("account-reauth-0").unwrap().center();
@@ -3219,6 +3238,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::ReauthRequired(account.clone()), Event::Reauthenticated { account: account.clone(), result: Err("Sign in with the same email address as this account".into()) }], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "Sign in again");
+            assert_eq!(v.sync_icon(), "icons/cloud-off.svg");
             assert!(v.toast.as_ref().unwrap().0.contains("same email address"));
         });
         cx.run_until_parked();

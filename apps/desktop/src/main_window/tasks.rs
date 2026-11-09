@@ -44,10 +44,17 @@ pub(super) struct Today {
     task_access: std::collections::HashSet<String>,
     pub(super) task_sync: std::collections::HashMap<String, crate::sync::SyncState>,
     pub(super) tasks: Vec<LocalTask>,
-    pub(super) unread: Vec<Mail>,
+    pub(super) unread: usize,
+    completed: HashSet<i64>,
+    menu: Option<TaskMenu>,
+    menu_focus: Option<FocusHandle>,
+    menu_index: usize,
+    focused: bool,
+    leaving: Vec<LocalTask>,
     selected: Option<i64>,
     editor: Option<(Edit, Entity<TextInput>)>,
-    scroll: ScrollHandle,
+    pub(super) scroll: ScrollHandle,
+    bounds: Rc<std::cell::RefCell<HashMap<i64, gpui::Bounds<Pixels>>>>,
     day: String,
     midnight: Option<Task<()>>,
 }
@@ -64,11 +71,10 @@ impl Today {
             .into_iter().enumerate().map(|(i, (list, title, done))| {
                 let link = link.as_ref().filter(|_| i == 0);
                 LocalTask { id: i as i64 + 1, list, remote_id: None, title: title.into(), notes: String::new(),
-                    due: None, done_at: done.then_some(1), position: Some(i as i64),
+                    due: (i == 0 || i == 3).then(|| (chrono::Local::now().date_naive() - chrono::Duration::days(i64::from(i == 3))).to_string()), done_at: done.then_some(1), position: Some(i as i64),
                     mail_account: link.map(|l| l.0.clone()), mail_message_id: link.map(|l| l.1.clone()), mail_subject: link.map(|l| l.2.clone()),
                     created: 0, updated: 0, dirty: false, deleted: false }
             }).collect();
-        // shortcut: demo tasks are read-only samples, add in-memory editing when interactive task demos are needed.
         Self { lists: ["Personal", "Work"].into_iter().enumerate().map(|(i, name)| TaskList {
             id: i as i64 + 1, account: None, remote_id: None, name: name.into(), position: i as i64, google_default: false,
         }).collect(), default: Some(1), tasks, ..Default::default() }
@@ -76,12 +82,19 @@ impl Today {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum TaskMenu { List(i64), Task(i64), Move(i64), DeleteList(i64) }
+
+#[derive(Clone, Copy, PartialEq)]
 enum Edit { Add(i64), Rename(i64), AddList, RenameList(i64) }
 
-actions!(tasks, [Next, Prev, Rename, Complete, Earlier, Later]);
+#[derive(Clone, Copy)]
+enum MenuAction { Edit(Edit), Menu(TaskMenu), Delete(i64), DeleteList(i64), Move(i64, i64), Cancel }
+struct MenuItem { id: String, label: String, icon: &'static str, danger: bool, action: MenuAction }
+
+actions!(tasks, [Next, Prev, Rename, Complete, Earlier, Later, OpenTaskMenu]);
 
 pub(super) fn bind_keys(cx: &mut App) {
-    let context = Some("Tasks && !TextInput");
+    let context = Some("Tasks && !TextInput && !TaskMenu");
     cx.bind_keys([
         KeyBinding::new("t", NewTask, context),
         KeyBinding::new("down", Next, context),
@@ -89,6 +102,7 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", Prev, context),
         KeyBinding::new("k", Prev, context),
         KeyBinding::new("enter", Rename, context),
+        KeyBinding::new("alt-enter", OpenTaskMenu, context),
         KeyBinding::new("space", Complete, context),
         KeyBinding::new("alt-up", Earlier, context),
         KeyBinding::new("alt-down", Later, context),
@@ -98,15 +112,15 @@ pub(super) fn bind_keys(cx: &mut App) {
 impl MainWindow {
     pub(super) fn reload_tasks(&mut self, cx: &mut Context<Self>) {
         self.reload_agenda(cx);
-        if matches!(self.page, Page::Home) { self.reload_unread(cx); }
+        self.reload_unread(cx);
         if matches!(self.page, Page::Calendar) { self.reload_week(cx); }
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let Some(live) = &self.live else {
-            if self.demo {
+            if self.demo && self.today.day.is_empty() {
                 let demo = Today::demo(&mut self.inbox.mail);
                 self.today.lists = demo.lists;
                 self.today.default = demo.default;
-                self.today.tasks = demo.tasks.into_iter().filter(|task| matches!(self.page, Page::Todo) || task.done_at.is_none()).collect();
+                self.today.tasks = demo.tasks;
             }
             self.today.day = day;
             return;
@@ -117,9 +131,8 @@ impl MainWindow {
                 if lagom_core::oauth::tasks_allowed(&live.store.account_scopes(&account.id)?) { access.insert(account.id.clone()); }
             }
             let lists = live.store.task_lists()?;
-            let tasks = if matches!(self.page, Page::Todo) {
-                lists.iter().map(|list| live.store.tasks(list.id, false)).collect::<lagom_core::Result<Vec<_>>>()?.into_iter().flatten().collect()
-            } else { live.store.today_tasks(&day)? };
+            let tasks: Vec<LocalTask> = if matches!(self.page, Page::Home) { live.store.today_tasks(&day)? }
+                else { lists.iter().map(|list| live.store.tasks(list.id, matches!(self.page, Page::Todo))).collect::<lagom_core::Result<Vec<_>>>()?.into_iter().flatten().collect() };
             let default = if lists.is_empty() { None } else { Some(live.store.default_task_list()?) };
             Ok((lists, default, tasks, access))
         })();
@@ -133,7 +146,7 @@ impl MainWindow {
                 self.today.tasks = tasks;
                 self.today.day = day;
                 if !self.today.tasks.iter().any(|t| Some(t.id) == self.today.selected) {
-                    self.today.selected = self.today.tasks.first().map(|t| t.id);
+                    self.today.selected = self.visible_tasks().first().map(|t| t.id);
                 }
             }
             Err(e) => self.notify(format!("Could not read tasks: {e}"), cx),
@@ -144,6 +157,7 @@ impl MainWindow {
         self.release(false, cx);
         self.clear_motion();
         self.page = Page::Home;
+        self.reset_task_focus();
         self.reload_tasks(cx);
         window.focus(&self.focus);
         cx.notify();
@@ -151,7 +165,8 @@ impl MainWindow {
 
     pub(crate) fn save_task(&mut self, change: TaskChange, cx: &mut Context<Self>) -> bool {
         let Some(live) = &self.live else {
-            self.notify("Tasks need the local store; unavailable in demo mode", cx);
+            if self.demo { return self.save_demo_task(change, cx); }
+            self.notify("Tasks need the local store", cx);
             return false;
         };
         // shortcut: task writes can block the UI for 250 ms on locks; move off-thread if this budget becomes too large.
@@ -165,6 +180,8 @@ impl MainWindow {
                 if let Some(id) = created {
                     self.notify("Task created", cx);
                     self.task_undo = Some(id);
+                    if self.today.selected.is_none() { self.today.selected = Some(id); }
+                    self.today.focused = true;
                     if let Some(toast) = &mut self.toast { toast.1 = true; }
                 }
                 cx.notify();
@@ -235,22 +252,27 @@ impl MainWindow {
     }
 
     fn select_task(&mut self, next: bool, cx: &mut Context<Self>) {
-        let index = self.today.tasks.iter().position(|t| Some(t.id) == self.today.selected).unwrap_or(0);
-        let index = if next { (index + 1).min(self.today.tasks.len().saturating_sub(1)) } else { index.saturating_sub(1) };
-        self.today.selected = self.today.tasks.get(index).map(|t| t.id);
-        if let Some(task) = self.today.tasks.get(index) {
-            let group = self.today.lists.iter().position(|l| l.id == task.list).unwrap_or(0);
-            let empty = self.today.lists[..group].iter().filter(|l| !self.today.tasks.iter().any(|t| t.list == l.id)).count();
-            self.today.scroll.scroll_to_item(index + group + empty + 1 + if matches!(self.page, Page::Home) { 2 } else { 0 });
+        let tasks = self.visible_tasks();
+        let index = tasks.iter().position(|t| Some(t.id) == self.today.selected);
+        let index = match index { Some(i) if next => (i + 1).min(tasks.len().saturating_sub(1)), Some(i) => i.saturating_sub(1), None => 0 };
+        self.today.selected = tasks.get(index).map(|t| t.id);
+        self.today.focused = self.today.selected.is_some();
+        if let Some(row) = self.today.selected.and_then(|id| self.today.bounds.borrow().get(&id).copied()) {
+            let viewport = self.today.scroll.bounds();
+            let mut offset = self.today.scroll.offset();
+            if row.top() < viewport.top() { offset.y += viewport.top() - row.top(); }
+            else if row.bottom() > viewport.bottom() { offset.y -= row.bottom() - viewport.bottom(); }
+            self.today.scroll.set_offset(offset);
         }
         cx.notify();
     }
 
     fn reorder_task(&mut self, down: bool, cx: &mut Context<Self>) {
-        let Some(index) = self.today.tasks.iter().position(|t| Some(t.id) == self.today.selected) else { return };
+        let tasks = self.visible_tasks();
+        let Some(index) = tasks.iter().position(|t| Some(t.id) == self.today.selected) else { return };
         let other = if down { index.checked_add(1) } else { index.checked_sub(1) };
-        let Some(other) = other.and_then(|i| self.today.tasks.get(i)) else { return };
-        let task = &self.today.tasks[index];
+        let Some(other) = other.and_then(|i| tasks.get(i)) else { return };
+        let task = tasks[index];
         if other.list != task.list { return; }
         let position = other.position.unwrap_or(0) + i64::from(down);
         self.save_task(TaskChange::Move { id: task.id, list: task.list, position }, cx);
@@ -266,85 +288,326 @@ impl MainWindow {
             .on_action(cx.listener(|this, _: &Prev, _, cx| this.select_task(false, cx)))
             .on_action(cx.listener(|this, _: &Earlier, _, cx| this.reorder_task(false, cx)))
             .on_action(cx.listener(|this, _: &Later, _, cx| this.reorder_task(true, cx)))
+            .on_action(cx.listener(|this, _: &OpenTaskMenu, window, cx| {
+                if let Some(id) = this.today.selected { this.open_task_menu(TaskMenu::Task(id), window, cx); }
+            }))
             .on_action(cx.listener(|this, _: &Rename, window, cx| {
                 if let Some(id) = this.today.selected { this.edit_task(Edit::Rename(id), window, cx); }
             }))
             .on_action(cx.listener(|this, _: &Complete, _, cx| {
-                if let Some(id) = this.today.selected { this.save_task(TaskChange::Complete(id), cx); }
+                if let Some(id) = this.today.selected { this.complete_task(id, cx); }
             }))
     }
 
-    pub(super) fn tasks_view(&mut self, cx: &mut Context<Self>) -> Div {
+    fn save_demo_task(&mut self, change: TaskChange, cx: &mut Context<Self>) -> bool {
+        let next = self.today.tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        let mut created = None;
+        match change {
+            TaskChange::Add { list, title } => {
+                if !self.today.lists.iter().any(|l| l.id == list) || title.trim().is_empty() { return false; }
+                self.today.tasks.push(LocalTask { id: next, list, title, notes: String::new(), due: None, done_at: None,
+                    position: Some(next), remote_id: None, mail_account: None, mail_message_id: None, mail_subject: None,
+                    created: 0, updated: 0, dirty: false, deleted: false });
+                created = Some(next);
+            }
+            TaskChange::FromMail(mail) => {
+                let Some(list) = self.today.default else { return false };
+                let title = if mail.subject.trim().is_empty() { "(no subject)".into() } else { mail.subject.clone() };
+                if !self.save_demo_task(TaskChange::Add { list, title }, cx) { return false; }
+                let task = self.today.tasks.last_mut().unwrap();
+                if !mail.message_id.is_empty() {
+                    task.mail_account = Some(mail.account); task.mail_message_id = Some(mail.message_id); task.mail_subject = Some(mail.subject);
+                }
+            }
+            TaskChange::Rename(id, title) => { if let Some(task) = self.today.tasks.iter_mut().find(|t| t.id == id) { task.title = title; } else { return false; } }
+            TaskChange::Complete(id) => { if let Some(task) = self.today.tasks.iter_mut().find(|t| t.id == id) { task.done_at = Some(chrono::Local::now().timestamp()); } else { return false; } }
+            TaskChange::Delete(id) => self.today.tasks.retain(|t| t.id != id),
+            TaskChange::Move { id, list, position } => {
+                if !self.today.lists.iter().any(|l| l.id == list) { return false; }
+                for task in &mut self.today.tasks { if task.list == list && task.position.unwrap_or(0) >= position { task.position = Some(task.position.unwrap_or(0) + 1); } }
+                if let Some(task) = self.today.tasks.iter_mut().find(|t| t.id == id) { task.list = list; task.position = Some(position); }
+                self.today.tasks.sort_by_key(|t| (t.list, t.position, t.id));
+            }
+            TaskChange::AddList(name) => {
+                let id = self.today.lists.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+                self.today.lists.push(TaskList { id, name, position: id, account: None, remote_id: None, google_default: false });
+                if self.today.default.is_none() { self.today.default = Some(id); }
+            }
+            TaskChange::RenameList(id, name) => { if let Some(list) = self.today.lists.iter_mut().find(|l| l.id == id) { list.name = name; } else { return false; } }
+            TaskChange::DeleteList(id) => {
+                let Some(default) = self.today.default.filter(|&d| d != id) else { return false };
+                if self.today.lists.iter().any(|l| l.id == id && l.google_default) { return false; }
+                for task in &mut self.today.tasks { if task.list == id { task.list = default; } }
+                self.today.lists.retain(|l| l.id != id);
+            }
+            TaskChange::DefaultList(id) => self.today.default = Some(id),
+        }
+        if !self.today.tasks.iter().any(|t| Some(t.id) == self.today.selected) {
+            self.today.selected = self.visible_tasks().first().map(|t| t.id);
+        }
+        if let Some(id) = created {
+            if self.today.selected.is_none() { self.today.selected = Some(id); }
+            self.today.focused = true;
+            self.notify("Task created", cx);
+            self.task_undo = Some(id);
+            if let Some(toast) = &mut self.toast { toast.1 = true; }
+        }
+        cx.notify();
+        true
+    }
+
+    pub(super) fn reset_task_focus(&mut self) {
+        self.today.focused = false;
+        self.today.menu = None;
+        self.today.editor = None;
+        self.today.scroll.set_offset(Point::default());
+    }
+
+    fn visible_tasks(&self) -> Vec<&LocalTask> {
+        if matches!(self.page, Page::Home) { return today_tasks(&self.today.tasks, self.today.default, &self.today.day); }
+        self.today.lists.iter().flat_map(|list| self.today.tasks.iter().filter(move |t| t.list == list.id && t.done_at.is_none())
+            .chain(self.today.tasks.iter().filter(move |t| t.list == list.id && t.done_at.is_some() && self.today.completed.contains(&list.id)))).collect()
+    }
+
+    fn complete_task(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(mut task) = self.today.tasks.iter().find(|t| t.id == id && t.done_at.is_none()).cloned() else { return };
+        let visible = self.visible_tasks();
+        let index = visible.iter().position(|t| t.id == id).unwrap_or(0);
+        if !self.save_task(TaskChange::Complete(id), cx) { return; }
+        task.done_at = Some(chrono::Local::now().timestamp());
+        self.today.leaving.push(task);
+        let visible = self.visible_tasks();
+        self.today.selected = visible.get(index.min(visible.len().saturating_sub(1))).map(|t| t.id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MOTION).await;
+            this.update(cx, |this, cx| { this.today.leaving.retain(|t| t.id != id); cx.notify(); }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    pub(super) fn task_hint(&self, window: &Window) -> Option<Div> {
+        (self.today.focused && self.today.selected.is_some() && self.today.editor.is_none() && self.focus.is_focused(window))
+            .then(|| mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", self.theme.ink2).debug_selector(|| "task-hint".into()))
+    }
+
+    pub(super) fn add_task_row(&self, list: Option<i64>, home: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.theme;
+        let row = div().id(("add-task", list.unwrap_or(0) as usize)).min_h(px(36.)).px(px(8.)).flex().items_center().gap(px(10.));
+        if let Some(input) = list.and_then(|id| self.task_input(Edit::Add(id))) { return row.child(div().flex_1().child(input)); }
+        pressable(row, &t, false).debug_selector(move || if home { "new-task".into() } else { format!("add-task-{}", list.unwrap_or(0)) })
+            .rounded(px(radius::CONTROL)).text_color(t.ink2)
+            .child(icon("icons/new-task.svg", t.ink2, 16.)).child(if home { "New task" } else { "Add task" })
+            .tooltip(move |_, cx| cx.new(|_| Tip(t, "New task · T")).into())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(list) = list { this.edit_task(Edit::Add(list), window, cx); }
+                else { this.edit_task(Edit::AddList, window, cx); }
+            }))
+    }
+
+    pub(super) fn task_row(&self, task: &LocalTask, leaving: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        let id = task.id;
+        let done = task.done_at.is_some();
+        let selected = self.today.focused && self.today.selected == Some(id);
+        let row = pressable(div().id(("task", id as usize)), &t, selected).group("task-row")
+            .debug_selector(move || format!("task-{id}")).flex().flex_shrink_0().items_center().gap(px(10.))
+            .h(px(40.)).px(px(8.)).rounded(px(radius::CONTROL)).when(selected, |d| d.bg(t.sel))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.today.selected = Some(id); this.today.focused = true;
+                if this.today.editor.is_none() { window.focus(&this.focus); } cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                if e.click_count == 2 { this.edit_task(Edit::Rename(id), window, cx); }
+            }))
+            .child(pressable(div().id("complete-task"), &t, false).debug_selector(move || format!("complete-task-{id}"))
+                .size(px(18.)).flex_shrink_0().flex().items_center().justify_center().border_1().border_color(t.ink2).rounded_full()
+                .when(done, |d| d.child(icon("icons/done.svg", t.ink2, 16.)))
+                .tooltip(move |_, cx| cx.new(|_| Tip(t, "Complete task · Space")).into())
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.complete_task(id, cx); })))
+            .child(div().flex_1().min_w(px(0.)).map(|d| match self.task_input(Edit::Rename(id)) {
+                Some(input) => d.child(input), None => d.one_line().when(done, |d| d.text_color(t.ink2).line_through()).child(task.title.clone()),
+            }))
+            .when(task.mail_message_id.is_some(), |d| d.child(icon_button(&t, "task-mail", "icons/mail.svg", "Open linked mail")
+                .debug_selector(move || format!("task-mail-{id}"))
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
+            .when_some(task.due.clone().filter(|_| matches!(self.page, Page::Todo)), |d, due| d.child(mono(due.chars().take(10).collect::<String>(), t.ink2)
+                .px(px(6.)).py(px(3.)).rounded(px(radius::KEY)).bg(t.subtle)))
+            .when(matches!(self.page, Page::Todo), |d| d.child(icon_button(&t, "task-menu", "icons/more.svg", "Task actions · ⌥Enter")
+                .debug_selector(move || format!("task-menu-{id}")).opacity(if selected { 1. } else { 0.2 }).group_hover("task-row", |s| s.opacity(1.))
+                .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_task_menu(TaskMenu::Task(id), window, cx); }))));
+        if leaving {
+            row.with_animation(("task-complete", id as usize), Animation::new(MOTION), |row, delta| row.opacity(1. - ease_out_quint()(delta)).h(px(40. * (1. - spring(delta)).max(0.))).overflow_hidden()).into_any_element()
+        } else {
+            let bounds = self.today.bounds.clone();
+            // Record the nested row's bounds so keyboard selection scrolls only when it leaves the viewport.
+            div().flex_shrink_0().on_children_prepainted(move |children, _, _| {
+                if let Some(row) = children.first() { bounds.borrow_mut().insert(id, *row); }
+            }).child(row).into_any_element()
+        }
+    }
+
+    pub(super) fn home_tasks(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let mut tasks = today_tasks(&self.today.tasks, self.today.default, &self.today.day);
+        tasks.extend(self.today.leaving.iter());
+        tasks.sort_by_key(|t| {
+            let due = t.due.as_deref().filter(|due| due.get(..10).unwrap_or(due) <= self.today.day.as_str());
+            (due.is_none(), due, t.position, t.id)
+        });
+        div().debug_selector(|| "home-tasks".into()).min_w(px(0.)).flex().flex_col().gap(px(4.))
+            .child(div().font_weight(FontWeight::SEMIBOLD).mb(px(8.)).child("To do"))
+            .when(tasks.is_empty() && self.today.leaving.is_empty(), |d| d.child(div().py(px(16.)).flex().flex_col().gap(px(8.))
+                .child(icon("icons/todo.svg", t.ink2, 32.)).child(mono("Nothing to do today", t.ink2))))
+            .children(tasks.into_iter().map(|task| self.task_row(task, self.today.leaving.iter().any(|t| t.id == task.id), cx)))
+            .child(self.add_task_row(self.today.default, true, cx))
+            .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
+    }
+
+    fn open_task_menu(&mut self, menu: TaskMenu, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.today.menu_focus.get_or_insert_with(|| cx.focus_handle());
+        window.focus(focus);
+        self.today.menu = Some(menu);
+        self.today.menu_index = 0;
+        cx.notify();
+    }
+
+    fn task_menu_items(&self) -> Vec<MenuItem> {
+        let Some(menu) = self.today.menu else { return vec![] };
+        let mut items = Vec::new();
+        let mut add = |id: String, label: String, icon, danger, action| items.push(MenuItem { id, label, icon, danger, action });
+        match menu {
+            TaskMenu::List(id) | TaskMenu::Task(id) => {
+                let list = matches!(menu, TaskMenu::List(_));
+                add(format!("rename-{}-{id}", if list { "list" } else { "task" }), "Rename".into(), "icons/rename.svg", false,
+                    MenuAction::Edit(if list { Edit::RenameList(id) } else { Edit::Rename(id) }));
+                if !list { add("move-task".into(), "Move to list".into(), "icons/move.svg", false, MenuAction::Menu(TaskMenu::Move(id))); }
+                if !list || (self.today.default != Some(id) && !self.today.lists.iter().any(|l| l.id == id && l.google_default)) {
+                    add(format!("delete-{}-{id}", if list { "list" } else { "task" }), if list { "Delete list".into() } else { "Delete".into() },
+                        "icons/trash.svg", true, if list { MenuAction::Menu(TaskMenu::DeleteList(id)) } else { MenuAction::Delete(id) });
+                }
+            }
+            TaskMenu::Move(id) => {
+                for list in self.today.lists.iter().filter(|l| !self.today.tasks.iter().any(|t| t.id == id && t.list == l.id)) {
+                    add(format!("move-target-{}", list.id), list.name.clone(), "icons/todo.svg", false, MenuAction::Move(id, list.id));
+                }
+            }
+            TaskMenu::DeleteList(id) => {
+                add("confirm-delete-list".into(), "Delete list".into(), "icons/trash.svg", true, MenuAction::DeleteList(id));
+                add("cancel-delete-list".into(), "Cancel".into(), "icons/close.svg", false, MenuAction::Cancel);
+            }
+        }
+        items
+    }
+
+    fn choose_task_menu(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self.task_menu_items().get(index).map(|i| i.action) else { return };
+        match action {
+            MenuAction::Menu(menu) => { self.open_task_menu(menu, window, cx); return; }
+            MenuAction::Edit(edit) => { self.today.menu = None; self.edit_task(edit, window, cx); return; }
+            MenuAction::Delete(id) => { if !self.save_task(TaskChange::Delete(id), cx) { return; } }
+            MenuAction::DeleteList(id) => { if !self.save_task(TaskChange::DeleteList(id), cx) { return; } }
+            MenuAction::Move(id, list) => {
+                let position = self.today.tasks.iter().filter(|t| t.list == list).filter_map(|t| t.position).max().unwrap_or(-1) + 1;
+                if !self.save_task(TaskChange::Move { id, list, position }, cx) { return; }
+            }
+            MenuAction::Cancel => {}
+        }
+        self.today.menu = None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    fn task_menu(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let menu = self.today.menu?;
+        let t = self.theme;
+        Some(div().id("task-actions").debug_selector(|| "task-actions".into()).absolute().top(px(58.)).right(px(24.)).w(px(240.))
+            .occlude().p(px(6.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised)
+            .flex().flex_col().gap(px(4.)).key_context("TaskMenu").track_focus(self.today.menu_focus.as_ref()?)
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| { this.today.menu = None; window.focus(&this.focus); cx.notify(); }))
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                match e.keystroke.key.as_str() {
+                    "escape" => { this.today.menu = None; window.focus(&this.focus); }
+                    "down" => this.today.menu_index = (this.today.menu_index + 1).min(this.task_menu_items().len().saturating_sub(1)),
+                    "up" => this.today.menu_index = this.today.menu_index.saturating_sub(1),
+                    "enter" | "space" => this.choose_task_menu(this.today.menu_index, window, cx),
+                    _ => return,
+                }
+                cx.stop_propagation(); cx.notify();
+            }))
+            .when(matches!(menu, TaskMenu::DeleteList(_)), |d| d.child(div().p(px(8.)).child("Delete this list? Tasks move to the default list.")))
+            .children(self.task_menu_items().into_iter().enumerate().map(|(ix, item)| {
+                pressable(div().id(SharedString::from(item.id.clone())), &t, ix == self.today.menu_index)
+                    .debug_selector(move || item.id.clone()).flex().items_center().gap(px(8.)).px(px(8.)).min_h(px(32.)).rounded(px(radius::KEY))
+                    .when(ix == self.today.menu_index, |d| d.bg(t.sel))
+                    .text_color(if item.danger { t.danger } else { t.ink })
+                    .child(icon(item.icon, if item.danger { t.danger } else { t.ink2 }, 16.)).child(item.label)
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| { if *hovered { this.today.menu_index = ix; cx.notify(); } }))
+                    .on_click(cx.listener(move |this, _, window, cx| this.choose_task_menu(ix, window, cx)))
+            })))
+    }
+
+    pub(super) fn tasks_view(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         if day != self.today.day { self.reload_tasks(cx); }
         if self.today.midnight.is_none() {
-            let now = chrono::Local::now();
-            let next = super::agenda::day_start(now.date_naive().succ_opt().unwrap(), &chrono::Local);
-            let delay = Duration::from_secs((next - now.timestamp()).max(1) as u64);
             self.today.midnight = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(delay).await;
+                cx.background_executor().timer(Duration::from_secs(60)).await;
                 this.update(cx, |this, cx| { this.today.midnight = None; cx.notify(); }).ok();
             }));
         }
+        self.today.bounds.borrow_mut().clear();
+        if matches!(self.page, Page::Home) { return self.home_view(window, cx); }
         let t = self.theme;
-        // shortcut: Today lays out every open task, virtualize when large task lists need bounded layout.
-        let mut groups = div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll).flex().flex_col().gap(px(4.));
-        if matches!(self.page, Page::Home) {
-            groups = groups.child(self.agenda_view(cx)).child(self.unread_view(cx).mt(px(16.)));
-        }
-        let empty = matches!(self.page, Page::Todo) && self.today.lists.is_empty();
-        if empty {
+        // shortcut: Todo lays out every visible task, virtualize when large lists need bounded layout.
+        let mut groups = div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll).flex().flex_col().gap(px(24.));
+        if self.today.lists.is_empty() {
             groups = groups.items_center().justify_center().gap(px(12.))
-                .child(div().debug_selector(|| "No lists yet".into()).text_color(t.ink2).child("No lists yet"))
-                .child(button(&t, "Add list", None).on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))));
+                .child(icon("icons/todo.svg", t.ink2, 32.))
+                .child(div().debug_selector(|| "No lists yet".into()).text_color(t.ink2).child("No lists yet"));
         }
         for list in &self.today.lists {
-            let list_id = list.id;
-            let mut group = div().id(("task-list", list_id as usize)).debug_selector(move || format!("task-list-{list_id}")).flex().flex_col().gap(px(4.)).mt(px(16.)).flex_shrink_0()
+            let id = list.id;
+            let mut group = div().id(("task-list", id as usize)).debug_selector(move || format!("task-list-{id}"))
+                .flex().flex_col().gap(px(4.)).flex_shrink_0()
                 .child(div().flex().items_center().gap(px(8.))
-                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD)
-                        .map(|d| match self.task_input(Edit::RenameList(list_id)) {
-                            Some(input) => d.child(input), None => d.child(list.name.clone()),
-                        }))
-                    .child(button(&t, "Add task", None).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
-                    .child(button(&t, "Rename", None).debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
-                    .when(self.today.default != Some(list_id) && !list.google_default, |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
-                        .on_click(cx.listener(move |this, _, _, cx| { this.save_task(TaskChange::DeleteList(list_id), cx); })))));
-            group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
-            let tasks: Vec<_> = self.today.tasks.iter().filter(|task| task.list == list_id).collect();
-            groups = groups.child(group);
-            if tasks.is_empty() { groups = groups.child(mono(if matches!(self.page, Page::Todo) { "No open tasks" } else { "No open tasks for today" }, t.ink2).py(px(8.))); }
-            for task in tasks {
-                let id = task.id;
-                let selected = self.today.selected == Some(id);
-                groups = groups.child(pressable(div().id(("task", id as usize)), &t, selected)
-                    .flex().flex_shrink_0().items_center().gap(px(10.)).min_h(px(40.)).px(px(8.)).rounded(px(radius::CONTROL))
-                    .when(selected, |d| d.bg(t.sel))
-                    .on_click(cx.listener(move |this, _, window, cx| { this.today.selected = Some(id); if this.today.editor.is_none() { window.focus(&this.focus); } cx.notify(); }))
-                    .child(pressable(div().id("complete-task"), &t, false).debug_selector(move || format!("complete-task-{id}"))
-                        .size(px(20.)).border_1().border_color(t.ink2).rounded(px(radius::KEY))
-                        .when(task.done_at.is_some(), |d| d.child(icon("icons/done.svg", t.ink2, 16.)))
-                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.save_task(TaskChange::Complete(id), cx); })))
-                    .child(div().flex_1().min_w(px(0.)).one_line()
-                        .map(|d| match self.task_input(Edit::Rename(id)) {
-                            Some(input) => d.child(input), None => d.child(task.title.clone()),
-                        }))
-                    .when_some(task.due.clone(), |d, due| d.child(mono(due, t.ink2)))
-                    .when(task.mail_message_id.is_some(), |d| d.child(button(&t, "Open mail", None)
-                        .child(icon("icons/link.svg", t.ink2, 14.))
-                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
-                    .child(button(&t, "Rename", None).on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation(); this.edit_task(Edit::Rename(id), window, cx);
-                    }))));
+                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).map(|d| match self.task_input(Edit::RenameList(id)) {
+                        Some(input) => d.child(input), None => d.child(list.name.clone()),
+                    }))
+                    .child(icon_button(&t, "list-menu", "icons/more.svg", "List actions")
+                        .debug_selector(move || format!("list-menu-{id}"))
+                        .on_click(cx.listener(move |this, _, window, cx| { this.open_task_menu(TaskMenu::List(id), window, cx); }))));
+            let mut rows: Vec<_> = self.today.tasks.iter().filter(|task| task.list == id && task.done_at.is_none())
+                .chain(self.today.leaving.iter().filter(|task| task.list == id)).collect();
+            rows.sort_by_key(|task| (task.position, task.id));
+            for task in rows {
+                group = group.child(self.task_row(task, self.today.leaving.iter().any(|t| t.id == task.id), cx));
             }
+            group = group.child(self.add_task_row(Some(id), false, cx));
+            let done: Vec<_> = self.today.tasks.iter().filter(|task| task.list == id && task.done_at.is_some()
+                && !self.today.leaving.iter().any(|leaving| leaving.id == task.id)).collect();
+            if !done.is_empty() {
+                let expanded = self.today.completed.contains(&id);
+                group = group.child(pressable(div().id(("completed", id as usize)), &t, false)
+                    .debug_selector(move || format!("completed-{id}")).flex().items_center().gap(px(8.)).h(px(32.)).text_color(t.ink2)
+                    .child(icon(if expanded { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 16.))
+                    .child(format!("Completed ({})", done.len()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.today.completed.remove(&id) { this.today.completed.insert(id); }
+                        if !this.visible_tasks().iter().any(|t| Some(t.id) == this.today.selected) {
+                            this.today.selected = None; this.today.focused = false;
+                        }
+                        cx.notify();
+                    })));
+                if expanded { for task in done { group = group.child(self.task_row(task, false, cx)); } }
+            }
+            groups = groups.child(group);
         }
-        div().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
-            .child(div().id("today").flex_1().min_h(px(0.)).flex().flex_col().gap(px(16.))
-                .child(div().flex().items_center().justify_between()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child(if matches!(self.page, Page::Todo) { "Todo" } else { "Home" }))
-                    .when(matches!(self.page, Page::Todo) && !empty, |d| d.child(button(&t, "Add list", None)
-                        .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))))))
-                .when(matches!(self.page, Page::Todo), |d| d.children(self.task_input(Edit::AddList).map(|input| div().child(input))))
+        div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
+            .child(div().flex().items_center().justify_between()
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Todo"))
+                .child(icon_button(&t, "new-list", "icons/new-list.svg", "New list")
+                    .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
+            .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
                 .when(matches!(self.page, Page::Todo), |d| d.children(self.today.calendar_accounts.iter().filter_map(|(account, _)| {
                     let state = self.today.task_sync.get(&account.id);
                     let text = task_sync_label(self.today.task_access.contains(&account.id), state)?;
@@ -352,6 +615,7 @@ impl MainWindow {
                     let signing_in = self.today.calendar_sync.get(&id) == Some(&crate::sync::SyncState::SigningIn);
                     let allowed = self.today.task_access.contains(&id);
                     Some(div().flex().items_center().gap(px(8.)).debug_selector({ let id = id.clone(); move || format!("tasks-sync-{id}") })
+                        .child(icon(if matches!(state, Some(crate::sync::SyncState::Failed(_))) { "icons/cloud-off.svg" } else { "icons/cloud.svg" }, t.ink2, 16.))
                         .child(mono(account.email.clone(), t.ink2))
                         .when(allowed, |d| d.child(mono(text.to_owned(), t.ink2)))
                         .when(!allowed, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Allow Google Tasks access" }, None)
@@ -366,16 +630,152 @@ impl MainWindow {
                                 cx.notify();
                             })))))
                 })))
-                .child(groups)
-                .when((matches!(self.page, Page::Todo) && !empty) || !self.today.tasks.is_empty(), |d|
-                    d.child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2).debug_selector(|| "task-hint".into()))))
+
+            .child(groups)
+            .children(self.task_hint(window))
+            .children(self.task_menu(cx))
     }
+
+}
+
+fn today_tasks<'a>(tasks: &'a [LocalTask], default: Option<i64>, day: &str) -> Vec<&'a LocalTask> {
+    let due = |task: &&LocalTask| task.done_at.is_none() && !task.deleted
+        && task.due.as_deref().is_some_and(|due| due.get(..10).unwrap_or(due) <= day);
+    let mut result: Vec<_> = tasks.iter().filter(due).collect();
+    result.sort_by_key(|t| (&t.due, t.position, t.id));
+    result.extend(tasks.iter().filter(|t| t.done_at.is_none() && !t.deleted && Some(t.list) == default && !due(t)).take(5));
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn today_prioritizes_due_tasks_then_five_default_tasks_without_duplicates() {
+        let mut tasks = Today::demo(&mut []).tasks;
+        let day = "2026-11-09";
+        for task in &mut tasks { task.due = None; }
+        tasks[0].due = Some("2026-11-09T00:00:00Z".into());
+        tasks[3].due = Some("2026-11-08".into());
+        tasks[4].due = Some("2099-01-01".into());
+        for id in 6..=15 {
+            let mut task = tasks[1].clone(); task.id = id; tasks.push(task);
+        }
+        let selected = today_tasks(&tasks, Some(1), day);
+        assert_eq!(selected.iter().map(|t| t.id).collect::<Vec<_>>(), [4, 1, 2, 6, 7, 8, 9]);
+        assert!(selected.iter().all(|t| t.done_at.is_none()));
+        assert_eq!(today_tasks(&tasks, None, day).iter().map(|t| t.id).collect::<Vec<_>>(), [4, 1]);
+        tasks[1].due = Some("2099-01-01".into());
+        assert!(today_tasks(&tasks, Some(1), day).iter().any(|t| t.id == 2), "the default-list fallback includes future tasks");
+    }
+
+    #[gpui::test]
+    fn demo_inline_add_rename_completion_and_disclosure_persist_between_pages(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-3").is_none(), "completed starts collapsed");
+        assert!(cx.debug_bounds("Rename").is_none());
+        assert!(cx.debug_bounds("task-hint").is_none());
+        let at = cx.debug_bounds("completed-1").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-3").is_some());
+        let at = cx.debug_bounds("add-task-1").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.simulate_input("Fixture task"); cx.simulate_keystrokes("enter");
+        let id = view.read_with(cx, |v, _| { assert!(v.today.editor.is_none(), "editor closed after adding"); assert_eq!(v.today.tasks.last().unwrap().title, "Fixture task"); v.today.tasks.last().unwrap().id });
+        cx.run_until_parked();
+        let at = cx.debug_bounds(format!("task-{id}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, _| { assert!(v.today.focused, "task focus flag"); assert!(v.today.editor.is_none(), "editor closed"); assert!(v.focus.is_focused(window), "root focused"); });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds("task-hint").is_some());
+        cx.simulate_keystrokes("enter secondary-a"); cx.simulate_input("Renamed fixture"); cx.simulate_keystrokes("enter space");
+        view.read_with(cx, |v, _| {
+            let task = v.today.tasks.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(task.title, "Renamed fixture"); assert!(task.done_at.is_some());
+            assert!(v.today.leaving.iter().any(|t| t.id == id));
+        });
+        cx.simulate_keystrokes("secondary-1 secondary-4");
+        view.read_with(cx, |v, _| assert!(v.today.tasks.iter().any(|t| t.id == id && t.done_at.is_some())));
+    }
+
+    #[gpui::test]
+    fn task_menu_keyboard_moves_and_deletes_with_list_confirmation(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("task-2").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.simulate_keystrokes("alt-enter down enter enter");
+        assert_eq!(view.read_with(cx, |v, _| v.today.tasks.iter().find(|t| t.id == 2).unwrap().list), 2);
+        cx.simulate_keystrokes("alt-enter down down enter");
+        assert!(view.read_with(cx, |v, _| !v.today.tasks.iter().any(|t| t.id == 2)));
+        view.update_in(cx, |v, window, cx| v.open_task_menu(TaskMenu::List(2), window, cx));
+        cx.simulate_keystrokes("down enter");
+        assert!(view.read_with(cx, |v, _| v.today.lists.len() == 2));
+        cx.simulate_keystrokes("down enter");
+        assert!(view.read_with(cx, |v, _| v.today.lists.len() == 2), "Cancel preserves the list");
+        view.update_in(cx, |v, window, cx| v.open_task_menu(TaskMenu::List(2), window, cx));
+        cx.simulate_keystrokes("down enter enter");
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.today.lists.len(), 1);
+            assert!(v.today.tasks.iter().all(|t| t.list == 1));
+        });
+    }
+
+    #[gpui::test]
+    fn completed_row_exits_in_place_on_today_and_todo(cx: &mut TestAppContext) {
+        for (screen, first, next) in [("home", 4, 1), ("todo", 1, 2)] {
+            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, screen, window, cx));
+            cx.run_until_parked();
+            let first_selector = format!("task-{first}").leak();
+            let next_selector = format!("task-{next}").leak();
+            let before = cx.debug_bounds(first_selector).unwrap().top();
+            view.update(cx, |v, cx| v.complete_task(first, cx));
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            let leaving = cx.debug_bounds(first_selector).unwrap();
+            let following = cx.debug_bounds(next_selector).unwrap();
+            assert_eq!(leaving.top(), before);
+            assert!(leaving.top() < following.top());
+            assert!(view.read_with(cx, |v, _| v.today.tasks.iter().find(|t| t.id == first).unwrap().done_at.is_some()));
+        }
+    }
+
+    #[gpui::test]
+    fn keyboard_selection_reaches_tasks_below_the_fold(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        view.update(cx, |v, cx| {
+            let sample = v.today.tasks[0].clone();
+            v.today.tasks = (1..=40).map(|id| { let mut task = sample.clone(); task.id = id; task.title = format!("Task {id}"); task }).collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for _ in 0..40 { cx.simulate_keystrokes("down"); cx.run_until_parked(); }
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert_eq!(view.read_with(cx, |v, _| v.today.selected), Some(40));
+        let row = cx.debug_bounds("task-40").unwrap();
+        let viewport = cx.debug_bounds("today-groups").unwrap();
+        assert!(row.top() >= viewport.top() && row.bottom() <= viewport.bottom(), "row {row:?}, viewport {viewport:?}, offset {:?}", view.read_with(cx, |v, _| v.today.scroll.offset()));
+    }
+
+    #[gpui::test]
+    fn double_click_renames_inline_and_escape_preserves_title(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("task-2").unwrap().center();
+        cx.simulate_event(MouseDownEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        assert!(view.read_with(cx, |v, _| matches!(v.today.editor, Some((Edit::Rename(2), _)))));
+        cx.simulate_keystrokes("secondary-a"); cx.simulate_input("Discard this"); cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.today.editor.is_none()));
+        assert_eq!(view.read_with(cx, |v, _| v.today.tasks.iter().find(|t| t.id == 2).unwrap().title.clone()), "Pick up groceries");
+    }
 
     #[gpui::test]
     fn review_todo_demo_has_sample_lists_and_a_working_mail_link(cx: &mut TestAppContext) {
@@ -390,7 +790,7 @@ mod tests {
         });
         assert!(cx.debug_bounds("task-list-1").is_some());
         assert!(cx.debug_bounds("task-list-2").is_some());
-        let at = cx.debug_bounds("Open mail").unwrap().center();
+        let at = cx.debug_bounds("task-mail-1").unwrap().center();
         cx.simulate_click(at, Default::default());
         view.read_with(cx, |v, _| {
             assert!(matches!(v.page, Page::Mail));
@@ -414,7 +814,7 @@ mod tests {
         let groups = cx.debug_bounds("today-groups").unwrap();
         assert!((empty.center().x - groups.center().x).abs() < px(1.));
         assert!((empty.center().y - groups.center().y).abs() < px(30.));
-        let at = cx.debug_bounds("Add list").unwrap().center();
+        let at = cx.debug_bounds("new-list").unwrap().center();
         cx.simulate_click(at, Default::default());
         view.read_with(cx, |v, _| assert!(matches!(v.today.editor, Some((Edit::AddList, _)))));
     }
