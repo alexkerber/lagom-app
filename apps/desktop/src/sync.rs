@@ -701,6 +701,61 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn review_followup_read_rejection_preserves_flags_and_reports_failure() {
+        use lagom_core::account::{Security, ServerConfig};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for status in ["NO", "BAD"] {
+            for seen in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+                let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = BufReader::new(socket);
+                    socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                    loop {
+                        let mut line = String::new();
+                        assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                        let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                        let data = match command {
+                            "LOGIN \"fixture\" \"fixture\"" => "",
+                            "CAPABILITY" => "* CAPABILITY IMAP4rev1\r\n",
+                            "SELECT \"INBOX\"" => "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n",
+                            _ => {
+                                assert_eq!(command, format!("UID STORE 1 {}FLAGS.SILENT (\\Seen)", if seen { "+" } else { "-" }));
+                                socket.get_mut().write_all(format!("{tag} {status} refused\r\n").as_bytes()).await.unwrap();
+                                break;
+                            }
+                        };
+                        socket.get_mut().write_all(format!("{data}{tag} OK fixture\r\n").as_bytes()).await.unwrap();
+                    }
+                });
+                let path = std::env::temp_dir().join(format!("lagom-read-rejection-{}.db", account.id));
+                let mut store = Store::open(&path).unwrap();
+                store.save_account(&account).unwrap();
+                let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+                store.reset_uidvalidity(folder, 7).unwrap();
+                let id = store.save_message(&lagom_core::store::Message { summary: lagom_core::store::MessageSummary {
+                    account: account.id.clone(), folder, uid: 1, seen: !seen, flagged: true, ..Default::default()
+                }, ..Default::default() }).unwrap();
+                let (me, _rx) = unbounded_channel();
+                let (events, mut out) = unbounded_channel();
+                let session = ImapSync::login(&account, "fixture").await.unwrap();
+                let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, reauth_required: HashSet::new(), discovery: None, me, events };
+                worker.quick(Cmd::Op { op: 42, id, act: Act::Read(seen) }).await;
+                let completion = out.recv().await.unwrap();
+                let summary = worker.store.message(id).unwrap().summary;
+                drop(worker);
+                server.await.unwrap();
+                std::fs::remove_file(path).unwrap();
+                assert!(matches!(completion, Event::Op { op: 42, error: Some(_) }), "{status} must fail the operation");
+                assert_eq!(summary.seen, !seen, "{status} must not change local read flags");
+                assert!(summary.flagged);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn folder_command_does_not_create_after_failed_initial_listing() {
         use lagom_core::account::{Security, ServerConfig};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

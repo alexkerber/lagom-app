@@ -210,6 +210,7 @@ impl MainWindow {
                 }
             }
         }
+        if self.inbox.unread_only { self.filter_unread(false, cx); }
         match self.inbox.list().iter().position(|&rep| self.inbox.members(rep).contains(&id)) {
             Some(ix) => self.act_at(ix, what, 0., cx),
             None => self.notify("That message is not in a loaded list. Try again after the next sync.", cx),

@@ -165,7 +165,7 @@ pub(super) trait WebHost: 'static + Sized {
 
 impl WebHost for MainWindow {
     fn new_task(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.inbox.current() { self.task_from_mail(id, cx); }
+        if let Some(id) = self.inbox.single() { self.task_from_mail(id, cx); }
     }
     fn web(&mut self) -> &mut Web {
         &mut self.web
