@@ -316,7 +316,6 @@ impl MainWindow {
         let mut new_mail = Vec::new();
         for event in events {
             match event {
-                Event::TaskChanged(result) => self.task_changed(result, cx),
                 Event::OpenUrl(url) => cx.open_url(&url),
                 Event::Downloaded(result) => match result {
                     Ok(path) => cx.reveal_path(&path),
@@ -989,24 +988,137 @@ mod tests {
         (view, cx, rx)
     }
 
-    fn finish_tasks(view: &Entity<MainWindow>, cx: &mut VisualTestContext, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Cmd>) -> Vec<i64> {
+    #[gpui::test]
+    fn local_tasks_commit_while_mail_operation_is_stalled(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let store = view.update(cx, |v, cx| {
+            incoming(v, 1);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.act(Move::Done, cx);
+            v.live.as_ref().unwrap().store.clone()
+        });
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, Cmd::Op { .. })));
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Saved during mail wait");
+        cx.simulate_keystrokes("enter");
+        let list = store.default_task_list().unwrap();
+        assert_eq!(store.tasks(list, false).unwrap().len(), 1);
+        cx.simulate_keystrokes("secondary-z");
+        assert!(store.tasks(list, true).unwrap().is_empty());
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Complete during mail wait");
+        cx.simulate_keystrokes("enter space");
+        assert!(store.tasks(list, false).unwrap().is_empty());
+        assert!(store.tasks(list, true).unwrap()[0].done_at.is_some());
+        assert!(view.read_with(cx, |v, _| !v.live.as_ref().unwrap().ops.is_empty()));
+        assert!(rx.try_recv().is_err(), "task writes must not use the mail queue");
+    }
+
+    #[gpui::test]
+    fn local_task_failed_write_keeps_editor_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
         let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
-        let mut events = Vec::new();
-        let mut created = Vec::new();
-        while let Ok(cmd) = rx.try_recv() {
-            match cmd {
-                Cmd::Task(change) => {
-                    let result = change.apply(&store).map_err(|e| e.to_string());
-                    if let Ok(Some(id)) = result { created.push(id); }
-                    events.push(Event::TaskChanged(result));
-                    events.push(Event::Changed);
-                }
-                Cmd::MarkSeen(_) => {}
-                _ => panic!("tasks must not queue network operations"),
-            }
+        let fixture = rusqlite::Connection::open(store.path()).unwrap();
+        fixture.execute_batch("CREATE TRIGGER refuse_task_write BEFORE INSERT ON tasks BEGIN SELECT RAISE(ABORT, 'fixture write failed'); END;").unwrap();
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Keep submitted text");
+        cx.simulate_keystrokes("enter");
+        assert!(toast(&view, cx).contains("fixture write failed"));
+        fixture.execute_batch("DROP TRIGGER refuse_task_write;").unwrap();
+        cx.simulate_input(" and retry");
+        cx.simulate_keystrokes("enter");
+        let tasks = store.tasks(store.default_task_list().unwrap(), false).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Keep submitted text and retry");
+        fixture.execute_batch("CREATE TRIGGER refuse_task_write BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'fixture write failed'); END;").unwrap();
+        cx.simulate_keystrokes("secondary-z");
+        assert!(toast(&view, cx).contains("fixture write failed"), "failed Undo must keep the error toast");
+        assert_eq!(store.tasks(tasks[0].list, false).unwrap().len(), 1);
+        cx.simulate_keystrokes("enter secondary-a");
+        cx.simulate_input("Keep renamed text");
+        cx.simulate_keystrokes("enter");
+        assert!(toast(&view, cx).contains("fixture write failed"));
+        fixture.execute_batch("DROP TRIGGER refuse_task_write;").unwrap();
+        cx.simulate_input(" and retry");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(store.tasks(tasks[0].list, false).unwrap()[0].title, "Keep renamed text and retry");
+    }
+
+    #[gpui::test]
+    fn local_task_list_failed_writes_keep_editor_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let fixture = rusqlite::Connection::open(store.path()).unwrap();
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        for rename in [false, true] {
+            let selector = if rename { format!("rename-list-{}", store.task_lists().unwrap().last().unwrap().id) } else { "Add list".into() };
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            let at = cx.debug_bounds(selector.leak()).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_keystrokes("secondary-a");
+            cx.simulate_input(if rename { "Renamed list" } else { "New list" });
+            let operation = if rename { "UPDATE" } else { "INSERT" };
+            fixture.execute_batch(&format!("CREATE TRIGGER refuse_list_write BEFORE {operation} ON task_lists BEGIN SELECT RAISE(ABORT, 'fixture list write failed'); END;")).unwrap();
+            cx.simulate_keystrokes("enter");
+            assert!(toast(&view, cx).contains("fixture list write failed"));
+            fixture.execute_batch("DROP TRIGGER refuse_list_write;").unwrap();
+            cx.simulate_input(" and retry");
+            cx.simulate_keystrokes("enter");
+            let lists = store.task_lists().unwrap();
+            assert_eq!(lists.len(), 3);
+            assert_eq!(lists.last().unwrap().name, if rename { "Renamed list and retry" } else { "New list and retry" });
         }
-        view.update_in(cx, |v, window, cx| v.on_events(events, window, cx));
-        created
+    }
+
+    #[gpui::test]
+    fn local_task_enter_is_durable_before_quit(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Durable on Enter");
+        cx.simulate_keystrokes("enter");
+        let path = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.path().to_path_buf());
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.tasks(reopened.default_task_list().unwrap(), false).unwrap().len(), 1);
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        view.update_in(cx, |_, window, _| window.remove_window());
+        drop(view);
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(reopened.tasks(reopened.default_task_list().unwrap(), false).unwrap()[0].title, "Durable on Enter");
+    }
+
+    #[gpui::test]
+    fn local_task_closed_window_cannot_consume_new_window_write(cx: &mut TestAppContext) {
+        let (old, cx, mut rx) = window(cx);
+        old.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Old window task");
+        cx.simulate_keystrokes("enter");
+        assert!(!old.update(cx, |v, cx| v.hold_exit(cx)));
+        let (store, bridge) = old.read_with(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            (live.store.clone(), live.bridge.clone())
+        });
+        old.update_in(cx, |_, window, _| window.remove_window());
+        drop(old);
+        let (view, cx) = cx.cx.add_window_view(|window, cx| {
+            let mut v = MainWindow::new(true, window, cx);
+            v.live = Some(fixture_live(store.clone(), bridge));
+            v.show_today(window, cx);
+            v
+        });
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("New window task");
+        cx.simulate_keystrokes("enter");
+        assert!(rx.try_recv().is_err(), "closed windows leave no task acknowledgements");
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Changed], window, cx));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        let reopened = Store::open(store.path()).unwrap();
+        let tasks = reopened.tasks(reopened.default_task_list().unwrap(), false).unwrap();
+        assert_eq!(tasks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Old window task", "New window task"]);
     }
 
     #[gpui::test]
@@ -1039,7 +1151,7 @@ mod tests {
 
     #[gpui::test]
     fn review_quit_commits_submitted_task_add_and_rename(cx: &mut TestAppContext) {
-        let (view, cx, mut rx) = window(cx);
+        let (view, cx, _rx) = window(cx);
         view.update_in(cx, |v, window, cx| v.show_today(window, cx));
         cx.simulate_keystrokes("t");
         cx.simulate_input("Submitted task");
@@ -1049,7 +1161,6 @@ mod tests {
             let store = Store::open(v.live.as_ref().unwrap().store.path()).unwrap();
             assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap()[0].title, "Submitted task");
         });
-        finish_tasks(&view, cx, &mut rx);
         assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
         cx.simulate_keystrokes("enter secondary-a");
         cx.simulate_input("Submitted rename");
@@ -1059,36 +1170,13 @@ mod tests {
             let store = Store::open(v.live.as_ref().unwrap().store.path()).unwrap();
             assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap()[0].title, "Submitted rename");
         });
-        finish_tasks(&view, cx, &mut rx);
         assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
         view.read_with(cx, |v, _| {
             let store = Store::open(v.live.as_ref().unwrap().store.path()).unwrap();
             let tasks = store.tasks(store.default_task_list().unwrap(), false).unwrap();
-            assert_eq!(tasks.len(), 1, "worker must not apply a quit-flushed write twice");
+            assert_eq!(tasks.len(), 1, "quit must not repeat a committed write");
             assert_eq!(tasks[0].title, "Submitted rename");
         });
-    }
-
-    #[gpui::test]
-    fn review_quit_retries_failed_task_flush_after_worker_stops(cx: &mut TestAppContext) {
-        let (view, cx, rx) = window(cx);
-        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
-        let fixture = rusqlite::Connection::open(store.path()).unwrap();
-        fixture.execute_batch("CREATE TRIGGER refuse_task_write BEFORE INSERT ON tasks BEGIN SELECT RAISE(ABORT, 'fixture write failed'); END;").unwrap();
-        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
-        cx.simulate_keystrokes("t");
-        cx.simulate_input("Keep submitted text");
-        cx.simulate_keystrokes("enter");
-        assert!(view.update(cx, |v, cx| v.hold_exit(cx)));
-        assert!(toast(&view, cx).contains("fixture write failed"));
-        drop(rx);
-        view.update(cx, |v, cx| v.worker_gone(cx));
-        fixture.execute_batch("DROP TRIGGER refuse_task_write;").unwrap();
-        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
-        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
-        let tasks = store.tasks(store.default_task_list().unwrap(), false).unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].title, "Keep submitted text");
     }
 
     #[gpui::test]
@@ -1110,7 +1198,7 @@ mod tests {
 
     #[gpui::test]
     fn task_key_creates_link_in_selected_default_and_undo_works_from_today(cx: &mut TestAppContext) {
-        let (view, cx, mut rx) = window(cx);
+        let (view, cx, _rx) = window(cx);
         let (store, mail, default) = view.update(cx, |v, cx| {
             let store = v.live.as_ref().unwrap().store.clone();
             let mut mail = incoming(v, 1);
@@ -1120,13 +1208,10 @@ mod tests {
             let default = store.task_lists().unwrap()[1].id;
             v.inbox = Inbox::live();
             v.reload(cx);
-            v.send_task(crate::sync::TaskChange::DefaultList(default), cx);
+            v.save_task(TaskChange::DefaultList(default), cx);
             (store, mail, default)
         });
-        finish_tasks(&view, cx, &mut rx);
         cx.simulate_keystrokes("t");
-        let ids = finish_tasks(&view, cx, &mut rx);
-        assert_eq!(ids.len(), 1);
         let tasks = store.tasks(default, false).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Follow up");
@@ -1135,7 +1220,6 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.toast.as_ref().is_some_and(|t| t.1)));
         view.update_in(cx, |v, window, cx| v.show_today(window, cx));
         cx.simulate_keystrokes("secondary-z");
-        finish_tasks(&view, cx, &mut rx);
         assert!(store.tasks(default, true).unwrap().is_empty());
         assert!(store.tasks_for_mail(&mail.account, &mail.message_id).unwrap().is_empty());
     }
@@ -1180,7 +1264,7 @@ mod tests {
 
     #[gpui::test]
     fn today_without_accounts_inline_add_rename_reorder_complete_and_palette(cx: &mut TestAppContext) {
-        let (view, cx, mut rx) = window(cx);
+        let (view, cx, _rx) = window(cx);
         let store = view.update_in(cx, |v, window, cx| {
             let store = v.live.as_ref().unwrap().store.clone();
             store.delete_account(&v.live.as_ref().unwrap().accounts[0].id).unwrap();
@@ -1194,34 +1278,30 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_input("First task");
         cx.simulate_keystrokes("enter");
-        let first = finish_tasks(&view, cx, &mut rx)[0];
+        let first = view.read_with(cx, |v, _| v.task_undo.unwrap());
         cx.simulate_keystrokes("t");
         cx.simulate_input("Second task");
         cx.simulate_keystrokes("enter");
-        let second = finish_tasks(&view, cx, &mut rx)[0];
+        let second = view.read_with(cx, |v, _| v.task_undo.unwrap());
         let list = store.default_task_list().unwrap();
         assert_eq!(store.tasks(list, false).unwrap().len(), 2);
         cx.simulate_keystrokes("alt-down");
-        finish_tasks(&view, cx, &mut rx);
         assert_eq!(store.tasks(list, false).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [second, first]);
         cx.simulate_keystrokes("enter secondary-a");
         cx.simulate_input("Renamed task");
         cx.simulate_keystrokes("enter");
-        finish_tasks(&view, cx, &mut rx);
         assert_eq!(store.tasks(list, false).unwrap()[1].title, "Renamed task");
         cx.simulate_keystrokes("up space");
-        finish_tasks(&view, cx, &mut rx);
         assert_eq!(store.tasks(list, false).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [first]);
         cx.simulate_keystrokes("t");
         cx.simulate_input("Not saved");
         cx.simulate_keystrokes("escape");
-        assert!(finish_tasks(&view, cx, &mut rx).is_empty());
         assert_eq!(store.tasks(list, true).unwrap().len(), 2);
     }
 
     #[gpui::test]
     fn task_from_html_reading_and_text_fields_do_not_trigger_mail_shortcut(cx: &mut TestAppContext) {
-        let (view, cx, mut rx) = window(cx);
+        let (view, cx, _rx) = window(cx);
         let store = view.update(cx, |v, cx| {
             let store = v.live.as_ref().unwrap().store.clone();
             let mut mail = incoming(v, 1);
@@ -1233,24 +1313,23 @@ mod tests {
             store
         });
         view.update(cx, |v, cx| html::WebHost::new_task(v, cx));
-        assert_eq!(finish_tasks(&view, cx, &mut rx).len(), 1);
+        assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap().len(), 1);
         assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap()[0].title, "HTML task");
         view.update_in(cx, |v, window, cx| v.open_palette("", window, cx));
         cx.simulate_input("t");
-        assert!(finish_tasks(&view, cx, &mut rx).is_empty());
+        assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap().len(), 1);
         assert_eq!(view.read_with(cx, |v, cx| v.palette.as_ref().unwrap().read(cx).query(cx)), "t");
     }
 
     #[gpui::test]
     fn task_list_controls_and_default_setting_move_tasks_on_delete(cx: &mut TestAppContext) {
-        let (view, cx, mut rx) = window(cx);
+        let (view, cx, _rx) = window(cx);
         view.update_in(cx, |v, window, cx| v.show_today(window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         let at = cx.debug_bounds("Add list").unwrap().center();
         cx.simulate_click(at, Default::default());
         cx.simulate_input("Custom list");
         cx.simulate_keystrokes("enter");
-        finish_tasks(&view, cx, &mut rx);
         let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
         let list = store.task_lists().unwrap().last().unwrap().id;
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
@@ -1259,7 +1338,6 @@ mod tests {
         cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("Renamed list");
         cx.simulate_keystrokes("enter");
-        finish_tasks(&view, cx, &mut rx);
         assert_eq!(store.task_lists().unwrap().last().unwrap().name, "Renamed list");
         let task = store.add_task(list, "Keep when deleting", "", None).unwrap();
         cx.simulate_keystrokes("secondary-,");
@@ -1267,20 +1345,17 @@ mod tests {
         let default = store.task_lists().unwrap()[1].id;
         let at = cx.debug_bounds(format!("default-task-list-{default}").leak()).unwrap().center();
         cx.simulate_click(at, Default::default());
-        finish_tasks(&view, cx, &mut rx);
         assert_eq!(store.default_task_list().unwrap(), default);
         view.update_in(cx, |v, window, cx| v.show_today(window, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         assert_eq!(view.read_with(cx, |v, _| v.today.default), Some(default));
         let at = cx.debug_bounds(format!("delete-list-{list}").leak()).unwrap().center();
         cx.simulate_click(at, Default::default());
-        finish_tasks(&view, cx, &mut rx);
         assert!(!store.task_lists().unwrap().iter().any(|l| l.id == list));
         assert_eq!(store.tasks(default, false).unwrap()[0].id, task.id);
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         let at = cx.debug_bounds(format!("complete-task-{}", task.id).leak()).unwrap().center();
         cx.simulate_click(at, Default::default());
-        finish_tasks(&view, cx, &mut rx);
         assert!(store.tasks(default, false).unwrap().is_empty());
     }
 

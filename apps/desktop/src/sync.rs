@@ -37,64 +37,7 @@ pub enum Act {
     Snooze(Option<i64>),
 }
 
-#[derive(Debug, Clone)]
-pub enum TaskChange {
-    Add { list: i64, title: String },
-    FromMail(lagom_core::store::MessageSummary),
-    Rename(i64, String),
-    Complete(i64),
-    Delete(i64),
-    Move { id: i64, list: i64, position: i64 },
-    AddList(String),
-    RenameList(i64, String),
-    DeleteList(i64),
-    DefaultList(i64),
-}
-
-impl TaskChange {
-    pub(crate) fn apply(self, store: &Store) -> lagom_core::Result<Option<i64>> {
-        match self {
-            Self::Add { list, title } => return store.add_task(list, &title, "", None).map(|t| Some(t.id)),
-            Self::FromMail(mail) => return store.task_from_mail(store.default_task_list()?, &mail).map(|t| Some(t.id)),
-            Self::Rename(id, title) => store.rename_task(id, &title)?,
-            Self::Complete(id) => store.set_done(id, true)?,
-            Self::Delete(id) => store.delete_task(id)?,
-            Self::Move { id, list, position } => store.move_task(id, list, position)?,
-            Self::AddList(name) => { store.add_task_list(&name)?; }
-            Self::RenameList(id, name) => store.rename_task_list(id, &name)?,
-            Self::DeleteList(id) => store.delete_task_list(id)?,
-            Self::DefaultList(id) => store.set_default_task_list(id)?,
-        }
-        Ok(None)
-    }
-}
-
-// Quit may flush a queued write before the mail worker reaches it.
-#[derive(Clone)]
-pub struct TaskWrite(std::sync::Arc<std::sync::Mutex<TaskWriteState>>);
-
-struct TaskWriteState {
-    change: Option<TaskChange>,
-    created: Option<i64>,
-}
-
-impl TaskWrite {
-    pub(crate) fn new(change: TaskChange) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(TaskWriteState { change: Some(change), created: None })))
-    }
-
-    pub(crate) fn apply(&self, store: &Store) -> lagom_core::Result<Option<i64>> {
-        let mut state = self.0.lock().map_err(|_| Error::Invalid("Task write interrupted"))?;
-        if let Some(change) = state.change.clone() {
-            state.created = change.apply(store)?;
-            state.change = None;
-        }
-        Ok(state.created)
-    }
-}
-
 pub enum Cmd {
-    Task(TaskWrite),
     #[cfg(test)]
     Pause(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
     /// Onboarding API; the UI consumes OpenUrl on its own thread.
@@ -140,7 +83,6 @@ pub enum Delivery {
 }
 
 pub enum Event {
-    TaskChanged(Result<Option<i64>, String>),
     /// Forward to GPUI cx.open_url; never log this URL.
     OpenUrl(String),
     SignedIn(Result<String, String>),
@@ -291,10 +233,6 @@ impl Worker {
     /// Commands that a running sync handles between folders, so a triage key never waits long.
     async fn quick(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Task(change) => {
-                self.emit(Event::TaskChanged(change.apply(&self.store).map_err(|e| e.to_string())));
-                self.emit(Event::Changed);
-            }
             #[cfg(test)]
             Cmd::Pause(ready, resume) => {
                 ready.send(()).unwrap();
@@ -759,53 +697,6 @@ fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_i
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn review_concurrent_task_flush_commits_once() {
-        let path = std::env::temp_dir().join(format!("lagom-task-flush-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let store = Store::open(&path).unwrap();
-        let worker_store = Store::open(&path).unwrap();
-        let list = store.default_task_list().unwrap();
-        let write = TaskWrite::new(TaskChange::Add { list, title: "Save once".into() });
-        let worker_write = write.clone();
-        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let worker_start = start.clone();
-        let worker = std::thread::spawn(move || {
-            worker_start.wait();
-            worker_write.apply(&worker_store).unwrap()
-        });
-        start.wait();
-        let created = write.apply(&store).unwrap().unwrap();
-        assert_eq!(worker.join().unwrap(), Some(created));
-        assert_eq!(write.apply(&store).unwrap(), Some(created));
-        let tasks = store.tasks(list, false).unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, created);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[tokio::test]
-    async fn local_task_commands_run_on_worker_without_accounts_and_report_errors() {
-        let path = std::env::temp_dir().join(format!("lagom-task-worker-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let (me, _rx) = unbounded_channel();
-        let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, reauth_required: HashSet::new(), discovery: None, me, events };
-        let default = worker.store.default_task_list().unwrap();
-        worker.quick(Cmd::Task(TaskWrite::new(TaskChange::Add { list: default, title: "Local task".into() }))).await;
-        let Some(Event::TaskChanged(Ok(Some(id)))) = out.recv().await else { panic!("expected created task") };
-        assert!(matches!(out.recv().await, Some(Event::Changed)));
-        worker.quick(Cmd::Task(TaskWrite::new(TaskChange::DeleteList(default)))).await;
-        let Some(Event::TaskChanged(Err(error))) = out.recv().await else { panic!("expected default-list guard") };
-        assert!(error.contains("default task list"));
-        assert!(matches!(out.recv().await, Some(Event::Changed)));
-        assert_eq!(worker.store.tasks(default, false).unwrap()[0].id, id);
-        worker.quick(Cmd::Task(TaskWrite::new(TaskChange::Delete(id)))).await;
-        assert!(matches!(out.recv().await, Some(Event::TaskChanged(Ok(None)))));
-        assert!(matches!(out.recv().await, Some(Event::Changed)));
-        assert!(worker.store.tasks(default, true).unwrap().is_empty());
-        assert!(worker.sessions.is_empty() && worker.idle.is_empty() && worker.deferred.is_empty());
-    }
 
     #[tokio::test]
     async fn folder_command_does_not_create_after_failed_initial_listing() {

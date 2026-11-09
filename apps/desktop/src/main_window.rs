@@ -160,6 +160,7 @@ mod html;
 mod conversation;
 mod live;
 mod tasks;
+pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
 pub(crate) use live::notify_without_window;
@@ -590,14 +591,13 @@ impl MainWindow {
     /// Only a failed local write can hold an exit; drafts and sends need no network wait.
     fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
         let mut saved = true;
-        let tasks_saved = self.save_tasks(cx);
         for compose in self.drafts.iter().chain(self.compose.iter()) {
             if compose.read(cx).is_modal() || compose.read(cx).keeps_draft() {
                 saved &= compose.update(cx, |c, cx| c.save(cx));
             }
         }
         if !saved { self.notify("Could not save draft. Check local storage before closing.", cx); }
-        !saved || !tasks_saved
+        !saved
     }
 
     fn watch_compose(&mut self, compose: &Entity<Compose>, window: &mut Window, cx: &mut Context<Self>) {
@@ -712,8 +712,7 @@ impl MainWindow {
     fn undo(&mut self, cx: &mut Context<Self>) {
         if self.toast.as_ref().is_some_and(|t| t.1) {
             if let Some(id) = self.task_undo.take() {
-                self.send_task(crate::sync::TaskChange::Delete(id), cx);
-                self.toast = None;
+                if self.save_task(TaskChange::Delete(id), cx) { self.toast = None; }
                 return;
             }
         }

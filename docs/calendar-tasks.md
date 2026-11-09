@@ -72,7 +72,7 @@ New core modules: `crates/lagom-core/src/tasks.rs` and `calendar.rs` (types and 
 - **Mail link when synced:** Graph uses `linkedResources` (`externalId` = Message-ID). Google Tasks `links` is read-only, so add a line to `notes` instead.
 
 ## 4. Desktop slices
-Each slice ships on its own. New `Cmd`s go in `apps/desktop/src/sync.rs`, the UI keeps reading the store, and `Event::Changed` is reused.
+Each slice ships on its own. Local tasks commit directly through the UI store. Network `Cmd`s go in `apps/desktop/src/sync.rs`, the UI keeps reading the store, and `Event::Changed` is reused.
 
 | Slice | Work | Size |
 |---|---|---|
@@ -107,7 +107,7 @@ Decided on **2026-11-09**:
 5. **Scopes:** request all calendar and tasks scopes once in slice b.
 6. **Zoom:** not in v1.
 
-Slice a behavior: Today shows open tasks due today or earlier, plus undated tasks, grouped by list. Future-dated, completed and deleted tasks stay out of Today. It works without a mail account. Enter renames the selected task, Space completes it, and Alt+Up/Down reorders it within its list. The palette's New task command creates a linked task when a mail is selected; otherwise it opens the inline task field. Task creation Undo lasts for the existing toast window. All task writes run on the worker and make no network requests. Notes and optional due dates are stored by the core; this slice's inline editor changes titles only.
+Slice a behavior: Today shows open tasks due today or earlier, plus undated tasks, grouped by list. Future-dated, completed and deleted tasks stay out of Today. It works without a mail account. Enter renames the selected task, Space completes it, and Alt+Up/Down reorders it within its list. The palette's New task command creates a linked task when a mail is selected; otherwise it opens the inline task field. Task creation Undo lasts for the existing toast window. All local task writes commit synchronously through the UI store using its atomic statements and small transactions. Failed writes keep the editor open with its text and show an error toast. Notes and optional due dates are stored by the core; this slice's inline editor changes titles only.
 
 Still open for later slices: Google sensitive-scope verification timing; accepting the sync conflict rule; time zones and editing one recurring event versus the series.
 

@@ -1,7 +1,38 @@
 use super::*;
 use gpui::Focusable;
-use crate::sync::{TaskChange, TaskWrite};
+use lagom_core::store::Store;
 use lagom_core::tasks::{Task as LocalTask, TaskList};
+
+pub(crate) enum TaskChange {
+    Add { list: i64, title: String },
+    FromMail(lagom_core::store::MessageSummary),
+    Rename(i64, String),
+    Complete(i64),
+    Delete(i64),
+    Move { id: i64, list: i64, position: i64 },
+    AddList(String),
+    RenameList(i64, String),
+    DeleteList(i64),
+    DefaultList(i64),
+}
+
+impl TaskChange {
+    fn apply(self, store: &Store) -> lagom_core::Result<Option<i64>> {
+        match self {
+            Self::Add { list, title } => return store.add_task(list, &title, "", None).map(|t| Some(t.id)),
+            Self::FromMail(mail) => return store.task_from_mail(store.default_task_list()?, &mail).map(|t| Some(t.id)),
+            Self::Rename(id, title) => store.rename_task(id, &title)?,
+            Self::Complete(id) => store.set_done(id, true)?,
+            Self::Delete(id) => store.delete_task(id)?,
+            Self::Move { id, list, position } => store.move_task(id, list, position)?,
+            Self::AddList(name) => { store.add_task_list(&name)?; }
+            Self::RenameList(id, name) => store.rename_task_list(id, &name)?,
+            Self::DeleteList(id) => store.delete_task_list(id)?,
+            Self::DefaultList(id) => store.set_default_task_list(id)?,
+        }
+        Ok(None)
+    }
+}
 
 #[derive(Default)]
 pub(super) struct Today {
@@ -13,7 +44,6 @@ pub(super) struct Today {
     scroll: ScrollHandle,
     day: String,
     midnight: Option<Task<()>>,
-    pending: std::collections::VecDeque<TaskWrite>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -67,43 +97,32 @@ impl MainWindow {
         cx.notify();
     }
 
-    pub(crate) fn send_task(&mut self, change: TaskChange, cx: &mut Context<Self>) {
+    pub(crate) fn save_task(&mut self, change: TaskChange, cx: &mut Context<Self>) -> bool {
         let Some(live) = &self.live else {
             self.notify("Tasks need the local store; unavailable in demo mode", cx);
-            return;
+            return false;
         };
-        let write = TaskWrite::new(change);
-        self.today.pending.push_back(write.clone());
-        if !live.bridge.send(Cmd::Task(write)) { self.worker_gone(cx); }
-    }
-
-    pub(super) fn save_tasks(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(live) = &self.live else { return true };
-        for write in &self.today.pending {
-            if let Err(e) = write.apply(&live.store) {
-                self.notify(format!("Could not save task: {e}. Check local storage before closing."), cx);
-                return false;
+        match change.apply(&live.store) {
+            Ok(created) => {
+                self.reload_tasks(cx);
+                if let Some(id) = created {
+                    self.notify("Task created", cx);
+                    self.task_undo = Some(id);
+                    if let Some(toast) = &mut self.toast { toast.1 = true; }
+                }
+                cx.notify();
+                true
             }
-        }
-        true
-    }
-
-    pub(super) fn task_changed(&mut self, result: Result<Option<i64>, String>, cx: &mut Context<Self>) {
-        self.today.pending.pop_front();
-        match result {
-            Ok(Some(id)) => {
-                self.notify("Task created", cx);
-                self.task_undo = Some(id);
-                if let Some(toast) = &mut self.toast { toast.1 = true; }
+            Err(e) => {
+                self.notify(format!("Could not save task: {e}"), cx);
+                false
             }
-            Ok(None) => {}
-            Err(e) => self.notify(format!("Could not save task: {e}"), cx),
         }
     }
 
     pub(super) fn task_from_mail(&mut self, id: usize, cx: &mut Context<Self>) {
         let Some(mail) = self.inbox.mail.get(id) else { return };
-        self.send_task(TaskChange::FromMail(lagom_core::store::MessageSummary {
+        self.save_task(TaskChange::FromMail(lagom_core::store::MessageSummary {
             account: mail.account.clone(), message_id: mail.message_id.clone(), subject: mail.subject.clone(),
             ..Default::default()
         }), cx);
@@ -140,9 +159,10 @@ impl MainWindow {
                         Edit::AddList => TaskChange::AddList(title),
                         Edit::RenameList(id) => TaskChange::RenameList(id, title),
                     };
-                    this.send_task(change, cx);
-                    this.today.editor = None;
-                    window.focus(&this.focus);
+                    if this.save_task(change, cx) {
+                        this.today.editor = None;
+                        window.focus(&this.focus);
+                    }
                 }
                 TextInputEvent::Escape => {
                     this.today.editor = None;
@@ -176,7 +196,7 @@ impl MainWindow {
         let task = &self.today.tasks[index];
         if other.list != task.list { return; }
         let position = other.position.unwrap_or(0) + i64::from(down);
-        self.send_task(TaskChange::Move { id: task.id, list: task.list, position }, cx);
+        self.save_task(TaskChange::Move { id: task.id, list: task.list, position }, cx);
     }
 
     fn task_input(&self, edit: Edit) -> Option<Entity<TextInput>> {
@@ -193,7 +213,7 @@ impl MainWindow {
                 if let Some(id) = this.today.selected { this.edit_task(Edit::Rename(id), window, cx); }
             }))
             .on_action(cx.listener(|this, _: &Complete, _, cx| {
-                if let Some(id) = this.today.selected { this.send_task(TaskChange::Complete(id), cx); }
+                if let Some(id) = this.today.selected { this.save_task(TaskChange::Complete(id), cx); }
             }))
     }
 
@@ -226,7 +246,7 @@ impl MainWindow {
                     .child(button(&t, "Add task", None).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
                     .child(button(&t, "Rename", None).debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
                     .when(self.today.default != Some(list_id), |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.send_task(TaskChange::DeleteList(list_id), cx))))));
+                        .on_click(cx.listener(move |this, _, _, cx| { this.save_task(TaskChange::DeleteList(list_id), cx); })))));
             group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
             let tasks: Vec<_> = self.today.tasks.iter().filter(|task| task.list == list_id).collect();
             groups = groups.child(group);
@@ -240,7 +260,7 @@ impl MainWindow {
                     .on_click(cx.listener(move |this, _, window, cx| { this.today.selected = Some(id); if this.today.editor.is_none() { window.focus(&this.focus); } cx.notify(); }))
                     .child(pressable(div().id("complete-task"), &t, false).debug_selector(move || format!("complete-task-{id}"))
                         .size(px(20.)).border_1().border_color(t.ink2).rounded(px(radius::KEY))
-                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.send_task(TaskChange::Complete(id), cx); })))
+                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.save_task(TaskChange::Complete(id), cx); })))
                     .child(div().flex_1().min_w(px(0.)).one_line()
                         .map(|d| match self.task_input(Edit::Rename(id)) {
                             Some(input) => d.child(input), None => d.child(task.title.clone()),

@@ -65,7 +65,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
                     .px(px(10.)).py(px(6.)).rounded(px(radius::CONTROL))
                     .when(default_list == Some(id), |d| d.bg(t.sel))
                     .child(format!("{}{}", if default_list == Some(id) { "✓ " } else { "" }, list.name))
-                    .on_click(cx.listener(move |this, _, _, cx| this.send_task(crate::sync::TaskChange::DefaultList(id), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); }))
             })))
         .child(list)
         .child(div().flex().child(button(t, "Add account", None).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))

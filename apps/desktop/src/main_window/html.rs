@@ -385,7 +385,9 @@ mod tests {
             v.inbox.mail[id].html = Some("<p>Still visible</p>".into());
             v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark));
             v.web.ready = true;
-            v.task_changed(Ok(Some(1)), cx);
+            v.notify("Task created", cx);
+            v.task_undo = Some(1);
+            v.toast.as_mut().unwrap().1 = true;
             v.web_frame(window, cx);
             assert!(v.web.drawable.get(), "task toast must not blank the HTML body");
         });
