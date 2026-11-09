@@ -148,6 +148,8 @@ async fn move_and_copy_fallback_check_every_tagged_reply_and_rollback() {
                 steps.push(step(command, ""));
             }
             if failure.is_none() { steps.extend(empty_sync("Projects")); steps.extend(empty_sync("INBOX")); }
+            // Keep the peer alive so a later EOF cannot mask an ignored refusal.
+            else { steps.push(step("NOOP", "")); }
             let (mut imap, mut store, _temp, server) = fixture(steps).await;
             let inbox = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
             let target = store.save_folder(&imap.account.id, "Projects", None, FolderRole::Other).unwrap();
@@ -158,6 +160,7 @@ async fn move_and_copy_fallback_check_every_tagged_reply_and_rollback() {
             let result = imap.move_message(&mut store, id, target).await;
             assert_eq!(result.is_err(), failure.is_some());
             if failure.is_some() {
+                imap.session.noop().await.unwrap();
                 assert_eq!(store.list_messages(inbox, 0, 10, 0).unwrap()[0].id, id);
                 assert!(store.list_messages(target, 0, 10, 0).unwrap().is_empty());
                 assert_eq!(store.message(id).unwrap().body_text, "Cached body");
