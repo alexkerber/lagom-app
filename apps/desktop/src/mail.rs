@@ -35,6 +35,7 @@ pub struct Mail {
     pub attachments: Vec<Attachment>,
     pub inline: std::sync::Arc<Vec<lagom_core::inline::InlinePart>>,
     pub inline_pending: bool,
+    pub inline_retry_after: Option<std::time::Instant>,
     pub unread: bool,
     /// Local store row id. `None` in demo mode.
     pub store: Option<i64>,
@@ -68,6 +69,7 @@ impl Mail {
             attachments: Vec::new(),
             inline: Default::default(),
             inline_pending: false,
+            inline_retry_after: None,
             unread: !m.seen,
             store: Some(m.id),
             folder: Place::Folder(m.folder),

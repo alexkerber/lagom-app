@@ -17,7 +17,6 @@ pub(crate) fn content_id(value: &str) -> &str {
 }
 
 fn decode_id(value: &str) -> Option<String> {
-    let value = mail_parser::decoders::html::html_to_text(value);
     let mut bytes = value.bytes();
     let mut out = Vec::new();
     while let Some(b) = bytes.next() {
@@ -33,10 +32,11 @@ fn decode_id(value: &str) -> Option<String> {
 // shortcut: CSS-escaped CID spellings are not decoded; use a CSS tokenizer if encountered.
 fn references(html: &str) -> impl Iterator<Item = (std::ops::Range<usize>, String)> {
     let mut out = Vec::new();
-    let mut add = |range: std::ops::Range<usize>| {
-        let value = &html[range.clone()];
+    let mut add = |range: std::ops::Range<usize>, value: &str, entities: bool| {
         // Bound both individual spellings and per-message work before decoding or allocating IDs.
-        if out.len() >= 1024 || value.len() > 4096 || !value.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("cid:")) { return; }
+        if out.len() >= 1024 || range.len() > 4096 { return; }
+        let value = if entities { mail_parser::decoders::html::html_to_text(value).into() } else { std::borrow::Cow::Borrowed(value) };
+        if !value.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("cid:")) { return; }
         if let Some(cid) = decode_id(&value[4..]).filter(|s| !s.is_empty()) { out.push((range, cid)); }
     };
     let bytes = html.as_bytes();
@@ -71,7 +71,7 @@ fn references(html: &str) -> impl Iterator<Item = (std::ops::Range<usize>, Strin
                 let value = &html[start..end];
                 let trimmed = value.trim_ascii();
                 let start = start + value.len() - value.trim_ascii_start().len();
-                add(start..start + trimmed.len());
+                add(start..start + trimmed.len(), trimmed, true);
             } else if name.eq_ignore_ascii_case("srcset") {
                 let mut at = start;
                 while at < end {
@@ -79,13 +79,18 @@ fn references(html: &str) -> impl Iterator<Item = (std::ops::Range<usize>, Strin
                     let start = at;
                     while at < end && !bytes[at].is_ascii_whitespace() { at += 1; }
                     let url_end = start + html[start..at].trim_end_matches(',').len();
-                    add(start..url_end);
+                    add(start..url_end, &html[start..url_end], true);
                     if url_end == at {
                         while at < end && bytes[at] != b',' { at += 1; }
                     }
                 }
             } else if name.eq_ignore_ascii_case("style") {
-                css_urls(&html[start..end], start, &mut add);
+                let value = &html[start..end];
+                let (css, offsets) = css_attribute(value);
+                css_urls(&css, 0, &mut |range| {
+                    let raw = if offsets.is_empty() { range.clone() } else { offsets[range.start]..offsets[range.end] };
+                    add(start + raw.start..start + raw.end, &css[range], false);
+                });
             }
         }
         i = (i + 1).min(bytes.len());
@@ -94,11 +99,35 @@ fn references(html: &str) -> impl Iterator<Item = (std::ops::Range<usize>, Strin
             let end = bytes[i..].windows(tag.len() + 2).enumerate().find(|(at, s)| s.starts_with(b"</") && s[2..].eq_ignore_ascii_case(tag.as_bytes())
                 && bytes.get(i + at + s.len()).is_none_or(|b| b.is_ascii_whitespace() || b">/".contains(b))).map(|(at, _)| at);
             let end = end.map_or(bytes.len(), |end| i + end);
-            if tag.eq_ignore_ascii_case("style") { css_urls(&html[i..end], i, &mut add); }
+            if tag.eq_ignore_ascii_case("style") { css_urls(&html[i..end], i, &mut |range| add(range.clone(), &html[range], false)); }
             i = end;
         }
     }
     out.into_iter()
+}
+
+fn css_attribute(value: &str) -> (std::borrow::Cow<'_, str>, Vec<usize>) {
+    if !value.contains('&') { return (value.into(), Vec::new()); }
+    let mut css = String::with_capacity(value.len());
+    let mut offsets = Vec::new();
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        i += value[i..].chars().next().unwrap().len_utf8();
+        if bytes[start] == b'&' {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'#') { i += 1; }
+            if bytes.get(i) == Some(&b';') { i += 1; }
+        }
+        let before = css.len();
+        mail_parser::decoders::html::add_html_token(&mut css, &bytes[start..i], false);
+        let length = css.len() - before;
+        // Keep source boundaries so rewriting preserves the attribute's original quoting.
+        if length == i - start { offsets.extend(start..i); }
+        else { offsets.extend(std::iter::repeat_n(start, length)); }
+    }
+    offsets.push(value.len());
+    (css.into(), offsets)
 }
 
 fn css_urls(css: &str, offset: usize, add: &mut impl FnMut(std::ops::Range<usize>)) {
@@ -217,6 +246,18 @@ mod tests {
         assert_ne!(referenced_ids("<img src='cid:Logo'>"), referenced_ids("<img src='cid:logo'>"));
         assert!(referenced_ids("<img src='cid:%xx'>").is_empty());
         assert_eq!(rewrite("<img src='https://example.test/cid:other'>", 1, false), "<img src='https://example.test/cid:other'>");
+    }
+
+    #[test]
+    fn cid_backgrounds_decode_attribute_entities_before_css() {
+        let html = include_str!("../tests/fixtures/inline-backgrounds.html");
+        assert_eq!(referenced_ids(html), ["logo@example.test".into(), "café&amp;".into()].into());
+        for windows in [false, true] {
+            let expected = html.replace("cid:logo@example.test", &url(1, "logo@example.test", windows))
+                .replace("c&#105;d:logo@example.test", &url(1, "logo@example.test", windows))
+                .replace("cid:caf&eacute;&amp;amp;", &url(1, "café&amp;", windows));
+            assert_eq!(rewrite(html, 1, windows), expected);
+        }
     }
 
     #[test]
