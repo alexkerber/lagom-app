@@ -83,6 +83,10 @@ pub const GOOGLE_CALENDAR_SCOPES: &str = "https://www.googleapis.com/auth/calend
 
 pub fn has_scope(scopes: &str, scope: &str) -> bool { scopes.split_whitespace().any(|s| s == scope) }
 
+pub const GOOGLE_TASKS_SCOPE: &str = "https://www.googleapis.com/auth/tasks";
+
+pub fn tasks_allowed(scopes: &str) -> bool { has_scope(scopes, GOOGLE_TASKS_SCOPE) }
+
 pub fn calendar_allowed(scopes: &str) -> bool {
     has_scope(scopes, "https://www.googleapis.com/auth/calendar")
         || has_scope(scopes, "https://www.googleapis.com/auth/calendar.readonly")

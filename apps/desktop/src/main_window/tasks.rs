@@ -41,6 +41,8 @@ pub(super) struct Today {
     pub(super) events: Vec<lagom_core::calendar::AgendaEvent>,
     pub(super) calendar_accounts: Vec<(lagom_core::account::Account, bool)>,
     pub(super) calendar_sync: std::collections::HashMap<String, crate::sync::SyncState>,
+    task_access: std::collections::HashSet<String>,
+    pub(super) task_sync: std::collections::HashMap<String, crate::sync::SyncState>,
     tasks: Vec<LocalTask>,
     selected: Option<i64>,
     editor: Option<(Edit, Entity<TextInput>)>,
@@ -75,10 +77,16 @@ impl MainWindow {
         let Some(live) = &self.live else { return };
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let snapshot = (|| -> lagom_core::Result<_> {
-            Ok((live.store.task_lists()?, live.store.default_task_list()?, live.store.today_tasks(&day)?))
+            let mut access = std::collections::HashSet::new();
+            for (account, _) in &self.today.calendar_accounts {
+                if lagom_core::oauth::tasks_allowed(&live.store.account_scopes(&account.id)?) { access.insert(account.id.clone()); }
+            }
+            Ok((live.store.task_lists()?, live.store.default_task_list()?, live.store.today_tasks(&day)?, access))
         })();
         match snapshot {
-            Ok((lists, default, mut tasks)) => {
+            Ok((lists, default, mut tasks, access)) => {
+                self.today.task_access = access;
+                self.today.task_sync.retain(|id, _| self.today.calendar_accounts.iter().any(|(a, _)| a.id == *id));
                 tasks.sort_by_key(|task| (lists.iter().position(|l| l.id == task.list), task.position, task.id));
                 self.today.lists = lists;
                 self.today.default = Some(default);
@@ -109,6 +117,10 @@ impl MainWindow {
         // shortcut: task writes can block the UI for 250 ms on locks; move off-thread if this budget becomes too large.
         match live.store.with_short_lock_wait(|store| change.apply(store)) {
             Ok(created) => {
+                let sync = live.store.accounts().unwrap_or_default().iter().any(|a|
+                    a.auth == lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google)
+                    && live.store.account_scopes(&a.id).is_ok_and(|s| lagom_core::oauth::tasks_allowed(&s)));
+                if sync { let _ = live.bridge.send(crate::sync::Cmd::TasksEdited); }
                 self.reload_tasks(cx);
                 if let Some(id) = created {
                     self.notify("Task created", cx);
@@ -284,7 +296,36 @@ impl MainWindow {
                 .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
                 .child(div().flex_1().min_h(px(0.)).flex().flex_col().gap(px(24.))
                     .when(!self.today.calendar_accounts.is_empty() || !self.today.events.is_empty(), |d| d.child(self.agenda_view(cx)))
+                    .children(self.today.calendar_accounts.iter().filter_map(|(account, _)| {
+                        let state = self.today.task_sync.get(&account.id);
+                        let text = task_sync_label(self.today.task_access.contains(&account.id), state)?;
+                        let id = account.id.clone();
+                        Some(div().debug_selector(move || format!("tasks-sync-{id}")).child(mono(format!("{} · {text}", account.email), t.ink2)))
+                    }))
                     .child(groups))
                 .child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2)))
+    }
+}
+
+fn task_sync_label(allowed: bool, state: Option<&crate::sync::SyncState>) -> Option<&str> {
+    if !allowed { return Some("Allow Google Tasks access"); }
+    match state {
+        Some(crate::sync::SyncState::Synced(_)) => Some("Synced with Google Tasks"),
+        Some(crate::sync::SyncState::Failed(error)) => Some(error.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod sync_status_tests {
+    use super::*;
+    use crate::sync::SyncState;
+
+    #[test]
+    fn tasks_status_never_claims_sync_before_success_or_after_scope_loss() {
+        assert_eq!(task_sync_label(true, None), None);
+        assert_eq!(task_sync_label(true, Some(&SyncState::Synced(1))), Some("Synced with Google Tasks"));
+        assert_eq!(task_sync_label(true, Some(&SyncState::Failed("offline".into()))), Some("offline"));
+        assert_eq!(task_sync_label(false, Some(&SyncState::Synced(1))), Some("Allow Google Tasks access"));
     }
 }

@@ -78,7 +78,7 @@ Each slice ships on its own. Local tasks commit directly through the UI store. N
 |---|---|---|
 | a. Local tasks + `t` | `tasks.rs` view on the start screen. `t` creates a task in the default list with title = subject, plus the Undo toast. Add/rename lists. Opening a task's link finds the mail by Message-ID. No network. | M |
 | b1. Google agenda, read-only | Shipped: full desktop consent, persisted scopes, schema v10, paged `google.rs` window fetch and `agenda.rs` in Today. Google mail and calendar share the same grant/cache; Google refreshes omit scope. | M |
-| b2. Google Tasks | Provider task lists and push/pull task sync. | M |
+| b2. Google Tasks | Shipped: provider list mapping, durable push/pull task sync and quiet per-account status. | M |
 | c. Microsoft | Graph token, `graph.rs` calendarView and To Do. | M |
 | d. Create/edit events | Form with `conferenceData.createRequest{requestId, conferenceSolutionKey:{type:"hangoutsMeet"}}`. On Graph, `isOnlineMeeting` (Teams only for work accounts, **not verified** for personal). | L |
 | d′. Zoom (after v1) | Excluded from v1; would need a separate OAuth integration and review. | L, separate |
@@ -110,7 +110,7 @@ Decided on **2026-11-09**:
 
 Slice a behavior: Today shows open tasks due today or earlier, plus undated tasks, grouped by list. Future-dated, completed and deleted tasks stay out of Today. It works without a mail account. Enter renames the selected task, Space completes it, and Alt+Up/Down reorders it within its list. The palette's New task command creates a linked task when a mail is selected; otherwise it opens the inline task field. Task creation Undo lasts for the existing toast window. All local task writes commit synchronously through the UI store using its atomic statements and small transactions. Failed writes keep the editor open with its text and show an error toast. Notes and optional due dates are stored by the core; this slice's inline editor changes titles only.
 
-Still open for later slices: Google sensitive-scope verification timing; accepting the sync conflict rule; time zones and editing one recurring event versus the series.
+Still open for later slices: Google sensitive-scope verification timing; time zones and editing one recurring event versus the series.
 
 ### Critical files
 - crates/lagom-core/src/oauth.rs
@@ -122,3 +122,19 @@ Still open for later slices: Google sensitive-scope verification timing; accepti
 - apps/desktop/src/main_window.rs
 
 For b1, the Google desktop OAuth, CalendarList and events.list documentation was checked on 2026-11-09. Live provider consent remains untested. Quotas, Testing-mode limits and Microsoft cross-resource refresh remain unverified. Microsoft Graph still needs a resource-keyed token cache in slice c; b1 does not call Graph. The read-only calendar cache replaces overlapping events in fetched calendars atomically, preserving other windows and calendars. Fetches run independently of mail commands; local/pending events must also be preserved when editing lands.
+
+### b2: Google Tasks sync
+
+Schema v11 follows main's v10 (checked before implementation). It adds list dirty/deleted flags, list and task etags/remote timestamps, per-list `pulled_through`, and revisions that protect edits during requests. Task tombstones already existed. Account removal detaches Google metadata before the original foreign-key cascade; local lists, tasks, completion history, default selection and mail links survive.
+
+The worker starts one cancellable job per authorized Google account on the existing two-minute tick. Desktop edits commit first and debounce for 400 ms. An edit during a job schedules another pass. Each job uses its own SQLite connection; no database transaction spans network I/O. Removal and reauthorization cancel jobs. A 401 refreshes once per request; an insufficient-scope 403 removes only the Tasks grant and displays `Allow Google Tasks access`. Today shows the account and `Synced with Google Tasks` after success, or its error. Calendar/mail grants remain independent.
+
+List discovery comes first, so existing local lists can map by exact name without creating duplicate lists. Each local list belongs to the first account that claims it transactionally; other accounts get their own lists. Existing remote IDs take precedence over names on every later sync. Missing lists are created on either side. Then **all dirty lists/tasks and tombstones are pushed before any task pull**. Push acknowledgements commit immediately and clear dirty only if the local revision still matches. Pull pages are applied atomically per list, never overwrite dirty or just-pushed tasks, and advance `updatedMin` only after every page succeeds. The cursor uses server task timestamps rounded down to seconds, retaining an inclusive overlap. Completed, hidden and deleted tasks are fetched explicitly.
+
+Deleting a list keeps the established local rule: move its tasks to the default list. A remotely removed default list is recreated, preserving its local tasks. Cross-list moves retain an old-list tombstone for deletion under the correct account and insert into the destination. Reordering and subtasks are not synchronized in b2; adding provider order requires `tasks.move`.
+
+A linked task appends one plain `lagom://mail?account=...&message-id=...&subject=...` line to Google notes, with URL-encoded values. Pull removes that line into the local link fields while preserving the other notes; notes edited after the link still work. Google's read-only `links` field is never written. API shapes and list flags were checked against the [Tasks resource](https://developers.google.com/workspace/tasks/reference/rest/v1/tasks), [tasks.list](https://developers.google.com/workspace/tasks/reference/rest/v1/tasks/list) and [tasklists resource](https://developers.google.com/workspace/tasks/reference/rest/v1/tasklists).
+
+Known limit: Google Tasks insert has no idempotency key. Successful acknowledged inserts are never repeated after a failed pull, and a list creation with a lost reply can be recovered by name. A task INSERT whose response is lost after Google commits can duplicate on retry; b2 cannot promise exactly-once creation in that case. Local writes deliberately win simultaneous remote changes. Native layout, real Google consent/API acceptance and real credentials are not exercised by these tests.
+
+Loopback HTTP/JSON fixtures cover paging and cursor flags, push-before-pull conflicts, failed pushes/pulls, repeated pages, task/list deletion, first-sync mapping without duplicates, links in notes, one refresh, scope denial, concurrent edits/moves, cross-account ownership, account removal and migration. Desktop headless tests cover edit notification, debounce, job deduplication/cancellation and status updates.

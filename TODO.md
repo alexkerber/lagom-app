@@ -94,7 +94,8 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] `t` in the message list and reading pane and ⌘K "New task" create a task in the default list with an Undo toast. Links resolve by account + Message-ID across folder moves; missing mail gives a toast. Store fixtures and headless dispatch tests cover creation/undo, linked mail, list deletion, settings, migration and Today editing.
 - [x] Tasks review: defer linked-mail navigation until pending moves finish; commit task and list edits directly to SQLite on the UI side, independent of the mail worker, and retain editor text with an error toast on failure; preserve Undo Send on Today and the HTML body during task toasts. Limit task-write lock waits to 250 ms, restore the UI connection's timeout afterwards and leave the worker's 5-second timeout unchanged. Fixture/headless regressions cover competing SQLite writers during creation/completion/Undo, retained editor text and retry, timeout restoration, stalled mail operations, window reopening, immediate quit, storage failure recovery and the earlier navigation/Undo/HTML fixes.
 - [ ] Tasks: native keyboard/focus, HTML bridge and layout acceptance on macOS/Windows/Linux; headless tests only. Today currently lays out every open task; virtualize if large lists require it.
-- [ ] Sync tasks with the mail account (for example Google Tasks, Microsoft To Do).
+- [x] Tasks slice b2: two-way Google Tasks sync, schema v11 metadata/tombstones, name mapping, push before incremental pull, local edits win, notes mail links, debounced desktop edits and two-minute sync, per-account status. Loopback fixtures and headless coverage; live Google acceptance remains unverified.
+- [ ] Microsoft To Do sync (slice c).
 
 ## Mail core
 

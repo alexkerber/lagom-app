@@ -175,3 +175,6 @@ fn event_time(time: EventTime) -> Result<(String, i64, bool)> {
 
 #[cfg(test)]
 mod tests;
+
+mod tasks;
+pub use tasks::{sync_tasks, sync_tasks_with};

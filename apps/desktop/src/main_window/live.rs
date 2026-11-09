@@ -339,6 +339,10 @@ impl MainWindow {
                         Err(error) => self.notify(format!("Could not sign in: {error}"), cx),
                     }
                 }
+                Event::TasksSync(account, state) => {
+                    self.today.task_sync.insert(account, state);
+                    read = true;
+                }
                 Event::CalendarSync(account, state) => {
                     self.today.calendar_sync.insert(account, state);
                     read = true;
@@ -1472,6 +1476,29 @@ mod tests {
             }).collect();
             assert_eq!(restored, marked);
         });
+    }
+
+    #[gpui::test]
+    fn task_edits_notify_sync_after_commit_and_status_refresh_keeps_local_tasks(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut account = store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            store.save_authorized_account(&account, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+            v.reload(cx);
+            v.show_today(window, cx);
+            let list = store.default_task_list().unwrap();
+            assert!(v.save_task(super::tasks::TaskChange::Add { list, title: "Durable before sync".into() }, cx));
+            assert_eq!(store.tasks(list, false).unwrap()[0].title, "Durable before sync");
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::TasksEdited));
+            v.on_events(vec![Event::TasksSync(account.id.clone(), SyncState::Synced(1)), Event::Changed], window, cx);
+            assert_eq!(v.today.task_sync.get(&account.id), Some(&SyncState::Synced(1)));
+            assert_eq!(store.tasks(list, false).unwrap().len(), 1);
+            v.on_events(vec![Event::TasksSync(account.id.clone(), SyncState::Failed("offline".into()))], window, cx);
+            assert_eq!(v.today.task_sync.get(&account.id), Some(&SyncState::Failed("offline".into())));
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]
