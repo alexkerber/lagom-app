@@ -11,6 +11,12 @@ async fn server(replies: Vec<(&'static str, &'static str)>) -> (String, tokio::t
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") { request.push(stream.read_u8().await.unwrap()); }
+            let headers = String::from_utf8(request.clone()).unwrap();
+            let length = headers.lines().find_map(|line| line.split_once(':').filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim().parse::<usize>().unwrap())).unwrap_or(0);
+            let mut body_bytes = vec![0; length];
+            stream.read_exact(&mut body_bytes).await.unwrap();
+            request.extend(body_bytes);
             requests.push(String::from_utf8(request).unwrap());
             stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         }
@@ -139,4 +145,120 @@ fn invalid_dates_and_unsafe_meeting_urls_are_rejected() {
 fn calendar_links_allow_only_google_calendar_https_without_credentials() {
     for url in ["https://www.google.com/calendar/event?eid=fixture", "https://calendar.google.com/calendar/u/0/r/eventedit/fixture"] { assert!(safe_calendar_url(url)); }
     for url in ["http://www.google.com/calendar/event", "https://www.google.com.evil.test/calendar/", "https://user@calendar.google.com/calendar/", "javascript:alert(1)", "https://www.google.com/search"] { assert!(!safe_calendar_url(url)); }
+}
+
+fn draft() -> crate::calendar::NewEvent {
+    crate::calendar::NewEvent {
+        title: "Fixture planning".into(), start: "2026-03-29T01:30:00+01:00".into(), end: "2026-03-29T03:30:00+02:00".into(),
+        time_zone: "Europe/Stockholm".into(), all_day: false, description: Some("Fixture notes".into()),
+        attendees: vec!["guest@example.test".into()], meet: true,
+    }
+}
+const CREATED: &str = r#"{"id":"created","summary":"Fixture planning","start":{"dateTime":"2026-03-29T01:30:00+01:00"},"end":{"dateTime":"2026-03-29T03:30:00+02:00"},"conferenceData":{"entryPoints":[{"entryPointType":"video","uri":"https://meet.example.test/new"}]}}"#;
+
+fn request_body(request: &str) -> serde_json::Value { serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap() }
+
+#[tokio::test]
+async fn insert_meet_refreshes_once_preserves_dst_offsets_and_immediately_caches_link() {
+    let (base, server) = server(vec![("401 Unauthorized", "{}"), ("200 OK", CREATED), ("200 OK", CREATED)]).await;
+    let mut tokens = vec![];
+    let event = create_with(&base, "fixture/calendar@example.test", &draft(), |rejected| {
+        let token = if rejected.is_some() { "fresh" } else { "cached" };
+        tokens.push(rejected);
+        std::future::ready(Ok(Zeroizing::new(token.into())))
+    }).await.unwrap();
+    create_with(&base, "fixture/calendar@example.test", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert_eq!(tokens, [None, Some("cached".into())]);
+    assert_eq!(event.end_utc - event.start_utc, 3600);
+    assert_eq!(event.join_url.as_deref(), Some("https://meet.example.test/new"));
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("POST /calendars/fixture%2Fcalendar@example.test/events?"));
+    assert!(requests[0].contains("conferenceDataVersion=1&sendUpdates=all"));
+    assert!(requests[1].contains("Bearer fresh"));
+    let body = request_body(&requests[0]);
+    assert_eq!(body["start"], serde_json::json!({"dateTime": "2026-03-29T01:30:00+01:00", "timeZone": "Europe/Stockholm"}));
+    assert_eq!(body["end"], serde_json::json!({"dateTime": "2026-03-29T03:30:00+02:00", "timeZone": "Europe/Stockholm"}));
+    assert_eq!(body["summary"], "Fixture planning");
+    assert_eq!(body["description"], "Fixture notes");
+    assert_eq!(body["attendees"], serde_json::json!([{"email":"guest@example.test"}]));
+    assert_eq!(body["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"], "hangoutsMeet");
+    let request_id = body["conferenceData"]["createRequest"]["requestId"].as_str().unwrap();
+    assert_eq!(uuid::Uuid::parse_str(request_id).unwrap().get_version_num(), 4);
+    assert_eq!(body, request_body(&requests[1]), "401 retry must use the same conference request");
+    assert_ne!(request_id, request_body(&requests[2])["conferenceData"]["createRequest"]["requestId"].as_str().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("cache.db")).unwrap();
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    store.replace_calendar_window(&account.id, 1, 2, &[(Calendar {
+        remote_id: "primary".into(), name: "Fixture".into(), color: None, shown: true, writable: true,
+    }, vec![])]).unwrap();
+    store.insert_calendar_event(&account.id, "primary", &event).unwrap();
+    store.insert_calendar_event(&account.id, "primary", &event).unwrap();
+    assert_eq!(store.today_events("2026-03-29", event.start_utc, event.end_utc).unwrap()[0].event, event);
+    assert_eq!(store.today_events("2026-03-29", event.start_utc, event.end_utc).unwrap().len(), 1);
+    assert_eq!(store.calendar_window(&account.id).unwrap(), Some((1, 2)), "creation must not claim fetch coverage");
+    assert!(store.insert_calendar_event("another-account", "primary", &event).is_err());
+}
+
+#[tokio::test]
+async fn insert_all_day_end_is_exclusive_and_no_guests_or_meet_are_omitted() {
+    let response = r#"{"id":"day","start":{"date":"2026-03-29"},"end":{"date":"2026-03-30"}}"#;
+    let (base, server) = server(vec![("200 OK", response)]).await;
+    let mut draft = draft();
+    draft.all_day = true;
+    draft.start = "2026-03-29".into();
+    draft.end = "2026-03-30".into();
+    draft.meet = false;
+    draft.attendees.clear();
+    draft.description = None;
+    let event = create_with(&base, "primary", &draft, |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(event.all_day);
+    assert_eq!(event.end, "2026-03-30");
+    let requests = server.await.unwrap();
+    assert!(requests[0].contains("conferenceDataVersion=1"));
+    assert!(!requests[0].contains("sendUpdates"));
+    let body = request_body(&requests[0]);
+    assert_eq!(body["start"], serde_json::json!({"date":"2026-03-29"}));
+    assert_eq!(body["end"], serde_json::json!({"date":"2026-03-30"}));
+    for key in ["conferenceData", "attendees", "description"] { assert!(body.get(key).is_none(), "{key}"); }
+}
+
+#[tokio::test]
+async fn insert_unauthorized_stops_after_one_refresh_and_forbidden_needs_calendar_access() {
+    for (replies, consent) in [
+        (vec![("401 Unauthorized", "{}"), ("401 Unauthorized", "{}")], false),
+        (vec![("403 Forbidden", "{}")], true),
+    ] {
+        let (base, server) = server(replies).await;
+        let mut tokens = vec![];
+        let error = create_with(&base, "primary", &draft(), |rejected| {
+            tokens.push(rejected);
+            std::future::ready(Ok(Zeroizing::new("fixture".into())))
+        }).await.unwrap_err();
+        assert!(if consent { matches!(error, Error::CalendarConsent) } else { matches!(error, Error::ReauthRequired) });
+        assert_eq!(tokens.len(), if consent { 1 } else { 2 });
+        assert_eq!(server.await.unwrap().len(), tokens.len());
+    }
+}
+
+#[tokio::test]
+async fn invalid_insert_does_not_get_a_token_or_make_a_request() {
+    for change in 0..7 {
+        let mut draft = draft();
+        match change {
+            0 => draft.title = "  ".into(),
+            1 => draft.end = draft.start.clone(),
+            2 => draft.start = "2026-02-30T01:30:00+01:00".into(),
+            3 => draft.attendees = vec!["bad address".into()],
+            4 => draft.start = "2026-03-29T01:30:00".into(),
+            5 => draft.time_zone.clear(),
+            _ => draft.attendees = vec!["guest@example.test\r\nother@example.test".into()],
+        }
+        assert!(create_with("http://127.0.0.1:1/", "primary", &draft, |_| {
+            panic!("invalid draft requested credentials");
+            #[allow(unreachable_code)] std::future::ready(Ok(Zeroizing::new(String::new())))
+        }).await.is_err());
+    }
 }

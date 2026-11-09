@@ -88,7 +88,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
 }
 
 /// A setting with a macOS-style switch. The whole row toggles, so the target is large.
-fn toggle_row(t: &Theme, label: &'static str, on: bool) -> Stateful<Div> {
+pub(crate) fn toggle_row(t: &Theme, label: &'static str, on: bool) -> Stateful<Div> {
     div().id(label).debug_selector(move || label.into()).flex().items_center().justify_between().min_h(px(32.))
         .child(label)
         .child(switch(t, label, on))

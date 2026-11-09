@@ -31,7 +31,43 @@ pub struct AgendaEvent {
     pub event: Event,
 }
 
+#[derive(Clone, Debug)]
+pub struct NewEvent {
+    pub title: String,
+    pub start: String,
+    pub end: String,
+    pub time_zone: String,
+    pub all_day: bool,
+    pub description: Option<String>,
+    pub attendees: Vec<String>,
+    pub meet: bool,
+}
+
 impl Store {
+    pub fn calendars(&self, account: &str) -> Result<Vec<Calendar>> {
+        let mut query = self.db.prepare("SELECT remote_id,name,color,shown,writable FROM calendars WHERE account=?1 AND shown=1 ORDER BY name,remote_id")?;
+        let rows = query.query_map([account], |r| Ok(Calendar {
+            remote_id: r.get(0)?, name: r.get(1)?, color: r.get(2)?, shown: r.get(3)?, writable: r.get(4)?,
+        }))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn insert_calendar_event(&self, account: &str, calendar: &str, event: &Event) -> Result<()> {
+        let id = self.db.query_row("SELECT id FROM calendars WHERE account=?1 AND remote_id=?2",
+            params![account, calendar], |r| r.get(0)).optional()?.ok_or(Error::NotFound)?;
+        self.save_calendar_event(id, event)
+    }
+
+    fn save_calendar_event(&self, calendar: i64, event: &Event) -> Result<()> {
+        if event.remote_id.is_empty() || event.end_utc <= event.start_utc {
+            return Err(Error::Invalid("invalid calendar event"));
+        }
+        self.db.execute("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,location,join_url,html_link) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+            ON CONFLICT(calendar,remote_id) DO UPDATE SET title=excluded.title,start=excluded.start,end=excluded.end,
+            start_utc=excluded.start_utc,end_utc=excluded.end_utc,all_day=excluded.all_day,location=excluded.location,join_url=excluded.join_url,html_link=excluded.html_link",
+            params![calendar, event.remote_id, event.title, event.start, event.end, event.start_utc, event.end_utc, event.all_day, event.location, event.join_url, event.html_link])?;
+        Ok(())
+    }
     pub fn account_scopes(&self, account: &str) -> Result<String> {
         Ok(self.db.query_row("SELECT scopes FROM accounts WHERE id=?1", [account], |r| r.get(0))?)
     }
@@ -70,13 +106,7 @@ impl Store {
                 params![account, calendar.remote_id], |r| r.get(0))?;
             self.db.execute("DELETE FROM events WHERE calendar=?1 AND start_utc<?3 AND end_utc>?2", params![id, start, end])?;
             for event in events {
-                if event.remote_id.is_empty() || event.end_utc <= event.start_utc {
-                    return Err(Error::Invalid("invalid calendar event"));
-                }
-                self.db.execute("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,location,join_url,html_link) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-                    ON CONFLICT(calendar,remote_id) DO UPDATE SET title=excluded.title,start=excluded.start,end=excluded.end,
-                    start_utc=excluded.start_utc,end_utc=excluded.end_utc,all_day=excluded.all_day,location=excluded.location,join_url=excluded.join_url,html_link=excluded.html_link",
-                    params![id, event.remote_id, event.title, event.start, event.end, event.start_utc, event.end_utc, event.all_day, event.location, event.join_url, event.html_link])?;
+                self.save_calendar_event(id, event)?;
             }
         }
         // shortcut: coverage tracks the latest complete fetch; retain disjoint windows when arbitrary week fetching lands.

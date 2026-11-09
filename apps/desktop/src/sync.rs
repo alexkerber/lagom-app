@@ -12,7 +12,7 @@ use std::{
 
 use lagom_core::{
     account::Account,
-    calendar::{Calendar, Event as CalendarEvent},
+    calendar::{Calendar, Event as CalendarEvent, NewEvent},
     oauth::{self, Provider, SignedIn},
     discovery::{self, Discovery},
     imap_sync::{ImapSync, DEFAULT_LIMIT},
@@ -48,6 +48,7 @@ pub enum Cmd {
     CancelSignIn,
     Reauthenticate(String),
     AllowCalendar(String),
+    CreateEvent { op: u64, account: String, calendar: String, event: NewEvent },
     #[allow(dead_code)]
     Discover(String),
     AddAccount(Box<Account>, Zeroizing<String>),
@@ -99,6 +100,7 @@ pub enum Event {
     /// The store changed: read it again.
     Changed,
     CalendarSync(String, SyncState),
+    EventCreated { op: u64, error: Option<String> },
     NewMail(Vec<lagom_core::store::MessageSummary>),
     Sync(String, SyncState),
     Op { op: u64, error: Option<String> },
@@ -164,7 +166,7 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
         return;
     }
     let _ = events.send(Event::Changed);
-    let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+    let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
     for account in w.store.accounts().unwrap_or_default() {
         w.watch(&account);
     }
@@ -181,6 +183,7 @@ async fn work(mut w: Worker, mut rx: UnboundedReceiver<Cmd>) {
             continue;
         }
         tokio::select! {
+            Some(result) = w.event_creates.join_next_with_id(), if !w.event_creates.is_empty() => w.event_created(result),
             Some(result) = w.calendars.join_next_with_id(), if !w.calendars.is_empty() => w.calendar_finished(result),
             result = async {
                 match &mut w.sign_in {
@@ -226,6 +229,8 @@ struct Worker {
     calendar_consent: bool,
     calendars: tokio::task::JoinSet<CalendarJob>,
     calendar_tasks: HashMap<String, tokio::task::AbortHandle>,
+    event_creates: tokio::task::JoinSet<lagom_core::Result<CalendarEvent>>,
+    create_tasks: HashMap<tokio::task::Id, (u64, Account, String)>,
     reauth_required: HashSet<String>,
     discovery: Option<Flow<(String, Discovery)>>,
     me: UnboundedSender<Cmd>,
@@ -315,6 +320,11 @@ impl Worker {
                 let error = self.empty_trash(folder).await.err().map(|e| e.to_string());
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
+            }
+            Cmd::CreateEvent { op, account, calendar, event } => {
+                if let Err(error) = self.create_event(op, &account, calendar, event) {
+                    self.emit(Event::EventCreated { op, error: Some(error.to_string()) });
+                }
             }
             Cmd::CreateFolder { op, account, name } => {
                 let error = self.create_folder(&account, &name).await.err().map(|e| e.to_string());
@@ -495,6 +505,41 @@ impl Worker {
             self.emit(Event::Sync(account.id.clone(), state));
             self.emit(Event::Changed);
         }
+    }
+
+    fn create_event(&mut self, op: u64, id: &str, calendar: String, event: NewEvent) -> lagom_core::Result<()> {
+        let account = self.account(id)?;
+        if account.auth != lagom_core::account::Auth::OAuth(Provider::Google) {
+            return Err(Error::Invalid("choose a Google calendar"));
+        }
+        if !oauth::calendar_writable(&self.store.account_scopes(id)?) { return Err(Error::CalendarConsent); }
+        if !self.store.calendars(id)?.iter().any(|c| c.remote_id == calendar && c.writable) {
+            return Err(Error::Invalid("choose a writable calendar"));
+        }
+        event.event("validation".into())?;
+        let (owned, remote) = (account.clone(), calendar.clone());
+        self.start_create(op, account, calendar, async move { lagom_core::google::create_event(&owned, &remote, &event).await });
+        Ok(())
+    }
+
+    fn start_create(&mut self, op: u64, account: Account, calendar: String,
+        create: impl Future<Output = lagom_core::Result<CalendarEvent>> + Send + 'static) {
+        let task = self.event_creates.spawn(create);
+        self.create_tasks.insert(task.id(), (op, account, calendar));
+    }
+
+    fn event_created(&mut self, completed: Result<(tokio::task::Id, lagom_core::Result<CalendarEvent>), tokio::task::JoinError>) {
+        let task = match &completed { Ok((task, _)) => *task, Err(error) => error.id() };
+        let Some((op, account, calendar)) = self.create_tasks.remove(&task) else { return };
+        // A fetch started before the POST completed must not erase the newly cached event.
+        self.cancel_calendar(&account.id);
+        let result = completed.map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))
+            .and_then(|(_, result)| result).and_then(|event| {
+                if self.account(&account.id)? != account { return Err(Error::Invalid("calendar account changed")); }
+                self.store.insert_calendar_event(&account.id, &calendar, &event)
+            });
+        self.emit(Event::EventCreated { op, error: result.as_ref().err().map(ToString::to_string) });
+        self.calendar_synced(&account, result);
     }
 
     fn sync_calendar(&mut self, account: &Account) {
@@ -874,7 +919,7 @@ mod tests {
                 let (me, _rx) = unbounded_channel();
                 let (events, mut out) = unbounded_channel();
                 let session = ImapSync::login(&account, "fixture").await.unwrap();
-                let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+                let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
                 worker.quick(Cmd::Op { op: 42, id, act: Act::Read(seen) }).await;
                 let completion = out.recv().await.unwrap();
                 let summary = worker.store.message(id).unwrap().summary;
@@ -893,7 +938,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lagom-calendar-jobs-{}.db", std::process::id()));
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
         let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
         worker.store.save_authorized_account(&account, oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
@@ -952,7 +997,7 @@ mod tests {
         }, ..Default::default() }).unwrap();
         let (me, rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::from([account.id.clone()]), discovery: None, me: me.clone(), events };
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::from([account.id.clone()]), discovery: None, me: me.clone(), events };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let (stalled, waiting) = tokio::sync::oneshot::channel();
@@ -1042,7 +1087,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lagom-unlisted-folder-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "fixture".into() };
         let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
         worker.store.save_account(&account).unwrap();
@@ -1066,7 +1111,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lagom-folder-worker-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         let server = ServerConfig { host: "127.0.0.1".into(), port: 3143, security: Security::Plain, username: "test@lagom.test".into() };
         let account = Account::new("test@lagom.test".into(), server.clone(), server).unwrap();
         worker.store.save_account(&account).unwrap();
@@ -1124,7 +1169,7 @@ mod tests {
             let (me, mut rx) = unbounded_channel();
             let (events, mut out) = unbounded_channel();
             let session = ImapSync::login(&account, "fixture").await.unwrap();
-            let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+            let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
             worker.store.save_account(&account).unwrap();
             let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
             let mut reauth = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
@@ -1160,7 +1205,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lagom-calendar-{}-{}.db", std::process::id(), now()));
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
         let mut account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
         account.auth = Auth::OAuth(Provider::Google);
@@ -1209,7 +1254,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lagom-reauth-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let (me, mut rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
         let mut account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
         account.auth = Auth::OAuth(Provider::Google);
@@ -1266,7 +1311,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lagom-oauth-worker-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         worker.quick(Cmd::Download { id: -1, section: "2".into() }).await;
         assert!(matches!(out.recv().await, Some(Event::Downloaded(Err(_)))));
         worker.quick(Cmd::SignIn(Provider::Google)).await;
@@ -1366,7 +1411,7 @@ mod tests {
             let (me, _rx) = unbounded_channel();
             let (events, mut out) = unbounded_channel();
             let session = ImapSync::login(&account, "fixture").await.unwrap();
-            let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+            let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
             if !reject {
                 worker.quick(Cmd::Op { op: 41, id: restore, act: Act::Inbox }).await;
                 assert!(matches!(out.recv().await, Some(Event::Op { op: 41, error: None })));
@@ -1559,3 +1604,6 @@ mod notification_tests;
 #[cfg(test)]
 #[path = "sync/mail_basics_tests.rs"]
 mod mail_basics_tests;
+
+#[cfg(test)]
+mod create_tests;

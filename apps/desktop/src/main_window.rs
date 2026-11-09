@@ -179,6 +179,7 @@ mod live;
 mod tasks;
 mod agenda;
 mod week;
+mod new_event;
 mod home;
 pub(crate) use tasks::TaskChange;
 mod popout;
@@ -438,6 +439,10 @@ impl MainWindow {
         match screen {
             "home" => this.show_section(0, window, cx),
             "calendar" => this.show_section(2, window, cx),
+            "new-event" if demo => {
+                this.show_section(2, window, cx);
+                this.new_event_default(window, cx);
+            }
             "todo" => this.show_section(3, window, cx),
             "palette" => this.open_palette("done", window, cx),
             // Three adjacent rows and one apart: the joined selection block and a separate one.

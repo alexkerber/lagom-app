@@ -1,3 +1,6 @@
+mod create;
+pub use create::{create_event, create_with};
+
 use crate::{account::Account, calendar::{Calendar, Event}, oauth, Error, Result};
 use serde::Deserialize;
 use std::{collections::HashSet, future::Future, time::Duration};

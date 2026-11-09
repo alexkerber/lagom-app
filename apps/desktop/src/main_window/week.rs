@@ -6,10 +6,13 @@ const HOUR: f32 = 60.;
 const MIN_EVENT: f32 = 36.;
 
 pub(super) struct Week {
-    start: NaiveDate,
+    pub(super) start: NaiveDate,
     days: Vec<Vec<AgendaEvent>>,
     windows: Vec<Option<(i64, i64)>>,
-    detail: Option<AgendaEvent>,
+    pub(super) detail: Option<AgendaEvent>,
+    pub(super) editor: Option<new_event::Editor>,
+    pub(super) created: Vec<AgendaEvent>,
+    drag: Option<(usize, u32, u32)>,
     scroll: ScrollHandle,
     tick: Option<Task<()>>,
     loaded_day: Option<NaiveDate>,
@@ -19,7 +22,7 @@ impl Default for Week {
     fn default() -> Self {
         let scroll = ScrollHandle::new();
         scroll.set_offset(gpui::point(px(0.), px(-8. * HOUR)));
-        Self { start: monday(chrono::Local::now().date_naive()), days: vec![vec![]; 7], windows: vec![], detail: None, scroll, tick: None, loaded_day: None }
+        Self { start: monday(chrono::Local::now().date_naive()), days: vec![vec![]; 7], windows: vec![], detail: None, editor: None, created: vec![], drag: None, scroll, tick: None, loaded_day: None }
     }
 }
 
@@ -84,13 +87,18 @@ fn short_time(event: &CalendarEvent) -> String {
     format!("{}–{}", time(event.start_utc), time(event.end_utc))
 }
 
-actions!(calendar_week, [PreviousWeek, NextWeek, CurrentWeek, CloseEvent]);
+actions!(calendar_week, [PreviousWeek, NextWeek, CurrentWeek, CloseEvent, NewEvent]);
 pub(super) fn bind_keys(cx: &mut App) {
-    let keys = Some("Calendar && !TextInput");
+    let keys = Some("Calendar && !TextInput && !NewEvent");
     cx.bind_keys([
+        KeyBinding::new("enter", crate::text_input::Enter, Some("NewEvent && !TextInput")),
+        KeyBinding::new("escape", crate::text_input::Escape, Some("NewEvent && !TextInput")),
+        KeyBinding::new("tab", crate::text_input::FocusNext, Some("NewEvent && !TextInput")),
+        KeyBinding::new("shift-tab", crate::text_input::FocusPrev, Some("NewEvent && !TextInput")),
         KeyBinding::new("left", PreviousWeek, keys), KeyBinding::new("right", NextWeek, keys),
         KeyBinding::new("t", CurrentWeek, keys), KeyBinding::new("shift-t", CurrentWeek, keys),
         KeyBinding::new("escape", CloseEvent, keys),
+        KeyBinding::new("n", NewEvent, keys), KeyBinding::new("shift-n", NewEvent, keys),
     ]);
 }
 
@@ -108,6 +116,11 @@ impl MainWindow {
                 self.week.days = vec![vec![]; 7];
                 let index = (today - self.week.start).num_days();
                 if (0..7).contains(&index) { self.week.days[index as usize] = agenda::demo_events(today); }
+                for i in 0..7 {
+                    let day = self.week.start + chrono::Duration::days(i as i64);
+                    let created = self.demo_created_on(day);
+                    self.week.days[i].extend(created);
+                }
                 let start = monday(today);
                 self.week.windows = vec![Some((agenda::day_start(start, &chrono::Local), agenda::day_start(start + chrono::Duration::weeks(1), &chrono::Local)))];
             }
@@ -133,7 +146,7 @@ impl MainWindow {
     }
 
     fn move_week(&mut self, delta: i64, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+        if self.week.editor.is_some() || self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.week.start = if delta == 0 { monday(chrono::Local::now().date_naive()) }
             else { self.week.start.checked_add_signed(chrono::Duration::weeks(delta)).unwrap_or(self.week.start) };
         self.week.detail = None;
@@ -145,7 +158,8 @@ impl MainWindow {
         element.on_action(cx.listener(|this, _: &PreviousWeek, _, cx| this.move_week(-1, cx)))
             .on_action(cx.listener(|this, _: &NextWeek, _, cx| this.move_week(1, cx)))
             .on_action(cx.listener(|this, _: &CurrentWeek, _, cx| this.move_week(0, cx)))
-            .on_action(cx.listener(|this, _: &CloseEvent, _, cx| { this.week.detail = None; cx.notify(); }))
+            .on_action(cx.listener(|this, _: &NewEvent, window, cx| this.new_event_default(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseEvent, window, cx| { this.week.drag = None; this.week.detail = None; this.cancel_new_event(window, cx); }))
     }
 
     fn event_block(&self, entry: &AgendaEvent, title: gpui::StyledText, day: usize, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -159,6 +173,7 @@ impl MainWindow {
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
             .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).whitespace_nowrap().text_ellipsis().child(title))
             .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(mono(short_time(&entry.event), t.ink2).w_full().flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into())))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.week.detail = Some(entry.clone());
                 window.focus(&this.focus);
@@ -179,15 +194,27 @@ impl MainWindow {
         let t = self.theme;
         let start = self.week.start;
         let allowed = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || self.week.days.iter().any(|d| !d.is_empty());
-        let mut page = div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
+        let mut page = div().relative()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                let minute = this.grid_minute(event.position.y);
+                if let Some((_, _, to)) = &mut this.week.drag { *to = minute; cx.notify(); }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                if let Some((day, from, _)) = this.week.drag.take() {
+                    let (start, end) = new_event::drag_interval(from, this.grid_minute(event.position.y));
+                    this.open_new_event(this.week.start + chrono::Duration::days(day as i64), start, end, window, cx);
+                }
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| { this.week.drag = None; cx.notify(); })).flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
             .child(div().flex().items_center().gap(px(8.))
                 .child(div().flex_1().text_size(px(size::TITLE)).font_weight(FontWeight::SEMIBOLD).child("Calendar"))
                 .child(mono(format!("{} – {}", start.format("%-d %b %Y"), (start + chrono::Duration::days(6)).format("%-d %b %Y")), t.ink2))
+                .child(button(&t, "New event", None).on_click(cx.listener(|this, _, window, cx| this.new_event_default(window, cx))))
                 .child(button(&t, "‹", None).debug_selector(|| "previous-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(-1, cx))))
                 .child(button(&t, "Today", None).on_click(cx.listener(|this, _, _, cx| this.move_week(0, cx))))
                 .child(button(&t, "›", None).debug_selector(|| "next-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(1, cx)))));
         page = page.child(self.calendar_controls(cx));
-        if !allowed { return page; }
+        if !allowed { return page.child(self.new_event_sheet(cx)); }
         let mut headers = div().flex().flex_shrink_0().pl(px(48.));
         let mut all_day = div().id("week-all-day").debug_selector(|| "week-all-day".into()).flex().flex_shrink_0().min_h(px(32.)).max_h(px(150.)).overflow_y_scroll()
             .child(mono("All day", t.ink2).w(px(48.)).flex_shrink_0());
@@ -205,7 +232,14 @@ impl MainWindow {
             all_day = all_day.child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).px(px(2.))
                 .children(entries.iter().enumerate().filter(|(_, e)| e.event.all_day)
                     .map(|(ix, e)| self.event_block(e, event_title(&e.event), day, ix, cx).min_h(px(26.)))));
-            let mut column = div().relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_color(t.line);
+            let mut column = div().id(("week-day", day)).debug_selector(move || format!("week-day-{day}"))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if this.week.editor.is_some() { return; }
+                    let minute = this.grid_minute(event.position.y);
+                    this.week.drag = Some((day, minute.min(1425), minute));
+                    cx.notify();
+                }))
+                .relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_color(t.line);
             if !synced {
                 column = column.child(mono("Not synced this far", t.ink2).absolute().top_0().p(px(8.)).debug_selector(move || format!("unsynced-day-{day}")));
             }
@@ -241,6 +275,13 @@ impl MainWindow {
                 column = column.child(div().absolute().top(px((now.hour() as f32 + now.minute() as f32 / 60.) * HOUR))
                     .w_full().h(px(2.)).bg(t.accent).debug_selector(|| "current-time".into()));
             }
+            if let Some((selected, from, to)) = self.week.drag {
+                if selected == day {
+                    let (start, end) = new_event::drag_interval(from, to);
+                    column = column.child(div().absolute().top(px(start as f32 * HOUR / 60.)).h(px((end - start) as f32 * HOUR / 60.))
+                        .w_full().bg(Rgba { a: 0.2, ..t.accent }).border_1().border_color(t.accent));
+                }
+            }
             grid = grid.child(column);
         }
         page = page.child(headers).child(all_day)
@@ -248,7 +289,7 @@ impl MainWindow {
                 d.child(mono("Not synced this far", t.ink2).debug_selector(|| "week-unsynced".into())))
             .when(self.week.days.iter().any(|d| !d.is_empty()) || (0..7).any(|i| synced_day(start + chrono::Duration::days(i), &self.week.windows)), |d|
                 d.child(div().id("week-grid").debug_selector(|| "week-grid".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.week.scroll).child(grid)))
-            .child(mono("← → week · T today", t.ink2));
+            .child(mono("← → week · T today · N new event", t.ink2));
         if let Some(entry) = &self.week.detail {
             page = page.child(div().id("event-detail").debug_selector(|| "event-detail".into()).absolute().top(px(64.)).right(px(24.)).w(px(320.))
                 .occlude().max_h(px(400.)).overflow_y_scroll().p(px(16.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).shadow_md()
@@ -264,7 +305,12 @@ impl MainWindow {
                     button(&t, "Open in Google Calendar", None).on_click(move |_, _, cx| cx.open_url(&url))))
                 .child(button(&t, "Close", None).on_click(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))));
         }
+        page = page.child(self.new_event_sheet(cx));
         page
+    }
+
+    fn grid_minute(&self, y: Pixels) -> u32 {
+        new_event::snap_minute(f32::from(y - self.week.scroll.bounds().top() - self.week.scroll.offset().y) * 60. / HOUR)
     }
 }
 

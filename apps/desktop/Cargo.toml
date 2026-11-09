@@ -17,6 +17,8 @@ unicode-segmentation = "1.13"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 # Local time zone for list dates and Later times; std has none. Already in Cargo.lock via async-imap.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Already used by chrono; Google needs the system IANA zone, not only its UTC offset.
+iana-time-zone = "0.1"
 # The app password between the add-account form and the keychain. Already in Cargo.lock.
 zeroize = "1"
 # Window layout preferences; already in Cargo.lock.

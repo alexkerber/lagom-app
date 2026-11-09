@@ -183,6 +183,12 @@ impl Live {
         }))
     }
 
+    pub(super) fn event_op(&self) -> u64 {
+        let id = self.next_op.get() + 1;
+        self.next_op.set(id);
+        id
+    }
+
     fn op(&mut self, op: Op) -> u64 {
         let id = self.next_op.get() + 1;
         self.next_op.set(id);
@@ -344,6 +350,10 @@ impl MainWindow {
                         Ok(()) => read = true,
                         Err(error) => self.notify(format!("Could not sign in: {error}"), cx),
                     }
+                }
+                Event::EventCreated { op, error } => {
+                    self.event_created(op, error, window, cx);
+                    read = true;
                 }
                 Event::CalendarSync(account, state) => {
                     self.today.calendar_sync.insert(account, state);
@@ -555,6 +565,7 @@ impl MainWindow {
 
     /// Pending sends remain in the outbox when the worker stops.
     pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
+        self.event_worker_gone();
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
         let mut ops: Vec<_> = live.ops.drain().collect();
@@ -1103,6 +1114,75 @@ mod tests {
         }));
         view.update(cx, |v, cx| { v.live = Some(fixture_live(store, bridge)); v.page = Page::Mail; cx.notify(); });
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn calendar_creation_cancel_dispatch_and_completion_reload_immediately(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            v.demo = false;
+            let live = v.live.as_mut().unwrap();
+            live.accounts[0].auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            let account = &live.accounts[0];
+            live.store.save_authorized_account(account, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+            let calendars = [("a", true), ("b", true), ("read-only", false)].map(|(id, writable)| (lagom_core::calendar::Calendar {
+                remote_id: id.into(), name: id.into(), color: None, shown: true, writable,
+            }, vec![]));
+            live.store.replace_calendar_window(&account.id, 0, i64::MAX, &calendars).unwrap();
+            v.show_section(2, window, cx);
+        });
+        cx.simulate_keystrokes("n");
+        cx.simulate_input("Discard fixture");
+        cx.simulate_keystrokes("escape");
+        assert!(rx.try_recv().is_err(), "Esc must not send any command");
+        cx.simulate_keystrokes("n");
+        cx.simulate_input("Created fixture");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("event-calendar-0").is_some());
+        assert!(cx.debug_bounds("event-calendar-1").is_some());
+        assert!(cx.debug_bounds("event-calendar-2").is_none());
+        let calendar = cx.debug_bounds("event-calendar-1").unwrap().center();
+        cx.simulate_click(calendar, Default::default());
+        let meet = cx.debug_bounds("Add Google Meet").unwrap().center();
+        cx.simulate_click(meet, Default::default());
+        for (field, value) in [("event-field-2", "09:00"), ("event-field-4", "09:45")] {
+            let at = cx.debug_bounds(field).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_keystrokes("secondary-a");
+            cx.simulate_input(value);
+        }
+        cx.simulate_keystrokes("enter enter");
+        let (mut op, account, calendar, draft) = match rx.try_recv().unwrap() {
+            Cmd::CreateEvent { op, account, calendar, event } => (op, account, calendar, event),
+            _ => panic!("expected calendar command"),
+        };
+        assert_eq!(calendar, "b");
+        assert!(draft.meet);
+        assert!(rx.try_recv().is_err(), "repeated Return must not duplicate a request");
+        cx.simulate_input("Do not edit while saving");
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::EventCreated { op, error: Some("Fixture refused".into()) }], window, cx));
+        cx.simulate_keystrokes("enter");
+        match rx.try_recv().unwrap() {
+            Cmd::CreateEvent { op: retry, event, .. } => { op = retry; assert_eq!(event.title, "Created fixture"); }
+            _ => panic!("failed save must retain the original draft"),
+        }
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::EventCreated { op: op + 1, error: None }], window, cx);
+            assert!(v.week.editor.is_some(), "unrelated completions cannot close the sheet");
+            let mut event = draft.event("created".into()).unwrap();
+            event.join_url = Some("https://meet.example.test/fixture".into());
+            v.live.as_ref().unwrap().store.insert_calendar_event(&account, &calendar, &event).unwrap();
+            v.on_events(vec![Event::EventCreated { op, error: None }], window, cx);
+            assert!(v.week.editor.is_none());
+            assert!(v.today.events.iter().any(|e| e.event.remote_id == "created"));
+        });
+        cx.run_until_parked();
+        let day = chrono::Datelike::weekday(&chrono::Local::now()).num_days_from_monday();
+        let event = cx.debug_bounds(format!("week-event-{day}-0").leak()).unwrap();
+        cx.simulate_click(event.center(), Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Join").is_some());
+        assert!(rx.try_recv().is_err(), "completion must display the cached event without fetching");
     }
 
     #[gpui::test]

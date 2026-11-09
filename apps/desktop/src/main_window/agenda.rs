@@ -5,7 +5,11 @@ use lagom_core::{account::Auth, oauth::{self, Provider}};
 impl MainWindow {
     pub(super) fn reload_agenda(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &self.live else {
-            if self.demo { self.today.events = demo_events(chrono::Local::now().date_naive()); }
+            if self.demo {
+                let day = chrono::Local::now().date_naive();
+                self.today.events = demo_events(day);
+                self.today.events.extend(self.demo_created_on(day));
+            }
             return;
         };
         let result = (|| -> lagom_core::Result<_> {
