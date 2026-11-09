@@ -79,6 +79,8 @@ const COMMANDS: &[Command] = &[
     Command { section: "Mail", label: "Add account", hint: Hint::Note("IMAP"), action: Action::Run(Run::AddAccount) },
 ];
 
+pub struct PrepareMove(pub String);
+
 /// Where "Move to" sends the selected message.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MoveTo {
@@ -98,7 +100,7 @@ struct Item {
 const MOVE_TO: &str = "Move to ";
 
 /// The folder query when `query` starts with "move", in any case.
-fn move_query(query: &str) -> Option<&str> {
+pub(crate) fn move_query(query: &str) -> Option<&str> {
     query.get(..4).filter(|p| p.eq_ignore_ascii_case("move")).map(|_| query[4..].trim_start())
 }
 
@@ -163,6 +165,7 @@ pub struct CommandPalette {
     input: Entity<TextInput>,
     composing: bool,
     mail: bool,
+    moving: bool,
     selected: usize,
     folders: Vec<(usize, String)>,
     // Subject of the message a move would take.
@@ -186,6 +189,7 @@ fn child_index(items: &[Item], i: usize) -> usize {
 
 impl EventEmitter<DismissEvent> for CommandPalette {}
 impl EventEmitter<MoveTo> for CommandPalette {}
+impl EventEmitter<PrepareMove> for CommandPalette {}
 impl EventEmitter<Run> for CommandPalette {}
 
 impl Focusable for CommandPalette {
@@ -208,6 +212,12 @@ impl CommandPalette {
         let input = cx.new(|cx| TextInput::new(window, cx).placeholder("Type a command or search").with_text(query));
         let sub = cx.subscribe(&input, |this, _, e: &TextInputEvent, cx| match e {
             TextInputEvent::Changed => {
+                let query = this.input.read(cx).text().to_string();
+                let moving = move_query(&query).is_some();
+                if moving && !this.moving && this.mail && !this.composing {
+                    cx.emit(PrepareMove(query));
+                }
+                this.moving = moving;
                 this.selected = 0;
                 this.scroll.set_offset(gpui::point(px(0.), px(0.)));
                 this.find_hits(cx);
@@ -216,7 +226,7 @@ impl CommandPalette {
             TextInputEvent::Enter => this.run(this.matches(cx), cx),
             TextInputEvent::Escape => cx.emit(DismissEvent),
         });
-        let mut this = Self { input, composing, mail, selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
+        let mut this = Self { input, composing, mail, moving: move_query(query).is_some(), selected: 0, folders, subject, search, hits: Vec::new(), scroll: ScrollHandle::new(), _input: sub };
         this.find_hits(cx);
         this
     }

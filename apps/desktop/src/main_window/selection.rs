@@ -105,9 +105,10 @@ impl MainWindow {
         if self.emptying_trash() { return; }
         let Some(members) = self.inbox.act_rows(&rows, what) else { return };
         self.clear_motion();
+        let mut destinations = HashMap::new();
         let mut sent = true;
         for member in members {
-            sent &= self.server(what, member, when, cx);
+            sent &= self.server(what, member, when, &mut destinations, cx);
             if !matches!(what, Move::Read(_)) { self.close_popouts(Some(member), cx); }
         }
         if !sent { return; }

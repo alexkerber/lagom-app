@@ -450,6 +450,12 @@ impl Store {
         let rows = stmt.query_map(params![account, now], folder_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+    /// Destination metadata without mailbox counts; unread is zero as in `folder`.
+    pub fn folder_metadata(&self, account: &str) -> Result<Vec<Folder>> {
+        let mut stmt = self.db.prepare("SELECT id,account,name,delimiter,role,uidvalidity,uidnext,last_uid,highest_modseq,0 FROM folders WHERE account=?1 ORDER BY name")?;
+        let rows = stmt.query_map([account], folder_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
     pub fn folder(&self, id: i64) -> Result<Folder> {
         self.db.query_row("SELECT id,account,name,delimiter,role,uidvalidity,uidnext,last_uid,highest_modseq,0 FROM folders WHERE id=?1",[id],folder_row).optional()?.ok_or(Error::NotFound)
     }

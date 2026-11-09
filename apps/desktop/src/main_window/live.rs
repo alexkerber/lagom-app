@@ -5,11 +5,11 @@ use super::*;
 
 /// What an in-flight worker command needs when it finishes.
 enum Op {
-    /// A move of this row (id in `Inbox::mail`). On failure the row comes back.
-    Move(usize),
+    /// Store identity survives account switches while the command is in flight.
+    Move(i64),
     Read { account: String, store: i64 },
     /// Undo of a move: on failure only a message.
-    Undo(usize),
+    Undo(i64),
     EmptyTrash(String),
     CreateFolder { account: String, name: String },
 }
@@ -33,6 +33,7 @@ pub struct Live {
     want: Option<i64>,
     notification_target: Option<crate::notifications::Target>,
     task_target: Option<i64>,
+    move_target: Option<i64>,
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
@@ -160,6 +161,7 @@ impl Live {
             want: None,
             notification_target: None,
             task_target: None,
+            move_target: None,
             seen: HashSet::new(),
             due: None,
         })
@@ -207,7 +209,7 @@ impl MainWindow {
         if live.account().is_some_and(|a| a.id == *account) { return true; }
         let selected: HashSet<_> = members.iter().filter_map(|&id| self.inbox.mail[id].store).collect();
         let Some(&first) = selected.iter().next() else { return false };
-        if !self.pending_moves().is_empty() { self.notify("Wait for the pending move before choosing a folder", cx); return false; }
+        if !live.ops.is_empty() { self.notify("Wait for the pending operation before choosing a folder", cx); return false; }
         let summaries = match selected.iter().map(|&id| live.store.message_summary(id)).collect::<lagom_core::Result<Vec<_>>>() {
             Ok(summaries) => summaries,
             Err(e) => { self.notify(format!("Could not read selection: {e}"), cx); return false; }
@@ -416,8 +418,9 @@ impl MainWindow {
                             self.notify("Trash emptied", cx);
                         }
                         (Op::EmptyTrash(_), Some(e)) => self.notify(format!("Could not empty Trash: {e}"), cx),
-                        (Op::Undo(id), None) => {
-                            if let Some(mail) = self.inbox.mail.get_mut(id) {
+                        (Op::Undo(store), None) => {
+                            if let Some(&id) = self.inbox.by_store.get(&store) {
+                                let mail = &mut self.inbox.mail[id];
                                 if let (Some(old), mail::Place::Folder(folder)) = (mail.store, &mail.folder) {
                                     if matches!(live.store.message_summary(old), Err(lagom_core::Error::NotFound)) {
                                         if let Ok(Some(new)) = live.store.find_message(*folder, &mail.message_id) {
@@ -441,10 +444,12 @@ impl MainWindow {
                             }
                             self.notify(format!("Could not change read status: {e}"), cx);
                         }
-                        (Op::Move(id), Some(e)) => {
-                            self.inbox.back(id);
-                            if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
-                                self.come_back(what, id, ix, false, cx);
+                        (Op::Move(store), Some(e)) => {
+                            if let Some(&id) = self.inbox.by_store.get(&store) {
+                                self.inbox.back(id);
+                                if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
+                                    self.come_back(what, id, ix, false, cx);
+                                }
                             }
                             self.notify(format!("Not moved: {e}"), cx);
                         }
@@ -486,13 +491,16 @@ impl MainWindow {
         if let Some(id) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.task_target.take()) {
             self.open_task_mail(id, cx);
         }
+        if let Some(store) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.move_target.take()) {
+            self.move_message(store, window, cx);
+        }
         self.notify_mail(new_mail, window, cx);
         cx.notify();
     }
 
     pub(super) fn pending_moves(&self) -> HashSet<i64> {
         self.live.iter().flat_map(|live| live.ops.values()).filter_map(|op| match op {
-            Op::Move(id) => self.inbox.mail.get(*id).and_then(|m| m.store),
+            Op::Move(store) => Some(*store),
             _ => None,
         }).collect()
     }
@@ -594,15 +602,18 @@ impl MainWindow {
     pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
+        live.move_target = None;
         let mut ops: Vec<_> = live.ops.drain().collect();
         ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
         for (op, action) in ops {
             match action {
-                Op::Move(id) => {
-                    self.inbox.back(id);
-                    if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
-                        self.come_back(what, id, ix, false, cx);
+                Op::Move(store) => {
+                    if let Some(&id) = self.inbox.by_store.get(&store) {
+                        self.inbox.back(id);
+                        if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
+                            self.come_back(what, id, ix, false, cx);
+                        }
                     }
                 }
                 Op::Read { account, store } => {
@@ -618,7 +629,8 @@ impl MainWindow {
     }
 
     /// The worker half of an optimistic move.
-    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) -> bool {
+    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen,
+        destinations: &mut HashMap<String, Vec<lagom_core::store::Folder>>, cx: &mut Context<Self>) -> bool {
         let Some(store) = self.inbox.mail[id].store else { return true };
         let Some(live) = &mut self.live else { return true };
         if let Move::Read(seen) = what {
@@ -629,14 +641,18 @@ impl MainWindow {
             if !sent { self.worker_gone(cx); }
             return sent;
         }
-        let folders = match live.store.folders(&self.inbox.mail[id].account, now()) {
-            Ok(folders) => folders,
-            Err(e) => {
-                self.inbox.revert(id, None);
-                self.notify(format!("Could not read destination: {e}"), cx);
-                return false;
+        let account = &self.inbox.mail[id].account;
+        if !destinations.contains_key(account) {
+            match live.store.folder_metadata(account) {
+                Ok(folders) => { destinations.insert(account.clone(), folders); }
+                Err(e) => {
+                    self.inbox.revert(id, None);
+                    self.notify(format!("Could not read destination: {e}"), cx);
+                    return false;
+                }
             }
-        };
+        }
+        let folders = &destinations[account];
         let store_of = |role| folders.iter().find(|f| f.role == role).map(|f| mail::Place::Folder(f.id));
         let (act, target) = match what {
             Move::Read(_) => unreachable!("handled above"),
@@ -661,7 +677,7 @@ impl MainWindow {
         };
         self.inbox.left(id, target);
         self.inbox.mail[id].snoozed_until = match act { Act::Snooze(until) => until, _ => None };
-        let op = live.op(Op::Move(id));
+        let op = live.op(Op::Move(store));
         if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
         let sent = live.bridge.send(Cmd::Op { op, id: store, act });
         if !sent { self.worker_gone(cx); }
@@ -693,14 +709,14 @@ impl MainWindow {
             },
         };
         let Some(live) = &mut self.live else { return };
-        let op = live.op(Op::Undo(id));
+        let op = live.op(Op::Undo(store));
         if !live.bridge.send(Cmd::Op { op, id: store, act }) {
             self.worker_gone(cx);
             return;
         }
         if what != Move::Later {
             if let Some(until) = self.inbox.mail[id].snoozed_until {
-                let op = live.op(Op::Undo(id));
+                let op = live.op(Op::Undo(store));
                 if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Snooze(Some(until)) }) { self.worker_gone(cx); }
             }
         }
@@ -967,6 +983,23 @@ impl MainWindow {
             (live.pin, live.want) = (Some(store), Some(store));
         }
         self.reload(cx);
+    }
+
+    pub(super) fn move_message(&mut self, store: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        if !live.ops.is_empty() {
+            live.move_target = Some(store);
+            return;
+        }
+        if live.store.message_summary(store).is_err() {
+            self.notify("That message is no longer available locally", cx);
+            return;
+        }
+        self.open_found(store, cx);
+        if self.live.as_ref().is_some_and(|l| !l.stale && l.want.is_none())
+            && self.inbox.single().is_some_and(|id| self.inbox.members(id).iter().any(|&id| self.inbox.mail[id].store == Some(store))) {
+            self.open_palette("move ", window, cx);
+        }
     }
 
     fn select_found(&mut self, store: i64, cx: &mut Context<Self>) {
@@ -2650,6 +2683,7 @@ mod tests {
             want: None,
             notification_target: None,
             task_target: None,
+            move_target: None,
             seen: HashSet::new(),
             failed: Vec::new(),
             due: None,
@@ -4048,6 +4082,151 @@ mod tests {
         }));
         assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
     }
+    fn review_accounts(v: &mut MainWindow, cx: &mut Context<MainWindow>) -> (i64, i64) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let first = incoming(v, 1).id;
+        incoming(v, 2);
+        incoming(v, 3);
+        let live = v.live.as_ref().unwrap();
+        live.store.save_folder(&live.accounts[0].id, "Personal files", None, FolderRole::Other).unwrap();
+        let mut other = live.accounts[0].clone();
+        other.id = "work-review".into();
+        other.email = "work@example.test".into();
+        live.store.save_account(&other).unwrap();
+        let folder = live.store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        live.store.save_folder(&other.id, "Work files", None, FolderRole::Other).unwrap();
+        let second = live.store.save_message(&Message { summary: MessageSummary {
+            account: other.id, folder, uid: 1, date: 10, ..Default::default()
+        }, ..Default::default() }).unwrap();
+        v.panes.group_conversations = false;
+        v.inbox = Inbox::live();
+        v.reload(cx);
+        (first, second)
+    }
+
+    #[gpui::test]
+    fn review_move_failure_after_account_switch_keeps_other_mail(cx: &mut TestAppContext) {
+        for worker_gone in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            let other = view.update(cx, |v, cx| {
+                let (first, other) = review_accounts(v, cx);
+                v.open_found(first, cx);
+                v.act(Move::Done, cx);
+                v.switch_account(1, cx);
+                other
+            });
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
+            view.update_in(cx, |v, window, cx| {
+                if worker_gone { v.worker_gone(cx); v.reload(cx); }
+                else { v.on_events(vec![Event::Op { op, error: Some("fixture refusal".into()) }], window, cx); }
+                assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(other));
+                assert!(v.inbox.history.is_empty());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn review_message_move_waits_for_the_requested_message(cx: &mut TestAppContext) {
+        for cross_account in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            let target = view.update_in(cx, |v, window, cx| {
+                let (first, other) = review_accounts(v, cx);
+                let target = if cross_account { other } else { first };
+                let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store != Some(target)
+                    && v.inbox.mail[id].account != "work-review").unwrap();
+                v.inbox.select(row);
+                v.act(Move::Done, cx);
+                let id = v.inbox.by_store[&target];
+                v.message_action(id, polish::MessageAction::Move, window, cx);
+                assert!(v.palette.is_none(), "Move must wait for its requested selection");
+                target
+            });
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
+            view.update_in(cx, |v, window, cx| {
+                v.on_events(vec![Event::Op { op, error: Some("fixture refusal".into()) }], window, cx);
+                assert!(v.palette.is_some());
+                assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(target));
+            });
+            cx.simulate_keystrokes("enter");
+            assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd|
+                matches!(cmd, Cmd::Op { id, act: Act::Move(_), .. } if id == target)));
+        }
+    }
+
+    #[gpui::test]
+    fn review_deferred_move_does_not_replace_a_missing_target(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let (target, _) = review_accounts(v, cx);
+            v.inbox.select(0);
+            v.act(Move::Done, cx);
+            let id = v.inbox.by_store[&target];
+            v.message_action(id, polish::MessageAction::Move, window, cx);
+            assert!(v.palette.is_none());
+            v.live.as_ref().unwrap().store.delete_message(target).unwrap();
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
+            v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            assert!(v.palette.is_none());
+            assert!(v.toast.as_ref().unwrap().0.contains("no longer available"));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[gpui::test]
+    fn review_generic_palette_prepares_move_on_entry(cx: &mut TestAppContext) {
+        for typed in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            let target = view.update_in(cx, |v, window, cx| {
+                let (_, target) = review_accounts(v, cx);
+                let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(target)).unwrap();
+                v.inbox.select(row);
+                v.open_palette("", window, cx);
+                target
+            });
+            if typed { cx.simulate_input("MOVE Work files"); }
+            else { cx.simulate_keystrokes("down down down down down enter"); }
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, "work-review");
+                assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(target));
+            });
+            cx.simulate_keystrokes("enter");
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            view.read_with(cx, |v, _| assert!(commands.iter().any(|cmd| match cmd {
+                Cmd::Op { id, act: Act::Move(folder), .. } => *id == target
+                    && v.live.as_ref().unwrap().store.folder(*folder).unwrap().account == "work-review",
+                _ => false,
+            })));
+        }
+    }
+
+    #[gpui::test]
+    fn review_bulk_destinations_do_not_read_messages(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            review_accounts(v, cx);
+            for uid in 4..=200 { incoming(v, uid); }
+            v.reload(cx);
+            let live = v.live.as_ref().unwrap();
+            for account in &live.accounts {
+                live.store.save_folder(&account.id, "Archive", None, lagom_core::store::FolderRole::Archive).unwrap();
+            }
+            let fixture = rusqlite::Connection::open(live.store.path()).unwrap();
+            // Destination routing must work without reading or counting any message rows.
+            fixture.execute_batch("ALTER TABLE messages RENAME TO fixture_messages;").unwrap();
+            v.inbox.select_all();
+            v.act(Move::Done, cx);
+            assert_eq!(v.live.as_ref().unwrap().ops.len(), 201);
+            for mail in &v.inbox.mail {
+                let mail::Place::Folder(folder) = mail.folder else { panic!("missing destination") };
+                let destination = v.live.as_ref().unwrap().store.folder(folder).unwrap();
+                assert_eq!(destination.account, mail.account);
+                assert_eq!(destination.role, lagom_core::store::FolderRole::Archive);
+            }
+        });
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|cmd| matches!(cmd, Cmd::Op { act: Act::Archive, .. })).count(), 201);
+    }
+
     #[gpui::test]
     fn unified_actions_keep_message_account_and_single_account_hides_controls(cx: &mut TestAppContext) {
         use lagom_core::store::{FolderRole, Message, MessageSummary};

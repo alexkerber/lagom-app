@@ -118,7 +118,7 @@ impl MainWindow {
             MessageAction::Unread => self.act_on(id, Move::Read(false), window, cx),
             MessageAction::Copy => cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.inbox.mail[id].address.clone())),
             MessageAction::Move => {
-                if let Some(store) = self.inbox.mail[id].store { self.open_found(store, cx); }
+                if let Some(store) = self.inbox.mail[id].store { return self.move_message(store, window, cx); }
                 else if let Some(ix) = self.inbox.list().iter().position(|&rep| self.inbox.members(rep).contains(&id)) { self.inbox.select(ix); }
                 self.open_palette("move ", window, cx);
             }

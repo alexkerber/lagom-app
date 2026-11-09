@@ -532,7 +532,7 @@ impl MainWindow {
     }
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if query.starts_with("move ") && !self.prepare_move(cx) { return; }
+        if crate::command_palette::move_query(query).is_some() && !self.prepare_move(cx) { return; }
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
         // The overlay takes ⌘Z, so the toast's Undo would not work while it is open.
@@ -550,6 +550,10 @@ impl MainWindow {
         let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
         let palette = cx.new(|cx| CommandPalette::new(query, composing, on_mail, targets, subject, search, window, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| this.close_palette(window, cx)).detach();
+        cx.subscribe_in(&palette, window, |this, _, query: &crate::command_palette::PrepareMove, window, cx| {
+            this.close_palette(window, cx);
+            this.open_palette(&query.0, window, cx);
+        }).detach();
         cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
             let f = match target {
                 MoveTo::Folder(f) => *f,
@@ -784,8 +788,9 @@ impl MainWindow {
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
         let members = self.inbox.batches.last().cloned().unwrap_or_default();
         if matches!(what, Move::Read(_)) {
+            let mut destinations = HashMap::new();
             let mut sent = true;
-            for member in members { sent &= self.server(what, member, when, cx); }
+            for member in members { sent &= self.server(what, member, when, &mut destinations, cx); }
             self.clear_motion();
             if !sent { return; }
             self.notify(if what == Move::Read(true) { "Marked read" } else { "Marked unread" }, cx);
@@ -803,9 +808,10 @@ impl MainWindow {
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, at: Instant::now(), dx });
+        let mut destinations = HashMap::new();
         let mut sent = true;
         for member in members {
-            sent &= self.server(what, member, when, cx);
+            sent &= self.server(what, member, when, &mut destinations, cx);
             self.close_popouts(Some(member), cx);
         }
         if !sent { return; }

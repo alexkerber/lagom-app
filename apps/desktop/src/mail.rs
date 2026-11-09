@@ -317,6 +317,7 @@ pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::a
             None => View::Inbox,
         };
         let other = load(store, &account.id, other_view, limit, now, pins.iter().copied(), group)?;
+        result.next_due = result.next_due.into_iter().chain(other.next_due).min();
         result.inbox.extend(other.inbox);
         result.inbox_total += other.inbox_total;
         if role.is_some() { result.open.extend(other.open); }
@@ -516,6 +517,34 @@ mod tests {
         }
         assert_eq!(date_group(at(2026, 12, 31, 23, 59).timestamp(), at(2027, 1, 1, 0, 1).date_naive()), "Yesterday");
         assert_eq!(date_group(i64::MAX, today), "Earlier");
+    }
+
+    #[test]
+    fn review_unified_snooze_wakes_for_the_earliest_account() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-due-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("mail.sqlite3")).unwrap();
+        let accounts = demo_accounts();
+        let mut ids = Vec::new();
+        for account in &accounts {
+            store.save_account(account).unwrap();
+            let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            ids.push(store.save_message(&Message { summary: MessageSummary {
+                account: account.id.clone(), folder, uid: 1, ..Default::default()
+            }, ..Default::default() }).unwrap());
+        }
+        for personal_due in [None, Some(150), Some(250)] {
+            store.snooze(ids[0], personal_due).unwrap();
+            store.snooze(ids[1], Some(200)).unwrap();
+            let snap = load_accounts(&store, &accounts, "personal", View::Inbox, 200, 100, vec![], false).unwrap();
+            assert_eq!(snap.next_due, Some(personal_due.unwrap_or(200).min(200)));
+            assert!(!snap.inbox.iter().any(|m| m.id == ids[1]));
+            let awake = load_accounts(&store, &accounts, "personal", View::Inbox, 200, 200, vec![], false).unwrap();
+            assert!(awake.inbox.iter().any(|m| m.id == ids[1]));
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
