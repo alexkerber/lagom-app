@@ -39,16 +39,16 @@ impl Render for MessageBody {
                 this.mail.remote = true;
                 cx.notify();
             }))))
-            .child(reading_view(&theme, id, &self.mail, overlay || !html::SUPPORTED || self.mail.html.is_none(), self.web.slot(), 0,
+            .child(reading_view(&theme, (id, &self.mail), overlay || !html::SUPPORTED || self.mail.html.is_none(), self.web.slot(), 0,
                 move |section, _, cx| { download.update(cx, |main, cx| main.download_attachment(id, section, cx)).ok(); },
                 move |_, window, cx| { reply.update(cx, |main, cx| main.compose_for(Some(id), window, cx)).ok(); }))
     }
 }
 
 impl MainWindow {
-    pub(super) fn toggle_message(&mut self, id: usize, cx: &mut Context<Self>) {
+    pub(super) fn toggle_message(&mut self, id: usize, mark_read: bool, cx: &mut Context<Self>) {
         if self.expanded.remove(&id).is_none() {
-            self.open_message(id, cx);
+            self.open_message(id, mark_read, cx);
             let mail = self.inbox.mail[id].clone();
             let main = cx.entity().downgrade();
             let focus = self.focus.clone();
@@ -72,7 +72,7 @@ impl MainWindow {
                             .child(div().flex_1().min_w(px(0.)).one_line().font_weight(if m.unread { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM }).child(m.from.clone()))
                             .child(mono(mail::full_date(m.date), t.ink2).flex_shrink_0()))
                         .child(div().one_line().text_color(t.ink2).child(m.snippet.clone()))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(id, cx))))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(id, true, cx))))
                     .children(self.expanded.get(&id).cloned())
             }))
     }

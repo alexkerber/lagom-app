@@ -24,9 +24,12 @@ pub(super) struct Panes {
     pub sidebar_hidden: bool,
     #[serde(default = "group_default")]
     pub group_conversations: bool,
+    #[serde(default = "notifications_default")]
+    pub notifications: bool,
 }
 
 fn group_default() -> bool { true }
+fn notifications_default() -> bool { true }
 
 impl Panes {
     pub fn new(viewport: f32) -> Self {
@@ -35,6 +38,7 @@ impl Panes {
             list: default_list(viewport, SIDEBAR_DEFAULT),
             sidebar_hidden: false,
             group_conversations: true,
+            notifications: true,
         }
     }
 
@@ -147,6 +151,20 @@ mod tests {
     }
 
     #[test]
+    fn preferences_from_either_branch_preserve_disabled_features() {
+        for (json, group, notifications) in [
+            (r#"{"sidebar":220,"list":420,"sidebar_hidden":false,"group_conversations":false}"#, false, true),
+            (r#"{"sidebar":220,"list":420,"sidebar_hidden":false,"notifications":false}"#, true, false),
+        ] {
+            let panes: Panes = serde_json::from_str(json).unwrap();
+            assert_eq!(panes.group_conversations, group);
+            assert_eq!(panes.notifications, notifications);
+            let restored: Panes = serde_json::from_str(&serde_json::to_string(&panes).unwrap()).unwrap();
+            assert_eq!(restored, panes);
+        }
+    }
+
+    #[test]
     fn defaults_match_the_original_layout() {
         assert_eq!(Panes::new(1440.).fit(1440.), (220., 420.));
         assert_eq!(Panes::new(970.).fit(970.), (220., 300.));
@@ -159,6 +177,7 @@ mod tests {
             list: 560.,
             sidebar_hidden: false,
             group_conversations: true,
+            notifications: true,
         };
         assert_eq!(panes.fit(1440.), (320., 560.));
         assert_eq!(panes.fit(1100.), (320., 330.));
@@ -212,6 +231,7 @@ mod tests {
                             list,
                             sidebar_hidden,
                             group_conversations: true,
+                            notifications: true,
                         };
                         let (sidebar, list) = panes.fit(viewport);
                         assert!(sidebar == 0. || (180. ..=320.).contains(&sidebar));
@@ -234,13 +254,13 @@ mod tests {
             for i in 0..8 {
                 let path = &path;
                 scope.spawn(move || {
-                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true };
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true, notifications: true };
                     for _ in 0..100 {
                         panes.save(path).unwrap();
                         let saved = Panes::load(path, 1440.).unwrap();
                         assert!((180. ..=187.).contains(&saved.sidebar));
                         assert_eq!(saved.list, 560.);
-                        assert_eq!(saved.sidebar_hidden, (saved.sidebar as u32 - 180) % 2 == 0);
+                        assert_eq!(saved.sidebar_hidden, (saved.sidebar as u32 - 180).is_multiple_of(2));
                     }
                 });
             }
@@ -259,9 +279,11 @@ mod tests {
         panes.resize_sidebar(300., 1440.);
         panes.resize_list(500., 1440.);
         panes.sidebar_hidden = true;
+        panes.notifications = false;
         panes.save(&path).unwrap();
         assert_eq!(Panes::load(&path, 970.).unwrap(), panes);
         fs::write(&path, r#"{"sidebar":900,"list":-5,"sidebar_hidden":false}"#).unwrap();
+        assert!(Panes::load(&path, 1440.).unwrap().notifications);
         assert_eq!(Panes::load(&path, 1440.).unwrap().fit(1440.), (320., 280.));
         fs::write(&path, "broken").unwrap();
         assert!(Panes::load(&path, 1440.).is_err());

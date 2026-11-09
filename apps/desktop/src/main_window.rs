@@ -158,6 +158,7 @@ mod conversation;
 mod live;
 mod popout;
 pub use live::Live;
+pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
 /// What fills the main panel.
@@ -206,7 +207,7 @@ impl RowLayout {
     fn index_at(&self, y: f32) -> usize {
         let (mut lo, mut hi) = (0, self.len);
         while lo < hi {
-            let mid = (lo + hi + 1) / 2;
+            let mid = lo + (hi - lo).div_ceil(2);
             if self.y(mid) <= y { lo = mid; } else { hi = mid - 1; }
         }
         lo
@@ -296,7 +297,7 @@ impl MainWindow {
         let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
             true => (None, None),
-            false => match Live::start(window, cx) {
+            false => match Live::start(cx) {
                 Ok(live) => (Some(live), None),
                 Err(e) => (None, Some(format!("Could not open the mail store: {e}"))),
             },
@@ -308,7 +309,8 @@ impl MainWindow {
         let viewport = f32::from(window.viewport_size().width);
         // Demo mode never resolves a store path or reads/writes preferences.
         let preferences = if demo { Ok(None) } else {
-            Store::default_path().map(|p| Some(p.with_file_name("window.json")))
+            live.as_ref().map(|live| live.store.path().to_path_buf())
+                .map_or_else(Store::default_path, Ok).map(|p| Some(p.with_file_name("window.json")))
         };
         let mut preference_problem = None;
         let preferences_path = match preferences {
@@ -1021,6 +1023,12 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
 }
 
 impl MainWindow {
+    pub(crate) fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        self.panes.notifications = !self.panes.notifications;
+        self.save_panes(cx);
+        cx.notify();
+    }
+
     fn save_panes(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = &self.preferences_path {
             if let Err(e) = self.panes.save(path) {
@@ -1756,7 +1764,7 @@ impl MainWindow {
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
-            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, id, m, text, self.web.slot(), toasts, on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.slot(), toasts, on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
     }
 }
 
@@ -1811,8 +1819,7 @@ fn attachment_size(bytes: u32) -> String {
 /// both show this. `toasts`: room the web view leaves for toasts above the reply field.
 fn reading_view(
     t: &Theme,
-    id: usize,
-    m: &Mail,
+    (id, m): (usize, &Mail),
     text: bool,
     slot: impl IntoElement,
     toasts: usize,
@@ -1948,7 +1955,7 @@ impl Render for MainWindow {
         if !self.ghosts.is_empty() || !self.entering.is_empty() || self.spring.is_some() {
             window.request_animation_frame();
         }
-        self.open_current(cx);
+        self.open_current(window.is_window_active(), cx);
         self.window_active = window.is_window_active();
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
@@ -1973,7 +1980,7 @@ impl Render for MainWindow {
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
-                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, cx)
+                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
@@ -3048,9 +3055,9 @@ mod dispatch {
         });
         assert!(children(&view, cx) < 15);
         view.update(cx, |v, cx| {
-            v.toggle_message(0, cx);
+            v.toggle_message(0, true, cx);
             assert_eq!(v.expanded.len(), 2);
-            v.toggle_message(1, cx);
+            v.toggle_message(1, true, cx);
             assert_eq!(v.expanded.len(), 1);
         });
         cx.simulate_keystrokes("j");
@@ -3482,7 +3489,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();

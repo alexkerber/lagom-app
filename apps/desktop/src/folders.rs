@@ -205,7 +205,7 @@ mod tests {
         use lagom_core::store::{Folder as F, FolderRole as R};
         let mut folders = vec![Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) }];
         let server = F { id: 42, account: "fixture".into(), name: "[Provider]/Bin".into(), delimiter: Some("/".into()), role: R::Trash, uidvalidity: Some(7), uidnext: None, last_uid: 0, highest_modseq: None, unread: 3 };
-        merge(&mut folders, &[server.clone()]);
+        merge(&mut folders, std::slice::from_ref(&server));
         assert_eq!(folders.len(), 1);
         assert_eq!((folders[0].kind, folders[0].store, folders[0].unread), (Kind::Trash, Some(42), 3));
         assert!(tree(&folders, true).is_empty());

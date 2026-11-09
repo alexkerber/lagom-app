@@ -127,6 +127,7 @@ fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, B
 
 /// (message id, HTML length, remote images, dark): the document on screen.
 type Key = (usize, usize, bool, bool);
+type Placement = (Bounds<Pixels>, Bounds<Pixels>, f32);
 
 /// The window's web view and what it shows.
 #[derive(Default)]
@@ -145,7 +146,7 @@ pub(super) struct Web {
     pub(super) has_remote: bool,
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
-    place: Rc<std::cell::Cell<Option<(Bounds<Pixels>, Bounds<Pixels>, f32)>>>,
+    place: Rc<std::cell::Cell<Option<Placement>>>,
 }
 
 /// A window with a mail web view: the main window and each message window.

@@ -721,12 +721,14 @@ fn attachment_filename(common: &async_imap::imap_proto::BodyContentCommon<'_>) -
     let name = message.attachments().next()?.attachment_name().filter(|s| !s.is_empty()).map(str::to_owned);
     name
 }
+type TextPart = (Vec<u32>, bool, u32, String);
+
 fn text_parts(
     body: &BodyStructure<'_>,
     path: &[u32],
     depth: usize,
     attached_parent: bool,
-    parts: &mut Vec<(Vec<u32>, bool, u32, String)>,
+    parts: &mut Vec<TextPart>,
     attachments: &mut Vec<Attachment>,
 ) {
     let common = match body {
@@ -784,7 +786,7 @@ fn text_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parsed_parts(structure: &str) -> (Vec<(Vec<u32>, bool, u32, String)>, Vec<Attachment>) {
+    fn parsed_parts(structure: &str) -> (Vec<TextPart>, Vec<Attachment>) {
         use async_imap::imap_proto::{AttributeValue, Response};
         let wire = format!("* 1 FETCH (BODYSTRUCTURE {structure})\r\n");
         let (_, Response::Fetch(_, attrs)) = Response::parse(wire.as_bytes()).unwrap() else { panic!("fetch") };

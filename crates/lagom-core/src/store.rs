@@ -417,6 +417,9 @@ impl Store {
         let rows = stmt.query_map(params![folder, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+    pub fn message_summary(&self, id: i64) -> Result<MessageSummary> {
+        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.id=?1"), [id], summary_row).optional()?.ok_or(Error::NotFound)
+    }
     pub fn message(&self, id: i64) -> Result<Message> {
         self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(20)?,body_html:r.get(21)? })).optional()?.ok_or(Error::NotFound)
     }
@@ -493,6 +496,13 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+    /// Metadata saved beyond a completed sync checkpoint, including snoozed rows.
+    pub fn messages_since(&self, folder: i64, uid: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.folder=?1 AND m.uid>?2 ORDER BY m.uid"))?;
+        let rows = stmt.query_map(params![folder, uid], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn known_uids(&self, folder: i64) -> Result<Vec<u32>> {
         let mut stmt = self
             .db
@@ -568,6 +578,44 @@ mod mail_tests {
             body_html: None,
         }
     }
+    #[test]
+    fn message_summary_revalidates_metadata_without_reading_bodies() {
+        let (_temp, s, a, inbox) = setup();
+        let id = s.save_message(&mail(&a, inbox, 1)).unwrap();
+        let mut expected = s.message(id).unwrap().summary;
+        // Invalid body types make accidental body decoding fail deterministically.
+        s.db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [id]).unwrap();
+        assert!(s.message(id).is_err());
+        assert_eq!(s.message_summary(id).unwrap(), expected);
+        s.set_flags(inbox, 1, true, false).unwrap();
+        s.snooze(id, Some(1000)).unwrap();
+        expected.seen = true;
+        expected.snoozed_until = Some(1000);
+        assert_eq!(s.message_summary(id).unwrap(), expected);
+        s.delete_message(id).unwrap();
+        assert!(matches!(s.message_summary(id), Err(Error::NotFound)));
+    }
+
+    #[test]
+    fn messages_since_uses_folder_and_uid_not_date_or_read_state() {
+        let (_temp, s, a, inbox) = setup();
+        let done = s.save_folder(&a.id, "Archive", None, FolderRole::Archive).unwrap();
+        for uid in 1..=3 {
+            s.save_message(&mail(&a, inbox, uid)).unwrap();
+            s.save_message(&mail(&a, done, uid)).unwrap();
+        }
+        let mut m = mail(&a, inbox, 3);
+        m.summary.date = 0;
+        m.summary.seen = true;
+        let id = s.save_message(&m).unwrap();
+        s.snooze(id, Some(1000)).unwrap();
+        let rows = s.messages_since(inbox, 1).unwrap();
+        assert_eq!(rows.iter().map(|m| m.uid).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(rows[1].seen);
+        assert_eq!(rows[1].snoozed_until, Some(1000));
+        assert!(s.messages_since(inbox, 3).unwrap().is_empty());
+    }
+
     #[test]
     fn insert_page_fts_and_snooze() {
         let (_temp, s, a, f) = setup();
@@ -648,7 +696,7 @@ mod mail_tests {
                 .query_map([], |r| r.get::<_, String>(2)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             assert_eq!(actual, columns);
         }
-        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         assert_eq!(store.attachments(root.summary.id).unwrap(), attachments);
         let a = store.message(root.summary.id).unwrap();
@@ -659,8 +707,8 @@ mod mail_tests {
         child.summary.thread_refs = "root@test".into();
         assert_eq!(a, root);
         assert_eq!(b, child);
-        assert_eq!(store.list_conversations(&account.id, Some(folder), 0, 1).unwrap(), [b.summary.clone()]);
-        assert_eq!(store.list_conversations(&account.id, None, 0, 1).unwrap(), [a.summary.clone()]);
+        assert_eq!(store.list_conversations(&account.id, Some(folder), 0, 1).unwrap(), std::slice::from_ref(&b.summary));
+        assert_eq!(store.list_conversations(&account.id, None, 0, 1).unwrap(), std::slice::from_ref(&a.summary));
         assert_eq!(a.summary.thread_id, b.summary.thread_id);
         assert_eq!(b.summary.thread_refs, "root@test");
         assert_eq!(b.body_text, child.body_text);
@@ -711,7 +759,7 @@ mod mail_tests {
         drop(old);
         let mut store = Store::open(&path).unwrap();
         assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
-        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
         saved_message.summary.thread_id = store.message(id).unwrap().summary.thread_id;
@@ -719,7 +767,7 @@ mod mail_tests {
         assert_eq!(store.message(id).unwrap(), saved_message);
         assert_eq!(store.search(&account.id, "sqlite", 100, 10, 0).unwrap(), [saved_message.summary]);
         if version >= 5 {
-            assert_eq!(store.drafts().unwrap(), [draft.clone()]);
+            assert_eq!(store.drafts().unwrap(), std::slice::from_ref(&draft));
             let pending = store.pending("queued").unwrap();
             assert_eq!(pending.mail.text, outgoing.text);
             assert_eq!(pending.raw, b"queued MIME bytes");
@@ -737,11 +785,11 @@ mod mail_tests {
         }
         assert_eq!(store.missing_metadata(folder, 1).unwrap(), [1]);
         let part = Attachment { section: "2.1".into(), filename: "report.pdf".into(), mime_type: "application/pdf".into(), size: 128, encoding: "base64".into() };
-        store.save_synced_message(&message, &[part.clone()]).unwrap();
-        assert_eq!(store.attachments(id).unwrap(), [part.clone()]);
+        store.save_synced_message(&message, std::slice::from_ref(&part)).unwrap();
+        assert_eq!(store.attachments(id).unwrap(), std::slice::from_ref(&part));
         assert!(store.missing_metadata(folder, 1).unwrap().is_empty());
         assert!(store.save_synced_message(&message, &[part.clone(), part.clone()]).is_err());
-        assert_eq!(store.attachments(id).unwrap(), [part.clone()]);
+        assert_eq!(store.attachments(id).unwrap(), std::slice::from_ref(&part));
         drop(store);
         store = Store::open(&path).unwrap();
         assert_eq!(store.attachments(id).unwrap(), [part]);
@@ -804,7 +852,7 @@ mod mail_tests {
         let folder = old.folder(f).unwrap();
         drop(old);
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.accounts().unwrap(), [a.clone()]);
+        assert_eq!(s.accounts().unwrap(), std::slice::from_ref(&a));
         assert_eq!(s.folder(f).unwrap(), folder);
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);

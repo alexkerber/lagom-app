@@ -122,7 +122,7 @@ impl Render for MessageWindow {
                         })))
                     }),
             )
-            .child(reading_view(&t, id, &m, !web, self.web.slot(), 0, on_download, on_reply))
+            .child(reading_view(&t, (id, &m), !web, self.web.slot(), 0, on_download, on_reply))
     }
 }
 
@@ -154,7 +154,7 @@ impl MainWindow {
     pub(super) fn open_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.inbox.current() else { return };
         // The body and HTML come from the store here; the new window only reads them.
-        self.open_message(id, cx);
+        self.open_message(id, true, cx);
         self.popouts.retain(|(_, h)| h.read(cx).is_ok());
         if let Some((_, h)) = self.popouts.iter().find(|p| p.0 == id) {
             h.update(cx, |_, window, _| window.activate_window()).ok();
