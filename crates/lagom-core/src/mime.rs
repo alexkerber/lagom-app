@@ -60,7 +60,7 @@ pub fn clean_snippet(text: &str) -> String {
 fn addresses(list: Option<AddressList<'_>>) -> String {
     list.map(|l| {
         l.mailboxes()
-            .filter_map(|m| m.address().map(str::to_owned))
+            .filter_map(|m| m.address().map(|address| crate::contacts::format_recipient(m.name().unwrap_or_default(), address)))
             .collect::<Vec<_>>()
             .join(", ")
     })
@@ -118,6 +118,13 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recipient_names_survive_sync_headers() {
+        let message = parse(b"From: Sender <sender@example.com>\r\nTo: \"Team, West\" <west@example.com>, east@example.com\r\nCc: Team <team@example.com>\r\n\r\nbody").unwrap();
+        assert_eq!(crate::contacts::split_recipients(&message.summary.to), ["\"Team, West\" <west@example.com>", "east@example.com"]);
+        assert_eq!(message.summary.cc, "Team <team@example.com>");
+    }
+
     #[test]
     fn multipart_and_attachment() {
         let raw=b"From: Alice <alice@example.com>\r\nTo: bob@example.com\r\nSubject: =?utf-8?Q?H=C3=A4lsning?=\r\nMessage-ID: <child@test>\r\nReferences: <root@test> <parent@test>\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: multipart/alternative; boundary=y\r\n\r\n--y\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello plain\r\n--y\r\nContent-Type: text/html\r\n\r\n<b>Hello HTML</b>\r\n--y--\r\n--x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=a.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--x--\r\n";
