@@ -31,14 +31,109 @@ fn decode_id(value: &str) -> Option<String> {
 }
 
 // shortcut: CSS-escaped CID spellings are not decoded; use a CSS tokenizer if encountered.
-fn references(html: &str) -> impl Iterator<Item = (std::ops::Range<usize>, String)> + '_ {
-    html.as_bytes().windows(4).enumerate().filter_map(move |(i, word)| {
-        if !word.eq_ignore_ascii_case(b"cid:") || (i > 0 && !b"\"'=(: \t\r\n".contains(&html.as_bytes()[i - 1])) { return None; }
-        let rest = &html[i + 4..];
-        let end = rest.find(|c: char| c.is_whitespace() || "\"'<>),".contains(c)).unwrap_or(rest.len());
-        let cid = decode_id(&rest[..end])?;
-        (!cid.is_empty()).then_some((i..i + 4 + end, cid))
-    })
+fn references(html: &str) -> impl Iterator<Item = (std::ops::Range<usize>, String)> {
+    let mut out = Vec::new();
+    let mut add = |range: std::ops::Range<usize>| {
+        let value = &html[range.clone()];
+        // Bound both individual spellings and per-message work before decoding or allocating IDs.
+        if out.len() >= 1024 || value.len() > 4096 || !value.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("cid:")) { return; }
+        if let Some(cid) = decode_id(&value[4..]).filter(|s| !s.is_empty()) { out.push((range, cid)); }
+    };
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let Some(start) = html[i..].find('<') else { break };
+        i += start + 1;
+        if html[i..].starts_with("!--") {
+            i = html[i + 3..].find("-->").map_or(bytes.len(), |end| i + 3 + end + 3);
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphanumeric() { i += 1; }
+        if i == start { continue; }
+        let tag = &html[start..i];
+        while i < bytes.len() && bytes[i] != b'>' {
+            if bytes[i].is_ascii_whitespace() || bytes[i] == b'/' { i += 1; continue; }
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !b"=>/".contains(&bytes[i]) { i += 1; }
+            let name = &html[start..i];
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+            if bytes.get(i) != Some(&b'=') { continue; }
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+            let quote = bytes.get(i).copied().filter(|b| b"\"'".contains(b));
+            if quote.is_some() { i += 1; }
+            let start = i;
+            while i < bytes.len() && if let Some(quote) = quote { bytes[i] != quote } else { !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' } { i += 1; }
+            let end = i;
+            if quote.is_some() && i < bytes.len() { i += 1; }
+            if name.eq_ignore_ascii_case("src") || name.eq_ignore_ascii_case("background") || name.eq_ignore_ascii_case("poster") {
+                let value = &html[start..end];
+                let trimmed = value.trim_ascii();
+                let start = start + value.len() - value.trim_ascii_start().len();
+                add(start..start + trimmed.len());
+            } else if name.eq_ignore_ascii_case("srcset") {
+                let mut at = start;
+                while at < end {
+                    while at < end && (bytes[at].is_ascii_whitespace() || bytes[at] == b',') { at += 1; }
+                    let start = at;
+                    while at < end && !bytes[at].is_ascii_whitespace() { at += 1; }
+                    let url_end = start + html[start..at].trim_end_matches(',').len();
+                    add(start..url_end);
+                    if url_end == at {
+                        while at < end && bytes[at] != b',' { at += 1; }
+                    }
+                }
+            } else if name.eq_ignore_ascii_case("style") {
+                css_urls(&html[start..end], start, &mut add);
+            }
+        }
+        i = (i + 1).min(bytes.len());
+        if tag.eq_ignore_ascii_case("plaintext") { break; }
+        if ["style", "script", "textarea", "title", "xmp", "iframe", "noembed", "noframes"].iter().any(|t| tag.eq_ignore_ascii_case(t)) {
+            let end = bytes[i..].windows(tag.len() + 2).enumerate().find(|(at, s)| s.starts_with(b"</") && s[2..].eq_ignore_ascii_case(tag.as_bytes())
+                && bytes.get(i + at + s.len()).is_none_or(|b| b.is_ascii_whitespace() || b">/".contains(b))).map(|(at, _)| at);
+            let end = end.map_or(bytes.len(), |end| i + end);
+            if tag.eq_ignore_ascii_case("style") { css_urls(&html[i..end], i, &mut add); }
+            i = end;
+        }
+    }
+    out.into_iter()
+}
+
+fn css_urls(css: &str, offset: usize, add: &mut impl FnMut(std::ops::Range<usize>)) {
+    let bytes = css.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"/*") {
+            i = css[i + 2..].find("*/").map_or(bytes.len(), |end| i + 2 + end + 2);
+        } else if b"\"'".contains(&bytes[i]) {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote { i += if bytes[i] == b'\\' { 2 } else { 1 }; }
+            i = (i + 1).min(bytes.len());
+        } else if bytes[i].is_ascii_alphabetic() || b"_-".contains(&bytes[i]) {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || b"_-".contains(&bytes[i])) { i += 1; }
+            if !css[start..i].eq_ignore_ascii_case("url") || bytes.get(i) != Some(&b'(') { continue; }
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+            let quote = bytes.get(i).copied().filter(|b| b"\"'".contains(b));
+            if quote.is_some() { i += 1; }
+            let start = i;
+            while i < bytes.len() && if let Some(quote) = quote { bytes[i] != quote } else { bytes[i] != b')' } { i += 1; }
+            let end = i;
+            if quote.is_some() && i < bytes.len() { i += 1; }
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+            if bytes.get(i) == Some(&b')') {
+                let end = start + css[start..end].trim_ascii_end().len();
+                add(offset + start..offset + end);
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
 }
 
 pub fn referenced_ids(html: &str) -> std::collections::HashSet<String> {
@@ -54,7 +149,6 @@ pub fn rewrite(html: &str, message: i64, windows: bool) -> String {
     let mut out = String::with_capacity(html.len());
     let mut last = 0;
     for (range, cid) in references(html) {
-        if range.start < last { continue; }
         out.push_str(&html[last..range.start]);
         out.push_str(&url(message, &cid, windows));
         last = range.end;
@@ -120,9 +214,44 @@ mod tests {
     fn cid_matching_preserves_case_and_handles_css_entities_and_unquoted_urls() {
         let html = "<img src=CID:Logo%2B1%40example.test><div background='cid:a&amp;b' style='background:url(cid:x%2Fy)'></div>";
         assert_eq!(referenced_ids(html), ["Logo+1@example.test", "a&b", "x/y"].map(str::to_owned).into());
-        assert_ne!(referenced_ids("src='cid:Logo'"), referenced_ids("src='cid:logo'"));
-        assert!(referenced_ids("src='cid:%xx'").is_empty());
+        assert_ne!(referenced_ids("<img src='cid:Logo'>"), referenced_ids("<img src='cid:logo'>"));
+        assert!(referenced_ids("<img src='cid:%xx'>").is_empty());
         assert_eq!(rewrite("<img src='https://example.test/cid:other'>", 1, false), "<img src='https://example.test/cid:other'>");
+    }
+
+    #[test]
+    fn repeated_cid_prefixes_are_one_bounded_reference() {
+        let html = format!("<img src='{}'>", "cid:".repeat(256));
+        let ids = referenced_ids(&html);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids.iter().next().unwrap().len(), 1020);
+        assert_eq!(rewrite(&html, 1, false), format!("<img src='{}'>", url(1, &"cid:".repeat(255), false)));
+        let oversized = format!("<img src='{}'>", "cid:".repeat(25_000));
+        assert!(referenced_ids(&oversized).is_empty());
+        assert_eq!(rewrite(&oversized, 1, false), oversized);
+        assert_eq!(referenced_ids(&format!("{oversized}<img src=cid:next>")), ["next".into()].into());
+        for (length, count) in [(4092, 1), (4093, 0)] {
+            assert_eq!(referenced_ids(&format!("<img src='cid:{}'>", "a".repeat(length))).len(), count);
+        }
+        let many = (0..2048).map(|i| format!("<img src='cid:{i}'>")).collect::<String>();
+        assert_eq!(referenced_ids(&many).len(), 1024);
+        assert_eq!(rewrite(&many, 1, false).matches("lagom-cid://").count(), 1024);
+    }
+
+    #[test]
+    fn cid_urls_only_change_in_resource_attributes_and_css_urls() {
+        let unchanged = r#"<img src="https://example.test/image?token=cid:logo" srcset="https://example.test/?token=cid:logo 2x"><a href="cid:logo">cid:logo</a>
+            <p title="cid:logo">src='cid:logo' url(cid:logo)</p><!-- <img src='cid:logo'> -->
+            <script>"<img src='cid:logo'>"</script>
+            <style>.a { content: 'url(cid:logo)'; background: url(https://example.test/?token=cid:logo) }
+            /* url(cid:logo) */</style>"#;
+        assert!(referenced_ids(unchanged).is_empty());
+        assert_eq!(rewrite(unchanged, 1, false), unchanged);
+        let html = r#"<IMG SRC = 'cid:logo'><table background=cid:logo><video poster="cid:logo"></video>
+            <div style="background: URL( 'cid:logo' )"></div><style>.a { background: url(cid:logo) }</style>
+            <img srcset="cid:logo, cid:logo 2x, cid:logo 3x">"#;
+        assert_eq!(referenced_ids(html), ["logo".into()].into());
+        assert_eq!(rewrite(html, 1, false).matches(&url(1, "logo", false)).count(), 8);
     }
 
     #[test]

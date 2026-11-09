@@ -7,7 +7,7 @@ use lagom_core::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
-async fn related_images_sync_and_legacy_mail_fetches_them_once_on_open() {
+async fn related_images_sync_and_legacy_fetch_preserves_cached_attachments() {
     for legacy in [false, true] { roundtrip(legacy, false).await; }
 }
 
@@ -41,6 +41,7 @@ async fn roundtrip(legacy: bool, oversized: bool) {
             else if command == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into() }
             else if command == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
             else if command.contains("BODYSTRUCTURE") {
+                if legacy { assert_eq!(command, "UID FETCH 1 (UID BODYSTRUCTURE)"); }
                 let structure = format!(r#"(("TEXT" "HTML" ("CHARSET" "utf-8") NIL NIL "7BIT" {} 1)("IMAGE" "PNG" NIL "<Logo+1@example.test>" NIL "BASE64" {} NIL ("INLINE" NIL)) "RELATED")"#, html.len(), image.len());
                 format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 500 BODYSTRUCTURE {structure} BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
             } else if command == "UID FETCH 1 (UID BODY.PEEK[1])" {
@@ -49,7 +50,8 @@ async fn roundtrip(legacy: bool, oversized: bool) {
                 images += 1;
                 if oversized {
                     write.write_all(format!("* 1 FETCH (UID 1 BODY[2] {{{}}}\r\n", MAX_INLINE_BYTES + 1).as_bytes()).await.unwrap();
-                    return;
+                    std::future::pending::<()>().await;
+                    unreachable!();
                 }
                 // FLAGS-only and unrelated UID/section replies must not supply the image.
                 format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 BODY[2] {{4}}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[3] {{4}}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[2] {{{}}}\r\n{image})\r\n", image.len())
@@ -78,15 +80,25 @@ async fn roundtrip(legacy: bool, oversized: bool) {
         message.summary.uid = 1;
         let id = store.save_message(&message).unwrap();
         assert!(!store.inline_loaded(id).unwrap());
-        let result = imap.fetch_inline(&mut store, id).await;
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("PRAGMA foreign_keys=ON", []).unwrap();
+        db.execute("INSERT INTO attachments VALUES (?1,'3','cached.txt','text/plain',6,'7bit')", [id]).unwrap();
+        db.execute("INSERT INTO attachment_cache VALUES (?1,'3',x'636163686564')", [id]).unwrap();
+        let attachments = store.attachments(id).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), imap.fetch_inline(&mut store, id)).await;
+        if oversized { server.abort(); }
+        let result = result.expect("must reject the literal header without waiting for its body");
         if oversized {
             assert!(result.is_err());
             assert!(!store.inline_loaded(id).unwrap());
             assert!(store.inline_parts(id).unwrap().is_empty());
-            server.await.unwrap();
+            assert!(server.await.unwrap_err().is_cancelled());
             return;
         }
         result.unwrap();
+        assert_eq!(store.cached_attachment(id, "3").unwrap().as_deref(), Some(b"cached".as_slice()));
+        assert_eq!(store.attachments(id).unwrap(), attachments);
+        assert_eq!(store.message(id).unwrap().body_html, message.body_html);
     } else {
         imap.sync_folder(&mut store, folder, 20).await.unwrap();
     }
@@ -97,6 +109,7 @@ async fn roundtrip(legacy: bool, oversized: bool) {
     drop(store);
     let store = Store::open(path).unwrap();
     assert!(store.inline_loaded(id).unwrap());
+    if legacy { assert_eq!(store.cached_attachment(id, "3").unwrap().as_deref(), Some(b"cached".as_slice())); }
     let parts = store.inline_parts(id).unwrap();
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].cid, "Logo+1@example.test");

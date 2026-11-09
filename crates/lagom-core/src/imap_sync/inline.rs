@@ -39,9 +39,14 @@ impl ImapSync {
         if folder.uidvalidity != before {
             return Err(Error::Invalid("mailbox changed; resync before loading inline images"));
         }
-        self.fetch_message(store, &folder, message.uid).await?;
-        if !store.inline_loaded(id)? { return Err(Error::NotFound); }
-        Ok(())
+        let metadata = net(async {
+            self.session.uid_fetch(message.uid.to_string(), "(UID BODYSTRUCTURE)").await?.try_collect::<Vec<_>>().await
+        }).await?;
+        let body = metadata.iter().find(|f| f.uid == Some(message.uid) && f.bodystructure().is_some())
+            .and_then(|f| f.bodystructure()).ok_or(Error::Network("IMAP BODYSTRUCTURE missing"))?;
+        let html = store.message(id)?.body_html.unwrap_or_default();
+        let parts = self.inline_parts(message.uid, body, &html).await?;
+        store.save_inline_parts(id, &parts)
     }
 
     pub(super) async fn inline_parts(&mut self, uid: u32, body: &BodyStructure<'_>, html: &str) -> Result<Vec<InlinePart>> {
@@ -86,12 +91,12 @@ mod tests {
         let AttributeValue::BodyStructure(body) = &attrs[0] else { panic!("bodystructure") };
         let mut out = Vec::new();
         let mut remaining = MAX_INLINE_BYTES;
-        parts(body, &[], &inline::referenced_ids("src='cid:large' src='cid:exact' src='cid:extra'"), &mut remaining, &mut out);
+        parts(body, &[], &inline::referenced_ids("<img src='cid:large'><img src='cid:exact'><img src='cid:extra'>"), &mut remaining, &mut out);
         assert_eq!(out.iter().map(|(cid, part)| (cid.as_str(), part.section.as_str(), part.mime_type.as_str(), part.encoding.as_str())).collect::<Vec<_>>(), [("exact", "3", "image/png", "base64")]);
         assert_eq!(remaining, 0);
         out.clear();
         remaining = MAX_INLINE_BYTES;
-        parts(body, &[], &inline::referenced_ids("src='cid:extra' src='cid:EXACT'"), &mut remaining, &mut out);
+        parts(body, &[], &inline::referenced_ids("<img src='cid:extra'><img src='cid:EXACT'>"), &mut remaining, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "extra");
         assert_eq!(remaining, MAX_INLINE_BYTES - 1);
