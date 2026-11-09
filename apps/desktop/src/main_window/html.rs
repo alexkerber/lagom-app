@@ -450,7 +450,7 @@ mod tests {
         assert!(document(r##"<table bgcolor="#f4f4f4">"##, &dark, false).contains("body{background:#fff;color:#000;border-radius:10px"));
         // Simple HTML blends: theme ink, accent links.
         let doc = document("<div dir=ltr>Lunch?</div>", &dark, false);
-        assert!(!doc.contains("background:#fff") && doc.contains("a{color:rgba(235,106,85,1)}"));
+        assert!(!doc.contains("background:#fff") && doc.contains("a{color:rgba(138,176,245,1)}"));
     }
 
     #[test]

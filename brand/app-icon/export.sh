@@ -42,7 +42,7 @@ func composite(dark: Bool) -> NSImage {
     let rect = CGRect(x: 0, y: 0, width: 1024, height: 1024)
     if dark {
         let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-            colors: [color(0x1E2238).cgColor, color(0x2A1F3C).cgColor] as CFArray,
+            colors: [color(0x0C1A35).cgColor, color(0x2B1E26).cgColor] as CFArray,
             locations: [0, 1])!
         context.drawLinearGradient(gradient, start: CGPoint(x: 512, y: 1024),
             end: CGPoint(x: 512, y: 0), options: [])

@@ -25,6 +25,8 @@
 - [ ] UniFFI bindings from `lagom-core` for both mobile apps.
 
 ## Mail (v1)
+- [ ] The All/Unread switch in the list header has no click handler (`filter-unread` in `main_window.rs`). Wire it to filter the list, or remove it.
+- [ ] Multi-select in the list: Shift+arrows, Shift-click, Cmd-click, Cmd+A; actions on all selected (branch `feat/multi-select`).
 
 - [x] Send Markdown mail (lists, bold/italic, links, headings, quotes, code), compose shortcuts and file insertion, CLI `--body-file` (`feat/markdown-compose`).
 - [ ] Show Markdown styling live in the composer (bold text bold, markers dimmed).

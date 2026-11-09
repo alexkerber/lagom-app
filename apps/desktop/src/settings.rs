@@ -1,10 +1,13 @@
 //! Notification preference and accounts. Remove asks inside the app, not in a
 //! system dialog, and deletes the saved password and the local mail; the server keeps its mail.
 
-use gpui::{div, prelude::*, px, Context, Div, FontWeight, SharedString};
+use std::time::Duration;
+
+use gpui::{div, point, prelude::*, px, Animation, AnimationExt, BoxShadow, Context, Div, FontWeight, Rgba, SharedString, Stateful};
 use lagom_core::account::Account;
 
 use crate::main_window::{button, mono, MainWindow, OneLine};
+use crate::motion::spring;
 use crate::theme::{radius, size, Theme};
 
 /// `confirm`: the id of the account whose removal waits for a yes.
@@ -51,12 +54,8 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
             1 => "One account.".to_string(),
             n => format!("{n} accounts."),
         })))
-        .child(div().flex().items_center().gap(px(12.)).child(div().flex_1().child("Group by conversation"))
-            .child(button(t, if group { "On" } else { "Off" }, None).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx)))))
-        .child(div().flex().items_center().justify_between()
-            .child("Notifications for new mail")
-            .child(button(t, if notifications { "On" } else { "Off" }, None)
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx)))))
+        .child(toggle_row(t, "Group by conversation", group).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
+        .child(toggle_row(t, "Notifications for new mail", notifications).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
         .child(div().flex().flex_col().gap(px(8.)).child("Default task list")
             .children(task_lists.iter().map(|list| {
                 let id = list.id;
@@ -82,4 +81,43 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
             .rounded(px(radius::PANEL))
             .child(content),
     )
+}
+
+/// A setting with a macOS-style switch. The whole row toggles, so the target is large.
+fn toggle_row(t: &Theme, label: &'static str, on: bool) -> Stateful<Div> {
+    div().id(label).debug_selector(move || label.into()).flex().items_center().justify_between().min_h(px(32.))
+        .child(label)
+        .child(switch(t, label, on))
+}
+
+/// Track 38×22 with a white knob that springs across. On takes the selection colour, as the
+/// system switch takes the accent; off is the neutral selection grey.
+fn switch(t: &Theme, id: &'static str, on: bool) -> impl IntoElement {
+    const TRAVEL: f32 = 16.;
+    let knob = div()
+        .absolute()
+        .top(px(2.))
+        .size(px(18.))
+        .rounded_full()
+        .bg(gpui::rgb(0xFFFFFF))
+        .shadow(vec![BoxShadow {
+            color: Rgba { r: 0., g: 0., b: 0., a: 0.28 }.into(),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(2.5),
+            spread_radius: px(0.),
+        }])
+        // A new id per state replays the slide on every toggle.
+        // shortcut: the knob also slides once when Settings opens; keep the last toggle in state to skip that.
+        .with_animation(SharedString::from(format!("{id}-{on}")), Animation::new(Duration::from_millis(220)), move |knob, v| {
+            let x = if on { spring(v) } else { 1. - spring(v) };
+            knob.left(px(2. + TRAVEL * x))
+        });
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(38.))
+        .h(px(22.))
+        .rounded_full()
+        .bg(if on { t.sel_focus } else { t.sel })
+        .child(knob)
 }

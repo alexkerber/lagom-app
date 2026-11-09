@@ -6,7 +6,7 @@ Run headless:
   Blender -b -P skymning.py -- all                    -> both, 1024 px
 
   Blender -b -P skymning.py -- icon 1024 512 B out.png  -> PUNCH variant B to out.png
-  (default variant: C2)
+  (default variant: SE3)
 
 Scene units: 1 unit = 100 px of the 1024 canvas. The plate is the 824 px macOS
 rounded square (-4.12..4.12), the camera looks down -Z, front faces point +Z.
@@ -24,13 +24,13 @@ argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 MODE = argv[0] if argv else "icon"
 RES = int(argv[1]) if len(argv) > 1 else 1024
 SAMPLES = int(argv[2]) if len(argv) > 2 else 512
-VARIANT = argv[3] if len(argv) > 3 else "C2"
+VARIANT = argv[3] if len(argv) > 3 else "SE3"
 OUT = argv[4] if len(argv) > 4 else None  # icon mode only; default icon-<res>.png
 
 PLATE = 4.12
 
 # Colour and light strength. "base" is the first approved look; A/B/C add punch.
-# C2 is the default.
+# SE3 (Swedish dusk, chosen 2026-11-09) is the default.
 # Plate stops run bottom (0.0, violet) to top (1.0, blue).
 BASE = dict(
     plate=[(0.0, "#8A60AA"), (0.25, "#6C589E"), (0.5, "#49528B"), (0.70, "#38537F"), (1.0, "#2A4068")],
@@ -39,6 +39,7 @@ BASE = dict(
     glow=("#FF7A34", "#FFC6A6"), glow_strength=2.1, glow_power=1.6, spill_strength=1.6,
     ember="#FF9C70", ember_energy=150,
     key=3300, key_size=5.0, key_y=9.5, fill=550, exposure=-0.28,
+    plate_bev=0.34, glass_bev=1.0, bevel_res=10, ramp="LINEAR", fill_color="#EEF0FF",
 )
 PUNCH = {
     "base": {},
@@ -69,6 +70,25 @@ PUNCH = {
 # C2: C with a lighter, softer shadow. A bigger key placed more overhead shortens
 # the dark band under the envelope; more fill lifts what remains.
 PUNCH["C2"] = dict(PUNCH["C"], key=2500, key_size=9.0, key_y=6.0, fill=640, glow_strength=3.7)
+# Swedish variants on C2: flag blue (#006AA7) and yellow (#FECC00). A pale or rose band
+# between them keeps the blend from turning green.
+GOLD_CORE = dict(glow=("#FFB000", "#FFE9A8"), ember="#FFC23A")
+PUNCH["SE1"] = dict(PUNCH["C2"], **GOLD_CORE,
+    plate=[(0.0, "#FECC00"), (0.22, "#F7D46A"), (0.45, "#CFE0EC"), (0.68, "#3F8BC9"), (1.0, "#005A9C")],
+    sheen_tint="#FFF6D8")
+PUNCH["SE2"] = dict(PUNCH["C2"], **GOLD_CORE,
+    plate=[(0.0, "#0E5FA6"), (0.5, "#0A579A"), (1.0, "#004A8A")],
+    sheen_tint="#D8E8FF", glow_strength=4.2, spill_strength=2.6)
+PUNCH["SE3"] = dict(PUNCH["C2"], **GOLD_CORE,
+    plate=[(0.0, "#FFCE1F"), (0.18, "#F6AE3E"), (0.40, "#D79A9A"), (0.66, "#3D6FB8"), (1.0, "#0B3F86")],
+    sheen_tint="#FFE8D8",
+    # soft finish: fully round plate edge, rounder glass, finer bevels, no banding in the ramp
+    plate_bev=0.37, glass_bev=1.2, bevel_res=16, ramp="B_SPLINE",
+    # a warm, broader fill keeps the shadow on the gold amber instead of grey-brown
+    key_size=12.0, fill=820, fill_color="#FFE2BE")
+# SE2b: SE2 with the flag's yellow carried by a hotter, wider gold core and a warm sheen.
+PUNCH["SE2b"] = dict(PUNCH["SE2"], glow=("#FFC400", "#FFE45C"), ember="#FFCC00", ember_energy=420,
+    glow_strength=5.6, glow_power=1.6, spill_strength=3.4, sheen_tint="#FFF1B8", diffuse="#FFFBEA")
 P = dict(BASE, **PUNCH[VARIANT])
 
 
@@ -127,7 +147,7 @@ def slab(name, poly, radii, z_back, thick, bev, mat):
     cu.fill_mode = "BOTH"
     cu.extrude = max(thick / 2 - bev, 0.0)
     cu.bevel_depth = bev
-    cu.bevel_resolution = 10
+    cu.bevel_resolution = P["bevel_res"]
     sp = cu.splines.new("POLY")
     sp.points.add(len(pts) - 1)
     for i, p in enumerate(pts):
@@ -164,6 +184,7 @@ def plate_material(span):
     mr.inputs["From Max"].default_value = span
     l.new(sep.outputs["Y"], mr.inputs["Value"])
     ramp = n.new("ShaderNodeValToRGB")
+    ramp.color_ramp.interpolation = P["ramp"]
     el = ramp.color_ramp.elements
     stops = P["plate"]
     el[0].position, el[0].color = stops[0][0], lin(stops[0][1])
@@ -332,7 +353,7 @@ def reset():
     fill = bpy.data.lights.new("fill", "AREA")
     fill.size = 16.0
     fill.energy = P["fill"]
-    fill.color = lin("#EEF0FF")[:3]
+    fill.color = lin(P["fill_color"])[:3]
     fo = bpy.data.objects.new("fill", fill)
     fo.location = (0, -2.0, 16.0)
     fo.rotation_euler = (Vector((0, 0, 0)) - fo.location).to_track_quat("-Z", "Y").to_euler()
@@ -344,16 +365,16 @@ def build(sc):
     objs = {}
     p = PLATE
     objs["plate"] = slab("plate", [(-p, -p), (p, -p), (p, p), (-p, p)], [1.85] * 4,
-                         -0.75, 0.75, 0.34, plate_material(p))
+                         -0.75, 0.75, P["plate_bev"], plate_material(p))
     glass = glass_material()
     # body, lower flaps, top flap: separate slabs stacked toward the camera
     objs["body"] = slab("body", [(-2.90, -2.10), (2.90, -2.10), (2.90, 1.72), (-2.90, 1.72)],
-                        [0.40] * 4, 0.60, 0.24, 0.09, glass)
+                        [0.40] * 4, 0.60, 0.24, 0.09 * P["glass_bev"], glass)
     # vertices sit outside the visible shape: the corner arcs pull the silhouette in
     objs["lower"] = slab("lower", [(-3.35, -2.10), (3.35, -2.10), (0.0, -0.02)],
-                         [0.26, 0.26, 0.42], 0.90, 0.22, 0.085, glass)
+                         [0.26, 0.26, 0.42], 0.90, 0.22, 0.085 * P["glass_bev"], glass)
     top_poly = [(-3.12, 2.23), (0.0, -0.78), (3.12, 2.23)]
-    objs["top"] = slab("top", top_poly, [0.30, 0.52, 0.30], 1.22, 0.24, 0.09, glass)
+    objs["top"] = slab("top", top_poly, [0.30, 0.52, 0.30], 1.22, 0.24, 0.09 * P["glass_bev"], glass)
 
     # warm light inside the envelope: an emitter in the air gap behind the top
     # flap, shaped like the flap so it is only ever seen through frosted glass

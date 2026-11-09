@@ -90,10 +90,10 @@ const SNIPPET_LINES: usize = 2;
 const ROW_H: f32 = 2. * ROW_PAD + 2. * ROW_GAP + (2. * size::BASE + SNIPPET_LINES as f32 * size::SNIPPET) * LEADING;
 
 /// Selection highlight moving to the row J, K or a click selected.
-const GLIDE: Duration = Duration::from_millis(260);
+const GLIDE: Duration = Duration::from_millis(140);
 /// A press while the highlight still glides (a held arrow key) takes this shorter curve, so the
 /// highlight keeps up with key repeat instead of trailing rows behind.
-const GLIDE_REPEAT: Duration = Duration::from_millis(120);
+const GLIDE_REPEAT: Duration = Duration::from_millis(70);
 /// Padding around the rows in the list.
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
@@ -1161,7 +1161,7 @@ impl MainWindow {
         };
         // A sidebar keeps a grey selection; the active row's icon takes the accent while the
         // window is active, as in Finder and Mail. Weight never changes, so labels never shift.
-        let active_icon = if self.window_active { t.sel_focus } else { t.ink2 };
+        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let nav = |path: &'static str, label: &'static str, count: Option<usize>, active: bool| {
             pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
                 .flex()
@@ -1353,7 +1353,7 @@ impl MainWindow {
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
         let slot = || div().size(px(12.)).flex_shrink_0();
-        let active_icon = if self.window_active { t.sel_focus } else { t.ink2 };
+        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
         for &(f, depth) in &rows[..shown] {
@@ -1765,11 +1765,6 @@ impl MainWindow {
             .child(
                 toolbar(t)
                     .px(px(16.))
-                    .child(
-                        // Pine green, like the Done swipe.
-                        button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.swipe_done))
-                            .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))),
-                    )
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
                     .when(!trash, |d| d.child(
                         button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
@@ -1786,6 +1781,11 @@ impl MainWindow {
                     .child(
                         icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
+                    )
+                    .child(
+                        // The step that finishes a message sits last, as a primary button does in macOS.
+                        button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))),
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
@@ -2702,7 +2702,8 @@ mod tests {
             let lag = (row_y(n as usize) - glide.y(now)) / ROW_H;
             assert!(lag < 0.5, "press {n}: highlight {lag:.2} rows behind");
             glide = Glide::new(Some(glide), row_y(n as usize), row_y(n as usize + 1), now, n as usize);
-            assert_eq!(glide.dur, GLIDE_REPEAT);
+            // The first glide lands before the key starts repeating, so the first repeat takes the full curve.
+            assert_eq!(glide.dur, if n == 1 { GLIDE } else { GLIDE_REPEAT });
         }
         // Once it lands, the next single press takes the full curve again.
         let later = t0 + delay + step * 20 + GLIDE;
