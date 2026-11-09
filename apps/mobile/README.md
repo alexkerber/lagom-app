@@ -42,6 +42,10 @@ Apple targets, so the desktop credential and HTTP backends are unchanged.
 Keychain access uses the app's sandbox entitlements. Compilation does not verify
 runtime credential access on signed hardware.
 
+The `Lagom` data directory has file protection `completeUnlessOpen` and is
+excluded from backups; the app entitlement sets the same default protection
+class. This is not verified on a device.
+
 ## Run manually
 
 Generate the project as above, then use Xcode to select a simulator **you own**
