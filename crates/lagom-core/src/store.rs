@@ -1099,6 +1099,7 @@ mod mail_tests {
         let mut child = mail(&account, folder, 2);
         child.summary.message_id = "child@test".into();
         child.summary.thread_key = "root@test".into();
+        child.summary.subject = "Re: Hello 1".into();
         let mut root = save_legacy(&old, root);
         let mut child = save_legacy(&old, child);
         old.snooze(root.summary.id, Some(1000)).unwrap();
