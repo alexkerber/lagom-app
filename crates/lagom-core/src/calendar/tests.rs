@@ -98,7 +98,10 @@ fn replacement_preserves_other_windows_calendars_and_accounts() {
     store.replace_calendar_window(&account.id, current.start_utc, current.end_utc, &[(calendar(), vec![])]).unwrap();
     assert_eq!(store.today_events("2026-11-01", 0, 1).unwrap().len(), 1);
     assert_eq!(store.today_events("2026-12-01", 0, 1).unwrap().len(), 1);
-    assert_eq!(store.today_events("2026-11-09", 0, 1).unwrap().len(), 2);
+    let today = store.today_events("2026-11-09", 0, 1).unwrap();
+    assert_eq!(today.len(), 1);
+    assert_eq!(today[0].account, other_account.id);
+    assert_eq!(store.db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
     assert_eq!(store.db.query_row("SELECT id FROM calendars WHERE account=?1 AND remote_id='primary'", [&account.id], |r| r.get::<_, i64>(0)).unwrap(), calendar_id);
 }
 

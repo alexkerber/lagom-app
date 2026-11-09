@@ -54,6 +54,7 @@ impl Store {
     pub fn replace_calendar_window(&self, account: &str, start: i64, end: i64, calendars: &[(Calendar, Vec<Event>)]) -> Result<()> {
         if start >= end { return Err(Error::Invalid("invalid calendar window")); }
         let tx = self.db.unchecked_transaction()?;
+        self.db.execute("UPDATE calendars SET shown=0 WHERE account=?1", [account])?;
         for (calendar, events) in calendars {
             if calendar.remote_id.is_empty() { return Err(Error::Invalid("calendar ID missing")); }
             self.db.execute("INSERT INTO calendars(account,remote_id,name,color,shown,writable) VALUES(?1,?2,?3,?4,?5,?6)

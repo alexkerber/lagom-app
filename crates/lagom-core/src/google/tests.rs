@@ -91,6 +91,36 @@ async fn failed_later_page_and_repeated_page_never_publish_partial_cache() {
     }
 }
 
+#[tokio::test]
+async fn calendar_missing_from_complete_list_hides_agenda_but_keeps_cached_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("cache.db")).unwrap();
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    let (url, server) = server(vec![
+        ("200 OK", LIST), ("200 OK", EMPTY), ("200 OK", EVENTS), ("200 OK", EMPTY),
+        ("200 OK", EMPTY),
+    ]).await;
+    let (start, end) = (1794000000, 1795000000);
+    let snapshot = fetch_with(&url, start, end, |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    store.replace_calendar_window(&account.id, start, end, &snapshot).unwrap();
+    assert_eq!(store.today_events("2026-11-09", start, end).unwrap().len(), 2);
+    let cached = || store.db.prepare("SELECT id,calendar,remote_id,title,start,end FROM events ORDER BY id").unwrap()
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))).unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>().unwrap();
+    let before = cached();
+    let snapshot = fetch_with(&url, start, end, |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(snapshot.is_empty());
+    store.replace_calendar_window(&account.id, start, end, &snapshot).unwrap();
+    assert!(store.today_events("2026-11-09", start, end).unwrap().is_empty());
+    assert_eq!(cached(), before);
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(requests[4].contains("users/me/calendarList?"));
+}
+
 #[test]
 fn invalid_dates_and_unsafe_meeting_urls_are_rejected() {
     for value in ["2026-02-30", "2026-13-01", "2026-11-09x", "2026-1-09"] {
