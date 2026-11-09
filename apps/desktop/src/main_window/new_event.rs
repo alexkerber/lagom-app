@@ -48,7 +48,11 @@ impl MainWindow {
     pub(super) fn new_event_default(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = chrono::Local::now();
         let today = now.date_naive();
-        let day = if (today - self.week.start).num_days() < 0 || (today - self.week.start).num_days() >= 7 { self.week.start } else { today };
+        let day = match self.week.view {
+            week::View::Week if (0..7).contains(&(today - self.week.start).num_days()) => today,
+            week::View::Week => self.week.start,
+            _ => self.week.anchor,
+        };
         let minute = if day == today { ((now.hour() * 60 + now.minute() + 14) / 15 * 15).min(1425) } else { 9 * 60 };
         self.open_new_event(day, minute, minute + 60, window, cx);
     }
@@ -75,7 +79,7 @@ impl MainWindow {
         };
         let at = |minutes: u32| day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::minutes(minutes as i64);
         let values = [String::new(), day.to_string(), at(start).format("%H:%M").to_string(), at(end).date().to_string(),
-            at(end).format("%H:%M").to_string(), String::new(), String::new()];
+            at(end).format("%H:%M").to_string(), self.calendar_guests(cx).join(", "), String::new()];
         let placeholders = ["Event title", "YYYY-MM-DD", "09:00", "YYYY-MM-DD", "10:00", "guest@example.com, guest2@example.com", "Description (optional)"];
         let fields = std::array::from_fn(|i| cx.new(|cx| TextInput::new(window, cx).bordered().placeholder(placeholders[i]).with_text(&values[i])));
         let current = self.live.as_ref().and_then(|l| l.account());
@@ -103,7 +107,9 @@ impl MainWindow {
         let draft = NewEvent {
             title: text(TITLE).trim().into(), start, end, time_zone, all_day: editor.all_day,
             description: (!text(DESCRIPTION).trim().is_empty()).then(|| text(DESCRIPTION).to_owned()),
-            attendees: lagom_core::contacts::split_recipients(text(GUESTS)), meet: editor.meet,
+            attendees: lagom_core::contacts::split_recipients(text(GUESTS)).iter()
+                .map(|guest| lagom_core::contacts::recipient_address(guest).ok_or("Enter valid guest email addresses".to_owned()))
+                .collect::<Result<Vec<_>, _>>()?, meet: editor.meet,
         };
         draft.event("validation".into()).map_err(|e| e.to_string())?;
         Ok(draft)
@@ -211,7 +217,7 @@ impl MainWindow {
             .child(field(TITLE, "Title", cx))
             .child(div().flex().gap(px(8.)).child(field(DATE, "Date", cx)).child(field(END_DATE, if editor.all_day { "Last day" } else { "End date" }, cx)))
             .when(!editor.all_day, |d| d.child(div().flex().gap(px(8.)).child(field(START, "Start · ↑ ↓ 15 min", cx)).child(field(END, "End · ↑ ↓ 15 min", cx))))
-            .child(crate::settings::toggle_row(&t, "All day", editor.all_day).focusable().tab_stop(true)
+            .child(crate::settings::toggle_row(&t, "All day", editor.all_day).child(icon("icons/all-day.svg", t.ink2, 16.)).focusable().tab_stop(true)
                 .focus(|s| s.border_1().border_color(t.accent))
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "space" {
@@ -240,7 +246,7 @@ impl MainWindow {
                 })));
         } else { sheet = sheet.child(mono(editor.calendars[editor.calendar].2.clone(), t.ink2)); }
         sheet = sheet
-            .child(crate::settings::toggle_row(&t, "Add Google Meet", editor.meet).focusable().tab_stop(true)
+            .child(crate::settings::toggle_row(&t, "Add Google Meet", editor.meet).child(icon("icons/meet.svg", t.ink2, 16.)).focusable().tab_stop(true)
                 .focus(|s| s.border_1().border_color(t.accent))
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "space" {

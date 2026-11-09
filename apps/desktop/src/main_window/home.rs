@@ -9,6 +9,7 @@ impl MainWindow {
             2 | 3 => {
                 self.release(false, cx);
                 self.clear_motion();
+                if section == 2 && !matches!(self.page, Page::Calendar) { self.week.scroll_to_now = true; }
                 self.page = if section == 2 { Page::Calendar } else { Page::Todo };
                 self.reload_tasks(cx);
             }
@@ -101,7 +102,7 @@ mod tests {
         view.read_with(cx, |v, _| {
             assert!(v.live.is_none());
             assert!(v.preferences_path.is_none());
-            assert_eq!(v.today.events.len(), 3);
+            assert_eq!(v.today.events.len(), 4);
             let day = chrono::Local::now().date_naive();
             for entry in &v.today.events {
                 let event = &entry.event;

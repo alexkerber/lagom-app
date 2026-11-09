@@ -85,16 +85,18 @@ fn n_opens_sheet_escape_discards_and_demo_return_updates_week_and_home(cx: &mut 
         assert!(v.today.events.iter().any(|e| e.event.title == "Fixture meeting"));
     });
     let day = chrono::Local::now().weekday().num_days_from_monday();
-    assert!(cx.debug_bounds(format!("week-event-{day}-3").leak()).is_some());
+    assert!(cx.debug_bounds(format!("week-event-{day}-4").leak()).is_some());
     cx.simulate_keystrokes("right left");
     assert_eq!(view.read_with(cx, |v, _| v.week.created.len()), 1);
-    assert!(cx.debug_bounds(format!("week-event-{day}-3").leak()).is_some());
+    assert!(cx.debug_bounds(format!("week-event-{day}-4").leak()).is_some());
 }
 
 #[gpui::test]
 fn empty_grid_drag_opens_snapped_sheet_and_event_click_only_opens_detail(cx: &mut TestAppContext) {
     keys(cx);
     let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    cx.run_until_parked();
+    view.update(cx, |v, cx| { v.week.scroll_to_now = false; v.week.scroll.set_offset(gpui::point(px(0.), px(-480.))); cx.notify(); });
     cx.run_until_parked();
     let day = chrono::Local::now().weekday().num_days_from_monday() as usize;
     let column = cx.debug_bounds(format!("week-day-{day}").leak()).unwrap();
@@ -194,4 +196,46 @@ fn worker_loss_releases_pending_sheet_and_keeps_the_draft(cx: &mut TestAppContex
     });
     cx.simulate_keystrokes("escape");
     assert!(view.read_with(cx, |v, _| v.week.editor.is_none()));
+}
+
+#[gpui::test]
+fn calendar_toolbar_and_n_share_guests_and_selected_day(cx: &mut TestAppContext) {
+    keys(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    view.update(cx, |v, cx| {
+        v.week.guests = vec!["Planning team <planning@example.com>".into(), "guest@example.test".into()];
+        v.calendar_date(NaiveDate::from_ymd_opt(2027, 1, 3).unwrap(), week::View::Day, cx);
+    });
+    cx.run_until_parked();
+    let at = cx.debug_bounds("New event").unwrap().center();
+    cx.simulate_click(at, Default::default());
+    cx.run_until_parked();
+    view.update(cx, |v, cx| {
+        let editor = v.week.editor.as_ref().unwrap();
+        assert_eq!(editor.fields[DATE].read(cx).text(), "2027-01-03");
+        assert_eq!(editor.fields[GUESTS].read(cx).text(), "Planning team <planning@example.com>, guest@example.test");
+        editor.fields[TITLE].update(cx, |f, cx| f.set_text("Fixture meeting", cx));
+        assert_eq!(v.event_draft(cx).unwrap().attendees, ["planning@example.com", "guest@example.test"]);
+    });
+    cx.simulate_keystrokes("escape n");
+    view.update(cx, |v, cx| {
+        let editor = v.week.editor.as_mut().unwrap();
+        editor.fields[TITLE].update(cx, |f, cx| f.set_text("Fixture meeting", cx));
+        editor.meet = true;
+        let draft = v.event_draft(cx).unwrap();
+        assert!(draft.meet);
+        assert_eq!(draft.attendees, ["planning@example.com", "guest@example.test"]);
+    });
+    cx.simulate_keystrokes("enter");
+    assert!(view.read_with(cx, |v, _| v.week.editor.is_none() && v.week.created.len() == 1));
+}
+
+#[test]
+fn named_calendar_guests_extract_addresses_without_accepting_invalid_tokens() {
+    use lagom_core::contacts::{recipient_address, split_recipients};
+    let guests = split_recipients("\"Planning, team\" <planning@example.test>, other@example.test");
+    assert_eq!(guests.iter().map(|g| recipient_address(g)).collect::<Vec<_>>(), [Some("planning@example.test".into()), Some("other@example.test".into())]);
+    for invalid in ["invalid", "Planning <>", "a@example.test\r\nBcc: b@example.test", "\"unbalanced <a@example.test>"] {
+        assert_eq!(recipient_address(invalid), None);
+    }
 }

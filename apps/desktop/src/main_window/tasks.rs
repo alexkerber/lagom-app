@@ -295,6 +295,7 @@ impl MainWindow {
         let empty = matches!(self.page, Page::Todo) && self.today.lists.is_empty();
         if empty {
             groups = groups.items_center().justify_center().gap(px(12.))
+                .child(icon("icons/todo.svg", t.ink2, 32.))
                 .child(div().debug_selector(|| "No lists yet".into()).text_color(t.ink2).child("No lists yet"))
                 .child(button(&t, "Add list", None).on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))));
         }
@@ -307,7 +308,7 @@ impl MainWindow {
                             Some(input) => d.child(input), None => d.child(list.name.clone()),
                         }))
                     .child(button(&t, "Add task", None).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
-                    .child(button(&t, "Rename", None).debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
+                    .child(icon_button(&t, "Rename", "icons/rename.svg", "Rename list").debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
                     .when(self.today.default != Some(list_id) && !list.google_default, |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
                         .on_click(cx.listener(move |this, _, _, cx| { this.save_task(TaskChange::DeleteList(list_id), cx); })))));
             group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
@@ -331,7 +332,6 @@ impl MainWindow {
                         }))
                     .when_some(task.due.clone(), |d, due| d.child(mono(due, t.ink2)))
                     .when(task.mail_message_id.is_some(), |d| d.child(button(&t, "Open mail", None)
-                        .child(icon("icons/link.svg", t.ink2, 14.))
                         .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
                     .child(button(&t, "Rename", None).on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation(); this.edit_task(Edit::Rename(id), window, cx);
@@ -353,7 +353,7 @@ impl MainWindow {
                     let allowed = self.today.task_access.contains(&id);
                     Some(div().flex().items_center().gap(px(8.)).debug_selector({ let id = id.clone(); move || format!("tasks-sync-{id}") })
                         .child(mono(account.email.clone(), t.ink2))
-                        .when(allowed, |d| d.child(mono(text.to_owned(), t.ink2)))
+                        .when(allowed, |d| d.child(icon(if matches!(state, Some(SyncState::Failed(_))) { "icons/sync-failed.svg" } else { "icons/synced.svg" }, t.ink2, 16.)).child(mono(text.to_owned(), t.ink2)))
                         .when(!allowed, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Allow Google Tasks access" }, None)
                             .debug_selector({ let id = id.clone(); move || format!("allow-tasks-{id}") })
                             .on_click(cx.listener(move |this, _, _, cx| {

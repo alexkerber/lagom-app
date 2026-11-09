@@ -53,6 +53,22 @@ enum Action {
     Fill(&'static str),
 }
 
+impl Action {
+    fn icon(&self) -> &'static str {
+        match self {
+            Self::Move(_) | Self::Fill(_) => "icons/move.svg",
+            Self::Run(run) => match run {
+                Run::NewTask => "icons/new-task.svg", Run::Done => "icons/done.svg", Run::Later(_) => "icons/later.svg",
+                Run::Delete => "icons/trash.svg", Run::Reply => "icons/reply.svg", Run::ReplyAll => "icons/reply-all.svg",
+                Run::Forward => "icons/forward.svg", Run::ToggleRead => "icons/mark-unread.svg",
+                Run::Compose => "icons/new-message.svg", Run::InsertFile => "icons/attachment.svg",
+                Run::Sync => "icons/sync.svg", Run::Settings => "icons/settings.svg", Run::AddAccount => "icons/add-account.svg",
+                Run::Open(_) => "icons/mail.svg",
+            },
+        }
+    }
+}
+
 struct Command {
     section: &'static str,
     label: &'static str,
@@ -336,7 +352,7 @@ impl Render for CommandPalette {
                     .rounded(px(radius::CONTROL))
                     .text_size(px(size::BODY))
                     .when(selected, |d| d.bg(t.sel))
-                    .child(div().size(px(6.)).rounded_full().when(selected, |d| d.bg(t.accent)))
+                    .child(crate::main_window::icon(item.action.icon(), if selected { t.ink } else { t.ink2 }, 16.))
                     .child(
                         div()
                             .flex_1()

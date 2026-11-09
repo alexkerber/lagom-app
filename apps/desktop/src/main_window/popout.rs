@@ -128,12 +128,12 @@ impl Render for MessageWindow {
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
             .child(
-                toolbar(&t)
+                toolbar(&t).flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     // macOS: the traffic lights sit in the toolbar, as in the main window's sidebar.
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
-                    .child(icon_button(&t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
+                    .child(icon_button(&t, "reply-all", "icons/reply-all.svg", "Reply all · ⇧R").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
                     .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
@@ -250,5 +250,25 @@ impl MainWindow {
             }
             !close
         });
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn icon_toolbar_keeps_every_action_inside_a_narrow_message_window(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+        view.update_in(cx, |v, window, cx| v.open_popout(window, cx));
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        let mut popup = gpui::VisualTestContext::from_window(popout.into(), cx);
+        popup.simulate_resize(gpui::size(px(420.), px(500.)));
+        popup.run_until_parked();
+        let bounds: Vec<_> = ["Reply", "reply-all", "Forward", "Later", "Done"].into_iter().map(|label| popup.debug_bounds(label).unwrap()).collect();
+        for (i, a) in bounds.iter().enumerate() {
+            assert!(a.left() >= px(0.) && a.right() <= px(420.), "action {i} must fit");
+            for b in bounds.iter().skip(i + 1) { assert!(!a.intersects(b), "toolbar actions must not overlap"); }
+        }
     }
 }

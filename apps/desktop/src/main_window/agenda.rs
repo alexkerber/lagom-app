@@ -42,6 +42,7 @@ impl MainWindow {
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
             controls = controls.child(div().flex().items_center().gap(px(8.))
+                .child(icon(match state { Some(SyncState::Failed(_)) => "icons/sync-failed.svg", Some(SyncState::Synced(_)) => "icons/synced.svg", _ => "icons/sync.svg" }, t.ink2, 16.))
                 .child(mono(account.email.clone(), t.ink2))
                 .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))
@@ -68,7 +69,7 @@ impl MainWindow {
             .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
         agenda = agenda.child(self.calendar_controls(cx));
         if has_calendar && self.today.events.is_empty() {
-            agenda = agenda.child(mono("No cached events for today", t.ink2));
+            agenda = agenda.child(div().flex().flex_col().items_center().gap(px(8.)).child(icon("icons/calendar.svg", t.ink2, 32.)).child(mono("No cached events for today", t.ink2)));
         }
         // shortcut: Today lays out every event, virtualize when large agendas need bounded layout.
         for (ix, entry) in self.today.events.iter().enumerate() {
@@ -78,7 +79,7 @@ impl MainWindow {
             };
             agenda = agenda.child(div().id(("agenda-event", ix)).debug_selector(move || format!("agenda-event-{ix}"))
                 .flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(radius::CONTROL)).bg(t.subtle)
-                .child(mono(format!("{when} · {}", entry.calendar), t.ink2))
+                .child(div().flex().items_center().gap(px(6.)).when(event.all_day, |d| d.child(icon("icons/all-day.svg", t.ink2, 16.))).child(mono(format!("{when} · {}", entry.calendar), t.ink2)))
                 .child(event.title.clone())
                 .children(event.location.clone().map(|location| mono(location, t.ink2)))
                 .children(event.join_url.clone().filter(|url| lagom_core::google::safe_join_url(url)).map(|url|
@@ -89,7 +90,7 @@ impl MainWindow {
 }
 
 pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::AgendaEvent> {
-    [(9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
+    let mut events: Vec<_> = [(9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
         let start = day.and_hms_opt(hour, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
         let end = start + chrono::Duration::minutes(45);
         Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(), calendar_id: "demo".into(),
@@ -99,7 +100,15 @@ pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::A
                 location: None, join_url: None, html_link: None,
             },
         })
-    }).collect()
+    }).collect();
+    events.push(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(), calendar_id: "demo".into(),
+        event: lagom_core::calendar::Event {
+            remote_id: "demo-all-day".into(), title: "Planning day".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
+            start_utc: day_start(day, &chrono::Local), end_utc: day_start(day.succ_opt().unwrap(), &chrono::Local), all_day: true,
+            location: None, join_url: None, html_link: None,
+        },
+    });
+    events
 }
 
 pub(super) fn day_start<T: chrono::TimeZone>(date: chrono::NaiveDate, zone: &T) -> i64 {

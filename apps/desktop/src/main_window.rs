@@ -439,6 +439,10 @@ impl MainWindow {
         match screen {
             "home" => this.show_section(0, window, cx),
             "calendar" => this.show_section(2, window, cx),
+            "calendar-month" => {
+                this.show_section(2, window, cx);
+                this.calendar_date(this.week.anchor, week::View::Month, cx);
+            }
             "new-event" if demo => {
                 this.show_section(2, window, cx);
                 this.new_event_default(window, cx);
@@ -1165,21 +1169,50 @@ pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Statefu
 
 /// A push button. `fill`: the colour of a primary button; `None` is a bordered one. Shortcuts
 /// live in the menus and the command palette, not on the button.
+pub(crate) fn action_icon(label: &str) -> &'static str {
+    match label {
+        "Reply" => "icons/reply.svg", "Reply all" => "icons/reply-all.svg", "Forward" => "icons/forward.svg",
+        "Later" => "icons/later.svg", "Done" => "icons/done.svg",
+        "New event" => "icons/new-event.svg", "New task" | "Add task" => "icons/new-task.svg",
+        "Day" => "icons/calendar-day.svg", "Week" => "icons/calendar-week.svg", "Month" => "icons/calendar-month.svg",
+        "Today" => "icons/calendar-today.svg", "Join" | "Join meeting" => "icons/meet.svg",
+        "Save event" | "Saving…" => "icons/save-event.svg", "Open in Google Calendar" => "icons/open-calendar.svg",
+        "Cancel" | "Close" | "Cancel sign-in" => "icons/close.svg",
+        "Add list" => "icons/new-list.svg", "Rename" | "Edit draft" => "icons/rename.svg",
+        "Delete list" => "icons/delete-list.svg", "Open mail" => "icons/linked-mail.svg",
+        "Delete" | "Delete all" | "Empty Trash" => "icons/trash.svg",
+        "Move" => "icons/move.svg", "Move to Inbox" => "icons/inbox.svg",
+        "Mark read" => "icons/mark-read.svg", "Mark unread" => "icons/mark-unread.svg",
+        "Undo" => "icons/undo.svg", "Send" | "Send again" => "icons/sent.svg",
+        "Load remote images" => "icons/images.svg", "Load more" => "icons/load-more.svg",
+        "Add account" => "icons/add-account.svg", "Connect" | "Connecting" => "icons/connect.svg",
+        "Remove" => "icons/remove-account.svg", "Keep" => "icons/keep-account.svg",
+        "Show your Google Calendar" => "icons/allow-calendar.svg", "Allow Google Tasks access" => "icons/allow-tasks.svg",
+        _ => "icons/plus.svg",
+    }
+}
+
 pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
-    let base = div()
-        .id(label)
-        .debug_selector(move || label.into())
-        .flex()
-        .items_center()
-        .h(px(28.))
-        .px(px(12.))
-        .rounded(px(radius::CONTROL))
-        .text_size(px(size::BASE))
-        .font_weight(FontWeight::MEDIUM)
-        .child(label);
+    let theme = *t;
+    let tip = match label {
+        "Reply" => "Reply · R", "Forward" => "Forward · F", "Later" => "Later · L", "Done" => "Done · E",
+        "New event" => "New event · N", "Today" => "Today · T", "New task" | "Add task" => "New task · T",
+        "Rename" => "Rename · Enter", "Cancel" | "Close" => "Close · Esc", "Open mail" => "Open linked mail",
+        _ => label,
+    };
+    let secondary = matches!(label, "Rename" | "Delete list" | "Open mail");
+    let ink = t.ink;
+    let base = div().id(label).debug_selector(move || label.into()).group("action")
+        .flex().items_center().justify_center().gap(px(6.)).h(px(28.)).flex_shrink_0()
+        .px(px(if secondary { 6. } else { 10. })).rounded(px(radius::CONTROL))
+        .text_size(px(size::BASE)).font_weight(FontWeight::MEDIUM)
+        .child(div().id("action-icon").flex().text_color(if fill.is_some() { t.accent_ink } else { t.ink2 })
+            .when(fill.is_none(), |d| d.group_hover("action", move |s| s.text_color(ink)).group_active("action", move |s| s.text_color(ink)))
+            .child(svg().path(action_icon(label)).size(px(16.)).flex_shrink_0()))
+        .when(!secondary, |d| d.child(if label == "Add task" { "New task" } else { label }))
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into());
     match fill {
-        // A translucent tint would replace the fill, so a filled button dims a little instead.
-        Some(bg) => base.bg(bg).text_color(t.accent_ink).active(|s| s.opacity(0.8)),
+        Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.border_1().border_color(t.line).bg(t.bg).text_color(t.ink), t, false),
     }
 }
@@ -1819,7 +1852,7 @@ impl MainWindow {
                             .flex_col()
                             .min_w(px(0.))
                             .child(div().font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
-                            .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}"))),
+                            .child(div().flex().items_center().gap(px(6.)).child(icon(self.sync_icon(), t.ink2, 16.)).child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}")))),
                     )
                     .child(if self.inbox.open_kind() == Some(Kind::Trash) {
                         let controls = div().flex().gap(px(8.));
@@ -1884,6 +1917,7 @@ impl MainWindow {
             let more = self.has_more();
             return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
                 .when(self.inbox.unread_only, |d| d
+                    .child(icon("icons/mail.svg", t.ink2, 32.))
                     .child(if more { "No unread messages in loaded mail" } else { "No unread messages" })
                     .when(more, |d| d.child(button(t, "Load more", None)
                         .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))))));
@@ -1911,7 +1945,7 @@ impl MainWindow {
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
-                    .child(icon_button(t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
+                    .child(icon_button(t, "reply-all", "icons/reply-all.svg", "Reply all · ⇧R").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
                     .child(button(t, "Forward", None).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .when(!trash, |d| d.child(
                         button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
@@ -1945,16 +1979,18 @@ fn toolbar(t: &Theme) -> Div {
 }
 
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
-fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
+pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
-    pressable(div().id(id), t, false)
+    let ink = t.ink;
+    pressable(div().id(id).group("action"), t, false)
         .debug_selector(move || id.into())
         .flex()
         .items_center()
         .justify_center()
         .size(px(28.))
         .rounded(px(radius::CONTROL))
-        .child(icon(path, t.ink2, 16.))
+        .child(div().id("action-icon").flex().text_color(t.ink2).group_hover("action", move |s| s.text_color(ink)).group_active("action", move |s| s.text_color(ink))
+            .child(svg().path(path).size(px(16.))))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
 }
 
@@ -2154,14 +2190,14 @@ impl Render for MainWindow {
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
         let panel = match &self.page {
             Page::Home | Page::Todo => self.tasks_view(cx),
-            Page::Calendar => self.week_view(cx),
+            Page::Calendar => self.week_view(window, cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
                 crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, &self.signatures, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
-            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
+            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_icon(), self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
             Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(list_height, cx)).child(self.reading_pane(cx)),
         };
         // Toasts sit bottom-centre in the reading pane, above its reply field, so they never cover

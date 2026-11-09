@@ -847,6 +847,15 @@ impl MainWindow {
         }
     }
 
+    pub(super) fn sync_icon(&self) -> &'static str {
+        match self.live.as_ref().and_then(|l| l.account().and_then(|a| l.sync.get(&a.id))) {
+            Some(SyncState::Failed(_) | SyncState::ReauthRequired) => "icons/sync-failed.svg",
+            Some(SyncState::Synced(_)) => "icons/synced.svg",
+            None if self.demo => "icons/synced.svg",
+            _ => "icons/sync.svg",
+        }
+    }
+
     /// "Personal · synced 10:12" for the current account, `None` in demo mode.
     pub(super) fn sync_line(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
@@ -1180,6 +1189,9 @@ mod tests {
             assert!(v.week.editor.is_none());
             assert!(v.today.events.iter().any(|e| e.event.remote_id == "created"));
         });
+        cx.run_until_parked();
+        // Keep the fixture's morning event visible independently of the current time.
+        view.update(cx, |v, cx| { v.week.scroll_to_now = false; v.week.scroll.set_offset(gpui::point(px(0.), px(-480.))); cx.notify(); });
         cx.run_until_parked();
         let day = chrono::Datelike::weekday(&chrono::Local::now()).num_days_from_monday();
         let event = cx.debug_bounds(format!("week-event-{day}-0").leak()).unwrap();
