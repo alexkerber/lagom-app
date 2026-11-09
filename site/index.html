@@ -10,8 +10,15 @@
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon-180.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@800&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="preload" href="fonts/hauora-sans-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/hauora-sans-800.woff2" as="font" type="font/woff2" crossorigin>
   <style>
+    /* Hauora Sans, OFL-1.1: see fonts/OFL.txt. */
+    @font-face { font-family: "Hauora Sans"; font-weight: 400; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-400.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 500; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-500.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 600; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-600.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 800; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-800.woff2") format("woff2"); }
     /* Concept D "Butik" tokens. */
     :root {
       --bg: #FFFFFF; --subtle: #F5F5F3; --raised: #FFFFFF; --ink: #111110; --ink2: #5F5F5A;
@@ -24,10 +31,10 @@
       }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
     a { color: inherit; }
     a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .display { font-family: "Inter Tight", Inter, sans-serif; font-weight: 800; }
+    .display { font-family: "Hauora Sans", system-ui, sans-serif; font-weight: 800; }
     .mono { font-family: "Geist Mono", ui-monospace, monospace; }
     .wrap { max-width: 1280px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px); }
 
