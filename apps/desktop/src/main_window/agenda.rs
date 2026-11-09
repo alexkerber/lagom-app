@@ -29,6 +29,9 @@ impl MainWindow {
         let mut agenda = div().id("today-agenda").w_full().flex_shrink_0().max_h(px(280.)).overflow_y_scroll()
             .flex().flex_col().gap(px(12.))
             .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
+        if self.today.calendar_accounts.is_empty() && self.today.events.is_empty() {
+            agenda = agenda.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
+        }
         for (ix, (account, allowed)) in self.today.calendar_accounts.iter().enumerate() {
             let id = account.id.clone();
             let state = self.today.calendar_sync.get(&id);
@@ -128,7 +131,7 @@ mod tests {
             remote_id: id.into(), title: id.into(), start: start.into(), end: end.into(),
             start_utc: chrono::DateTime::parse_from_rfc3339(start).unwrap().timestamp(),
             end_utc: chrono::DateTime::parse_from_rfc3339(end).unwrap().timestamp(),
-            all_day: false, location: None, join_url: None,
+            all_day: false, location: None, join_url: None, html_link: None,
         }).collect();
         store.replace_calendar_window(&account.id, i64::MIN, i64::MAX, &[(lagom_core::calendar::Calendar {
             remote_id: "primary".into(), name: "Fixture".into(), color: None, shown: true, writable: true,

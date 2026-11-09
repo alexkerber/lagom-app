@@ -812,7 +812,7 @@ mod tests {
         worker.store.save_authorized_account(&account, oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
         let snapshot = vec![(Calendar { remote_id: "fixture".into(), name: "Fixture".into(), color: None, shown: true, writable: true },
             vec![CalendarEvent { remote_id: "fixture".into(), title: "Fixture".into(), start: "2026-11-09".into(), end: "2026-11-10".into(),
-                start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None }])];
+                start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None, html_link: None }])];
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(snapshot.clone())));
         worker.start_calendar(account.clone(), 0, 3, async { panic!("duplicate fetch") });
         assert_eq!(worker.calendars.len(), 1);
@@ -1077,7 +1077,7 @@ mod tests {
             remote_id: "fixture".into(), name: "Fixture".into(), color: None, shown: true, writable: true,
         }, vec![lagom_core::calendar::Event {
             remote_id: "fixture".into(), title: "Fixture".into(), start: "2026-11-09".into(), end: "2026-11-10".into(),
-            start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None,
+            start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None, html_link: None,
         }])]).unwrap();
         worker.calendar_synced(&account, Err(Error::Network("offline")));
         assert_eq!(worker.store.account_scopes(&account.id).unwrap(), scopes);

@@ -5,7 +5,7 @@ fn calendar() -> Calendar {
 }
 fn event(id: &str, start: &str, end: &str, all_day: bool) -> Event {
     let stamp = |s: &str| mail_parser::DateTime::parse_rfc3339(&if all_day { format!("{s}T00:00:00Z") } else { s.into() }).unwrap().to_timestamp();
-    Event { remote_id: id.into(), title: id.into(), start: start.into(), end: end.into(), start_utc: stamp(start), end_utc: stamp(end), all_day, location: None, join_url: None }
+    Event { remote_id: id.into(), title: id.into(), start: start.into(), end: end.into(), start_utc: stamp(start), end_utc: stamp(end), all_day, location: None, join_url: None, html_link: None }
 }
 fn setup() -> (tempfile::TempDir, Store, Account) {
     let dir = tempfile::tempdir().unwrap();
@@ -40,7 +40,7 @@ fn calendar_migrates_v9_without_changing_mail_or_tasks() {
     store.set_account_scopes(&account.id, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
     store.save_account(&account).unwrap();
     assert!(crate::oauth::calendar_allowed(&store.account_scopes(&account.id).unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 11);
 }
 
 #[test]
@@ -129,4 +129,30 @@ fn replacement_uses_overlap_bounds_and_upserts_moved_events() {
     }
     assert!(store.replace_calendar_window(&account.id, 1, 1, &[(calendar(), vec![])]).is_err());
     assert_eq!(store.db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+}
+
+#[test]
+fn v10_upgrade_keeps_cached_events_and_roundtrips_optional_html_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calendar.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for schema in [include_str!("../schema_v1.sql"), include_str!("../schema_v2.sql"), include_str!("../schema_v3.sql"), include_str!("../schema_v4.sql"), include_str!("../schema_v5.sql"), include_str!("../schema_v6.sql"), include_str!("../schema_v7.sql"), include_str!("../schema_v8.sql"), include_str!("../schema_v9.sql"), include_str!("../schema_v10.sql")] { db.execute_batch(schema).unwrap(); }
+    db.execute_batch("INSERT INTO accounts(id,display_name,email,imap_host,imap_port,imap_security,imap_username,smtp_host,smtp_port,smtp_security,smtp_username)
+        VALUES('fixture','Fixture','fixture@example.test','localhost',993,'tls','fixture','localhost',465,'tls','fixture');
+        INSERT INTO calendars(id,account,remote_id,name,writable) VALUES(1,'fixture','primary','Fixture',1);
+        INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day) VALUES(1,'old','Kept','2026-11-09','2026-11-10',1,2,1);").unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let cached = store.today_events("2026-11-09", 0, 1).unwrap();
+    assert_eq!(cached[0].event.title, "Kept");
+    assert!(cached[0].event.html_link.is_none());
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    let mut linked = event("linked", "2026-11-09", "2026-11-10", true);
+    linked.html_link = Some("https://www.google.com/calendar/event?eid=fixture".into());
+    store.replace_calendar_window(&account.id, i64::MIN, i64::MAX, &[(calendar(), vec![linked.clone()])]).unwrap();
+    drop(store);
+    let store = Store::open(path).unwrap();
+    assert!(store.today_events("2026-11-09", 0, 1).unwrap().iter().any(|e| e.event == linked));
 }

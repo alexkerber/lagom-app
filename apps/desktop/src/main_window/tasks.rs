@@ -41,7 +41,8 @@ pub(super) struct Today {
     pub(super) events: Vec<lagom_core::calendar::AgendaEvent>,
     pub(super) calendar_accounts: Vec<(lagom_core::account::Account, bool)>,
     pub(super) calendar_sync: std::collections::HashMap<String, crate::sync::SyncState>,
-    tasks: Vec<LocalTask>,
+    pub(super) tasks: Vec<LocalTask>,
+    pub(super) unread: Vec<Mail>,
     selected: Option<i64>,
     editor: Option<(Edit, Entity<TextInput>)>,
     scroll: ScrollHandle,
@@ -55,7 +56,7 @@ enum Edit { Add(i64), Rename(i64), AddList, RenameList(i64) }
 actions!(tasks, [Next, Prev, Rename, Complete, Earlier, Later]);
 
 pub(super) fn bind_keys(cx: &mut App) {
-    let context = Some("Today && !TextInput");
+    let context = Some("Tasks && !TextInput");
     cx.bind_keys([
         KeyBinding::new("t", NewTask, context),
         KeyBinding::new("down", Next, context),
@@ -72,10 +73,16 @@ pub(super) fn bind_keys(cx: &mut App) {
 impl MainWindow {
     pub(super) fn reload_tasks(&mut self, cx: &mut Context<Self>) {
         self.reload_agenda(cx);
+        if matches!(self.page, Page::Home) { self.reload_unread(cx); }
+        if matches!(self.page, Page::Calendar) { self.reload_week(cx); }
         let Some(live) = &self.live else { return };
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let snapshot = (|| -> lagom_core::Result<_> {
-            Ok((live.store.task_lists()?, live.store.default_task_list()?, live.store.today_tasks(&day)?))
+            let lists = live.store.task_lists()?;
+            let tasks = if matches!(self.page, Page::Todo) {
+                lists.iter().map(|list| live.store.tasks(list.id, false)).collect::<lagom_core::Result<Vec<_>>>()?.into_iter().flatten().collect()
+            } else { live.store.today_tasks(&day)? };
+            Ok((lists, live.store.default_task_list()?, tasks))
         })();
         match snapshot {
             Ok((lists, default, mut tasks)) => {
@@ -92,10 +99,10 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn show_today(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.clear_motion();
-        self.page = Page::Today;
+        self.page = Page::Home;
         self.reload_tasks(cx);
         window.focus(&self.focus);
         cx.notify();
@@ -140,7 +147,7 @@ impl MainWindow {
                 return;
             }
         }
-        self.show_today(window, cx);
+        if !matches!(self.page, Page::Home | Page::Todo) { self.show_home(window, cx); }
         if let Some(list) = self.today.default { self.edit_task(Edit::Add(list), window, cx); }
     }
 
@@ -189,7 +196,7 @@ impl MainWindow {
         if let Some(task) = self.today.tasks.get(index) {
             let group = self.today.lists.iter().position(|l| l.id == task.list).unwrap_or(0);
             let empty = self.today.lists[..group].iter().filter(|l| !self.today.tasks.iter().any(|t| t.list == l.id)).count();
-            self.today.scroll.scroll_to_item(index + group + empty + 1);
+            self.today.scroll.scroll_to_item(index + group + empty + 1 + if matches!(self.page, Page::Home) { 2 } else { 0 });
         }
         cx.notify();
     }
@@ -237,9 +244,12 @@ impl MainWindow {
         let t = self.theme;
         // shortcut: Today lays out every open task, virtualize when large task lists need bounded layout.
         let mut groups = div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll).flex().flex_col().gap(px(4.));
+        if matches!(self.page, Page::Home) {
+            groups = groups.child(self.agenda_view(cx)).child(self.unread_view(cx).mt(px(16.)));
+        }
         for list in &self.today.lists {
             let list_id = list.id;
-            let mut group = div().id(("task-list", list_id as usize)).flex().flex_col().gap(px(4.)).mt(px(16.)).flex_shrink_0()
+            let mut group = div().id(("task-list", list_id as usize)).debug_selector(move || format!("task-list-{list_id}")).flex().flex_col().gap(px(4.)).mt(px(16.)).flex_shrink_0()
                 .child(div().flex().items_center().gap(px(8.))
                     .child(div().flex_1().font_weight(FontWeight::SEMIBOLD)
                         .map(|d| match self.task_input(Edit::RenameList(list_id)) {
@@ -252,7 +262,7 @@ impl MainWindow {
             group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
             let tasks: Vec<_> = self.today.tasks.iter().filter(|task| task.list == list_id).collect();
             groups = groups.child(group);
-            if tasks.is_empty() { groups = groups.child(mono("No open tasks for today", t.ink2).py(px(8.))); }
+            if tasks.is_empty() { groups = groups.child(mono(if matches!(self.page, Page::Todo) { "No open tasks" } else { "No open tasks for today" }, t.ink2).py(px(8.))); }
             for task in tasks {
                 let id = task.id;
                 let selected = self.today.selected == Some(id);
@@ -279,12 +289,10 @@ impl MainWindow {
         div().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
             .child(div().id("today").flex_1().min_h(px(0.)).flex().flex_col().gap(px(16.))
                 .child(div().flex().items_center().justify_between()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Today"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child(if matches!(self.page, Page::Todo) { "Todo" } else { "Home" }))
                     .child(button(&t, "Add list", None).on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
                 .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
-                .child(div().flex_1().min_h(px(0.)).flex().flex_col().gap(px(24.))
-                    .when(!self.today.calendar_accounts.is_empty() || !self.today.events.is_empty(), |d| d.child(self.agenda_view(cx)))
-                    .child(groups))
+                .child(groups)
                 .child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2)))
     }
 }

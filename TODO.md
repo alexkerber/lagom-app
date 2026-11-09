@@ -82,6 +82,8 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last section.
 
+- [x] Home / Mail / Calendar / Todo sidebar with ⌘1–4, Home as start page and newest unread Inbox mail, full open task lists in Todo, and read-only cached calendar week with all-day strip, overlapping blocks, week navigation, current-time line and event details. Google htmlLink persisted in schema v11; demo account renamed Personal. Fixture/headless coverage; native visual and live-provider acceptance remain unverified.
+
 - [x] Calendar slice b1: read-only Google agenda above local tasks in Today, with a quiet consent row. Explicit full desktop consent for mail/identity/calendar/tasks, actual granted scopes, schema v10, paged calendar/event fetch, two-minute background window refresh without blocking mail commands, cached events retained outside each replacement window, DST-safe day boundaries, all-day dates and meeting links. Fixture and headless regression coverage; live provider consent and visual layout remain unverified.
 - [x] Calendar review: a complete calendar list hides missing calendars from Today while retaining their cached events; fixture regression covers the fetch-to-store path and account isolation.
 - [ ] Microsoft calendar agenda in Today (slice c).

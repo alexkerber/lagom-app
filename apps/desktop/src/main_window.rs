@@ -24,15 +24,20 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
 
 pub fn bind_keys(cx: &mut App) {
     tasks::bind_keys(cx);
+    week::bind_keys(cx);
     let ctx = Some("MainWindow");
     // Plain keys type into a focused text field instead. The cmd keys stay: the overlay guard
     // hands them on, and a field handles ⌘Z itself because it sits deeper in the dispatch path.
-    let keys = Some("MainWindow && !TextInput && !Today");
+    let keys = Some("MainWindow && !TextInput && !Tasks && !Calendar");
     cx.bind_keys([
+        KeyBinding::new("secondary-1", ShowHome, ctx),
+        KeyBinding::new("secondary-2", ShowMail, ctx),
+        KeyBinding::new("secondary-3", ShowCalendar, ctx),
+        KeyBinding::new("secondary-4", ShowTodo, ctx),
         KeyBinding::new("j", SelectNext, keys),
         KeyBinding::new("down", SelectNext, keys),
         KeyBinding::new("k", SelectPrev, keys),
@@ -100,7 +105,7 @@ const LIST_PAD: f32 = 6.;
 const SIDEBAR_ROW: f32 = 28.;
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
-/// 600 pt tall keeps the sidebar's groups on screen.
+/// Compact windows scroll the sidebar groups beneath Search.
 pub const MIN_WINDOW: (f32, f32) = (970., 600.);
 
 mod panes;
@@ -161,16 +166,27 @@ mod conversation;
 mod live;
 mod tasks;
 mod agenda;
+mod week;
+mod home;
 pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
 pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
+const SECTIONS: [(&str, &str, &str); 4] = [
+    ("Home", "icons/home.svg", "⌘1"),
+    ("Mail", "icons/mail.svg", "⌘2"),
+    ("Calendar", "icons/calendar.svg", "⌘3"),
+    ("Todo", "icons/todo.svg", "⌘4"),
+];
+
 /// What fills the main panel.
 enum Page {
     Mail,
-    Today,
+    Home,
+    Calendar,
+    Todo,
     AddAccount(Entity<AddAccount>),
     /// Settings, with the account whose removal waits for a confirm.
     Settings(Option<String>),
@@ -255,12 +271,14 @@ pub struct MainWindow {
     live: Option<live::Live>,
     page: Page,
     today: tasks::Today,
+    week: week::Week,
     task_undo: Option<i64>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     confirm_empty_trash: bool,
     folder_name: Option<Entity<TextInput>>,
     folder_scroll: ScrollHandle,
+    sidebar_scroll: ScrollHandle,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -355,13 +373,15 @@ impl MainWindow {
             drafts: Vec::new(),
             sending: Vec::new(),
             live,
-            page: if demo { Page::Mail } else { Page::Today },
+            page: if demo && !screen.is_empty() { Page::Mail } else { Page::Home },
             today: tasks::Today::default(),
+            week: week::Week::default(),
             task_undo: None,
             all_folders: false,
             confirm_empty_trash: false,
             folder_name: None,
             folder_scroll: ScrollHandle::new(),
+            sidebar_scroll: ScrollHandle::new(),
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -502,6 +522,7 @@ impl MainWindow {
                     }
                     this.all_folders = true;
                     this.folder_scroll.scroll_to_bottom();
+                    this.sidebar_scroll.scroll_to_item(1);
                     this.inbox.create_folder(name)
                 }
             };
@@ -573,7 +594,7 @@ impl MainWindow {
                 let headers = m.map(|m| mail::reply_headers(&m.message_id, &m.thread_key));
                 let from = match self.live.as_ref().and_then(|l| l.account()) {
                     Some(a) => a.email.clone(),
-                    None => "Home · you@home.example".into(),
+                    None => "Personal · you@home.example".into(),
                 };
                 let compose = cx.new(|cx| Compose::new(&from, to, &subject, headers, window, cx));
                 if let Some(live) = &self.live {
@@ -1190,7 +1211,7 @@ impl MainWindow {
                         .size(px(8.))
                         .flex_shrink_0()
                         .rounded_full()
-                        .when(active, |d| d.bg(t.accent))
+                        .when(active, |d| d.bg(self.account_accent(ix)))
                         .when(!active, |d| d.border_1().border_color(t.ink2)),
                 )
                 .child(
@@ -1262,14 +1283,19 @@ impl MainWindow {
                     .child(icon("icons/search.svg", t.ink2, 14.))
                     .child(div().flex_1().child("Search")),
             )
-            .child(
-                div()
+            .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
+                .child(div()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
                     .flex_shrink_0()
-                    .child(nav("icons/done.svg", "Today", None, matches!(self.page, Page::Today))
-                        .on_click(cx.listener(|this, _, window, cx| this.show_today(window, cx))))
+                    .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
+                        let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
+                        nav(path, label, None, active).debug_selector(move || format!("section-{ix}"))
+                            .child(mono(shortcut, t.ink2))
+                            .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
+                    }))
+                    .child(heading("Mail").mt(px(12.)))
                     .child(
                         nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
@@ -1280,11 +1306,9 @@ impl MainWindow {
                     )
                     .child(nav("icons/sent.svg", "Sent", None, open_kind(Kind::Sent)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Sent, cx))))
                     .child(nav("icons/done.svg", "Done", None, open_kind(Kind::Done)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Done, cx))))
-                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Trash, cx)))),
-            )
-            .child(self.folder_group(heading("Folders"), cx))
-            .child(account_rows)
-            .child(div().flex_1())
+                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Trash, cx)))))
+                .child(self.folder_group(heading("Folders"), cx).flex_shrink_0().max_h(px(200.)))
+                .child(account_rows))
             .child(
                 pressable(div().id("settings"), t, in_settings)
                     .flex()
@@ -1992,7 +2016,9 @@ impl Render for MainWindow {
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
-            Page::Today => "Today".into(),
+            Page::Home => "Home".into(),
+            Page::Todo => "Todo".into(),
+            Page::Calendar => "Calendar".into(),
             Page::Settings(_) => "Settings".into(),
             Page::AddAccount(_) => "Add Account".into(),
         };
@@ -2003,14 +2029,15 @@ impl Render for MainWindow {
         let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none();
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         let panel = match &self.page {
-            Page::Today => self.tasks_view(cx),
+            Page::Home | Page::Todo => self.tasks_view(cx),
+            Page::Calendar => self.week_view(cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
                 crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
-            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
+            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
             Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(list_height, cx)).child(self.reading_pane(cx)),
         };
         // Toasts sit bottom-centre in the reading pane, above its reply field, so they never cover
@@ -2037,7 +2064,12 @@ impl Render for MainWindow {
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
         let tint = Rgba { a: 0.96, ..frost };
         div()
-            .key_context(if matches!(self.page, Page::Today) { "MainWindow Today" } else { "MainWindow" })
+            .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", _ => "MainWindow" })
+            .map(|d| Self::week_keys(d, cx))
+            .on_action(cx.listener(|this, _: &ShowHome, window, cx| this.show_section(0, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowMail, window, cx| this.show_section(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowCalendar, window, cx| this.show_section(2, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowTodo, window, cx| this.show_section(3, window, cx)))
             .map(|d| Self::task_keys(d, cx))
             // Mouse swipe: the root sees every move inside the window; `on_mouse_up_out` catches a
             // release outside it. shortcut: moves outside the window are not followed (the row waits
@@ -2048,7 +2080,7 @@ impl Render for MainWindow {
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Today) { this.new_task(window, cx); }))
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.new_task(window, cx); }))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
             .on_action(cx.listener(|this, _: &Done, _, cx| if !this.overlay_open(cx) { this.act(Move::Done, cx) }))
@@ -2063,12 +2095,12 @@ impl Render for MainWindow {
                 // The newest send in its Undo window goes first: its toast is the one on top.
                 let sent = this.sending.iter().rev().find(|c| c.read(cx).undoable()).cloned();
                 if !sent.is_some_and(|c| c.update(cx, |c, cx| c.undo(window, cx))) {
-                    if matches!(this.page, Page::Today) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
+                    if matches!(this.page, Page::Home | Page::Todo | Page::Calendar) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
                     this.undo(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
-                if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Today) { this.open_palette("", window, cx); }
+                if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.open_palette("", window, cx); }
             }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
@@ -3059,7 +3091,9 @@ mod dispatch {
             bind_keys(cx);
             crate::text_input::bind_keys(cx);
         });
-        cx.add_window_view(|window, cx| MainWindow::new(true, window, cx))
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        view.update(cx, |v, cx| v.open_box(None, cx));
+        (view, cx)
     }
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
@@ -3117,7 +3151,7 @@ mod dispatch {
         let (view, cx) = open(cx);
         view.update_in(cx, |v, window, cx| {
             v.act(Move::Done, cx);
-            v.show_today(window, cx);
+            v.show_home(window, cx);
         });
         let count = inbox_len(&view, cx);
         cx.simulate_keystrokes("secondary-z");

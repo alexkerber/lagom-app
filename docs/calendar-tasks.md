@@ -101,7 +101,7 @@ Each slice ships on its own. Local tasks commit directly through the UI store. N
 ## 6. Maintainer decisions
 
 Decided on **2026-11-09**:
-1. **Start screen:** a Today entry at the top of the sidebar opens Today with today's tasks. Today's events join it in slice b. Inbox stays as it is.
+1. **Start screen:** Home (⌘1) opens today's events, due/undated open tasks and the five newest unread Inbox messages across accounts. Mail (⌘2) opens Inbox; Calendar (⌘3) opens the cached week; Todo (⌘4) shows open tasks from every list, including future tasks. Mailboxes, Folders and Accounts remain below the top group. The sample account is Personal.
 2. **Lists:** provider lists appear unchanged under each account in slice b. Locally, create Work and Private only when no lists exist.
 3. **Mail → task:** `t` on a mail creates a task immediately in the default list, with title = subject and a link by account + Message-ID. Show an Undo toast. Choose the default list in Settings. A mail without Message-ID creates an unlinked task.
 4. **Deleting a list:** move its tasks to the default list. Delete an empty list immediately. The default list cannot be deleted.
@@ -122,3 +122,9 @@ Still open for later slices: Google sensitive-scope verification timing; accepti
 - apps/desktop/src/main_window.rs
 
 For b1, the Google desktop OAuth, CalendarList and events.list documentation was checked on 2026-11-09. Live provider consent remains untested. Quotas, Testing-mode limits and Microsoft cross-resource refresh remain unverified. Microsoft Graph still needs a resource-keyed token cache in slice c; b1 does not call Graph. The read-only calendar cache replaces overlapping events in fetched calendars atomically, preserving other windows and calendars. Fetches run independently of mail commands; local/pending events must also be preserved when editing lands.
+
+### Home and week view
+
+The read-only week starts on Monday in the system timezone. All-day dates stay in a separate strip; timed events use account accent tints and share horizontal space when they overlap. ‹ / › and the arrow keys move one week; Today or T returns to this week. The current-time line refreshes each minute. Event details show time, location and calendar, with validated HTTPS Join links and an optional Google Calendar link. Schema v11 preserves `htmlLink`; older cached events have no link until refreshed.
+
+Days outside the rolling now−7d / now+60d window show “Not synced this far”. Boundary dates may contain partial days because the provider window uses instants. Repeated DST hours share the same wall-clock row. Home and Calendar reuse the Google consent row. Todo reuses list creation, rename, deletion and task controls; completed/deleted tasks remain excluded. All tests use local fixtures or GPUI's headless test platform. Native layout, live consent and links in a real browser remain unverified; no GUI or screenshots were used for this change.

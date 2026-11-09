@@ -381,6 +381,7 @@ mod tests {
         if !SUPPORTED { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
+            v.open_box(None, cx);
             let id = v.inbox.current().unwrap();
             v.inbox.mail[id].html = Some("<p>Still visible</p>".into());
             v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark));
