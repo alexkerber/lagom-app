@@ -17,7 +17,8 @@ rm -rf "$build"
 ../../../scripts/build-apple.sh
 xcodegen generate --spec project.yml
 
-# The UTC minute as build number: always increasing, no file to bump.
+# The UTC minute as build number: increasing, no file to bump.
+# shortcut: two archives in the same minute share a number and App Store Connect rejects the second; use a counter if that starts to happen.
 number=$(date -u +%Y%m%d%H%M)
 xcodebuild -project Lagom.xcodeproj -scheme Lagom -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$archive" \
