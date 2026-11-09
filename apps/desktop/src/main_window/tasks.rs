@@ -41,6 +41,8 @@ pub(super) struct Today {
     pub(super) events: Vec<lagom_core::calendar::AgendaEvent>,
     pub(super) calendar_accounts: Vec<(lagom_core::account::Account, bool)>,
     pub(super) calendar_sync: std::collections::HashMap<String, crate::sync::SyncState>,
+    task_access: std::collections::HashSet<String>,
+    pub(super) task_sync: std::collections::HashMap<String, crate::sync::SyncState>,
     pub(super) tasks: Vec<LocalTask>,
     pub(super) unread: Vec<Mail>,
     selected: Option<i64>,
@@ -68,7 +70,7 @@ impl Today {
             }).collect();
         // shortcut: demo tasks are read-only samples, add in-memory editing when interactive task demos are needed.
         Self { lists: ["Personal", "Work"].into_iter().enumerate().map(|(i, name)| TaskList {
-            id: i as i64 + 1, account: None, remote_id: None, name: name.into(), position: i as i64,
+            id: i as i64 + 1, account: None, remote_id: None, name: name.into(), position: i as i64, google_default: false,
         }).collect(), default: Some(1), tasks, ..Default::default() }
     }
 }
@@ -110,15 +112,21 @@ impl MainWindow {
             return;
         };
         let snapshot = (|| -> lagom_core::Result<_> {
+            let mut access = std::collections::HashSet::new();
+            for (account, _) in &self.today.calendar_accounts {
+                if lagom_core::oauth::tasks_allowed(&live.store.account_scopes(&account.id)?) { access.insert(account.id.clone()); }
+            }
             let lists = live.store.task_lists()?;
             let tasks = if matches!(self.page, Page::Todo) {
                 lists.iter().map(|list| live.store.tasks(list.id, false)).collect::<lagom_core::Result<Vec<_>>>()?.into_iter().flatten().collect()
             } else { live.store.today_tasks(&day)? };
             let default = if lists.is_empty() { None } else { Some(live.store.default_task_list()?) };
-            Ok((lists, default, tasks))
+            Ok((lists, default, tasks, access))
         })();
         match snapshot {
-            Ok((lists, default, mut tasks)) => {
+            Ok((lists, default, mut tasks, access)) => {
+                self.today.task_access = access;
+                self.today.task_sync.retain(|id, _| self.today.calendar_accounts.iter().any(|(a, _)| a.id == *id));
                 tasks.sort_by_key(|task| (lists.iter().position(|l| l.id == task.list), task.position, task.id));
                 self.today.lists = lists;
                 self.today.default = default;
@@ -149,6 +157,10 @@ impl MainWindow {
         // shortcut: task writes can block the UI for 250 ms on locks; move off-thread if this budget becomes too large.
         match live.store.with_short_lock_wait(|store| change.apply(store)) {
             Ok(created) => {
+                let sync = live.store.accounts().unwrap_or_default().iter().any(|a|
+                    a.auth == lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google)
+                    && live.store.account_scopes(&a.id).is_ok_and(|s| lagom_core::oauth::tasks_allowed(&s)));
+                if sync { let _ = live.bridge.send(crate::sync::Cmd::TasksEdited); }
                 self.reload_tasks(cx);
                 if let Some(id) = created {
                     self.notify("Task created", cx);
@@ -296,7 +308,7 @@ impl MainWindow {
                         }))
                     .child(button(&t, "Add task", None).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
                     .child(button(&t, "Rename", None).debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
-                    .when(self.today.default != Some(list_id), |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
+                    .when(self.today.default != Some(list_id) && !list.google_default, |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
                         .on_click(cx.listener(move |this, _, _, cx| { this.save_task(TaskChange::DeleteList(list_id), cx); })))));
             group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
             let tasks: Vec<_> = self.today.tasks.iter().filter(|task| task.list == list_id).collect();
@@ -333,6 +345,27 @@ impl MainWindow {
                     .when(matches!(self.page, Page::Todo) && !empty, |d| d.child(button(&t, "Add list", None)
                         .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))))))
                 .when(matches!(self.page, Page::Todo), |d| d.children(self.task_input(Edit::AddList).map(|input| div().child(input))))
+                .when(matches!(self.page, Page::Todo), |d| d.children(self.today.calendar_accounts.iter().filter_map(|(account, _)| {
+                    let state = self.today.task_sync.get(&account.id);
+                    let text = task_sync_label(self.today.task_access.contains(&account.id), state)?;
+                    let id = account.id.clone();
+                    let signing_in = self.today.calendar_sync.get(&id) == Some(&crate::sync::SyncState::SigningIn);
+                    let allowed = self.today.task_access.contains(&id);
+                    Some(div().flex().items_center().gap(px(8.)).debug_selector({ let id = id.clone(); move || format!("tasks-sync-{id}") })
+                        .child(mono(account.email.clone(), t.ink2))
+                        .when(allowed, |d| d.child(mono(text.to_owned(), t.ink2)))
+                        .when(!allowed, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Allow Google Tasks access" }, None)
+                            .debug_selector({ let id = id.clone(); move || format!("allow-tasks-{id}") })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let cmd = if signing_in { crate::sync::Cmd::CancelSignIn } else { crate::sync::Cmd::AllowCalendar(id.clone()) };
+                                if let Some(live) = &this.live {
+                                    if live.bridge.send(cmd) {
+                                        this.today.calendar_sync.insert(id.clone(), if signing_in { crate::sync::SyncState::Synced(0) } else { crate::sync::SyncState::SigningIn });
+                                    } else { this.worker_gone(cx); }
+                                }
+                                cx.notify();
+                            })))))
+                })))
                 .child(groups)
                 .when((matches!(self.page, Page::Todo) && !empty) || !self.today.tasks.is_empty(), |d|
                     d.child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2).debug_selector(|| "task-hint".into()))))
@@ -384,5 +417,28 @@ mod tests {
         let at = cx.debug_bounds("Add list").unwrap().center();
         cx.simulate_click(at, Default::default());
         view.read_with(cx, |v, _| assert!(matches!(v.today.editor, Some((Edit::AddList, _)))));
+    }
+}
+
+fn task_sync_label(allowed: bool, state: Option<&crate::sync::SyncState>) -> Option<&str> {
+    if !allowed { return Some("Allow Google Tasks access"); }
+    match state {
+        Some(crate::sync::SyncState::Synced(_)) => Some("Synced with Google Tasks"),
+        Some(crate::sync::SyncState::Failed(error)) => Some(error.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod sync_status_tests {
+    use super::*;
+    use crate::sync::SyncState;
+
+    #[test]
+    fn tasks_status_never_claims_sync_before_success_or_after_scope_loss() {
+        assert_eq!(task_sync_label(true, None), None);
+        assert_eq!(task_sync_label(true, Some(&SyncState::Synced(1))), Some("Synced with Google Tasks"));
+        assert_eq!(task_sync_label(true, Some(&SyncState::Failed("offline".into()))), Some("offline"));
+        assert_eq!(task_sync_label(false, Some(&SyncState::Synced(1))), Some("Allow Google Tasks access"));
     }
 }
