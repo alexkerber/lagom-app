@@ -157,8 +157,8 @@ impl MainWindow {
             .debug_selector(move || format!("week-event-{day}-{ix}"))
             .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
-            .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).one_line().child(title))
-            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(mono(short_time(&entry.event), t.ink2).w_full().flex_shrink_0().one_line().debug_selector(|| "week-time".into())))
+            .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).whitespace_nowrap().text_ellipsis().child(title))
+            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(mono(short_time(&entry.event), t.ink2).w_full().flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into())))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.week.detail = Some(entry.clone());
                 window.focus(&this.focus);
@@ -207,16 +207,36 @@ impl MainWindow {
                     .map(|(ix, e)| self.event_block(e, event_title(&e.event), day, ix, cx).min_h(px(26.)))));
             let mut column = div().relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_color(t.line);
             if !synced {
-                column = column.child(mono("Not synced this far", t.ink2).p(px(8.)).debug_selector(move || format!("unsynced-day-{day}")));
+                column = column.child(mono("Not synced this far", t.ink2).absolute().top_0().p(px(8.)).debug_selector(move || format!("unsynced-day-{day}")));
             }
             for hour in 0..24 {
                 column = column.child(div().absolute().top(px(hour as f32 * HOUR)).w_full().h(px(1.)).bg(t.line));
             }
-            for block in layout(entries, date, &chrono::Local) {
-                column = column.child(self.event_block(&entries[block.event], event_title(&entries[block.event].event), day, block.event, cx).absolute()
-                    .top(px(block.start * HOUR / 60.)).h(px((block.end - block.start) * HOUR / 60.))
-                    .left(relative(block.lane as f32 / block.lanes as f32)).w(relative(1. / block.lanes as f32)));
+            // Events sit in normal flow, not absolutely positioned: GPUI shapes and truncates the text of an
+            // absolute child before it has a width, which cut titles to a few characters or to "…".
+            // Each overlap group is a row of lanes; within a lane a top margin places each event.
+            let blocks = layout(entries, date, &chrono::Local);
+            let mut events = div().w_full().flex().flex_col();
+            let (mut y, mut i) = (0., 0);
+            while i < blocks.len() {
+                let (top, lanes) = (blocks[i].start, blocks[i].lanes);
+                let (mut j, mut bottom) = (i, top);
+                while j < blocks.len() && (j == i || blocks[j].start < bottom) { bottom = f32::max(bottom, blocks[j].end); j += 1; }
+                let mut row = div().w_full().flex().flex_shrink_0().mt(px((top - y) * HOUR / 60.)).h(px((bottom - top) * HOUR / 60.));
+                for lane in 0..lanes {
+                    let mut col = div().flex_1().min_w(px(0.)).flex().flex_col();
+                    let mut at = top;
+                    for b in blocks[i..j].iter().filter(|b| b.lane == lane) {
+                        col = col.child(self.event_block(&entries[b.event], event_title(&entries[b.event].event), day, b.event, cx)
+                            .flex_shrink_0().mt(px((b.start - at) * HOUR / 60.)).h(px((b.end - b.start) * HOUR / 60.)));
+                        at = b.end;
+                    }
+                    row = row.child(col);
+                }
+                events = events.child(row);
+                (y, i) = (bottom, j);
             }
+            column = column.child(events);
             if date == today {
                 column = column.child(div().absolute().top(px((now.hour() as f32 + now.minute() as f32 / 60.) * HOUR))
                     .w_full().h(px(2.)).bg(t.accent).debug_selector(|| "current-time".into()));
