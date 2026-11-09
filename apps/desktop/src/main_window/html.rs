@@ -23,7 +23,7 @@ mod native;
 /// Whether this platform renders HTML mail.
 pub(super) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_links};
+use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_tags};
 
 fn css(c: Rgba) -> String {
     let ch = |v: f32| (v * 255.).round() as u8;
@@ -47,7 +47,7 @@ pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="color-scheme" content="{scheme}"><style>{base}{look}</style></head>{mail}"#,
         csp = csp(remote, if cfg!(target_os = "windows") { "http://lagom-cid.localhost" } else { "lagom-cid:" }),
-        mail = inert_links(html),
+        mail = inert_tags(html),
     )
 }
 
