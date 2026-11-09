@@ -69,6 +69,18 @@ PUNCH = {
 # C2: C with a lighter, softer shadow. A bigger key placed more overhead shortens
 # the dark band under the envelope; more fill lifts what remains.
 PUNCH["C2"] = dict(PUNCH["C"], key=2500, key_size=9.0, key_y=6.0, fill=640, glow_strength=3.7)
+# Swedish variants on C2: flag blue (#006AA7) and yellow (#FECC00). A pale or rose band
+# between them keeps the blend from turning green.
+GOLD_CORE = dict(glow=("#FFB000", "#FFE9A8"), ember="#FFC23A")
+PUNCH["SE1"] = dict(PUNCH["C2"], **GOLD_CORE,
+    plate=[(0.0, "#FECC00"), (0.22, "#F7D46A"), (0.45, "#CFE0EC"), (0.68, "#3F8BC9"), (1.0, "#005A9C")],
+    sheen_tint="#FFF6D8")
+PUNCH["SE2"] = dict(PUNCH["C2"], **GOLD_CORE,
+    plate=[(0.0, "#0E5FA6"), (0.5, "#0A579A"), (1.0, "#004A8A")],
+    sheen_tint="#D8E8FF", glow_strength=4.2, spill_strength=2.6)
+PUNCH["SE3"] = dict(PUNCH["C2"], **GOLD_CORE,
+    plate=[(0.0, "#FFCE1F"), (0.18, "#F6AE3E"), (0.40, "#D79A9A"), (0.66, "#3D6FB8"), (1.0, "#0B3F86")],
+    sheen_tint="#FFE8D8")
 P = dict(BASE, **PUNCH[VARIANT])
 
 
