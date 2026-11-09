@@ -82,7 +82,9 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last section.
 
-- [ ] Agenda next to the inbox: Google and Microsoft calendars.
+- [x] Calendar slice b1: read-only Google agenda above local tasks in Today, with a quiet consent row. Explicit full desktop consent for mail/identity/calendar/tasks, actual granted scopes, schema v10, paged calendar/event fetch, two-minute background window refresh without blocking mail commands, cached events retained outside each replacement window, DST-safe day boundaries, all-day dates and meeting links. Fixture and headless regression coverage; live provider consent and visual layout remain unverified.
+- [x] Calendar review: a complete calendar list hides missing calendars from Today while retaining their cached events; fixture regression covers the fetch-to-store path and account isolation.
+- [ ] Microsoft calendar agenda in Today (slice c).
 - [ ] Create a meeting from the app with Google Meet or Teams attached, without opening Gmail or Outlook. Zoom is outside v1 (2026-11-09).
 
 ## Tasks

@@ -1,5 +1,7 @@
 //! Local-first mail services. Blocking network and keychain calls belong on a worker.
 pub mod account;
+pub mod calendar;
+pub mod google;
 pub mod attachment;
 pub mod discovery;
 pub use discovery::{discover, Discovery, Preset};
@@ -31,6 +33,8 @@ pub enum Error {
     Rejected,
     #[error("sign in again")]
     ReauthRequired,
+    #[error("Allow calendar access")]
+    CalendarConsent,
     #[error("sign-in cancelled")]
     Cancelled,
     #[error("authentication rejected")]
