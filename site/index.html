@@ -27,24 +27,25 @@
       --accent: #111110;
     }
     * { box-sizing: border-box; }
-    html { overflow-x: hidden; }
-    body { margin: 0; overflow-x: hidden; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
     a { color: inherit; }
     a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
     img { display: block; max-width: 100%; height: auto; }
     .display { font-weight: 800; letter-spacing: -0.045em; }
     .mono { font-family: "Geist Mono", ui-monospace, monospace; }
+    /* clip, not hidden: iOS Safari still pans sideways to the icon that runs off the edge when only html and body hide overflow. */
+    .page { overflow-x: clip; }
     .wrap { max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 56px); }
 
     nav { position: relative; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 88px; }
     .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 700; letter-spacing: -0.05em; line-height: 1; }
     .brand img { border-radius: 22%; }
     .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
-    .links a { display: flex; align-items: center; height: 40px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
+    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
     .links a:hover { background: var(--card); }
 
     /* Hero: the icon is larger than its column and runs off the right edge. */
-    .hero { position: relative; display: grid; grid-template-columns: 1fr; align-items: center; min-height: min(86vh, 820px); padding: 48px 0 120px; }
+    .hero { position: relative; display: grid; grid-template-columns: 1fr; align-items: center; min-height: min(86vh, 820px); min-height: min(86svh, 820px); padding: 48px 0 120px; }
     .hero > * { min-width: 0; }
     .copy { position: relative; z-index: 2; display: flex; flex-direction: column; gap: 28px; max-width: 34rem; }
     h1 { margin: 0; font-size: clamp(88px, 13vw, 184px); line-height: 0.8; padding-bottom: 0.08em; }
@@ -62,7 +63,12 @@
     .spill { position: absolute; z-index: 1; top: 50%; right: max(-26vw, -340px); width: clamp(420px, 58vw, 860px); transform: translateY(-50%); pointer-events: none; }
     @media (max-width: 899px) {
       .hero { min-height: 0; padding-top: 24px; }
-      .spill { position: relative; top: auto; right: auto; width: 115%; margin: -24px -30% -24px auto; transform: none; }
+      .spill { position: relative; top: auto; right: auto; width: min(115%, 560px); margin: -24px -30% -24px auto; transform: none; }
+    }
+    /* One line of nav on the smallest phones; the footer still names the licence. */
+    @media (max-width: 400px) {
+      .links a { padding: 0 10px; }
+      .links a.licence { display: none; }
     }
 
     section { padding: clamp(80px, 12vw, 160px) 0 0; }
@@ -72,6 +78,8 @@
 
     /* Detail tiles: one crop of the real app each, at its natural size on a grey card. */
     .details { display: grid; grid-template-columns: 1fr; gap: 24px; }
+    /* Two columns from a folded-out iPhone Duo (669 pt) up: wide crops span both, the tall ones pair up. */
+    @media (min-width: 600px) and (max-width: 899px) { .details { grid-template-columns: 1fr 1fr; } .t1, .t5, .t6 { grid-column: span 2; } }
     @media (min-width: 900px) { .details { grid-template-columns: repeat(6, 1fr); } .t1 { grid-column: span 4; } .t2 { grid-column: span 2; grid-row: span 2; } .t3 { grid-column: span 4; } .t5 { grid-column: span 3; } .t6 { grid-column: span 3; } }
     .tile { display: flex; flex-direction: column; gap: 24px; padding: clamp(24px, 3vw, 40px); border-radius: 16px; background: var(--card); }
     .tile figure { flex: 1; display: flex; align-items: center; justify-content: center; margin: 0; }
@@ -87,7 +95,7 @@
     .about .word strong { color: var(--ink); font-weight: 600; }
     .about .source { font-size: 13px; }
     .principles { display: grid; grid-template-columns: 1fr; gap: 40px; padding-top: 8px; border-top: 1px solid var(--line); }
-    @media (min-width: 800px) { .principles { grid-template-columns: repeat(3, 1fr); } }
+    @media (min-width: 600px) { .principles { grid-template-columns: repeat(3, 1fr); } }
     .principles div { padding-top: 32px; }
     .principles h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
     .principles p { margin: 0; color: var(--ink2); }
@@ -100,6 +108,7 @@
   </style>
 </head>
 <body>
+  <div class="page">
   <div class="wrap">
     <nav aria-label="Site">
       <a class="brand" href="./">
@@ -108,7 +117,7 @@
       </a>
       <div class="links">
         <a href="https://github.com/alexkerber/lagom-app">Source</a>
-        <a href="https://github.com/alexkerber/lagom-app/blob/main/LICENSE">Licence</a>
+        <a class="licence" href="https://github.com/alexkerber/lagom-app/blob/main/LICENSE">Licence</a>
         <a href="https://github.com/alexkerber/lagom-app/commits/main">Changelog</a>
       </div>
     </nav>
@@ -189,6 +198,7 @@
       <span>Open source · MIT · github.com/alexkerber/lagom-app</span>
       <span class="sv"><svg class="flag" viewBox="0 0 16 10" aria-hidden="true"><rect width="16" height="10" fill="#006AA7"/><rect x="5" width="2" height="10" fill="#FECC00"/><rect y="4" width="16" height="2" fill="#FECC00"/></svg>Made in Sweden</span>
     </footer>
+  </div>
   </div>
 </body>
 </html>
