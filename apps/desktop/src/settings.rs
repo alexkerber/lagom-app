@@ -42,7 +42,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         list = list.child(row).children(signatures.get(&a.id).map(|input|
             div().debug_selector({ let id = a.id.clone(); move || format!("signature-{id}") })
                 .flex().flex_col().gap(px(6.)).py(px(12.)).child(mono("Signature", t.ink2))
-                .child(div().h(px(100.)).child(input.clone()))
+                .child(div().h(px(72.)).child(input.clone()))
         ));
     }
     let content = div()
