@@ -5,19 +5,20 @@
 use gpui::{rgb, Rgba, WindowAppearance};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// The Dusk profile, from the app icon: Swedish blue leads, gold marks Later.
 pub enum Accent {
-    FaluRed,
+    Dusk,
     PineGreen,
-    CatalogueBlue,
+    Gold,
 }
 
 impl Accent {
     /// (light, dark)
     fn hex(self) -> (u32, u32) {
         match self {
-            Accent::FaluRed => (0xB03A2E, 0xEB6A55),
+            Accent::Dusk => (0x2A5BB8, 0x8AB0F5),
             Accent::PineGreen => (0x1E6B4E, 0x4CC38A),
-            Accent::CatalogueBlue => (0x2F56A8, 0x86A8F0),
+            Accent::Gold => (0x94640A, 0xF5C22E),
         }
     }
 }
@@ -39,10 +40,10 @@ pub struct Theme {
     pub accent: Rgba,
     pub accent_ink: Rgba,
     // Behind a swiped row, by the move it commits to. `accent_ink` sits on all three:
-    // 5.6–7.0:1 in light (white), 7.1–8.9:1 in dark (near black).
+    // 5.1–7.0:1 in light (white), 7.5–10:1 in dark (near black).
     pub swipe_done: Rgba,
     pub swipe_later: Rgba,
-    /// Delete. A purer red than Falu red, so Delete never reads as the accent.
+    /// Delete. The only red in the app.
     pub danger: Rgba,
     /// While pressed. Translucent ink, so one token works on every surface. Native controls show
     /// no hover state, so there is no hover token.
@@ -64,7 +65,7 @@ impl Theme {
             accent: rgb(accent.hex().0),
             accent_ink: rgb(0xFFFFFF),
             swipe_done: rgb(Accent::PineGreen.hex().0),
-            swipe_later: rgb(Accent::CatalogueBlue.hex().0),
+            swipe_later: rgb(Accent::Gold.hex().0),
             danger: rgb(0xC62828),
             press: Rgba { a: 0.12, ..rgb(0x111110) },
         }
@@ -85,7 +86,7 @@ impl Theme {
             accent: rgb(accent.hex().1),
             accent_ink: rgb(0x1E1E1E),
             swipe_done: rgb(Accent::PineGreen.hex().1),
-            swipe_later: rgb(Accent::CatalogueBlue.hex().1),
+            swipe_later: rgb(Accent::Gold.hex().1),
             danger: rgb(0xF87171),
             press: Rgba { a: 0.14, ..rgb(0xF2F2EE) },
         }
@@ -119,6 +120,10 @@ impl Accent {
 fn system_selection() -> Option<u32> {
     static FILL: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     *FILL.get_or_init(|| {
+        // Demo mode shows the app's own accent, so screenshots look the same on every Mac.
+        if std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1") {
+            return None;
+        }
         #[cfg(target_os = "macos")]
         {
             // shortcut: a change in System Settings shows after a relaunch; observe
@@ -148,7 +153,7 @@ fn accent_fill(value: i32) -> Option<u32> {
     })
 }
 
-pub const DEFAULT_ACCENT: Accent = Accent::FaluRed;
+pub const DEFAULT_ACCENT: Accent = Accent::Dusk;
 
 pub mod font {
     pub const MONO: &str = "Geist Mono"; // key caps in the command palette
@@ -197,10 +202,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accents_match_concept_d() {
-        assert_eq!(Accent::FaluRed.hex(), (0xB03A2E, 0xEB6A55));
-        assert_eq!(Theme::dark(DEFAULT_ACCENT).accent, rgb(0xEB6A55));
-        assert_eq!(Theme::light(DEFAULT_ACCENT).accent, rgb(0xB03A2E));
+    fn accents_match_the_dusk_profile() {
+        assert_eq!(Accent::Dusk.hex(), (0x2A5BB8, 0x8AB0F5));
+        assert_eq!(Theme::dark(DEFAULT_ACCENT).accent, rgb(0x8AB0F5));
+        assert_eq!(Theme::light(DEFAULT_ACCENT).accent, rgb(0x2A5BB8));
+        assert!(contrast(0x111110, Accent::Gold.hex().1) >= 4.5 && contrast(0xFFFFFF, Accent::Gold.hex().0) >= 4.5);
     }
 
     fn luminance(c: u32) -> f32 {
@@ -218,7 +224,7 @@ mod tests {
 
     #[test]
     fn white_text_reads_on_every_selection_fill() {
-        let fills = (-1..=6).filter_map(accent_fill).chain([Accent::FaluRed, Accent::PineGreen, Accent::CatalogueBlue].map(Accent::selection));
+        let fills = (-1..=6).filter_map(accent_fill).chain([Accent::Dusk, Accent::PineGreen, Accent::Gold].map(Accent::selection));
         for fill in fills {
             assert!(contrast(0xFFFFFF, fill) >= 4.5, "white on {fill:06X}: {}", contrast(0xFFFFFF, fill));
         }
