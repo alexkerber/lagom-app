@@ -29,6 +29,7 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone)]
 pub enum Act {
     Archive,
+    Read(bool),
     Trash,
     Inbox,
     Move(i64),
@@ -293,7 +294,7 @@ impl Worker {
             }
             Cmd::MarkSeen(id) => {
                 // Either way the UI drops its override: the store says what the server has.
-                let _ = self.mark_seen(id).await;
+                let _ = self.mark_seen(id, true).await;
                 self.emit(Event::Seen(id));
                 self.emit(Event::Changed);
             }
@@ -508,6 +509,7 @@ impl Worker {
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {
         let id = self.resolve(id).await?;
+        if let Act::Read(seen) = act { return self.mark_seen(id, seen).await; }
         if let Act::Snooze(until) = act {
             return self.store.snooze(id, until);
         }
@@ -540,7 +542,7 @@ impl Worker {
                     session.move_message(store, id, folder).await?;
                     Some(folder)
                 }
-                Act::Snooze(_) => unreachable!("handled above"),
+                Act::Snooze(_) | Act::Read(_) => unreachable!("handled above"),
             };
             Ok(target)
         }
@@ -589,10 +591,10 @@ impl Worker {
         lagom_core::attachment::save_download(&part.filename, &result?)
     }
 
-    async fn mark_seen(&mut self, id: i64) -> lagom_core::Result<()> {
+    async fn mark_seen(&mut self, id: i64, seen: bool) -> lagom_core::Result<()> {
         let account = self.account(&self.store.message(id)?.summary.account)?;
         let mut session = self.take(&account).await?;
-        let result = session.mark_seen(&mut self.store, id, true).await;
+        let result = session.mark_seen(&mut self.store, id, seen).await;
         self.give(&account.id, session, &result);
         result
     }
@@ -954,6 +956,7 @@ mod tests {
                 let mut deleted = false;
                 let mut inbox = false;
                 let mut restored = false;
+                let mut read_flags = Vec::new();
                 loop {
                     let mut line = String::new();
                     if socket.read_line(&mut line).await.unwrap() == 0 { break; }
@@ -967,6 +970,8 @@ mod tests {
                         }
                         "UID STORE 4 -FLAGS.SILENT (\\Deleted)" => String::new(),
                         "UID MOVE 4 \"INBOX\"" => { restored = true; String::new() }
+                        "UID STORE 8 +FLAGS.SILENT (\\Seen)" => { read_flags.push(true); String::new() }
+                        "UID STORE 8 -FLAGS.SILENT (\\Seen)" => { read_flags.push(false); String::new() }
                         "UID FETCH 8 (UID FLAGS)" => "* 1 FETCH (UID 8 FLAGS ())\r\n".into(),
                         "UID FETCH 5 (UID FLAGS)" => "* 1 FETCH (UID 5 FLAGS ())\r\n".into(),
                         "UID SEARCH ALL" => if inbox { "* SEARCH 8\r\n".into() } else if deleted { "* SEARCH\r\n".into() } else { "* SEARCH 5\r\n".into() },
@@ -990,6 +995,7 @@ mod tests {
                 }
                 assert_eq!(deleted, !reject);
                 assert_eq!(restored, !reject);
+                assert_eq!(read_flags, if reject { vec![] } else { vec![true, false] });
             });
             let path = std::env::temp_dir().join(format!("lagom-empty-trash-{}-{}.db", std::process::id(), account.id));
             let mut store = Store::open(&path).unwrap();
@@ -1011,6 +1017,13 @@ mod tests {
                 assert!(matches!(out.recv().await, Some(Event::Changed)));
                 assert_eq!(worker.store.known_uids(inbox).unwrap(), [8]);
                 assert!(worker.store.message(restore).is_err());
+                let id = worker.store.list_messages(inbox, now(), 1, 0).unwrap()[0].id;
+                for seen in [true, false] {
+                    worker.quick(Cmd::Op { op: 43, id, act: Act::Read(seen) }).await;
+                    assert!(matches!(out.recv().await, Some(Event::Op { op: 43, error: None })));
+                    assert!(matches!(out.recv().await, Some(Event::Changed)));
+                    assert_eq!(worker.store.message(id).unwrap().summary.seen, seen);
+                }
             }
             worker.quick(Cmd::EmptyTrash { op: 42, folder }).await;
             let Event::Op { op, error } = out.recv().await.unwrap() else { panic!("missing completion") };

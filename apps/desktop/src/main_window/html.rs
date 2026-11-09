@@ -181,7 +181,7 @@ impl MainWindow {
     /// so the web view hides while one is open.
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
-        let want = self.inbox.current().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
+        let want = self.inbox.current().filter(|&id| matches!(self.page, Page::Mail) && !empty && !self.inbox.multi() && self.inbox.is_selected(id) && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
         let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
         self.web.frame(want, &self.theme, overlay, window, cx);
         let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());

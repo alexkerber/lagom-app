@@ -7,6 +7,7 @@ use super::*;
 enum Op {
     /// A move of this row (id in `Inbox::mail`). On failure the row comes back.
     Move(usize),
+    Read(usize),
     /// Undo of a move: on failure only a message.
     Undo,
     EmptyTrash(String),
@@ -372,6 +373,10 @@ impl MainWindow {
                             self.folder_failed(&account, &name);
                             self.notify(format!("Could not create folder: {e}"), cx);
                         }
+                        (Op::Read(id), Some(e)) => {
+                            self.inbox.revert(id);
+                            self.notify(format!("Could not change read status: {e}"), cx);
+                        }
                         (Op::Move(id), Some(e)) => {
                             self.inbox.back(id);
                             if let Some((what, id, ix)) = self.inbox.revert(id) {
@@ -513,6 +518,7 @@ impl MainWindow {
                         self.come_back(what, id, ix, false, cx);
                     }
                 }
+                Op::Read(id) => { self.inbox.revert(id); }
                 Op::Undo | Op::EmptyTrash(_) => {}
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
@@ -521,11 +527,19 @@ impl MainWindow {
     }
 
     /// The worker half of an optimistic move.
-    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) {
-        let Some(store) = self.inbox.mail[id].store else { return };
-        let Some(live) = &mut self.live else { return };
+    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) -> bool {
+        let Some(store) = self.inbox.mail[id].store else { return true };
+        let Some(live) = &mut self.live else { return true };
+        if let Move::Read(seen) = what {
+            live.seen.remove(&store);
+            let op = live.op(Op::Read(id));
+            let sent = live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) });
+            if !sent { self.worker_gone(cx); }
+            return sent;
+        }
         let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store).map(mail::Place::Folder);
         let (act, target) = match what {
+            Move::Read(_) => unreachable!("handled above"),
             Move::Inbox => {
                 let inbox = live.account().and_then(|a| live.store.folders(&a.id, now()).ok())
                     .and_then(|fs| fs.into_iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox));
@@ -545,9 +559,9 @@ impl MainWindow {
         self.inbox.left(id, target);
         self.inbox.mail[id].snoozed_until = match act { Act::Snooze(until) => until, _ => None };
         let op = live.op(Op::Move(id));
-        if !live.bridge.send(Cmd::Op { op, id: store, act }) {
-            self.worker_gone(cx);
-        }
+        let sent = live.bridge.send(Cmd::Op { op, id: store, act });
+        if !sent { self.worker_gone(cx); }
+        sent
     }
 
     /// Undo on the server: the message goes back to the folder it was in, or off Later.
@@ -556,8 +570,17 @@ impl MainWindow {
         if self.live.is_none() {
             return;
         }
+        if matches!(what, Move::Read(_)) {
+            let seen = !self.inbox.mail[id].unread;
+            let live = self.live.as_mut().unwrap();
+            live.seen.remove(&store);
+            let op = live.op(Op::Undo);
+            if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) }) { self.worker_gone(cx); }
+            return;
+        }
         let back = self.inbox.back(id);
         let act = match what {
+            Move::Read(_) => unreachable!("handled above"),
             Move::Later => Act::Snooze(self.inbox.mail[id].snoozed_until),
             Move::Inbox | Move::Done | Move::Delete | Move::Folder(_) => match back {
                 mail::Place::Folder(id) => Act::Move(id),
@@ -590,7 +613,7 @@ impl MainWindow {
     /// Before a frame: the selected message's body comes from the store once, and opening a
     /// message marks it read. One indexed row read, only when the selection changed.
     pub(super) fn open_current(&mut self, mark_read: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.inbox.current() else {
+        let Some(id) = self.inbox.current().filter(|&id| !self.inbox.multi() && self.inbox.is_selected(id)) else {
             self.reading_thread = None;
             self.reading_members.clear();
             self.expanded.clear();
@@ -653,7 +676,8 @@ impl MainWindow {
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
         }
-        if mark_read && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
+        // Reading a filtered list must not consume the next unread row on every reload.
+        if mark_read && !self.inbox.unread_only && !self.inbox.keep_unread.contains(&id) && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
             self.inbox.mail[id].unread = false;
             if let Some(f) = self.inbox.open.filter(|&f| self.inbox.folders[f].store == match self.inbox.mail[id].folder { mail::Place::Folder(id) => Some(id), _ => None }) {
                 self.inbox.folders[f].unread = self.inbox.folders[f].unread.saturating_sub(1);
@@ -665,14 +689,20 @@ impl MainWindow {
         }
     }
 
+    pub(super) fn has_more(&self) -> bool {
+        let loaded = if self.inbox.group { self.inbox.members.len() } else { self.inbox.raw_list().len() };
+        self.live.as_ref().is_some_and(|live| loaded as u32 >= live.limit)
+    }
+
+    pub(super) fn load_more(&mut self, cx: &mut Context<Self>) {
+        if !self.has_more() { return; }
+        if let Some(live) = &mut self.live { live.limit += PAGE; }
+        self.reload(cx);
+    }
+
     /// Reads the next page when the selection nears the end of what is loaded.
     pub(super) fn near_end(&mut self, cx: &mut Context<Self>) {
-        let Some(live) = &mut self.live else { return };
-        let len = self.inbox.list().len();
-        if len as u32 >= live.limit && self.inbox.selected + 20 >= len {
-            live.limit += PAGE;
-            self.reload(cx);
-        }
+        if self.inbox.selected + 20 >= self.inbox.list().len() { self.load_more(cx); }
     }
 
     pub(super) fn emptying_trash(&self) -> bool {
@@ -986,6 +1016,106 @@ mod tests {
         }));
         view.update(cx, |v, _| v.live = Some(fixture_live(store, bridge)));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn unread_pages_remain_reachable_after_filter_hides_loaded_rows(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=205 {
+                let mut m = incoming(v, uid);
+                m.seen = uid > 2;
+                m.subject = format!("Message {uid}");
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message { summary: m, ..Default::default() }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            assert!(v.inbox.list().is_empty());
+            assert!(v.has_more());
+        });
+        cx.run_until_parked();
+        let at = cx.debug_bounds("Load more").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.list().len(), 2);
+            assert!(!v.has_more());
+            assert!(v.inbox.list().iter().all(|&id| v.inbox.mail[id].unread));
+        });
+    }
+
+    #[gpui::test]
+    fn multi_selection_queues_actions_and_one_undo_for_all_rows(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.open_current(true, cx);
+            assert!(v.reading_members.is_empty());
+            assert!(v.inbox.selected_members().iter().all(|&id| v.inbox.mail[id].unread));
+        });
+        assert!(rx.try_recv().is_err(), "the summary must not load or mark one message read");
+        view.update(cx, |v, cx| v.act(Move::Done, cx));
+        let moved = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Archive, .. } => id,
+            _ => panic!("expected archive"),
+        }).collect::<Vec<_>>();
+        assert_eq!(moved.len(), 3);
+        assert!(view.read_with(cx, |v, _| v.inbox.list().is_empty()));
+        view.update(cx, |v, cx| v.undo(cx));
+        let restored = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Move(_), .. } => id,
+            _ => panic!("expected restore"),
+        }).collect::<Vec<_>>();
+        assert_eq!(restored, moved);
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.list().len()), 3);
+        assert!(view.read_with(cx, |v, _| v.inbox.history.is_empty() && v.inbox.batches.is_empty()));
+    }
+
+    #[gpui::test]
+    fn manual_read_flags_undo_failure_and_stopped_worker(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let ids = view.update(cx, |v, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.inbox.mail[1].unread = false;
+            v.toggle_read(cx);
+            assert!(v.inbox.mail.iter().all(|m| !m.unread));
+            v.inbox.mail.iter().map(|m| m.store.unwrap()).collect::<Vec<_>>()
+        });
+        let marked = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Read(true), .. } => id,
+            _ => panic!("expected mark read"),
+        }).collect::<Vec<_>>();
+        assert_eq!(marked, [ids[0], ids[2]]);
+        view.update(cx, |v, cx| v.undo(cx));
+        let restored = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Read(false), .. } => id,
+            _ => panic!("expected mark unread"),
+        }).collect::<Vec<_>>();
+        assert_eq!(restored, marked);
+        view.update_in(cx, |v, window, cx| {
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            let commands = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            let Cmd::Op { op, .. } = commands[0] else { panic!("expected operation") };
+            v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            assert!(v.inbox.mail[0].unread);
+            assert!(!v.inbox.mail[2].unread);
+            v.undo(cx);
+            assert!(v.inbox.mail[2].unread);
+        });
+        drop(rx);
+        view.update(cx, |v, cx| {
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            assert!(v.inbox.mail[0].unread && v.inbox.mail[2].unread);
+            assert!(!v.inbox.mail[1].unread);
+        });
     }
 
     #[gpui::test]
