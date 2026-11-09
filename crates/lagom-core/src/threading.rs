@@ -1,4 +1,4 @@
-use crate::{store::{MessageSummary, Store, SUMMARY_COLUMNS, summary_row}, Result};
+use crate::{store::{MessageSummary, Store, SUMMARY_COLUMNS, VISIBLE_SUMMARY_COLUMNS, summary_row}, Result};
 use rusqlite::{params, OptionalExtension};
 use std::collections::BTreeSet;
 
@@ -59,7 +59,7 @@ impl Store {
     }
 
     pub fn thread_messages(&self, account: &str, thread: &str) -> Result<Vec<MessageSummary>> {
-        let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE account=?1 AND thread_id=?2 ORDER BY date,id"))?;
+        let mut stmt = self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages m WHERE account=?1 AND thread_id=?2 ORDER BY date,id"))?;
         let rows = stmt.query_map(params![account, thread], summary_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -74,7 +74,7 @@ impl Store {
 
 fn conversation_sql(folder: Option<i64>) -> String {
     let (index, thread_index, scope) = if folder.is_some() {
-        ("messages_folder_date", "messages_thread_folder", "m.folder=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)")
+        ("messages_visible_folder_date", "messages_visible_thread_folder", "coalesce(m.move_target,m.folder)=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)")
     } else {
         ("messages_later_date", "messages_thread", "m.snoozed_until>?3")
     };
@@ -82,7 +82,7 @@ fn conversation_sql(folder: Option<i64>) -> String {
     format!("WITH page AS (
         SELECT DISTINCT m.thread_id FROM messages m INDEXED BY {index} WHERE m.account=?1 AND {scope}
         ORDER BY m.date DESC,m.id DESC LIMIT ?4)
-        SELECT {SUMMARY_COLUMNS} FROM page CROSS JOIN messages m INDEXED BY {thread_index} ON m.account=?1 AND m.thread_id=page.thread_id
+        SELECT {VISIBLE_SUMMARY_COLUMNS} FROM page CROSS JOIN messages m INDEXED BY {thread_index} ON m.account=?1 AND m.thread_id=page.thread_id
         WHERE {scope} ORDER BY m.date DESC,m.id DESC")
 }
 

@@ -84,7 +84,7 @@ pub fn merge(folders: &mut Vec<Folder>, server: &[lagom_core::store::Folder]) {
     }
     for s in server {
         let kind = match s.role {
-            Role::Inbox => continue,
+            Role::Inbox | Role::Drafts => continue,
             Role::Sent => Kind::Sent,
             Role::Archive => Kind::Done,
             Role::Trash => Kind::Trash,
@@ -188,7 +188,7 @@ mod tests {
         use lagom_core::store::{Folder as F, FolderRole as R};
         let f = |id, name: &str, role, unread| F { id, account: "a".into(), name: name.into(), delimiter: Some("/".into()), role, uidvalidity: None, uidnext: None, last_uid: 0, highest_modseq: None, unread };
         let mut folders = vec![Folder { kind: Kind::Later, ..Folder::new("Later", None, &[]) }, Folder::new("Taxes", None, &[])];
-        merge(&mut folders, &[f(1, "INBOX", R::Inbox, 4), f(2, "Archive", R::Archive, 0), f(3, "Travel", R::Other, 0), f(4, "Travel/Trains", R::Other, 2), f(5, "Taxes", R::Other, 0)]);
+        merge(&mut folders, &[f(1, "INBOX", R::Inbox, 4), f(2, "Archive", R::Archive, 0), f(3, "Travel", R::Other, 0), f(4, "Travel/Trains", R::Other, 2), f(5, "Taxes", R::Other, 0), f(6, "Unsent", R::Drafts, 0)]);
         let names: Vec<_> = folders.iter().map(|x| (x.name.as_str(), x.kind, x.parent)).collect();
         // INBOX stays out; the local "Taxes" is adopted, not doubled; Trains sits under Travel.
         assert_eq!(names, [("Later", Kind::Later, None), ("Taxes", Kind::Custom, None), ("Archive", Kind::Done, None), ("Travel", Kind::Custom, None), ("Trains", Kind::Custom, Some(3))]);

@@ -299,12 +299,12 @@ impl AddAccount {
         }
     }
 
-    /// 1–5 pick a provider; ⌘↵ connects; Esc goes back.
+    /// 1–5 pick a provider; the submit shortcut connects; Esc goes back.
     fn on_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &e.keystroke;
         match k.key.as_str() {
             "escape" => self.back(window, cx),
-            "enter" if k.modifiers.platform => self.connect(cx),
+            "enter" if crate::shortcuts::submit().matches(k) => self.connect(cx),
             n if self.state == State::Pick && !k.modifiers.platform => {
                 let Some(p) = n.parse::<usize>().ok().and_then(|i| Provider::ALL.get(i.wrapping_sub(1))) else { return };
                 self.pick(*p, window, cx);
@@ -351,19 +351,19 @@ impl AddAccount {
             for s in [Security::Tls, Security::StartTls, Security::Plain] {
                 let on = s == current;
                 seg = seg.child(
-                    pressable(div().id(SharedString::from(format!("sec-{imap}-{}", security_label(s)))), t, on)
+                    button(t, security_label(s), None).id(SharedString::from(format!("sec-{imap}-{}", security_label(s))))
+                        .debug_selector(move || format!("sec-{imap}-{}", security_label(s)))
                         .h(px(26.))
                         .px(px(10.))
-                        .flex()
-                        .items_center()
+                        .border_0()
+                        .bg(t.subtle)
                         .rounded(px(6.))
                         .when(on, |d| d.bg(t.raised).font_weight(FontWeight::SEMIBOLD))
                         .when(!on, |d| d.text_color(t.ink2))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if imap { this.imap_security = s } else { this.smtp_security = s }
                             cx.notify();
-                        }))
-                        .child(security_label(s)),
+                        })),
                 );
             }
             seg
@@ -510,6 +510,29 @@ mod tests {
             smtp_port: "3025".into(),
             smtp_security: Security::Plain,
         }
+    }
+
+    #[gpui::test]
+    fn account_controls_render_icons_and_submit_validates_without_a_worker(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::text_input::bind_keys);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = AddAccount::new(true, window, cx);
+            view.pick(Provider::Other, window, cx);
+            view
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        for (label, path) in [("Connect", "connect"), ("sec-false-STARTTLS", "access"), ("sec-false-None", "close")] {
+            let control = cx.debug_bounds(label).unwrap();
+            let glyph = cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
+            assert_eq!(glyph.size, gpui::size(px(16.), px(16.)));
+            assert!(control.contains(&glyph.center()), "{label}");
+        }
+        let plain = cx.debug_bounds("sec-false-None").unwrap().center();
+        cx.simulate_click(plain, Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.smtp_security), Security::Plain);
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
+        assert!(view.read_with(cx, |v, _| matches!(&v.state, State::Failed(error) if error == "Enter your full email address.")));
     }
 
     #[test]

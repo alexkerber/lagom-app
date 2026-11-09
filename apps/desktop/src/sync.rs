@@ -170,7 +170,7 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
             return;
         }
     };
-    if let Err(error) = store.recover_outbox() {
+    if let Err(error) = store.recover_outbox().and_then(|_| store.recover_moves()) {
         let _ = events.send(Event::Sync(String::new(), SyncState::Failed(error.to_string())));
         return;
     }
@@ -381,7 +381,10 @@ impl Worker {
                 }));
             }
             Cmd::Op { op, id, act } => {
-                let error = self.op(id, act).await.err().map(|e| e.to_string());
+                let mut error = self.op(id, act).await.err().map(|e| e.to_string());
+                if let Some(error) = &mut error {
+                    if let Err(rollback) = self.store.cancel_move(id) { error.push_str(&format!("; local rollback failed: {rollback}")); }
+                }
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
             }
@@ -509,8 +512,10 @@ impl Worker {
     }
 
     /// README: a session that saw an error may hold a half-read response; never reuse it.
-    fn give<T>(&mut self, account: &str, session: ImapSync, result: &lagom_core::Result<T>) {
-        if result.is_ok() {
+    fn give<T>(&mut self, account: &str, mut session: ImapSync, result: &lagom_core::Result<T>) {
+        if let Some(error) = session.take_refresh_error() {
+            self.emit(Event::Sync(account.into(), SyncState::Failed(format!("Mail moved; refresh failed: {error}"))));
+        } else if result.is_ok() {
             self.sessions.insert(account.into(), session);
         }
     }
@@ -772,10 +777,11 @@ impl Worker {
         let listed = session.list_folders(&self.store).await;
         self.give(&account.id, session, &listed);
         let mut folders = listed?;
+        self.emit(Event::Changed);
         // INBOX first, so the list fills where the user looks.
         folders.sort_by_key(|f| f.role != FolderRole::Inbox);
         if inbox_only {
-            folders.truncate(1);
+            folders.retain(|f| f.role == FolderRole::Inbox);
         }
         // One bad folder must not keep the others from syncing.
         let mut first = None;
@@ -888,7 +894,10 @@ impl Worker {
         if let Some(target) = result?.filter(|_| !message.message_id.is_empty()) {
             follow(&mut self.moved, id, message.folder, &message.message_id, target);
         }
-        notified
+        if let Err(error) = notified {
+            self.emit(Event::Sync(account.id, SyncState::Failed(error.to_string())));
+        }
+        Ok(())
     }
 
     async fn create_folder(&mut self, account: &str, name: &str) -> lagom_core::Result<()> {

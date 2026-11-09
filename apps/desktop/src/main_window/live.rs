@@ -636,6 +636,7 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
         live.move_target = None;
+        let rollback = live.store.with_short_lock_wait(Store::recover_moves);
         let mut ops: Vec<_> = live.ops.drain().collect();
         ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
@@ -658,7 +659,9 @@ impl MainWindow {
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
-        self.notify("Mail stopped working. Restart Lagom; pending sends are saved in the outbox.", cx);
+        let mut error = "Mail stopped working. Restart Lagom; pending sends are saved in the outbox.".to_string();
+        if let Err(rollback) = rollback { error.push_str(&format!(" Local rollback failed: {rollback}")); }
+        self.notify(error, cx);
     }
 
     /// The worker half of an optimistic move.
@@ -1808,7 +1811,7 @@ mod tests {
             Cmd::ForwardAttachments { draft, id } => { assert_eq!(id, source); Some(draft) }, _ => None,
         }).unwrap();
         cx.simulate_input("recipient@example.com");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.compose.is_some()), "pending attachments block Send");
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::ForwardAttachments { draft: draft.clone(), result: Err("fixture failure".into()) }], window, cx);
@@ -1829,7 +1832,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| { v.drafts.clear(); v.restore_drafts(window, cx); });
         cx.simulate_keystrokes("c");
         assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         view.read_with(cx, |v, _| assert_eq!(v.live.as_ref().unwrap().store.pending(&draft).unwrap().mail, original));
     }
 
@@ -3724,6 +3727,112 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_custom_folder_batch_does_not_wait_for_a_writer(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=12 { incoming(v, uid); }
+            let live = v.live.as_ref().unwrap();
+            let target = live.store.save_folder(&live.accounts[0].id, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            let lock = rusqlite::Connection::open(live.store.path()).unwrap();
+            v.panes.group_conversations = false;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let started = std::time::Instant::now();
+            v.act(Move::Folder(folder), cx);
+            let elapsed = started.elapsed();
+            lock.execute_batch("ROLLBACK").unwrap();
+            assert!(elapsed < Duration::from_millis(750), "batch blocked on a writer for {elapsed:?}");
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(commands.len(), 12);
+            assert!(commands.iter().all(|cmd| matches!(cmd, Cmd::Op { act: Act::Move(id), .. } if *id == target)));
+            assert!(v.inbox.list().is_empty());
+            v.reload(cx);
+            assert!(v.inbox.list().is_empty(), "reload must preserve queued moves");
+            let events = commands.into_iter().map(|cmd| match cmd {
+                Cmd::Op { op, .. } => Event::Op { op, error: Some("fixture refused".into()) },
+                _ => unreachable!(),
+            }).collect();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let started = std::time::Instant::now();
+            v.on_events(events, window, cx);
+            let elapsed = started.elapsed();
+            lock.execute_batch("ROLLBACK").unwrap();
+            assert!(elapsed < Duration::from_millis(750), "batch rollback blocked on a writer for {elapsed:?}");
+            assert_eq!(v.inbox.list().len(), 12);
+        });
+    }
+
+    #[gpui::test]
+    fn review_custom_folder_move_queues_old_id_while_undo_is_pending(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let mut original = incoming(v, 1);
+            original.message_id = "queued@example.test".into();
+            let live = v.live.as_ref().unwrap();
+            let store = live.store.clone();
+            store.save_message(&lagom_core::store::Message { summary: original.clone(), ..Default::default() }).unwrap();
+            let target = store.save_folder(&original.account, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            let next = store.save_folder(&original.account, "Next", None, lagom_core::store::FolderRole::Other).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            let Cmd::Op { op, id, act: Act::Move(destination) } = rx.try_recv().unwrap() else { panic!("expected move") };
+            assert_eq!((id, destination), (original.id, target));
+            let mut moved = store.message(id).unwrap();
+            moved.summary.folder = target;
+            let replacement = store.save_message(&moved).unwrap();
+            store.delete_message(id).unwrap();
+            assert_ne!(replacement, id);
+            v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            v.undo(cx);
+            assert!(v.prepare_move(cx));
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(next)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::Op { id, act: Act::Move(folder), .. } if id == original.id && folder == original.folder));
+            assert!(matches!(rx.try_recv().expect("new move must reach worker alias resolution"), Cmd::Op { id, act: Act::Move(folder), .. } if id == original.id && folder == next));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[gpui::test]
+    fn custom_folder_batch_queues_persistence_and_restores_refused_messages(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let messages: Vec<_> = (1..=2).map(|uid| incoming(v, uid)).collect();
+            let live = v.live.as_ref().unwrap();
+            let target = live.store.save_folder(&live.accounts[0].id, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(commands.len(), 2);
+            let store = v.live.as_ref().unwrap().store.clone();
+            assert!(store.list_messages(target, now(), 10, 0).unwrap().is_empty());
+            for message in &messages {
+                assert_eq!(store.message(message.id).unwrap().summary.folder, message.folder);
+            }
+            for command in commands {
+                let Cmd::Op { op, id, act: Act::Move(destination) } = command else { panic!("expected move") };
+                assert_eq!(destination, target);
+                store.begin_move(id, destination).unwrap();
+                assert_eq!(store.message_summary(id).unwrap().folder, target);
+                store.cancel_move(id).unwrap();
+                v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+                assert_ne!(v.live.as_ref().unwrap().store.message_summary(id).unwrap().folder, target);
+            }
+            assert!(v.live.as_ref().unwrap().store.list_messages(target, now(), 10, 0).unwrap().is_empty());
+            assert_eq!(v.inbox.list().len(), 2);
+            assert!(v.toast.as_ref().unwrap().0.contains("Not moved: fixture refused"));
+        });
+    }
+
+    #[gpui::test]
     fn thread_actions_send_every_folder_member_and_undo_them(cx: &mut TestAppContext) {
         use lagom_core::store::FolderRole;
         let (view, cx, mut rx) = window(cx);
@@ -4279,7 +4388,7 @@ mod tests {
     fn send_one(cx: &mut VisualTestContext) {
         cx.simulate_keystrokes("c");
         cx.simulate_input("ana@example.com");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
     }
 
     fn toast(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> String {

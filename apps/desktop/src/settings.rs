@@ -64,12 +64,13 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         .when(!task_lists.is_empty(), |d| d.child(div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(8.)).child("Default task list")
             .children(task_lists.iter().map(|list| {
                 let id = list.id;
-                crate::main_window::pressable(div().id(("default-task-list", id as usize)), t, default_list == Some(id))
-                    .debug_selector(move || format!("default-task-list-{id}"))
-                    .px(px(10.)).py(px(6.)).rounded(px(radius::CONTROL))
+                div().flex().items_center().gap(px(8.)).px(px(10.)).py(px(6.)).rounded(px(radius::CONTROL))
                     .when(default_list == Some(id), |d| d.bg(t.sel))
-                    .child(format!("{}{}", if default_list == Some(id) { "✓ " } else { "" }, list.name))
-                    .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); }))
+                    .child(div().flex_1().min_w(px(0.)).one_line().child(list.name.clone()))
+                    .child(icon_button(t, "default-task-list", if default_list == Some(id) { "icons/complete-task.svg" } else { "icons/open-task.svg" },
+                        if default_list == Some(id) { "Default task list" } else { "Set as default task list" })
+                        .id(("default-task-list", id as usize)).debug_selector(move || format!("default-task-list-{id}"))
+                        .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); })))
             }))))
         .child(list)
         .child(div().flex().child(button(t, "Add account", None).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))
