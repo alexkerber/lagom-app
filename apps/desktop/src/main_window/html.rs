@@ -105,6 +105,7 @@ pub(super) enum Msg {
     Open(String),
     Escape,
     NewTask,
+    MailAction(Run),
 }
 
 /// Runs in every document before the mail, as an app script: the CSP and the page-script switch
@@ -118,9 +119,10 @@ addEventListener('click', e => {
 }, true);
 addEventListener('keydown', e => {
   if (e.key === 'Escape') window.ipc.postMessage('escape');
-  if (e.isTrusted && e.key === 't' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.target.closest?.('input,textarea,[contenteditable]')) {
-    e.preventDefault(); window.ipc.postMessage('task');
-  }
+  if (!e.isTrusted || e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input,textarea,[contenteditable]')) return;
+  const key = e.key.toLowerCase();
+  const command = !e.shiftKey && key === 't' ? 'task' : !e.shiftKey && key === 'f' ? 'forward' : e.shiftKey && key === 'r' ? 'reply-all' : e.shiftKey && key === 'u' ? 'toggle-read' : null;
+  if (command) { e.preventDefault(); window.ipc.postMessage(command); }
 }, true);
 "#;
 
@@ -161,9 +163,13 @@ pub(super) trait WebHost: 'static + Sized {
     /// Where the keys go when Esc leaves the web view.
     fn keys(&self) -> FocusHandle;
     fn new_task(&mut self, cx: &mut Context<Self>);
+    fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>);
 }
 
 impl WebHost for MainWindow {
+    fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.inbox.current() { self.mail_action_on(id, action, window, cx); }
+    }
     fn new_task(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.inbox.current() { self.task_from_mail(id, cx); }
     }
@@ -300,6 +306,11 @@ impl Web {
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     fn event<T: WebHost>(host: &mut T, msg: Msg, window: &mut Window, cx: &mut Context<T>) {
         match msg {
+            Msg::MailAction(action) => {
+                host.web().unfocus();
+                window.focus(&host.keys());
+                host.mail_action(action, window, cx);
+            }
             Msg::NewTask => {
                 host.web().unfocus();
                 window.focus(&host.keys());
@@ -347,6 +358,9 @@ impl Web {
                     Some(("open", url)) => Msg::Open(url.to_string()),
                     _ if body == "escape" => Msg::Escape,
                     _ if body == "task" => Msg::NewTask,
+                    _ if body == "forward" => Msg::MailAction(Run::Forward),
+                    _ if body == "reply-all" => Msg::MailAction(Run::ReplyAll),
+                    _ if body == "toggle-read" => Msg::MailAction(Run::ToggleRead),
                     _ => return,
                 };
                 let _ = ipc_tx.send(msg);
@@ -375,6 +389,20 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[gpui::test]
+    fn html_mail_actions_use_compose_and_unread_paths(cx: &mut gpui::TestAppContext) {
+        for action in [Run::Forward, Run::ReplyAll, Run::ToggleRead] {
+            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+            view.update_in(cx, |v, window, cx| {
+                let id = v.inbox.current().unwrap();
+                let unread = v.inbox.mail[id].unread;
+                Web::event(v, Msg::MailAction(action), window, cx);
+                if action == Run::ToggleRead { assert_eq!(v.inbox.mail[id].unread, !unread); }
+                else { assert!(v.compose.is_some()); }
+            });
+        }
+    }
 
     #[gpui::test]
     fn review_task_toast_keeps_html_drawable(cx: &mut gpui::TestAppContext) {

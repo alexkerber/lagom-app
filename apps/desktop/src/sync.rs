@@ -29,6 +29,7 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone)]
 pub enum Act {
     Archive,
+    Seen { seen: bool, before: bool },
     Trash,
     Inbox,
     Move(i64),
@@ -58,6 +59,7 @@ pub enum Cmd {
     EmptyTrash { op: u64, folder: i64 },
     CreateFolder { op: u64, account: String, name: String },
     MarkSeen(i64),
+    ForwardAttachments { draft: String, id: i64 },
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
     Send(String),
@@ -102,6 +104,7 @@ pub enum Event {
     /// A MarkSeen finished, done or not.
     Seen(i64),
     Downloaded(Result<PathBuf, String>),
+    ForwardAttachments { draft: String, result: Result<Vec<lagom_core::smtp::OutgoingAttachment>, String> },
     /// `error` says why, also when the message went out but its Sent copy failed.
     Sent { delivery: Delivery, error: Option<String> },
 }
@@ -287,13 +290,17 @@ impl Worker {
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
             }
+            Cmd::ForwardAttachments { draft, id } => {
+                let result = self.forward_attachments(id).await.map_err(|e| e.to_string());
+                self.emit(Event::ForwardAttachments { draft, result });
+            }
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| e.to_string());
                 self.emit(Event::Downloaded(result));
             }
             Cmd::MarkSeen(id) => {
                 // Either way the UI drops its override: the store says what the server has.
-                let _ = self.mark_seen(id).await;
+                let _ = self.mark_seen(id, true).await;
                 self.emit(Event::Seen(id));
                 self.emit(Event::Changed);
             }
@@ -508,6 +515,13 @@ impl Worker {
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {
         let id = self.resolve(id).await?;
+        if let Act::Seen { seen, before } = act {
+            let result = self.mark_seen(id, seen).await;
+            if result.is_err() {
+                if let Ok(m) = self.store.message_summary(id) { self.store.set_flags(m.folder, m.uid, before, m.flagged)?; }
+            }
+            return result;
+        }
         if let Act::Snooze(until) = act {
             return self.store.snooze(id, until);
         }
@@ -540,7 +554,7 @@ impl Worker {
                     session.move_message(store, id, folder).await?;
                     Some(folder)
                 }
-                Act::Snooze(_) => unreachable!("handled above"),
+                Act::Snooze(_) | Act::Seen { .. } => unreachable!("handled above"),
             };
             Ok(target)
         }
@@ -579,20 +593,44 @@ impl Worker {
         self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
     }
 
-    async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
-        let id = self.resolve(id).await?;
-        let account = self.account(&self.store.message(id)?.summary.account)?;
-        let part = self.store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
+    async fn attachment_bytes(&mut self, id: i64, section: &str) -> lagom_core::Result<Vec<u8>> {
+        if let Some(data) = self.store.cached_attachment(id, section)? { return Ok(data); }
+        let account = self.account(&self.store.message_summary(id)?.account)?;
         let mut session = self.take(&account).await?;
         let result = session.fetch_attachment(&mut self.store, id, section).await;
         self.give(&account.id, session, &result);
-        lagom_core::attachment::save_download(&part.filename, &result?)
+        result
     }
 
-    async fn mark_seen(&mut self, id: i64) -> lagom_core::Result<()> {
+    async fn forward_attachments(&mut self, id: i64) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
+        let id = self.resolve(id).await?;
+        if !self.store.attachment_metadata_loaded(id)? {
+            let m = self.store.message_summary(id)?;
+            let account = self.account(&m.account)?;
+            self.sync_folder(&account, m.folder).await?;
+            // shortcut: legacy metadata backfill is bounded; retry after sync if this message is beyond that batch.
+            if !self.store.attachment_metadata_loaded(id)? { return Err(Error::Invalid("sync attachments before forwarding")); }
+        }
+        let mut parts = Vec::new();
+        for part in self.store.attachments(id)? {
+            let data = self.attachment_bytes(id, &part.section).await?;
+            parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
+        }
+        Ok(parts)
+    }
+
+    async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
+        let id = self.resolve(id).await?;
+        let part = self.store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
+        let data = self.attachment_bytes(id, section).await?;
+        lagom_core::attachment::save_download(&part.filename, &data)
+    }
+
+    async fn mark_seen(&mut self, id: i64, seen: bool) -> lagom_core::Result<()> {
+        let id = self.resolve(id).await?;
         let account = self.account(&self.store.message(id)?.summary.account)?;
         let mut session = self.take(&account).await?;
-        let result = session.mark_seen(&mut self.store, id, true).await;
+        let result = session.mark_seen(&mut self.store, id, seen).await;
         self.give(&account.id, session, &result);
         result
     }
@@ -1186,3 +1224,7 @@ mod greenmail {
 #[cfg(test)]
 #[path = "sync/notification_tests.rs"]
 mod notification_tests;
+
+#[cfg(test)]
+#[path = "sync/mail_basics_tests.rs"]
+mod mail_basics_tests;

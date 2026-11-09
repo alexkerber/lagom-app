@@ -504,7 +504,9 @@ impl ImapSync {
         if bytes.len() != part.size as usize {
             return Err(Error::Network("attachment size changed or download incomplete"));
         }
-        attachment::decode(bytes, &part.encoding)
+        let data = attachment::decode(bytes, &part.encoding)?;
+        store.cache_attachment(id, section, &data)?;
+        Ok(data)
     }
     pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
         let message = store.message(id)?.summary;
@@ -518,14 +520,8 @@ impl ImapSync {
         } else {
             "-FLAGS.SILENT (\\Seen)"
         };
-        net(async {
-            self.session
-                .uid_store(message.uid.to_string(), command)
-                .await?
-                .try_collect::<Vec<_>>()
-                .await
-        })
-        .await?;
+        // The FETCH stream used by uid_store does not validate the tagged completion status.
+        net(self.session.run_command_and_check_ok(format!("UID STORE {} {command}", message.uid))).await?;
         store.set_flags(message.folder, message.uid, seen, message.flagged)
     }
     pub async fn create_folder(&mut self, store: &Store, name: &str) -> Result<i64> {

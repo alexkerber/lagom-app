@@ -28,6 +28,7 @@
 
 - [x] Send Markdown mail (lists, bold/italic, links, headings, quotes, code), compose shortcuts and file insertion, CLI `--body-file` (`feat/markdown-compose`).
 - [ ] Show Markdown styling live in the composer (bold text bold, markers dimmed).
+- [x] Everyday mail: Forward (F, toolbar, palette, pop-out) with quoted headers and cached/on-demand attachments; Reply all (Shift+R, reply menu, palette) removes account identities and duplicate recipients; read/unread (Shift+U, palette) syncs with Undo; per-account Markdown signatures in Settings, inserted once above quotes. Schema v11 follows the calendar schema on main and preserves existing data. Fixture/headless coverage includes drafts, MIME, IMAP flags (including rejected updates), attachment downloads and migration.
 
 - [x] Main window, Concept D, light and dark (static sample data).
 - [x] Native macOS menu bar: lagom, File, View, Window, Help.

@@ -9,6 +9,7 @@ enum Op {
     Move(usize),
     /// Undo of a move: on failure only a message.
     Undo,
+    Seen { id: usize, before: bool },
     EmptyTrash(String),
     CreateFolder { account: String, name: String },
 }
@@ -317,6 +318,11 @@ impl MainWindow {
         for event in events {
             match event {
                 Event::OpenUrl(url) => cx.open_url(&url),
+                Event::ForwardAttachments { draft, result } => {
+                    for compose in self.compose.iter().chain(&self.drafts) {
+                        compose.update(cx, |c, cx| c.forwarded(&draft, &result, cx));
+                    }
+                }
                 Event::Downloaded(result) => match result {
                     Ok(path) => cx.reveal_path(&path),
                     Err(error) => self.notify(format!("Could not download attachment: {error}"), cx),
@@ -367,6 +373,13 @@ impl MainWindow {
                             self.notify("Trash emptied", cx);
                         }
                         (Op::EmptyTrash(_), Some(e)) => self.notify(format!("Could not empty Trash: {e}"), cx),
+                        (Op::Seen { id, before }, Some(e)) => {
+                            let newer = live.ops.values().any(|op| matches!(op, Op::Seen { id: other, .. } if *other == id));
+                            if !newer {
+                                self.inbox.mail[id].unread = !before;
+                            }
+                            self.notify(format!("Could not change read status: {e}"), cx);
+                        }
                         (_, None) => {}
                         (Op::CreateFolder { account, name }, Some(e)) => {
                             self.folder_failed(&account, &name);
@@ -513,6 +526,12 @@ impl MainWindow {
                         self.come_back(what, id, ix, false, cx);
                     }
                 }
+                Op::Seen { id, before } => {
+                    self.inbox.mail[id].unread = !before;
+                    if let (Some(live), Some(store)) = (&self.live, self.inbox.mail[id].store) {
+                        if let Ok(m) = live.store.message_summary(store) { let _ = live.store.set_flags(m.folder, m.uid, before, m.flagged); }
+                    }
+                }
                 Op::Undo | Op::EmptyTrash(_) => {}
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
@@ -579,6 +598,50 @@ impl MainWindow {
         }
     }
 
+    pub(super) fn toggle_read(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.inbox.current() { self.toggle_read_on(id, cx); }
+    }
+
+    pub(super) fn toggle_read_on(&mut self, id: usize, cx: &mut Context<Self>) {
+        let members = self.inbox.members(id);
+        let seen = members.iter().any(|&id| self.inbox.mail[id].unread);
+        let mut undo = Vec::new();
+        for id in members {
+            let before = !self.inbox.mail[id].unread;
+            if before != seen && self.set_read(id, seen, cx) { undo.push((id, before)); }
+        }
+        if !undo.is_empty() {
+            self.notify(if seen { "Marked as read" } else { "Marked as unread" }, cx);
+            self.task_undo = None;
+            self.read_undo = undo;
+            if let Some(toast) = &mut self.toast { toast.1 = true; }
+        }
+    }
+
+    pub(super) fn set_read(&mut self, id: usize, seen: bool, cx: &mut Context<Self>) -> bool {
+        let before = !self.inbox.mail[id].unread;
+        if let (Some(live), Some(store)) = (&mut self.live, self.inbox.mail[id].store) {
+            let result = live.store.with_short_lock_wait(|store_db| {
+                let m = store_db.message_summary(store)?;
+                store_db.set_flags(m.folder, m.uid, seen, m.flagged)
+            });
+            if let Err(e) = result { self.notify(format!("Could not change read status: {e}"), cx); return false; }
+            live.seen.remove(&store);
+            let op = live.op(Op::Seen { id, before });
+            if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Seen { seen, before } }) {
+                live.ops.remove(&op);
+                live.pending.borrow_mut().remove(&op);
+                if let Ok(m) = live.store.message_summary(store) { let _ = live.store.set_flags(m.folder, m.uid, before, m.flagged); }
+                self.worker_gone(cx);
+                return false;
+            }
+        }
+        self.inbox.mail[id].unread = !seen;
+        if seen { self.manual_unread.remove(&id); } else { self.manual_unread.insert(id); }
+        cx.notify();
+        true
+    }
+
     pub(super) fn download_attachment(&mut self, id: usize, section: String, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
         let Some(store) = self.inbox.mail.get(id).and_then(|m| m.store) else { return };
@@ -597,6 +660,7 @@ impl MainWindow {
             return;
         };
         let changed = self.reading_thread != Some(id);
+        if changed { self.manual_unread.clear(); }
         if changed || self.reading_dirty {
             let was_single = self.reading_members.len() <= 1;
             if changed { self.expanded.clear(); }
@@ -633,10 +697,10 @@ impl MainWindow {
             }
         }
         if !self.inbox.group || self.reading_members.len() <= 1 {
-            self.open_message(id, mark_read, cx);
+            self.open_message(id, mark_read && !self.manual_unread.contains(&id), cx);
         } else if mark_read {
             let expanded: Vec<_> = self.expanded.keys().copied().collect();
-            for id in expanded { self.open_message(id, true, cx); }
+            for id in expanded { self.open_message(id, !self.manual_unread.contains(&id), cx); }
         }
     }
 
@@ -653,6 +717,7 @@ impl MainWindow {
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
         }
+        if mark_read { self.manual_unread.remove(&id); }
         if mark_read && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
             self.inbox.mail[id].unread = false;
             if let Some(f) = self.inbox.open.filter(|&f| self.inbox.folders[f].store == match self.inbox.mail[id].folder { mail::Place::Folder(id) => Some(id), _ => None }) {
@@ -902,6 +967,29 @@ impl MainWindow {
         cx.notify();
     }
 
+    pub(super) fn prepare_signatures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        self.signatures.retain(|id, _| live.accounts.iter().any(|a| &a.id == id));
+        for account in &live.accounts {
+            if self.signatures.contains_key(&account.id) { continue; }
+            let text = match live.store.signature(&account.id) {
+                Ok(text) => text,
+                Err(_) => continue,
+            };
+            let input = cx.new(|cx| TextInput::new(window, cx).markdown().bordered().placeholder("Signature (plain text or Markdown)").with_text(&text));
+            let id = account.id.clone();
+            cx.subscribe(&input, move |this, input, event: &TextInputEvent, cx| {
+                if !matches!(event, TextInputEvent::Changed) { return; }
+                if let Some(live) = &this.live {
+                    if let Err(e) = live.store.with_short_lock_wait(|store| store.set_signature(&id, input.read(cx).text())) {
+                        this.notify(format!("Could not save signature: {e}"), cx);
+                    }
+                }
+            }).detach();
+            self.signatures.insert(account.id.clone(), input);
+        }
+    }
+
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.confirm_empty_trash = false;
@@ -986,6 +1074,130 @@ mod tests {
         }));
         view.update(cx, |v, _| v.live = Some(fixture_live(store, bridge)));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn unread_toggle_queues_flags_updates_store_and_undo_survives_render(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let store_id = view.update(cx, |v, cx| {
+            let m = incoming(v, 1);
+            v.live.as_ref().unwrap().store.set_flags(m.folder, m.uid, true, true).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.open_current(true, cx);
+            m.id
+        });
+        cx.simulate_keystrokes("shift-u");
+        let op = match rx.try_recv().unwrap() {
+            Cmd::Op { op, id, act: Act::Seen { seen: false, before: true } } => { assert_eq!(id, store_id); op }
+            _ => panic!("missing unread command"),
+        };
+        view.update_in(cx, |v, window, cx| {
+            assert!(!v.live.as_ref().unwrap().store.message_summary(store_id).unwrap().seen);
+            v.open_current(true, cx);
+            assert!(v.inbox.mail[v.inbox.current().unwrap()].unread);
+            v.on_events(vec![Event::Op { op, error: None }, Event::Changed], window, cx);
+            v.open_current(true, cx);
+            assert!(v.inbox.mail[v.inbox.current().unwrap()].unread);
+        });
+        assert!(rx.try_recv().is_err(), "redraw must not mark it read again");
+        cx.simulate_keystrokes("secondary-z");
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Op { id, act: Act::Seen { seen: true, .. }, .. } if id == store_id));
+        view.read_with(cx, |v, _| {
+            let m = v.live.as_ref().unwrap().store.message_summary(store_id).unwrap();
+            assert!(m.seen && m.flagged);
+        });
+        view.update(cx, |v, cx| { v.toggle_read(cx); v.open_message(v.inbox.current().unwrap(), true, cx); });
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Op { act: Act::Seen { seen: false, .. }, .. }));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::MarkSeen(id) if id == store_id));
+    }
+
+    #[gpui::test]
+    fn forward_signature_attachments_and_draft_reopen(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let source = view.update(cx, |v, cx| {
+            let m = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            let mut original = live.store.message(m.id).unwrap();
+            original.summary.subject = "Files".into();
+            original.summary.from_address = "sender@example.com".into();
+            original.summary.to = "me@lagom.test, colleague@example.com".into();
+            original.summary.cc = "copy@example.com".into();
+            original.body_text = "Original body".into();
+            live.store.save_message(&original).unwrap();
+            live.store.set_signature(&m.account, "**Team**").unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            m.id
+        });
+        cx.simulate_keystrokes("f");
+        let draft = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|cmd| match cmd {
+            Cmd::ForwardAttachments { draft, id } => { assert_eq!(id, source); Some(draft) }, _ => None,
+        }).unwrap();
+        cx.simulate_input("recipient@example.com");
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(view.read_with(cx, |v, _| v.compose.is_some()), "pending attachments block Send");
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::ForwardAttachments { draft: draft.clone(), result: Err("fixture failure".into()) }], window, cx);
+            assert!(v.live.as_ref().unwrap().store.due_outbox(&v.live.as_ref().unwrap().accounts[0].id, i64::MAX).unwrap().is_empty());
+            let parts = vec![lagom_core::smtp::OutgoingAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }];
+            v.on_events(vec![Event::ForwardAttachments { draft: draft.clone(), result: Ok(parts) }], window, cx);
+        });
+        let original = view.read_with(cx, |v, cx| {
+            let outgoing = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+            assert_eq!(outgoing.subject, "Fwd: Files");
+            assert_eq!(outgoing.text.matches("-- \n**Team**").count(), 1);
+            assert!(outgoing.text.contains("> Original body"));
+            assert!(outgoing.in_reply_to.is_none());
+            assert_eq!(outgoing.attachments[0].data, [0, 255]);
+            outgoing
+        });
+        cx.simulate_keystrokes("escape");
+        view.update_in(cx, |v, window, cx| { v.drafts.clear(); v.restore_drafts(window, cx); });
+        cx.simulate_keystrokes("c");
+        assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
+        cx.simulate_keystrokes("cmd-enter");
+        view.read_with(cx, |v, _| assert_eq!(v.live.as_ref().unwrap().store.pending(&draft).unwrap().mail, original));
+    }
+
+    #[gpui::test]
+    fn signature_settings_and_reply_all_use_the_message_account(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let m = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            let mut message = live.store.message(m.id).unwrap();
+            message.summary.from_address = "sender@example.com".into();
+            message.summary.to = "ME@lagom.test, colleague@example.com, sender@example.com".into();
+            message.summary.cc = "COLLEAGUE@example.com, copy@example.com".into();
+            live.store.save_message(&message).unwrap();
+            let config = live.accounts[0].imap.clone();
+            let other = Account::new("other@example.com".into(), config.clone(), config).unwrap();
+            live.store.save_account(&other).unwrap();
+            live.store.set_signature(&other.id, "Other signature").unwrap();
+            v.open_settings(cx);
+            v.prepare_signatures(window, cx);
+            v.signatures[&m.account].update(cx, |input, cx| input.set_text("Team", cx));
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_ref().unwrap();
+            assert_eq!(live.store.signature(&live.accounts[0].id).unwrap(), "Team");
+            v.page = Page::Mail;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            let live = v.live.as_mut().unwrap();
+            live.current = live.accounts.iter().position(|a| a.email == "other@example.com").unwrap();
+            window.focus(&v.focus);
+        });
+        cx.simulate_keystrokes("shift-r");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.compose.as_ref().unwrap().read(cx).account_id(), Some(v.live.as_ref().unwrap().accounts[0].id.as_str()));
+            let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+            assert_eq!(mail.to, ["sender@example.com", "colleague@example.com"]);
+            assert_eq!(mail.cc, ["copy@example.com"]);
+            assert!(mail.text.starts_with("\n\n-- \nTeam\n\n> On "));
+        });
     }
 
     #[gpui::test]
@@ -1940,6 +2152,7 @@ mod tests {
         use crate::notifications::Target;
         let (view, cx, _rx) = window(cx);
         cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
         cx.simulate_input("Unfinished fixture draft");
         let target = view.update(cx, |v, _| {
             let m = incoming(v, 1);
@@ -1955,7 +2168,7 @@ mod tests {
             assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, target.message);
             assert!(v.compose.is_none());
             assert_eq!(v.drafts.len(), 1);
-            assert_eq!(v.drafts[0].read(cx).body_text(cx), "Unfinished fixture draft");
+            assert_eq!(v.drafts[0].read(cx).body_text(cx), format!("Unfinished fixture draft{quote}"));
             assert!(!v.hold_exit(cx));
         });
     }
@@ -2690,20 +2903,21 @@ mod tests {
     fn a_failed_local_write_keeps_the_unsaved_draft(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
         cx.simulate_input("Keep this text");
         view.update(cx, |v, _| {
             let live = v.live.as_ref().unwrap();
             live.store.delete_account(&live.accounts[0].id).unwrap();
         });
         assert!(view.update(cx, |v, cx| v.hold_exit(cx)));
-        assert!(toast(&view, cx).contains("Could not save draft"));
-        assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx)), "Keep this text");
+        assert!(toast(&view, cx).contains("Could not save local edits"));
+        assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx)), format!("Keep this text{quote}"));
         view.update(cx, |v, _| {
             let live = v.live.as_ref().unwrap();
             live.store.save_account(&live.accounts[0]).unwrap();
         });
         assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
-        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "Keep this text");
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), format!("Keep this text{quote}"));
     }
 
     #[gpui::test]
@@ -2723,7 +2937,7 @@ mod tests {
         cx.run_until_parked();
         let stored = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap());
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].text, "Draft **body**");
+        assert_eq!(stored[0].text, original.text);
         view.update_in(cx, |v, window, cx| {
             v.compose = None;
             v.drafts.clear();
@@ -2739,15 +2953,16 @@ mod tests {
     fn autosave_waits_for_a_pause_and_keeps_the_latest_edit(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
         cx.simulate_input("first");
-        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "");
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), quote);
         cx.executor().advance_clock(Duration::from_millis(200));
         cx.simulate_input(" latest");
         cx.executor().advance_clock(Duration::from_millis(200));
-        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "");
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), quote);
         cx.executor().advance_clock(Duration::from_millis(100));
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), "first latest");
+        assert_eq!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap()[0].text.clone()), format!("first latest{quote}"));
     }
 
     #[gpui::test]

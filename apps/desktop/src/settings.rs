@@ -8,7 +8,7 @@ use crate::main_window::{button, mono, MainWindow, OneLine};
 use crate::theme::{radius, size, Theme};
 
 /// `confirm`: the id of the account whose removal waits for a yes.
-pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool, notifications: bool, task_lists: &[lagom_core::tasks::TaskList], default_list: Option<i64>, cx: &mut Context<MainWindow>) -> Div {
+pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool, notifications: bool, task_lists: &[lagom_core::tasks::TaskList], default_list: Option<i64>, signatures: &std::collections::HashMap<String, gpui::Entity<crate::text_input::TextInput>>, cx: &mut Context<MainWindow>) -> Div {
     let mut list = div().flex().flex_col().pt(px(20.)).border_t_1().border_color(t.line);
     for a in accounts {
         let id = a.id.clone();
@@ -36,7 +36,10 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         } else {
             row.child(button(t, "Remove", None).on_click(cx.listener(move |this, _, _, cx| this.confirm_remove(Some(id.clone()), cx))))
         };
-        list = list.child(row);
+        list = list.child(row).children(signatures.get(&a.id).map(|input|
+            div().flex().flex_col().gap(px(6.)).py(px(12.)).child(mono("Signature", t.ink2))
+                .child(div().h(px(100.)).child(input.clone()))
+        ));
     }
     let content = div()
         .w_full()

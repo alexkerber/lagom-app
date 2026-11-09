@@ -43,6 +43,7 @@ pub struct Mail {
     pub snoozed_until: Option<i64>,
     pub was_snoozed: Vec<Option<i64>>,
     pub to: String,
+    pub cc: String,
     pub message_id: String,
     pub thread_key: String,
     pub thread_id: String,
@@ -70,6 +71,7 @@ impl Mail {
             snoozed_until: m.snoozed_until,
             was_snoozed: Vec::new(),
             to: m.to.clone(),
+            cc: m.cc.clone(),
             message_id: m.message_id.clone(),
             thread_key: m.thread_key.clone(),
             thread_id: m.thread_id.clone(),
@@ -157,6 +159,32 @@ pub fn fts_query(q: &str) -> Option<String> {
 /// "Re: subject", without stacking "Re: Re:".
 pub fn reply_subject(subject: &str) -> String {
     if subject.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) { subject.into() } else { format!("Re: {subject}") }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ComposeKind { Reply, ReplyAll, Forward }
+
+pub fn forward_subject(subject: &str) -> String {
+    if subject.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("fwd:")) { subject.into() } else { format!("Fwd: {subject}") }
+}
+
+pub fn reply_all(sender: &str, to: &str, cc: &str, own: &[&str]) -> (String, String) {
+    let mut used: std::collections::HashSet<String> = own.iter().map(|s| s.trim().to_ascii_lowercase()).collect();
+    let mut unique = |field: &str| recipients(field).into_iter().filter(|address| used.insert(address.to_ascii_lowercase())).collect::<Vec<_>>().join(", ");
+    (unique(&format!("{sender}, {to}")), unique(cc))
+}
+
+pub fn compose_body(signature: &str, original: Option<(&Mail, &str)>, kind: ComposeKind) -> String {
+    let mut body = if signature.trim().is_empty() { String::new() } else { format!("-- \n{signature}") };
+    if let Some((m, text)) = original {
+        if !body.is_empty() { body.push_str("\n\n"); }
+        let header = if kind == ComposeKind::Forward {
+            format!("Forwarded message\nFrom: {} <{}>\nDate: {}\nSubject: {}\nTo: {}\n\n", m.from, m.address, full_date(m.date), m.subject, m.to)
+        } else { format!("On {}, {} wrote:\n\n", full_date(m.date), m.address) };
+        body.push_str(&format!("{header}{text}").lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"));
+    }
+    if !body.is_empty() { body.insert_str(0, "\n\n"); }
+    body
 }
 
 /// In-Reply-To and References for a reply.
@@ -361,6 +389,7 @@ pub fn demo() -> Vec<Mail> {
                 "maja@lind.example" if s.subject.starts_with("Lunch") => Some(SIMPLE_HTML.into()),
                 _ => None,
             },
+            cc: String::new(),
             from: s.from.into(),
             address: s.address.into(),
             time: s.time.into(),
@@ -380,6 +409,26 @@ mod tests {
 
     fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).earliest().unwrap()
+    }
+
+    #[test]
+    fn forward_subject_quote_and_signature() {
+        assert_eq!(forward_subject("Plans"), "Fwd: Plans");
+        assert_eq!(forward_subject("FWd: Plans"), "FWd: Plans");
+        let m = Mail { from: "Sender".into(), address: "sender@example.com".into(), to: "recipient@example.com".into(), subject: "Plans".into(), date: 1, ..Default::default() };
+        let body = compose_body("**Team**", Some((&m, "First\n\nSecond")), ComposeKind::Forward);
+        assert!(body.starts_with("\n\n-- \n**Team**\n\n> Forwarded message\n> From: Sender <sender@example.com>\n> Date: "));
+        assert!(body.contains("> Subject: Plans\n> To: recipient@example.com\n> \n> First\n> \n> Second"));
+        assert_eq!(body.matches("-- \n**Team**").count(), 1);
+        assert_eq!(compose_body("", None, ComposeKind::Reply), "");
+        assert_eq!(compose_body("Team", None, ComposeKind::Reply), "\n\n-- \nTeam");
+    }
+
+    #[test]
+    fn reply_all_removes_own_addresses_and_deduplicates_across_to_and_cc() {
+        assert_eq!(reply_all("Sender@EXAMPLE.com", "ME@example.com, sender@example.com, Other@example.com; other@example.com", "alias@EXAMPLE.com, OTHER@example.com, Copy@example.com, copy@example.com", &["me@example.com", "Alias@example.com"]),
+            ("Sender@EXAMPLE.com, Other@example.com".into(), "Copy@example.com".into()));
+        assert_eq!(reply_all("me@example.com", "", "ME@example.com", &["me@example.com"]), (String::new(), String::new()));
     }
 
     #[test]
