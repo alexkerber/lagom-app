@@ -520,7 +520,7 @@ impl ImapSync {
         } else {
             "-FLAGS.SILENT (\\Seen)"
         };
-        // The FETCH stream used by uid_store does not validate the tagged completion status.
+        // async-imap's STORE stream discards tagged NO/BAD replies.
         net(self.session.run_command_and_check_ok(format!("UID STORE {} {command}", message.uid))).await?;
         store.set_flags(message.folder, message.uid, seen, message.flagged)
     }

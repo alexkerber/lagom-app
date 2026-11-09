@@ -50,7 +50,7 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
         let session = ImapSync::login(&account, "fixture").await.unwrap();
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
         for _ in 0..2 {
             worker.quick(Cmd::ForwardAttachments { draft: "draft".into(), id }).await;
             let Some(Event::ForwardAttachments { draft, result }) = out.recv().await else { panic!("missing forward result") };
@@ -62,18 +62,17 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
             assert_eq!(parts[0].data, b"\0\xffhi");
         }
         for seen in [false, true] {
-            worker.quick(Cmd::Op { op: 42, id, act: Act::Seen { seen, before: !seen } }).await;
+            worker.quick(Cmd::Op { op: 42, id, act: Act::Read(seen) }).await;
             assert!(matches!(out.recv().await, Some(Event::Op { op: 42, error: None })));
             assert!(matches!(out.recv().await, Some(Event::Changed)));
             let m = worker.store.message_summary(id).unwrap();
             assert_eq!(m.seen, seen);
             assert!(m.flagged);
         }
-        worker.store.set_flags(folder, 1, false, true).unwrap();
-        worker.quick(Cmd::Op { op: 43, id, act: Act::Seen { seen: false, before: true } }).await;
+        worker.quick(Cmd::Op { op: 43, id, act: Act::Read(false) }).await;
         assert!(matches!(out.recv().await, Some(Event::Op { op: 43, error: Some(_) })));
         assert!(matches!(out.recv().await, Some(Event::Changed)));
-        assert!(worker.store.message_summary(id).unwrap().seen, "a failed server flag restores the local state even without a window");
+        assert!(worker.store.message_summary(id).unwrap().seen, "a failed server flag preserves the confirmed state even without a window");
         assert!(worker.forward_attachments(-1).await.is_err());
         drop(worker);
         server.await.unwrap();

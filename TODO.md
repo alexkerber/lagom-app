@@ -25,10 +25,11 @@
 - [ ] UniFFI bindings from `lagom-core` for both mobile apps.
 
 ## Mail (v1)
+- [x] All/Unread filters loaded message rows; multi-select supports Shift+arrows, Shift-click, Cmd-click, Cmd+A and batch actions. Integrated with Google Calendar/Today, Dusk (accent Done last, 140 ms glide) and Settings switches, retaining both branches' regression tests.
 
 - [x] Send Markdown mail (lists, bold/italic, links, headings, quotes, code), compose shortcuts and file insertion, CLI `--body-file` (`feat/markdown-compose`).
 - [ ] Show Markdown styling live in the composer (bold text bold, markers dimmed).
-- [x] Everyday mail: Forward (F, toolbar, palette, pop-out) with quoted headers and cached/on-demand attachments; Reply all (Shift+R, reply menu, palette) removes account identities and duplicate recipients; read/unread (Shift+U, palette) syncs with Undo; per-account Markdown signatures in Settings, inserted once above quotes. Schema v11 follows the calendar schema on main and preserves existing data. Fixture/headless coverage includes drafts, MIME, IMAP flags (including rejected updates), attachment downloads and migration.
+- [x] Everyday mail: Forward (F, toolbar, palette, pop-out) with quoted headers and cached/on-demand attachments; Reply all (Shift+R, reply menu, palette) removes account identities and duplicate recipients; read/unread (Shift+U, palette) shares the multi-select batch path and Undo; per-account Markdown signatures in Settings, inserted once above quotes. Merged main with multi-select, Unread, Google calendar, Dusk and Settings switches. Schema v11 follows the calendar schema on main and preserves existing data. Fixture/headless coverage includes drafts, MIME, IMAP flags (including rejected updates), attachment downloads and migration.
 
 - [x] Main window, Concept D, light and dark (static sample data).
 - [x] Native macOS menu bar: lagom, File, View, Window, Help.
@@ -62,6 +63,7 @@
 - [ ] Feel: in the light sidebar, hover looks almost like the selected row (`subtle` is close to `sel`). Decide whether the selected row needs more contrast.
 - [x] Typeface: the system font (SF Pro on macOS) is the UI default. `LAGOM_UI_FONT=inter` switches back.
 - [x] Message list: visible rows plus two-row overscan, with animated-height spacers; integrated with persisted drafts, outbox and non-blocking quit.
+- [x] Message list: Shift-arrow/Shift-click ranges, Cmd-click toggles, Cmd+A and Escape, stable selection across sync, conversation-aware batch Done/Later/Delete/Move/read status with one Undo, and a selection summary. All/Unread filters the loaded rows. Fixture and headless tests cover selection, filtering, batch undo and worker read flags. Review fixes bind rollback to worker operations, retain selected mail past page boundaries, reveal search targets, clear the hidden Trash filter, keep the sole selection readable after Cmd-click, share thread read state between labels and actions, reject failed IMAP read-status commands, retain Undo selection across replaced store rows, link HTML tasks to the sole selection, and reveal filtered popout targets before actions.
 
 ## Folders: open questions
 
@@ -81,7 +83,9 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last section.
 
-- [ ] Agenda next to the inbox: Google and Microsoft calendars.
+- [x] Calendar slice b1: read-only Google agenda above local tasks in Today, with a quiet consent row. Explicit full desktop consent for mail/identity/calendar/tasks, actual granted scopes, schema v10, paged calendar/event fetch, two-minute background window refresh without blocking mail commands, cached events retained outside each replacement window, DST-safe day boundaries, all-day dates and meeting links. Fixture and headless regression coverage; live provider consent and visual layout remain unverified.
+- [x] Calendar review: a complete calendar list hides missing calendars from Today while retaining their cached events; fixture regression covers the fetch-to-store path and account isolation.
+- [ ] Microsoft calendar agenda in Today (slice c).
 - [ ] Create a meeting from the app with Google Meet or Teams attached, without opening Gmail or Outlook. Zoom is outside v1 (2026-11-09).
 
 ## Tasks
@@ -128,6 +132,6 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).
 - [x] Message list virtualisation: visible rows plus overscan; height animation, selection glide, swipe, keyboard scrolling and paging covered by headless tests. Undo plus swipe keeps row heights consistent; spring-back keeps its progress across off-screen rows. 10,000-row measurement in `docs/performance.md`.
 - [ ] Store reads on the UI thread: each reload runs account-wide count queries. Codex measured about 37 ms at 100k rows (Python SQLite, not the app). Build the snapshot on the worker before large mailboxes.
-- [x] Undo restores the previous snooze deadline after Done/Delete/Move, including every member of a conversation. Headless tests verify the queued restore commands.
+- [x] Undo restores the previous snooze deadline after Done/Delete/Move, including every member of a conversation. Headless tests verify the queued restore commands and completion reloads with replaced store IDs, retained single/batch selection, page boundaries and subsequent actions.
 - [ ] A server MOVE that succeeds but whose follow-up folder sync fails shows as "Not moved"; the next sync shows the truth.
 - [ ] Real-provider TLS/STARTTLS and native keychain acceptance testing, Linux/Windows builds, remaining performance budgets.
