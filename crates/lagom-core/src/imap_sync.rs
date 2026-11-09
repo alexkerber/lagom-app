@@ -2,7 +2,8 @@
 //! thread; Tokio/rustls also shares the desktop's existing runtime dependencies.
 mod guard;
 mod mailbox;
-use mailbox::{decode as decode_mailbox, encode as encode_mailbox};
+pub(crate) use mailbox::decode as decode_mailbox;
+use mailbox::encode as encode_mailbox;
 #[cfg(test)]
 mod folder_tests;
 use guard::Guarded;

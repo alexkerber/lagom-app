@@ -42,6 +42,60 @@ fn message(store: &Store, account: &str, folder: i64, uid: u32) -> i64 {
 }
 
 #[tokio::test]
+async fn review_upgrade_preserves_encoded_folders_and_local_mail() {
+    let names = [("R&--D", "R&-D"), ("R&-D", "R&D"), ("&U,BTFw-/&ZeVnLIqe-", "台北/日本語")];
+    let mut steps = login("");
+    let rows: String = names.iter().map(|(wire, _)| format!("* LIST () \"/\" \"{wire}\"\r\n")).collect();
+    steps.push(step("LIST \"\" \"*\"", &rows));
+    let (mut imap, store, temp, server) = fixture(steps).await;
+    drop(store);
+    let path = temp.path().join("upgrade.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for schema in [include_str!("../schema_v1.sql"), include_str!("../schema_v2.sql"), include_str!("../schema_v3.sql"), include_str!("../schema_v4.sql"), include_str!("../schema_v5.sql"), include_str!("../schema_v6.sql"), include_str!("../schema_v7.sql"), include_str!("../schema_v8.sql"), include_str!("../schema_v9.sql"), include_str!("../schema_v10.sql"), include_str!("../schema_v11.sql"), include_str!("../schema_v12.sql"), include_str!("../schema_v13.sql"), include_str!("../schema_v14.sql")] {
+        db.execute_batch(schema).unwrap();
+    }
+    let mut old = Store { db };
+    old.save_account(&imap.account).unwrap();
+    let mut saved = Vec::new();
+    for (wire, decoded) in names {
+        let folder = old.save_folder(&imap.account.id, wire, Some("/"), FolderRole::Other).unwrap();
+        old.reset_uidvalidity(folder, 7).unwrap();
+        let id = message(&old, &imap.account.id, folder, 1);
+        old.snooze(id, Some(123456789)).unwrap();
+        old.finish_sync(folder, &HashSet::from([1]), 1, Some(2), Some(3)).unwrap();
+        let mut metadata = old.folder(folder).unwrap();
+        metadata.name = decoded.into();
+        saved.push((metadata, old.message(id).unwrap()));
+    }
+    old.db.execute_batch("CREATE TRIGGER refuse_rename BEFORE UPDATE ON folders WHEN NEW.name='R&D' BEGIN SELECT RAISE(ABORT, 'fixture refused'); END;").unwrap();
+    drop(old);
+    assert!(Store::open(&path).is_err());
+    let old = Store { db: rusqlite::Connection::open(&path).unwrap() };
+    assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+    for ((folder, message), (wire, _)) in saved.iter().zip(names) {
+        assert_eq!(old.folder(folder.id).unwrap().name, wire);
+        assert_eq!(old.message(message.summary.id).unwrap(), *message);
+    }
+    old.db.execute_batch("DROP TRIGGER refuse_rename").unwrap();
+    drop(old);
+    let store = Store::open(&path).unwrap();
+    let folders = imap.list_folders(&store).await.unwrap();
+    assert_eq!(folders.len(), saved.len());
+    for (folder, message) in &saved {
+        assert_eq!(store.folder(folder.id).unwrap(), *folder);
+        assert_eq!(store.message(message.summary.id).unwrap(), *message);
+    }
+    drop(store);
+    let reopened = Store::open(path).unwrap();
+    for (folder, message) in saved {
+        assert_eq!(reopened.folder(folder.id).unwrap(), folder);
+        assert_eq!(reopened.message(message.summary.id).unwrap(), message);
+    }
+    assert!(reopened.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn list_create_refresh_and_refusal_preserve_account_folders() {
     for special in [false, true] {
         let list = if special { "LIST \"\" \"*\" RETURN (SPECIAL-USE)" } else { "LIST \"\" \"*\"" };

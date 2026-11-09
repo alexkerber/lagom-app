@@ -26,7 +26,7 @@ pub(super) fn encode(name: &str) -> String {
     out
 }
 
-pub(super) fn decode(name: &str) -> Result<String> {
+pub(crate) fn decode(name: &str) -> Result<String> {
     let invalid = || Error::Invalid("invalid IMAP mailbox encoding");
     let mut out = String::new();
     let mut rest = name;

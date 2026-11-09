@@ -111,7 +111,17 @@ impl Store {
             }
         }
         if version < 15 {
+            let tx = store.db.unchecked_transaction()?;
+            let names = store.db.prepare("SELECT id,name FROM folders")?.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
+            // Temporary names avoid collisions when a decoded name is another folder's wire name.
+            store.db.execute("UPDATE folders SET name=char(0)||id", [])?;
+            for (id, name) in names {
+                store.db.execute("UPDATE folders SET name=?2 WHERE id=?1", params![id, crate::imap_sync::decode_mailbox(&name)?])?;
+            }
             store.db.execute_batch(include_str!("schema_v15.sql"))?;
+            tx.commit()?;
         }
         Ok(store)
     }
