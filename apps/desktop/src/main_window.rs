@@ -1182,14 +1182,11 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
         _ => label,
     };
     let secondary = matches!(label, "Rename" | "Delete list" | "Open mail");
-    let ink = t.ink;
     let base = div().id(label).debug_selector(move || label.into()).group("action")
         .flex().items_center().justify_center().gap(px(6.)).h(px(28.)).flex_shrink_0()
         .px(px(if secondary { 6. } else { 10. })).rounded(px(radius::CONTROL))
         .text_size(px(size::BASE)).font_weight(FontWeight::MEDIUM)
-        .children(action_icon(label).map(|path| div().id("action-icon").flex().text_color(if fill.is_some() { t.accent_ink } else { t.ink2 })
-            .when(fill.is_none(), |d| d.group_hover("action", move |s| s.text_color(ink)).group_active("action", move |s| s.text_color(ink)))
-            .child(svg().path(path).size(px(16.)).flex_shrink_0())))
+        .children(action_icon(label).map(|path| action_glyph(t, path, fill)))
         .when(!secondary, |d| d.child(if label == "Add task" { "New task" } else { label }))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into());
     match fill {
@@ -1198,6 +1195,16 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
         None => pressable(base.border_1().border_color(t.line).bg(t.bg).text_color(t.ink), t, false),
     }
 }
+
+fn action_glyph(t: &Theme, path: &'static str, fill: Option<Rgba>) -> gpui::Svg {
+    // GPUI's SVG paint path requires an explicit color on the SVG itself.
+    svg().path(path).size(px(16.)).flex_shrink_0()
+        .text_color(if fill.is_some() { t.accent_ink } else { t.ink2 })
+        .when(fill.is_none(), |s| s.group_hover("action", |s| s.text_color(t.ink)))
+}
+
+#[cfg(test)]
+mod icon_tests;
 
 pub(crate) fn action_icon(label: &str) -> Option<&'static str> {
     Some(match label {
@@ -1999,7 +2006,7 @@ fn toolbar(t: &Theme) -> Div {
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
 pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
-    pressable(div().id(id), t, false).group("icon-button")
+    pressable(div().id(id), t, false).group("action")
         .debug_selector(move || id.into())
         .flex()
         .items_center()
@@ -2008,14 +2015,8 @@ pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: 
         .flex_shrink_0()
         .rounded(px(radius::CONTROL))
         .text_color(t.ink2)
-        .child(icon_button_glyph(t, path))
+        .child(action_glyph(t, path, None))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
-}
-
-fn icon_button_glyph(t: &Theme, path: &'static str) -> gpui::Svg {
-    // GPUI's SVG paint path requires an explicit color on the SVG itself.
-    svg().path(path).size(px(16.)).flex_shrink_0()
-        .text_color(t.ink2).group_hover("icon-button", |s| s.text_color(t.ink))
 }
 
 struct Tip(Theme, &'static str);

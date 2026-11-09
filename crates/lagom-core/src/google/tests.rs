@@ -230,10 +230,11 @@ async fn insert_all_day_end_is_exclusive_and_no_guests_or_meet_are_omitted() {
 }
 
 #[tokio::test]
-async fn insert_unauthorized_stops_after_one_refresh_and_forbidden_needs_calendar_access() {
+async fn insert_unauthorized_stops_after_one_refresh_and_scope_denial_needs_calendar_access() {
     for (replies, consent) in [
         (vec![("401 Unauthorized", "{}"), ("401 Unauthorized", "{}")], false),
-        (vec![("403 Forbidden", "{}")], true),
+        (vec![("403 Forbidden", r#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#)], true),
+        (vec![("403 Forbidden", r#"{"error":{"details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#)], true),
     ] {
         let (base, server) = server(replies).await;
         let mut tokens = vec![];

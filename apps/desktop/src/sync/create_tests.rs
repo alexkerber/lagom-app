@@ -75,9 +75,9 @@ async fn created_event_is_cached_before_completion_and_older_fetch_cannot_erase_
 }
 
 #[tokio::test]
-async fn create_403_reports_op_and_marks_calendar_access_without_losing_mail_scopes() {
+async fn create_scope_denial_reports_op_and_marks_calendar_access_without_losing_mail_scopes() {
     let (mut worker, account, mut events, path) = fixture();
-    let (base, server) = server("POST", "403 Forbidden", "{}").await;
+    let (base, server) = server("POST", "403 Forbidden", r#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#).await;
     worker.start_create(42, account.clone(), "primary".into(), async move {
         lagom_core::google::create_with(&base, "primary", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await
     });
@@ -93,6 +93,36 @@ async fn create_403_reports_op_and_marks_calendar_access_without_losing_mail_sco
     server.await.unwrap();
     drop(worker);
     std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn create_rate_limit_preserves_calendar_scopes_and_followup_sync() {
+    for body in [
+        r#"{"error":{"errors":[{"reason":"rateLimitExceeded"}]}}"#,
+        r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#,
+        r#"{"error":{"errors":[{"reason":"quotaExceeded"}]}}"#,
+        r#"{"error":{"errors":[{"reason":"forbidden"}]}}"#,
+        "{}", "invalid JSON",
+    ] {
+        let (mut worker, account, mut events, path) = fixture();
+        let scopes = worker.store.account_scopes(&account.id).unwrap();
+        let (base, server) = server("POST", "403 Forbidden", body).await;
+        worker.start_create(42, account.clone(), "primary".into(), async move {
+            lagom_core::google::create_with(&base, "primary", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await
+        });
+        let result = worker.event_creates.join_next_with_id().await.unwrap();
+        worker.event_created(result);
+        assert!(matches!(events.try_recv().unwrap(), Event::EventCreated { op: 42, error: Some(_) }));
+        assert_eq!(worker.store.account_scopes(&account.id).unwrap(), scopes, "{body}");
+        assert!(worker.reauth_required.is_empty());
+        worker.start_calendar(account.clone(), 10, 20, std::future::ready(Ok(vec![])));
+        let result = worker.calendars.join_next_with_id().await.unwrap();
+        worker.calendar_finished(result);
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((10, 20)));
+        server.await.unwrap();
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[tokio::test]

@@ -133,16 +133,20 @@ where T: serde::de::DeserializeOwned, F: FnMut(Option<String>) -> Fut, Fut: Futu
     let bytes = oauth::body(response).await?;
     if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
     if status == reqwest::StatusCode::FORBIDDEN {
-        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-        let scope_error = error["error"]["errors"].as_array().is_some_and(|errors|
-            errors.iter().any(|e| e["reason"] == "insufficientPermissions"))
-            || error["error"]["details"].as_array().is_some_and(|details|
-                details.iter().any(|e| e["reason"] == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"));
-        return Err(if scope_error { Error::CalendarConsent } else { Error::Network("calendar access refused") });
+        return Err(calendar_forbidden(&bytes));
     }
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE { return Err(Error::NotFound); }
     if !status.is_success() { return Err(Error::Network("calendar request failed")); }
     serde_json::from_slice(&bytes).map_err(|_| Error::Network("invalid calendar response"))
+}
+
+fn calendar_forbidden(bytes: &[u8]) -> Error {
+    let error: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_default();
+    let scope_error = error["error"]["errors"].as_array().is_some_and(|errors|
+        errors.iter().any(|e| e["reason"] == "insufficientPermissions"))
+        || error["error"]["details"].as_array().is_some_and(|details|
+            details.iter().any(|e| e["reason"] == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"));
+    if scope_error { Error::CalendarConsent } else { Error::Network("calendar access refused") }
 }
 
 pub fn safe_join_url(value: &str) -> bool {

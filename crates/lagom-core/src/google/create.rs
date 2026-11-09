@@ -66,7 +66,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     }
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
-    if status == reqwest::StatusCode::FORBIDDEN { return Err(Error::CalendarConsent); }
+    if status == reqwest::StatusCode::FORBIDDEN { return Err(calendar_forbidden(&oauth::body(response).await?)); }
     if !status.is_success() { return Err(Error::Network("could not create event")); }
     let bytes = oauth::body(response).await.map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?;
     created(serde_json::from_slice(&bytes).map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?)
