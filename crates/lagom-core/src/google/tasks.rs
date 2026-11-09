@@ -249,16 +249,21 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             if let Some(remote) = remote.iter().find(|r| r.id == *remote_id) {
                 store.db.execute("UPDATE task_lists SET name=?2,etag=?3,remote_updated=?4 WHERE id=?1 AND dirty=0 AND deleted=0", params![list.id, remote.title, remote.etag, remote.updated])?;
             } else if !list.dirty {
+                // Hold the writer lock so Settings cannot change the destination after its ownership check.
+                let tx = rusqlite::Transaction::new_unchecked(&store.db, rusqlite::TransactionBehavior::Immediate)?;
                 let default = store.default_task_list()?;
-                let owner: Option<String> = store.db.query_row("SELECT account FROM task_lists WHERE id=?1", [default], |r| r.get(0))?;
+                let owner: Option<String> = tx.query_row("SELECT account FROM task_lists WHERE id=?1", [default], |r| r.get(0))?;
+                #[cfg(test)]
+                tests::after_recovery_owner_check();
                 // Recovery must not upload private tasks through another account's default list.
                 if list.id == default || owner.as_deref() != Some(account) {
-                    store.db.execute("UPDATE task_lists SET remote_id=NULL,dirty=1,pulled_through=NULL WHERE id=?1", [list.id])?;
-                    store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,dirty=1 WHERE list=?1", [list.id])?;
+                    tx.execute("UPDATE task_lists SET remote_id=NULL,dirty=1,pulled_through=NULL WHERE id=?1", [list.id])?;
+                    tx.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,dirty=1 WHERE list=?1", [list.id])?;
                 } else {
-                    store.delete_task_list(list.id)?;
-                    store.db.execute("DELETE FROM task_lists WHERE id=?1", [list.id])?;
+                    crate::tasks::delete_task_list(&tx, list.id)?;
+                    tx.execute("DELETE FROM task_lists WHERE id=?1", [list.id])?;
                 }
+                tx.commit()?;
                 continue;
             }
         }

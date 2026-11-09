@@ -6,6 +6,14 @@ const SAVED_LIST: &str = r#"{"id":"work","title":"Work","etag":"l2","updated":"2
 const TASK: &str = r#"{"id":"task","title":"Local title","etag":"t2","updated":"2026-11-09T09:00:00Z"}"#;
 const EMPTY: &str = r#"{"items":[]}"#;
 
+thread_local! {
+    static RECOVERY_OWNER_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn after_recovery_owner_check() {
+    if let Some(hook) = RECOVERY_OWNER_CHECK.with(|hook| hook.borrow_mut().take()) { hook(); }
+}
+
 async fn server(replies: Vec<(&str, &str)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     server_default(replies, SAVED_LIST).await
 }
@@ -530,4 +538,47 @@ async fn remote_list_deletion_never_uploads_work_tasks_to_personal_default() {
     assert!(requests[2].contains("Private work notes") && requests[2].contains(&work.id));
     assert_eq!(store.tasks(list, true).unwrap()[0].id, task.id);
     assert_eq!(store.default_task_list().unwrap(), default);
+}
+
+#[tokio::test]
+async fn default_change_between_recovery_check_and_move_cannot_leak_tasks() {
+    let (dir, mut store, work, default) = setup(true);
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let personal = Account::new("personal@example.test".into(), imap, smtp).unwrap();
+    store.save_authorized_account(&personal, oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+    let personal_list = store.add_task_list("Personal").unwrap().id;
+    store.db.execute("UPDATE task_lists SET account=?2,remote_id='work',dirty=0 WHERE id=?1", params![personal_list, personal.id]).unwrap();
+    let extra = store.add_task_list("Extra").unwrap().id;
+    store.db.execute("UPDATE task_lists SET account=?2,remote_id='extra',dirty=0 WHERE id=?1", params![extra, work.id]).unwrap();
+    let task = store.add_task(extra, "Work task", "Private work notes", None).unwrap();
+    store.db.execute("UPDATE tasks SET remote_id='old-task',remote_list_id='extra',dirty=0,mail_account=?2,mail_message_id='<work@example.test>',mail_subject='Work mail' WHERE id=?1", params![task.id, work.id]).unwrap();
+    let settings = Store::open(dir.path().join("fixture.db")).unwrap();
+    settings.db.busy_timeout(Duration::ZERO).unwrap();
+    let change = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed = change.clone();
+    RECOVERY_OWNER_CHECK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        assert_eq!(settings.default_task_list().unwrap(), default);
+        *observed.borrow_mut() = Some(settings.set_default_task_list(personal_list));
+    })));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+    assert!(store.tasks(personal_list, true).unwrap().is_empty(), "a default switch during recovery must not expose work tasks");
+    assert!(matches!(change.borrow_mut().take().unwrap(), Err(Error::Store(rusqlite::Error::SqliteFailure(error, _))) if error.code == rusqlite::ErrorCode::DatabaseBusy));
+    let kept = store.tasks(default, true).unwrap().remove(0);
+    assert_eq!((kept.id, kept.notes.as_str(), kept.mail_account.as_deref(), kept.mail_message_id.as_deref(), kept.mail_subject.as_deref()),
+        (task.id, "Private work notes", Some(work.id.as_str()), Some("<work@example.test>"), Some("Work mail")));
+    assert!(kept.dirty && kept.remote_id.is_none());
+    assert!(!store.task_lists().unwrap().iter().any(|list| list.id == extra));
+    let settings = Store::open(dir.path().join("fixture.db")).unwrap();
+    settings.set_default_task_list(personal_list).unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &personal.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ") && !r.contains("Private work notes")));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", TASK), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(requests[1].starts_with("POST /lists/work/tasks "));
+    assert!(requests[1].contains("Private work notes") && requests[1].contains(&work.id));
+    assert_eq!(store.default_task_list().unwrap(), personal_list);
 }

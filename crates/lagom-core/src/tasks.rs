@@ -78,6 +78,17 @@ fn changed(rows: usize) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn delete_task_list(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
+    let default: i64 = tx.query_row("SELECT list FROM task_settings WHERE id=1", [], |r| r.get(0))?;
+    let protected: bool = tx.query_row("SELECT google_default FROM task_lists WHERE id=?1", [id], |r| r.get(0)).optional()?.ok_or(Error::NotFound)?;
+    if id == default || protected {
+        return Err(Error::Invalid("cannot delete the default task list"));
+    }
+    // Keep completed tasks and tombstones too, so deleting a list never loses task history.
+    tx.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL,list=?2,position=COALESCE(position,0)+(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?2),updated=unixepoch(),dirty=1 WHERE list=?1", params![id, default])?;
+    changed(tx.execute("UPDATE task_lists SET deleted=1,dirty=1 WHERE id=?1 AND deleted=0", [id])?)
+}
+
 impl Store {
     pub fn task_lists(&self) -> Result<Vec<TaskList>> {
         let mut stmt = self.db.prepare(
@@ -103,14 +114,7 @@ impl Store {
     }
     pub fn delete_task_list(&self, id: i64) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
-        let default = self.default_task_list()?;
-        let protected: bool = tx.query_row("SELECT google_default FROM task_lists WHERE id=?1", [id], |r| r.get(0)).optional()?.ok_or(Error::NotFound)?;
-        if id == default || protected {
-            return Err(Error::Invalid("cannot delete the default task list"));
-        }
-        // Keep completed tasks and tombstones too, so deleting a list never loses task history.
-        tx.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL,list=?2,position=COALESCE(position,0)+(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?2),updated=unixepoch(),dirty=1 WHERE list=?1", params![id, default])?;
-        changed(tx.execute("UPDATE task_lists SET deleted=1,dirty=1 WHERE id=?1 AND deleted=0", [id])?)?;
+        delete_task_list(&tx, id)?;
         Ok(tx.commit()?)
     }
     /// Undated and overdue tasks stay visible until completed.
