@@ -135,7 +135,7 @@ impl MainWindow {
 
     pub(super) fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.page, Page::Mail) {
-            if let Some(id) = self.inbox.current() {
+            if let Some(id) = self.inbox.single() {
                 self.task_from_mail(id, cx);
                 return;
             }

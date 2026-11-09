@@ -204,9 +204,8 @@ pub struct Snapshot {
 
 /// Bounded queries on indexed columns: a few ms for a 100 000-message store. Runs when the
 /// worker reports a change, never per key press.
-/// `pin`: a store id that must be in the list on screen if it belongs there, even past
-/// `limit` (a ⌘K hit), so the selection lands on it and not on another row.
-pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64, pin: Option<i64>, group: bool) -> lagom_core::Result<Snapshot> {
+/// `pins`: selected messages and a ⌘K hit stay in their list even past `limit`.
+pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64, pins: impl IntoIterator<Item = i64>, group: bool) -> lagom_core::Result<Snapshot> {
     let folders = store.folders(account, now)?;
     let counts = store.counts(account, now)?;
     let inbox_id = folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox).map(|f| f.id);
@@ -223,7 +222,14 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
         View::Folder(id) => if group { store.list_conversations(account, Some(id), now, limit)? } else { store.list_messages(id, now, limit, 0)? },
         View::Later => if group { store.list_conversations(account, None, now, limit)? } else { store.later(account, now, limit, 0)? },
     };
-    if let Some(m) = pin.and_then(|id| store.message(id).ok()).map(|m| m.summary) {
+    let mut loaded = match view { View::Inbox => &inbox, _ => &open }.iter().map(|m| m.id).collect::<std::collections::HashSet<_>>();
+    for id in pins {
+        if loaded.contains(&id) { continue; }
+        let m = match store.message_summary(id) {
+            Ok(m) if m.account == account => m,
+            Ok(_) | Err(lagom_core::Error::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
         let snoozed = m.snoozed_until.is_some_and(|t| t > now);
         let list = match view {
             View::Inbox if Some(m.folder) == inbox_id && !snoozed => Some(&mut inbox),
@@ -232,10 +238,12 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
             _ => None,
         };
         // Past the page means older than every loaded row: it goes last.
-        if let Some(list) = list.filter(|l| !l.iter().any(|r| r.id == m.id)) {
+        if let Some(list) = list {
+            let start = list.len();
             if group {
                 list.extend(store.thread_messages(account, &m.thread_id)?.into_iter().filter(|row| row.folder == m.folder && row.snoozed_until.is_some_and(|t| t > now) == snoozed));
             } else { list.push(m); }
+            loaded.extend(list[start..].iter().map(|m| m.id));
         }
     }
     let next_due = store.later(account, now, 1, 0)?.first().and_then(|m| m.snoozed_until);
