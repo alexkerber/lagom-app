@@ -22,7 +22,8 @@ async fn inline_fetch_uses_source_folder_and_uid_during_pending_move() {
 }
 
 async fn roundtrip(legacy: bool, oversized: bool, pending_move: bool) {
-    let raw = include_str!("fixtures/related.eml").replace('\n', "\r\n");
+    // Windows checks the fixture out with CRLF; normalise before building the wire form.
+    let raw = include_str!("fixtures/related.eml").replace("\r\n", "\n").replace('\n', "\r\n");
     let chunks: Vec<_> = raw.split("--related\r\n").collect();
     let header = chunks[0].to_owned();
     let html = chunks[1].split_once("\r\n\r\n").unwrap().1.trim_end().to_owned();
