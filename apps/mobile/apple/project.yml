@@ -1,0 +1,66 @@
+name: Lagom
+options:
+  deploymentTarget:
+    iOS: '18.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    # shortcut: arm64 simulator only; add x86_64 when Intel Mac development is needed.
+    ARCHS: arm64
+    TARGETED_DEVICE_FAMILY: '1,2'
+    # Placeholder: replace the bundle identifier before release.
+    PRODUCT_BUNDLE_IDENTIFIER: iq.lagom.app
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: '1'
+    OTHER_LDFLAGS: ['$(inherited)', '-lsqlite3', '-liconv', '-lresolv', '-lc++']
+targets:
+  Lagom:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Assets.xcassets
+      - path: Generated/LagomCore.swift
+    dependencies:
+      - framework: Generated/LagomFFI.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: Lagom
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  LagomTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: Tests
+    dependencies:
+      - target: Lagom
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: iq.lagom.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Lagom:
+    build:
+      targets:
+        Lagom: all
+        LagomTests: [test]
+    test:
+      targets: [LagomTests]

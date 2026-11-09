@@ -31,3 +31,32 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test workspace
         run: cargo test --workspace --locked
+
+  apple-mobile:
+    name: iOS static library and app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build Apple bindings
+        run: scripts/build-apple.sh
+      - name: Generate Xcode project
+        run: xcodegen generate --spec apps/mobile/apple/project.yml
+      - name: Build iPhone and iPad app without a simulator device
+        run: xcodebuild build -project apps/mobile/apple/Lagom.xcodeproj -scheme Lagom -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+      - name: Compile view model tests without running the app
+        run: xcodebuild build-for-testing -project apps/mobile/apple/Lagom.xcodeproj -scheme Lagom -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+      - name: Check the generated Swift async boundary without an app
+        run: |
+          cargo build --locked -p lagom-ffi
+          xcrun swiftc apps/mobile/apple/Generated/LagomCore.swift \
+            crates/lagom-ffi/tests/swift-smoke.swift \
+            -I apps/mobile/apple/Generated/LagomFFI.xcframework/ios-arm64/Headers \
+            -L target/debug -llagom_ffi -framework Security -framework SystemConfiguration \
+            -lresolv -liconv -o target/mobile-swift-smoke
+          target/mobile-swift-smoke

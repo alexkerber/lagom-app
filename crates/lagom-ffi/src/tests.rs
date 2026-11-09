@@ -1,0 +1,310 @@
+use super::*;
+use lagom_core::store::{Message, MessageSummary};
+use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
+use std::{any::Any, collections::HashMap};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+// The test binary replaces the backend before any credential operation; it never opens a keychain.
+#[derive(Clone, Default, Debug)]
+struct MemorySecrets(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+#[derive(Debug)]
+struct MemoryEntry { store: MemorySecrets, id: String }
+impl CredentialBuilderApi for MemorySecrets {
+    fn build(&self, _: Option<&str>, service: &str, user: &str) -> keyring::Result<Box<Credential>> {
+        Ok(Box::new(MemoryEntry { store: self.clone(), id: format!("{service}/{user}") }))
+    }
+    fn as_any(&self) -> &dyn Any { self }
+}
+impl CredentialApi for MemoryEntry {
+    fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> { self.store.0.lock().unwrap().insert(self.id.clone(), secret.to_vec()); Ok(()) }
+    fn get_secret(&self) -> keyring::Result<Vec<u8>> { self.store.0.lock().unwrap().get(&self.id).cloned().ok_or(keyring::Error::NoEntry) }
+    fn delete_credential(&self) -> keyring::Result<()> { self.store.0.lock().unwrap().remove(&self.id); Ok(()) }
+    fn as_any(&self) -> &dyn Any { self }
+}
+fn fixture() -> (tempfile::TempDir, Arc<LagomCore>) {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| keyring::set_default_credential_builder(Box::<MemorySecrets>::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let core = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
+    (dir, core)
+}
+fn fixture_account(store: &Store, email: &str, port: u16) -> Account {
+    let server = ServerConfig { host: "127.0.0.1".into(), port, username: email.into(), security: Security::Plain };
+    let a = Account::new(email.into(), server.clone(), server).unwrap();
+    a.set_password("fixture").unwrap();
+    store.save_account(&a).unwrap();
+    a
+}
+fn mail(store: &mut Store, a: &Account, uid: u32, date: i64) -> i64 {
+    let folder = store.save_folder(&a.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    store.reset_uidvalidity(folder, 7).unwrap();
+    store.save_message(&Message { summary: MessageSummary { account: a.id.clone(), folder, uid, date,
+        from_address: "sender@example.test".into(), subject: "Hello".into(), message_id: format!("m{uid}@example.test"),
+        thread_refs: "root@example.test".into(), has_attachments: true, ..Default::default() },
+        body_text: "line one\nline two".into(), body_html: Some("<p>Hello</p>".into()) }).unwrap()
+}
+
+#[tokio::test]
+async fn unified_pages_snooze_details_and_account_removal() {
+    let (dir, core) = fixture();
+    let (a, b, first, second, third) = {
+        let mut s = core.store.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let b = fixture_account(&s, "b@example.test", 1);
+        let first = mail(&mut s, &a, 1, 20);
+        let second = mail(&mut s, &b, 1, 30);
+        let third = mail(&mut s, &a, 2, 30);
+        (a, b, first, second, third)
+    };
+    assert_eq!(core.inbox(2, 0).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [third, second]);
+    assert_eq!(core.inbox(2, 2).await.unwrap()[0].id, first);
+    assert!(core.inbox(501, 0).await.is_err());
+    assert!(core.inbox(0, 0).await.unwrap().is_empty());
+    assert_eq!(core.mailbox(Some(b.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().len(), 1);
+    assert!(core.later(vec![first, -1], now() + 100).await.is_err());
+    assert_eq!(core.inbox(20, 0).await.unwrap().len(), 3);
+    core.later(vec![third], now() + 100).await.unwrap();
+    assert_eq!(core.mailbox(None, Mailbox::Later, 20, 0).await.unwrap()[0].id, third);
+    assert_eq!(core.inbox(20, 0).await.unwrap()[0].id, second);
+    core.store.lock().unwrap().snooze(third, Some(now() - 1)).unwrap();
+    assert_eq!(core.inbox(20, 0).await.unwrap()[0].id, third);
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("INSERT INTO attachments VALUES (?1,'2','fixture.txt','text/plain',8,'base64')", [first]).unwrap();
+    let message = core.message(first).await.unwrap();
+    assert_eq!(message.attachments[0].filename, "fixture.txt");
+    assert_eq!(message.attachments[0].size, 8);
+    assert_eq!(message.text_body, "line one\nline two");
+    assert_eq!(message.html_body.as_deref(), Some("<p>Hello</p>"));
+    assert!(message.row.unread);
+    assert!(core.message(-1).await.unwrap_err().to_string().contains("not found"));
+    core.remove_account(a.id.clone()).await.unwrap();
+    assert_eq!(core.accounts().await.unwrap()[0].id, b.id);
+    assert_eq!(core.inbox(20, 0).await.unwrap().len(), 1);
+    assert!(a.password().is_err());
+}
+
+#[tokio::test]
+async fn replies_queue_markdown_durably_without_network_or_cross_account_sends() {
+    let (dir, core) = fixture();
+    let (a, b, id) = {
+        let mut s = core.store.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let b = fixture_account(&s, "b@example.test", 1);
+        let id = mail(&mut s, &a, 1, 1);
+        (a, b, id)
+    };
+    let reply = core.reply_draft(id).await.unwrap();
+    assert_eq!(reply.account, a.id);
+    assert_eq!(reply.subject, "Re: Hello");
+    assert!(reply.body.contains("> line two"));
+    assert!(core.send(b.id, vec![reply.to.clone()], vec![], reply.subject.clone(), "body".into(), Some(id)).await.is_err());
+    assert!(core.send(a.id.clone(), vec!["invalid".into()], vec![], "subject".into(), "body".into(), None).await.is_err());
+    let queued = core.send(a.id.clone(), vec![reply.to], vec![], reply.subject, "**bold**".into(), Some(id)).await.unwrap();
+    let s = core.store.lock().unwrap();
+    let pending = s.pending(&queued).unwrap();
+    assert_eq!(pending.mail.in_reply_to.as_deref(), Some("<m1@example.test>"));
+    assert_eq!(pending.mail.references, ["<root@example.test>", "<m1@example.test>"]);
+    assert!(String::from_utf8_lossy(&pending.raw).contains("<strong>bold</strong>"));
+    assert!(s.claim_send(&queued, i64::MAX).unwrap());
+    drop(s);
+    let same = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
+    assert!(Arc::ptr_eq(&same.store, &core.store));
+    assert!(same.send_failures().await.unwrap().is_empty(), "reopening must not recover an active send");
+    drop(same); drop(core);
+    let reopened = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
+    assert!(reopened.send_failures().await.unwrap()[0].message.contains("uncertain"));
+    assert!(reopened.store.lock().unwrap().due_outbox(&a.id, i64::MAX).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (_dir, core) = fixture();
+        let a = fixture_account(&core.store.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let mut flags = 0;
+            for _ in 0..3 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                    let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                    let data = if cmd.starts_with("LOGIN ") { String::new() }
+                    else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n".into() }
+                    else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n".into() }
+                    else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into() }
+                    else if cmd == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
+                    else if cmd.contains("BODYSTRUCTURE") {
+                        let header = "From: Sender <sender@example.test>\r\nSubject: Fixture\r\nMessage-ID: <fixture@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                        format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                    } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                    else if cmd == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
+                    else if cmd.starts_with("UID STORE 1 ") {
+                        flags += 1;
+                        if flags == 2 {
+                            socket.get_mut().write_all(format!("{tag} NO refused\r\n").as_bytes()).await.unwrap();
+                            continue;
+                        }
+                        assert_eq!(cmd, "UID STORE 1 +FLAGS.SILENT (\\Seen)");
+                        String::new()
+                    } else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                    else { panic!("unexpected command {cmd}"); };
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                    if cmd == "LOGOUT" { break; }
+                }
+            }
+            assert_eq!(flags, 2);
+        });
+        core.sync(a.id).await.unwrap();
+        let row = core.inbox(10, 0).await.unwrap().remove(0);
+        assert_eq!(row.sender_name, "Sender");
+        assert_eq!(core.message(row.id).await.unwrap().text_body, "body");
+        core.mark_read(row.id, true).await.unwrap();
+        assert!(!core.message(row.id).await.unwrap().row.unread);
+        assert!(core.mark_read(row.id, false).await.is_err());
+        assert!(!core.message(row.id).await.unwrap().row.unread);
+        server.await.unwrap();
+    }).await.unwrap();
+}
+
+#[test]
+fn local_later_is_tomorrow_at_eight() {
+    use chrono::{Local, TimeZone, Timelike};
+    let timestamp = tomorrow_at_eight().unwrap();
+    let next = Local.timestamp_opt(timestamp, 0).unwrap();
+    assert_eq!(next.date_naive(), Local::now().date_naive().succ_opt().unwrap());
+    assert_eq!((next.hour(), next.minute(), next.second()), (8, 0, 0));
+}
+
+#[test]
+fn html_privacy_and_recipients_share_core_policy() {
+    let html = "<LINK rel=preconnect href='https://tracker.example'><img src='https://tracker.example/pixel'><script>fetch('/secret')</script>";
+    for dark in [false, true] {
+        let document = mail_document(html.into(), dark);
+        assert!(document.contains("default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
+        assert!(document.find("Content-Security-Policy").unwrap() < document.find("<img").unwrap());
+        assert!(document.contains("<x-LINK"));
+        assert!(!document.contains("<LINK"));
+    }
+    assert_eq!(split_recipients("\"Example, Sender\" <sender@example.test>, next@example.test".into()), ["\"Example, Sender\" <sender@example.test>", "next@example.test"]);
+}
+
+#[tokio::test]
+async fn done_and_delete_move_through_imap_without_crossing_accounts() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (_dir, core) = fixture();
+        let (a, other, id, untouched) = {
+            let mut s = core.store.lock().unwrap();
+            let a = fixture_account(&s, "moving@example.test", listener.local_addr().unwrap().port());
+            let other = fixture_account(&s, "other@example.test", 1);
+            let id = mail(&mut s, &a, 1, 1);
+            let untouched = mail(&mut s, &other, 1, 1);
+            (a, other, id, untouched)
+        };
+        let server = tokio::spawn(async move {
+            let mut location = "INBOX".to_string();
+            for destination in ["Archive", "Trash"] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                let mut selected = String::new();
+                let mut moved = false;
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                    let data = if cmd.starts_with("LOGIN ") { String::new() }
+                    else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1 MOVE\r\n".into() }
+                    else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n* LIST (\\Archive) NIL \"Archive\"\r\n* LIST (\\Trash) NIL \"Trash\"\r\n".into() }
+                    else if let Some(name) = cmd.strip_prefix("SELECT ") {
+                        selected = name.trim_matches('"').into();
+                        "* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+                    } else if cmd.starts_with("UID MOVE ") {
+                        assert_eq!(cmd, format!("UID MOVE 1 \"{destination}\""));
+                        assert_eq!(selected, location);
+                        location = destination.into(); moved = true; String::new()
+                    } else if cmd == "UID SEARCH ALL" {
+                        if selected == location { "* SEARCH 1\r\n".into() } else { "* SEARCH\r\n".into() }
+                    } else if cmd.contains("BODYSTRUCTURE") {
+                        assert_eq!(selected, location);
+                        let header = "From: sender@example.test\r\nSubject: Moved\r\nMessage-ID: <m1@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                        format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                    } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                    else if cmd == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
+                    else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                    else { panic!("unexpected command {cmd}"); };
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                    if cmd == "LOGOUT" { break; }
+                }
+                assert!(moved);
+            }
+        });
+        core.done(vec![id]).await.unwrap();
+        assert_eq!(core.inbox(20, 0).await.unwrap()[0].id, untouched);
+        let archived = core.mailbox(Some(a.id.clone()), Mailbox::Done, 20, 0).await.unwrap();
+        assert_eq!(archived.len(), 1);
+        core.delete(vec![archived[0].id]).await.unwrap();
+        assert!(core.mailbox(Some(a.id.clone()), Mailbox::Done, 20, 0).await.unwrap().is_empty());
+        let s = core.store.lock().unwrap();
+        assert_eq!(s.mailbox_messages(Some(&a.id), Some(FolderRole::Trash), now(), 20, 0).unwrap().len(), 1);
+        assert_eq!(s.message_summary(untouched).unwrap().account, other.id);
+        drop(s);
+        server.await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn manual_add_verifies_both_servers_before_saving() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let (_dir, core) = fixture();
+        for accepted in [false, true] {
+            let imap = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let smtp = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let config = |port| MailServer { host: "127.0.0.1".into(), port, username: "fixture@example.test".into(), security: TransportSecurity::Plain };
+            let (imap_config, smtp_config) = (config(imap.local_addr().unwrap().port()), config(smtp.local_addr().unwrap().port()));
+            let imap_server = tokio::spawn(async move {
+                let (socket, _) = imap.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                    let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                    let data = if cmd.starts_with("LOGIN ") { "" }
+                    else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                    else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                    else { panic!("unexpected command {cmd}"); };
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                    if cmd == "LOGOUT" { break; }
+                }
+            });
+            let smtp_server = tokio::spawn(async move {
+                let (socket, _) = smtp.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"220 fixture ESMTP\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                    let data = if line.starts_with("EHLO ") { "250-fixture\r\n250 AUTH PLAIN\r\n" }
+                    else if line.starts_with("AUTH PLAIN ") { if accepted { "235 authenticated\r\n" } else { "535 rejected\r\n" } }
+                    else if line == "NOOP\r\n" { "250 OK\r\n" }
+                    else if line == "QUIT\r\n" { "221 bye\r\n" }
+                    else { panic!("unexpected SMTP command"); };
+                    socket.get_mut().write_all(data.as_bytes()).await.unwrap();
+                    if line == "QUIT\r\n" || !accepted && line.starts_with("AUTH ") { break; }
+                }
+            });
+            let result = core.add_account_manual("fixture@example.test".into(), "fixture".into(), imap_config, smtp_config).await;
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(core.accounts().await.unwrap().len(), usize::from(accepted));
+            if let Ok(a) = result { assert_eq!(&*account(&core.store.lock().unwrap(), &a.id).unwrap().password().unwrap(), "fixture"); }
+            imap_server.await.unwrap(); smtp_server.await.unwrap();
+        }
+        assert!(core.add_account("not-an-address".into(), "fixture".into()).await.is_err());
+        assert!(core.sync("missing-account".into()).await.is_err());
+    }).await.unwrap();
+}
