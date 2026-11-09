@@ -118,9 +118,10 @@ const SIDEBAR_ROW: f32 = 28.;
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
 /// Compact windows scroll the sidebar groups beneath Search.
-pub const MIN_WINDOW: (f32, f32) = (970., 600.);
+pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 
 mod polish;
+use polish::action_icon;
 mod panes;
 use panes::{default_list, Panes, SIDEBAR_DEFAULT};
 
@@ -189,7 +190,7 @@ pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
 const SECTIONS: [(&str, &str, &str); 4] = [
-    ("Home", "icons/home.svg", "⌘1"),
+    ("Today", "icons/home.svg", "⌘1"),
     ("Mail", "icons/mail.svg", "⌘2"),
     ("Calendar", "icons/calendar.svg", "⌘3"),
     ("Todo", "icons/todo.svg", "⌘4"),
@@ -299,6 +300,8 @@ pub struct MainWindow {
     folder_name: Option<Entity<TextInput>>,
     folder_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
+    sidebar_mail: bool,
+    sidebar_fade: Option<Instant>,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -411,6 +414,8 @@ impl MainWindow {
             folder_name: None,
             folder_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
+            sidebar_mail: false,
+            sidebar_fade: None,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -1173,12 +1178,12 @@ pub(crate) trait OneLine: Styled + Sized {
 
 impl<E: Styled> OneLine for E {}
 
-/// Press feedback for anything clickable. As in native macOS controls: the arrow pointer, no
-/// hover state, and an instant press tint (a fade would make the click feel late).
+/// Instant hover and press feedback; the arrow pointer follows the house controls.
 /// `selected` rows keep their selection fill while pressed.
 pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Stateful<Div> {
     let press = t.press;
-    el.when(!selected, |el| el.active(move |s| s.bg(press)))
+    let ink = t.ink;
+    el.when(!selected, |el| el.hover(move |s| s.bg(Rgba { a: press.a / 2., ..press }).text_color(ink)).active(move |s| s.bg(press)))
 }
 
 /// A push button. `fill`: the colour of a primary button; `None` is a bordered one. Shortcuts
@@ -1200,7 +1205,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .text_size(px(size::BASE))
         .font_weight(FontWeight::MEDIUM)
         .gap(px(6.))
-        .when_some(polish::action_icon(label), |d, path| d.child(
+        .when_some(action_icon(label), |d, path| d.child(
             icon(path, if fill.is_some() { t.accent_ink } else { t.ink2 }, 16.)
                 .when(fill.is_none(), |icon| icon.group_hover(label, move |s| s.text_color(ink)))))
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
@@ -1208,7 +1213,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         }))));
     match fill {
         // A translucent tint would replace the fill, so a filled button dims a little instead.
-        Some(bg) => base.bg(bg).text_color(t.accent_ink).active(|s| s.opacity(0.8)),
+        Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.border_1().border_color(t.line).bg(t.bg).text_color(t.ink), t, false),
     }
 }
@@ -1380,6 +1385,9 @@ impl MainWindow {
             None => mail::demo_accounts().iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == 0)).collect(),
         };
         let on_mail = matches!(self.page, Page::Mail);
+        let fade = self.sidebar_fade.map(|at| ease_out_quint()((at.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.))).unwrap_or(1.);
+        let show_mail = on_mail || self.sidebar_fade.is_some();
+        let unread = if self.live.is_none() { self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count() } else { self.today.unread };
         let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
         for (i, (name, address, active)) in accounts.into_iter().enumerate() {
@@ -1413,7 +1421,6 @@ impl MainWindow {
                     .child(app_mark())
                     .child("Lagom"),
             )
-            .children(self.live.as_ref().and_then(|live| self.reauth_control(live.current, "sidebar-reauth", cx)))
             .child(
                 div()
                     .id("search")
@@ -1429,7 +1436,7 @@ impl MainWindow {
                     .bg(t.raised)
                     .text_color(t.ink2)
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))
-                    .child(icon("icons/search.svg", t.ink2, 14.))
+                    .child(icon("icons/search.svg", t.ink2, 16.))
                     .child(div().flex_1().child("Search")),
             )
             .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
@@ -1440,18 +1447,29 @@ impl MainWindow {
                     .flex_shrink_0()
                     .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
                         let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
+                        let theme = *t;
+                        // Unread mail is a filled badge, so it never reads as a shortcut; every row keeps its ⌘ key.
                         nav(path, label, None, active).debug_selector(move || format!("section-{ix}"))
+                            .when(ix == 1 && unread > 0, |d| d.child(
+                                div().debug_selector(|| "mail-unread-badge".into()).h(px(16.)).min_w(px(16.)).px(px(5.)).rounded_full()
+                                    .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
+                                    .text_size(px(size::SMALL)).font_weight(FontWeight::SEMIBOLD).child(unread.to_string())))
                             .child(mono(shortcut, t.ink2))
+                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix].into())).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
-                    }))
-                    .child(self.mailbox_row(0, cx).mt(px(12.)))
+                    })))
+                .when(show_mail, |d| d.child(div().id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
+                    .flex().flex_col().gap(px(2.)).opacity(if on_mail { fade } else { 1. - fade })
+                    .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
+                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
+                    .child(self.mailbox_row(0, cx))
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
-                        .on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Later, cx))))
+                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Later, cx); })))
                     .child(self.mailbox_row(2, cx))
                     .child(self.mailbox_row(1, cx))
-                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Trash, cx)))))
-                .child(self.folder_group(heading("Folders"), cx).flex_shrink_0().max_h(px(200.)))
-                .child(account_rows))
+                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Trash, cx); })))
+                .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(200.)))
+                .child(account_rows.mt(px(18.))))))
             .child(
                 pressable(div().id("settings").group("settings"), t, in_settings)
                     .flex()
@@ -1503,14 +1521,14 @@ impl MainWindow {
         let row = |id: ElementId, active: bool| {
             pressable(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
-        let add = icon_button(t, "add-folder", "icons/plus.svg", "New folder")
+        let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder")
             .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
         #[cfg(test)]
         let add = add.debug_selector(|| "add-folder".into());
         let group = div().flex().flex_col().min_h(px(0.)).gap(px(2.)).child(heading.flex_shrink_0().child(add))
             .children(self.folder_name.as_ref().map(|input| div().flex_shrink_0().px(px(10.)).child(input.clone())));
         if !all.iter().any(Folder::listed) {
-            let new = row("new-folder".into(), false).text_color(t.ink2).child(icon("icons/plus.svg", t.ink2, 16.)).child("New folder")
+            let new = row("new-folder".into(), false).text_color(t.ink2).child(icon("icons/new-folder.svg", t.ink2, 16.)).child("New folder")
                 .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
             #[cfg(test)]
             let new = new.debug_selector(|| "new-folder".into());
@@ -1748,10 +1766,10 @@ impl MainWindow {
                     let el = away(el, theme, what, p, 0.).into_any_element();
                     with_behind(el, theme, what, p)
                 }
-                // At rest. No hover fill, as in native lists; a press tints, the selection keeps its fill.
+                // Selection keeps its fill under the pointer.
                 None => {
                     let press = t.press;
-                    el.when(!selected, |el| el.active(move |s| s.bg(press))).into_any_element()
+                    el.when(!selected, |el| el.hover(move |s| s.bg(Rgba { a: press.a / 2., ..press })).active(move |s| s.bg(press))).into_any_element()
                 }
             });
         }
@@ -1990,15 +2008,22 @@ fn toolbar(t: &Theme) -> Div {
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
 pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
-    pressable(div().id(id).group(id), t, false)
+    pressable(div().id(id), t, false).group("icon-button")
         .debug_selector(move || id.into())
         .flex()
         .items_center()
         .justify_center()
         .size(px(28.))
+        .flex_shrink_0()
         .rounded(px(radius::CONTROL))
-        .child(icon(path, t.ink2, 16.).group_hover(id, move |s| s.text_color(theme.ink)))
+        .text_color(t.ink2)
+        .child(icon_button_glyph(t, path))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
+}
+
+fn icon_button_glyph(t: &Theme, path: &'static str) -> gpui::Svg {
+    // GPUI's SVG paint path requires an explicit color on the SVG itself.
+    icon(path, t.ink2, 16.).group_hover("icon-button", |s| s.text_color(t.ink))
 }
 
 pub(crate) struct Tip(pub(crate) Theme, pub(crate) SharedString);
@@ -2125,7 +2150,7 @@ impl Render for MainWindow {
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
-            Page::Home => "Home".into(),
+            Page::Home => "Today".into(),
             Page::Todo => "Todo".into(),
             Page::Calendar => "Calendar".into(),
             Page::Settings(_) => "Settings".into(),
@@ -2138,8 +2163,12 @@ impl Render for MainWindow {
         let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && self.inbox.account_filter.is_none() && !self.inbox.unread_only;
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
+        let on_mail = matches!(self.page, Page::Mail);
+        if self.sidebar_mail != on_mail { self.sidebar_mail = on_mail; self.sidebar_fade = Some(Instant::now()); }
+        if self.sidebar_fade.is_some_and(|at| at.elapsed() < MOTION) { window.request_animation_frame(); }
+        else { self.sidebar_fade = None; }
         let panel = match &self.page {
-            Page::Home | Page::Todo => self.tasks_view(cx),
+            Page::Home | Page::Todo => self.tasks_view(window, cx),
             Page::Calendar => self.week_view(cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
@@ -2168,13 +2197,10 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        // The sidebar shows the blurred window background through a frosted tint: a step lighter
-        // than the page in dark mode, so it reads as frost, not a hole. At 0.96 only the
-        // desktop's colour comes through, not its shapes.
-        // shortcut: the blur radius is AppKit's fixed NSVisualEffectView one; a stronger blur needs
-        // native code (see spike/liquid-glass).
+        // The sidebar is a solid step lighter than the page in dark mode (darker in light mode).
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
-        let tint = Rgba { a: 0.96, ..frost };
+        // Opaque: on macOS 27 the blur did not apply and text behind the window showed through.
+        let tint = Rgba { a: 1.0, ..frost };
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
@@ -3427,7 +3453,8 @@ mod dispatch {
         let new = cx.debug_bounds("folder-101").unwrap();
         let settings = cx.debug_bounds("settings").unwrap();
         assert_eq!(new.size.height, px(SIDEBAR_ROW));
-        assert!(new.top() > add.y && new.bottom() <= settings.top());
+        let add = cx.debug_bounds("add-folder").unwrap();
+        assert!(new.top() >= add.bottom() && new.bottom() <= settings.top());
         assert!(settings.bottom() <= px(700.));
         cx.simulate_click(new.center(), Default::default());
         assert_eq!(view.read_with(cx, |v, _| v.inbox.open), Some(101));

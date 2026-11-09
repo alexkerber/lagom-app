@@ -56,18 +56,16 @@ enum Action {
 impl Action {
     fn icon(&self) -> &'static str {
         match self {
-            Self::Move(MoveTo::New(_)) => "icons/plus.svg",
-            Self::Move(_) => "icons/folder.svg",
+            Self::Move(MoveTo::Folder(_)) => "icons/folder.svg",
+            Self::Move(MoveTo::New(_)) => "icons/new-folder.svg",
             Self::Fill(_) => "icons/move.svg",
             Self::Run(run) => match run {
-                Run::NewTask => "icons/new-task.svg", Run::Done => "icons/done.svg",
-                Run::Later(_) => "icons/later.svg", Run::Delete => "icons/trash.svg",
-                Run::Reply => "icons/reply.svg", Run::ReplyAll => "icons/reply-all.svg",
-                Run::Forward => "icons/forward.svg", Run::ToggleRead => "icons/unread.svg",
-                Run::Compose => "icons/compose.svg", Run::InsertFile => "icons/insert-file.svg",
-                Run::Sync => "icons/cloud-syncing.svg", Run::Settings => "icons/settings.svg",
-                Run::AddAccount => "icons/account-add.svg", Run::Open(_) => "icons/mail.svg",
-            },
+                Run::NewTask => "icons/plus.svg", Run::Done => "icons/done.svg", Run::Later(_) => "icons/later.svg",
+                Run::Delete => "icons/trash.svg", Run::Reply => "icons/reply.svg", Run::ReplyAll => "icons/reply-all.svg",
+                Run::Forward => "icons/forward.svg", Run::ToggleRead => "icons/unread.svg", Run::Compose => "icons/compose.svg",
+                Run::InsertFile => "icons/attachment.svg", Run::Sync => "icons/sync.svg", Run::Settings => "icons/settings.svg",
+                Run::AddAccount => "icons/add-account.svg", Run::Open(_) => "icons/mail.svg",
+            }
         }
     }
 }
@@ -489,6 +487,7 @@ mod tests {
     #[test]
     fn every_palette_action_has_an_embedded_stroke_icon() {
         use gpui::AssetSource;
+        assert_eq!(Action::Run(Run::NewTask).icon(), "icons/plus.svg");
         for action in COMMANDS.iter().map(|c| c.action.clone()).chain([
             Action::Move(MoveTo::Folder(0)), Action::Move(MoveTo::New("Fixture".into())), Action::Run(Run::Open(1)),
         ]) {

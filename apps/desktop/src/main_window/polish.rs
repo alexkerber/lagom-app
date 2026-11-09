@@ -178,13 +178,13 @@ pub(super) fn action_icon(label: &str) -> Option<&'static str> {
         "Later" => "icons/later.svg", "Done" => "icons/done.svg", "Move to Inbox" => "icons/restore.svg",
         "Move" => "icons/move.svg", "Mark unread" => "icons/unread.svg", "Mark read" => "icons/read.svg",
         "Copy address" => "icons/copy.svg", "Load remote images" => "icons/image.svg", "Load more" => "icons/load-more.svg",
-        "Delete" => "icons/trash.svg", "Empty Trash" | "Delete all" => "icons/empty-trash.svg", "Cancel" => "icons/cancel.svg",
+        "Delete" => "icons/trash.svg", "Empty Trash" | "Delete all" => "icons/empty-trash.svg", "Cancel" => "icons/close.svg",
         "Undo" => "icons/undo.svg", "Send again" => "icons/retry-send.svg", "Edit draft" => "icons/edit-draft.svg",
-        "New task" | "Add task" => "icons/new-task.svg", "Add list" => "icons/new-list.svg",
+        "New task" | "Add task" => "icons/plus.svg", "New list" | "Add list" => "icons/new-list.svg",
         "Rename" => "icons/rename.svg", "Delete list" => "icons/delete-list.svg", "Open mail" => "icons/linked-mail.svg",
-        "Today" => "icons/calendar.svg", "Join" | "Join meeting" => "icons/camera.svg",
+        "New event" => "icons/new-event.svg", "Today" => "icons/calendar.svg", "Join" | "Join meeting" => "icons/camera.svg",
         "Open in Google Calendar" => "icons/external.svg", "Close" => "icons/close.svg",
-        "Add account" => "icons/account-add.svg", "Remove" => "icons/account-remove.svg", "Keep" | "Cancel sign-in" => "icons/cancel.svg",
+        "Add account" => "icons/account-add.svg", "Remove" => "icons/account-remove.svg", "Keep" | "Cancel sign-in" => "icons/close.svg",
         "Show your Google Calendar" | "Allow Google Tasks access" => "icons/access.svg",
         "Send" => "icons/send.svg", "New message" => "icons/compose.svg", "Insert file…" => "icons/insert-file.svg",
         "Sync now" => "icons/cloud-syncing.svg", "Settings" => "icons/settings.svg", "Connect" => "icons/connect.svg",
@@ -219,7 +219,7 @@ mod tests {
         let mut paths = HashSet::new();
         let mut drawings = HashSet::new();
         for label in ["Reply", "Reply all", "Forward", "Later", "Done", "Move to Inbox", "Move", "Mark unread", "Mark read",
-            "Copy address", "Load remote images", "Load more", "Delete", "Empty Trash", "Cancel", "Undo", "Send again", "Edit draft",
+            "Copy address", "Load remote images", "Load more", "Delete", "Empty Trash", "Undo", "Send again", "Edit draft",
             "New task", "Add list", "Rename", "Delete list", "Open mail", "Today", "Join", "Open in Google Calendar", "Close",
             "Add account", "Remove", "Show your Google Calendar", "Send", "New message", "Insert file…", "Sync now", "Settings", "Connect"] {
             let path = action_icon(label).unwrap();
@@ -229,6 +229,7 @@ mod tests {
             assert!(svg.contains("viewBox=\"0 0 16 16\"") && svg.contains("stroke-width=\"1.5\""));
             assert!(drawings.insert(svg.to_string()), "{label} must have its own drawing");
         }
+        assert_eq!(action_icon("Cancel"), action_icon("Close"));
         for path in ["icons/more.svg", "icons/attachment.svg"] {
             assert!(crate::Assets.load(path).unwrap().is_some());
         }
@@ -257,13 +258,13 @@ mod tests {
         let (view, cx) = super::super::dispatch::open(cx);
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         cx.run_until_parked();
-        for path in ["new-task", "new-list", "rename", "delete-list", "linked-mail", "open-task", "settings"] {
+        for path in ["plus", "more", "mail", "settings"] {
             let bounds = cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
             assert_eq!(bounds.size, gpui::size(px(16.), px(16.)), "{path}");
         }
         view.update_in(cx, |v, window, cx| v.open_palette("New task", window, cx));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("icon-icons/new-task.svg").is_some());
+        assert!(cx.debug_bounds("icon-icons/plus.svg").is_some());
     }
 
     #[gpui::test]
