@@ -28,6 +28,7 @@ pub struct Event {
 pub struct AgendaEvent {
     pub account: String,
     pub calendar: String,
+    pub calendar_id: String,
     pub event: Event,
 }
 
@@ -56,6 +57,12 @@ impl Store {
         let id = self.db.query_row("SELECT id FROM calendars WHERE account=?1 AND remote_id=?2",
             params![account, calendar], |r| r.get(0)).optional()?.ok_or(Error::NotFound)?;
         self.save_calendar_event(id, event)
+    }
+
+    pub fn delete_calendar_event(&self, account: &str, calendar: &str, event: &str) -> Result<()> {
+        self.db.execute("DELETE FROM events WHERE remote_id=?3 AND calendar IN (SELECT id FROM calendars WHERE account=?1 AND remote_id=?2)",
+            params![account, calendar, event])?;
+        Ok(())
     }
 
     fn save_calendar_event(&self, calendar: i64, event: &Event) -> Result<()> {
@@ -118,12 +125,12 @@ impl Store {
 
     /// Timed events overlap the local day's UTC bounds; all-day dates stay date-only.
     pub fn today_events(&self, day: &str, start: i64, end: i64) -> Result<Vec<AgendaEvent>> {
-        let mut query = self.db.prepare("SELECT c.account,c.name,e.remote_id,e.title,e.start,e.end,e.start_utc,e.end_utc,e.all_day,e.location,e.join_url,e.html_link
+        let mut query = self.db.prepare("SELECT c.account,c.name,e.remote_id,e.title,e.start,e.end,e.start_utc,e.end_utc,e.all_day,e.location,e.join_url,e.html_link,c.remote_id
             FROM events e JOIN calendars c ON c.id=e.calendar WHERE c.shown=1 AND
             ((e.all_day=1 AND e.start<=?1 AND e.end>?1) OR (e.all_day=0 AND e.start_utc<?3 AND e.end_utc>?2))
             ORDER BY e.all_day DESC,e.start_utc,c.account,c.name,e.remote_id")?;
         let rows = query.query_map(params![day, start, end], |r| Ok(AgendaEvent {
-            account: r.get(0)?, calendar: r.get(1)?, event: Event {
+            account: r.get(0)?, calendar: r.get(1)?, calendar_id: r.get(12)?, event: Event {
                 remote_id: r.get(2)?, title: r.get(3)?, start: r.get(4)?, end: r.get(5)?,
                 start_utc: r.get(6)?, end_utc: r.get(7)?, all_day: r.get(8)?, location: r.get(9)?, join_url: r.get(10)?, html_link: r.get(11)?,
             },

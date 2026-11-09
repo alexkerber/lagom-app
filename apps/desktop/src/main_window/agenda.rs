@@ -92,7 +92,7 @@ pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::A
     [(9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
         let start = day.and_hms_opt(hour, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
         let end = start + chrono::Duration::minutes(45);
-        Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(),
+        Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(), calendar_id: "demo".into(),
             event: lagom_core::calendar::Event {
                 remote_id: format!("demo-{hour}"), title: title.into(), start: start.to_rfc3339(), end: end.to_rfc3339(),
                 start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: false,

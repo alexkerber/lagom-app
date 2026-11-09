@@ -1130,7 +1130,7 @@ mod tests {
             let account = &live.accounts[0];
             live.store.save_authorized_account(account, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
             let calendars = [("a", true), ("b", true), ("read-only", false)].map(|(id, writable)| (lagom_core::calendar::Calendar {
-                remote_id: id.into(), name: id.into(), color: None, shown: true, writable,
+                remote_id: id.into(), name: "Fixture calendar".into(), color: None, shown: true, writable,
             }, vec![]));
             live.store.replace_calendar_window(&account.id, 0, i64::MAX, &calendars).unwrap();
             v.show_section(2, window, cx);
@@ -1174,7 +1174,7 @@ mod tests {
             v.on_events(vec![Event::EventCreated { op: op + 1, error: None }], window, cx);
             assert!(v.week.editor.is_some(), "unrelated completions cannot close the sheet");
             let mut event = draft.event("created".into()).unwrap();
-            event.join_url = Some("https://meet.example.test/fixture".into());
+            event.join_url = None;
             v.live.as_ref().unwrap().store.insert_calendar_event(&account, &calendar, &event).unwrap();
             v.on_events(vec![Event::EventCreated { op, error: None }], window, cx);
             assert!(v.week.editor.is_none());
@@ -1185,8 +1185,29 @@ mod tests {
         let event = cx.debug_bounds(format!("week-event-{day}-0").leak()).unwrap();
         cx.simulate_click(event.center(), Default::default());
         cx.run_until_parked();
+        assert!(cx.debug_bounds("event-detail").is_some());
+        assert!(cx.debug_bounds("Join").is_none());
+        view.update_in(cx, |v, window, cx| {
+            let mut event = draft.event("created".into()).unwrap();
+            event.join_url = Some("https://meet.example.test/fixture".into());
+            let store = &v.live.as_ref().unwrap().store;
+            let mut other = event.clone();
+            other.start_utc -= 3600;
+            other.join_url = Some("https://meet.example.test/other-calendar".into());
+            store.insert_calendar_event(&account, "a", &other).unwrap();
+            store.insert_calendar_event(&account, &calendar, &event).unwrap();
+            v.on_events(vec![Event::Changed], window, cx);
+            assert_eq!(v.week.detail.as_ref().unwrap().event, event, "an open detail must receive the completed conference");
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("event-detail").is_some());
         assert!(cx.debug_bounds("Join").is_some());
         assert!(rx.try_recv().is_err(), "completion must display the cached event without fetching");
+        view.update_in(cx, |v, window, cx| {
+            v.live.as_ref().unwrap().store.delete_calendar_event(&account, &calendar, "created").unwrap();
+            v.on_events(vec![Event::Changed], window, cx);
+            assert!(v.week.detail.is_none(), "a deleted event must not leave a stale detail or select a different calendar");
+        });
     }
 
     #[gpui::test]

@@ -136,7 +136,12 @@ impl MainWindow {
             Ok((days, windows))
         })();
         match result {
-            Ok((days, windows)) => { self.week.days = days; self.week.windows = windows; }
+            Ok((days, windows)) => {
+                self.week.detail = self.week.detail.as_ref().and_then(|selected| days.iter().flatten().find(|entry|
+                    entry.account == selected.account && entry.calendar_id == selected.calendar_id && entry.event.remote_id == selected.event.remote_id).cloned());
+                self.week.days = days;
+                self.week.windows = windows;
+            }
             Err(e) => {
                 self.week.days = vec![vec![]; 7];
                 self.week.windows.clear();
@@ -321,7 +326,7 @@ mod tests {
 
     fn entry(day: NaiveDate, start: u32, end: u32, all_day: bool) -> AgendaEvent {
         let midnight = day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-        AgendaEvent { account: "fixture".into(), calendar: "Fixture calendar".into(), event: CalendarEvent {
+        AgendaEvent { account: "fixture".into(), calendar: "Fixture calendar".into(), calendar_id: "primary".into(), event: CalendarEvent {
             remote_id: format!("{start}-{end}"), title: "Fixture event".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
             start_utc: midnight + start as i64 * 60, end_utc: midnight + end as i64 * 60,
             all_day, location: Some("Fixture room".into()), join_url: Some("https://meet.example.test/fixture".into()),

@@ -266,6 +266,7 @@ struct PendingEvent {
     calendar: String,
     created: CreatedEvent,
     cached: bool,
+    deleted: bool,
     retry_at: tokio::time::Instant,
 }
 
@@ -337,6 +338,7 @@ impl Worker {
                 if self.reauth.as_ref() == Some(&id) { return; }
                 self.cancel_sign_in();
                 self.cancel_calendar(&id);
+                if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.clone())); }
                 self.reauth = Some(id.clone());
                 self.calendar_consent = calendar_consent;
                 match self.account(&id) {
@@ -429,6 +431,7 @@ impl Worker {
 
     fn require_reauth(&mut self, id: &str) {
         self.cancel_calendar(id);
+        if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         self.reauth_required.insert(id.into());
         self.sessions.remove(id);
         if let Some(task) = self.idle.remove(id) { task.abort(); }
@@ -536,6 +539,7 @@ impl Worker {
 
     fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>) {
         self.cancel_calendar(id);
+        if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         if self.reauth.as_deref() == Some(id) { self.cancel_sign_in(); }
         if let Some(task) = self.idle.remove(id) {
             task.abort();
@@ -609,7 +613,17 @@ impl Worker {
         let remote_error = result.as_ref().err().map(ToString::to_string);
         if let CreateJob::Conference(id) = &job {
             if matches!(result, Err(Error::NotFound)) {
-                self.pending_events.retain(|p| p.account.id != account.id || p.calendar != calendar || &p.created.event.remote_id != id);
+                if let Some(index) = self.pending_events.iter().position(|p| p.account == account && p.calendar == calendar && &p.created.event.remote_id == id) {
+                    let mut pending = self.pending_events.remove(index);
+                    pending.deleted = true;
+                    pending.cached = false;
+                    pending.created.conference_pending = false;
+                    self.cancel_calendar(&account.id);
+                    let result = self.cache_event(&mut pending);
+                    if !pending.cached { self.pending_events.push(pending); }
+                    self.calendar_synced(&account, result);
+                }
+                return;
             }
         }
         let result = result.and_then(|created| {
@@ -617,7 +631,7 @@ impl Worker {
             self.cancel_calendar(&account.id);
             self.pending_events.retain(|p| p.account.id != account.id || p.calendar != calendar
                 || p.created.event.remote_id != created.event.remote_id);
-            let mut pending = PendingEvent { account: account.clone(), calendar, created, cached: false, retry_at: tokio::time::Instant::now() + Duration::from_secs(5) };
+            let mut pending = PendingEvent { account: account.clone(), calendar, created, cached: false, deleted: false, retry_at: tokio::time::Instant::now() + Duration::from_secs(5) };
             let result = self.cache_event(&mut pending);
             if !pending.cached || pending.created.conference_pending { self.pending_events.push(pending); }
             result
@@ -630,7 +644,11 @@ impl Worker {
 
     fn cache_event(&self, pending: &mut PendingEvent) -> lagom_core::Result<()> {
         if self.account(&pending.account.id)? != pending.account { return Err(Error::Invalid("calendar account changed")); }
-        self.store.insert_calendar_event(&pending.account.id, &pending.calendar, &pending.created.event)?;
+        if pending.deleted {
+            self.store.delete_calendar_event(&pending.account.id, &pending.calendar, &pending.created.event.remote_id)?;
+        } else {
+            self.store.insert_calendar_event(&pending.account.id, &pending.calendar, &pending.created.event)?;
+        }
         pending.cached = true;
         Ok(())
     }
@@ -707,7 +725,6 @@ impl Worker {
     }
 
     fn cancel_calendar(&mut self, id: &str) {
-        if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         if let Some(task) = self.calendar_tasks.remove(id) { task.abort(); }
     }
 
@@ -781,7 +798,18 @@ impl Worker {
     async fn sync_folder(&mut self, account: &Account, folder: i64) -> lagom_core::Result<()> {
         let before = self.store.folder(folder)?;
         let mut session = self.take(account).await?;
-        let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
+        // Folder I/O must leave the worker free to publish completed calendar requests.
+        let mut store = Store::open(self.store.path())?;
+        let result = {
+            let sync = session.sync_folder(&mut store, folder, DEFAULT_LIMIT);
+            tokio::pin!(sync);
+            loop {
+                tokio::select! {
+                    result = &mut sync => break result,
+                    Some(result) = self.event_creates.join_next_with_id(), if !self.event_creates.is_empty() => self.event_created(result),
+                }
+            }
+        };
         self.give(&account.id, session, &result);
         result?;
         self.notify_new_mail(&before)

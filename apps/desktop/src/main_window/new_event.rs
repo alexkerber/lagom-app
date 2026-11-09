@@ -119,7 +119,7 @@ impl MainWindow {
         let (account, calendar, name) = editor.calendars[editor.calendar].clone();
         if self.demo {
             let event = draft.event(format!("demo-created-{}", self.week.created.len())).unwrap();
-            self.week.created.push(AgendaEvent { account, calendar: name, event });
+            self.week.created.push(AgendaEvent { account, calendar: name, calendar_id: calendar, event });
             self.week.editor = None;
             self.reload_agenda(cx);
             self.reload_week(cx);

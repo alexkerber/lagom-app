@@ -23,7 +23,7 @@ fn draft() -> NewEvent {
         all_day: false, time_zone: "Europe/Stockholm".into(), description: None, attendees: vec![], meet: true }
 }
 
-async fn server(status: &'static str, body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+async fn server(method: &'static str, status: &'static str, body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -31,9 +31,9 @@ async fn server(status: &'static str, body: &'static str) -> (String, tokio::tas
         let mut headers = Vec::new();
         while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
         let headers = String::from_utf8(headers).unwrap();
-        assert!(headers.starts_with("POST /calendars/primary/events?"));
+        assert!(headers.starts_with(&format!("{method} /calendars/primary/events")));
         let length = headers.lines().find_map(|line| line.split_once(':').filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-            .map(|(_, value)| value.trim().parse::<usize>().unwrap())).unwrap();
+            .map(|(_, value)| value.trim().parse::<usize>().unwrap())).unwrap_or(0);
         socket.read_exact(&mut vec![0; length]).await.unwrap();
         socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
     });
@@ -45,7 +45,9 @@ async fn created_event_is_cached_before_completion_and_older_fetch_cannot_erase_
     let (mut worker, account, mut events, path) = fixture();
     worker.start_calendar(account.clone(), 1, 3, std::future::ready(Ok(vec![])));
     let stale = worker.calendars.join_next_with_id().await.unwrap();
-    let (base, server) = server("200 OK", r#"{"id":"created","summary":"Fixture","start":{"dateTime":"2026-11-09T09:00:00+01:00"},"end":{"dateTime":"2026-11-09T10:00:00+01:00"},"hangoutLink":"https://meet.example.test/new"}"#).await;
+    let (task_tx, mut task_rx) = unbounded_channel();
+    worker.task_sync = Some(task_tx);
+    let (base, server) = server("POST", "200 OK", r#"{"id":"created","summary":"Fixture","start":{"dateTime":"2026-11-09T09:00:00+01:00"},"end":{"dateTime":"2026-11-09T10:00:00+01:00"},"hangoutLink":"https://meet.example.test/new"}"#).await;
     worker.start_create(41, account.clone(), "primary".into(), async move {
         lagom_core::google::create_with(&base, "primary", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await
     });
@@ -62,6 +64,7 @@ async fn created_event_is_cached_before_completion_and_older_fetch_cannot_erase_
     let events = worker.store.today_events("2026-11-09", start, start + 3600).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event.join_url.as_deref(), Some("https://meet.example.test/new"));
+    assert!(task_rx.try_recv().is_err(), "caching a created event must not pause Google Tasks");
     worker.calendar_finished(stale);
     assert_eq!(worker.store.today_events("2026-11-09", start, start + 3600).unwrap(), events);
     assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((1, 2)));
@@ -74,7 +77,7 @@ async fn created_event_is_cached_before_completion_and_older_fetch_cannot_erase_
 #[tokio::test]
 async fn create_403_reports_op_and_marks_calendar_access_without_losing_mail_scopes() {
     let (mut worker, account, mut events, path) = fixture();
-    let (base, server) = server("403 Forbidden", "{}").await;
+    let (base, server) = server("POST", "403 Forbidden", "{}").await;
     worker.start_create(42, account.clone(), "primary".into(), async move {
         lagom_core::google::create_with(&base, "primary", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await
     });
@@ -133,7 +136,7 @@ async fn cache_failure_keeps_remote_success_and_retries_without_another_post() {
     let (mut worker, account, mut events, path) = fixture();
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch("CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(FAIL, 'fixture disk full'); END;").unwrap();
-    let (base, server) = server("200 OK", r#"{"id":"created","start":{"dateTime":"2026-11-09T09:00:00+01:00"},"end":{"dateTime":"2026-11-09T10:00:00+01:00"}}"#).await;
+    let (base, server) = server("POST", "200 OK", r#"{"id":"created","start":{"dateTime":"2026-11-09T09:00:00+01:00"},"end":{"dateTime":"2026-11-09T10:00:00+01:00"}}"#).await;
     worker.start_create(43, account.clone(), "primary".into(), async move {
         lagom_core::google::create_with(&base, "primary", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await
     });
@@ -163,7 +166,7 @@ async fn cache_failure_keeps_remote_success_and_retries_without_another_post() {
 }
 
 #[tokio::test]
-async fn work_completes_creation_between_folders_before_mail_sync_finishes() {
+async fn work_completes_creation_while_the_same_folder_is_stalled() {
     use lagom_core::account::{Security, ServerConfig};
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (mut worker, account, mut events, path) = fixture();
@@ -173,16 +176,21 @@ async fn work_completes_creation_between_folders_before_mail_sync_finishes() {
     worker.store.save_account(&mail).unwrap();
     worker.reauth_required.insert(account.id.clone());
     let (started, ready) = tokio::sync::oneshot::channel();
-    let (created, completed) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = BufReader::new(socket);
         socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
-        let (mut started, mut completed, mut resume) = (Some(started), Some(completed), Some(resume));
+        let (mut started, mut resume) = (Some(started), Some(resume));
         loop {
             let mut line = String::new();
-            if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+            match socket.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {},
+                // Dropping the worker closes its cached session without LOGOUT.
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(e) => panic!("{e}"),
+            }
             let (tag, command) = line.trim_end().split_once(' ').unwrap();
             let data = if command.starts_with("LOGIN ") { "" }
                 else if command == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
@@ -190,8 +198,8 @@ async fn work_completes_creation_between_folders_before_mail_sync_finishes() {
                 else if command.starts_with("SELECT ") {
                     if command == "SELECT \"INBOX\"" {
                         started.take().unwrap().send(()).unwrap();
-                        completed.take().unwrap().await.unwrap();
-                    } else { resume.take().unwrap().await.unwrap(); }
+                        resume.take().unwrap().await.unwrap();
+                    }
                     "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 1] next\r\n"
                 } else if command == "UID SEARCH ALL" { "* SEARCH\r\n" }
                 else { panic!("unexpected fixture command: {command}") };
@@ -202,7 +210,6 @@ async fn work_completes_creation_between_folders_before_mail_sync_finishes() {
     worker.sessions.insert(mail.id.clone(), session);
     worker.start_create(44, account, "primary".into(), async move {
         ready.await.unwrap();
-        created.send(()).unwrap();
         draft().event("created".into()).map(|event| CreatedEvent { event, conference_pending: false })
     });
     worker.deferred.push_back(Cmd::Sync(Some(mail.id.clone())));
@@ -223,7 +230,7 @@ async fn work_completes_creation_between_folders_before_mail_sync_finishes() {
                 loop {
                     if matches!(events.recv().await.unwrap(), Event::Sync(id, SyncState::Synced(_)) if id == mail.id) { break; }
                 }
-            }).await.expect("creation must finish while the second folder is blocked");
+            }).await.expect("creation must finish while the same SELECT remains blocked");
         } => {}
     }
     server.await.unwrap();
@@ -292,19 +299,59 @@ async fn pending_conference_pauses_for_consent_and_discards_removed_accounts() {
 }
 
 #[tokio::test]
-async fn deleted_remote_event_stops_conference_retries_without_reopening_draft() {
+async fn deleted_remote_event_is_removed_outside_fetch_window_without_reopening_draft() {
+    for (status, body) in [("404 Not Found", "{}"), ("410 Gone", "{}"), ("200 OK", r#"{"id":"created","status":"cancelled"}"#)] {
+        let (mut worker, account, mut events, path) = fixture();
+        let mut event = draft();
+        event.start = "2027-05-09T09:00:00Z".into();
+        event.end = "2027-05-09T10:00:00Z".into();
+        let created = CreatedEvent { event: event.event("created".into()).unwrap(), conference_pending: true };
+        worker.start_create(47, account.clone(), "primary".into(), std::future::ready(Ok(created)));
+        let result = worker.event_creates.join_next_with_id().await.unwrap();
+        worker.event_created(result);
+        assert!(matches!(events.try_recv().unwrap(), Event::EventCreated { op: 47, error: None }));
+        assert_eq!(worker.store.today_events("2027-05-09", 0, i64::MAX).unwrap().len(), 1);
+        worker.pending_events[0].retry_at = tokio::time::Instant::now();
+        let (base, server) = server("GET", status, body).await;
+        worker.retry_events_with(|_, calendar, id| {
+            let base = base.clone();
+            async move { lagom_core::google::fetch_created_with(&base, &calendar, &id,
+                |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await }
+        });
+        let result = worker.event_creates.join_next_with_id().await.unwrap();
+        worker.event_created(result);
+        assert!(worker.store.today_events("2027-05-09", 0, i64::MAX).unwrap().is_empty(), "confirmed deletion must remove the cached event");
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((1, 2)));
+        assert!(worker.pending_events.is_empty());
+        while let Ok(event) = events.try_recv() { assert!(!matches!(event, Event::EventCreated { .. })); }
+        server.await.unwrap();
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn failed_cache_deletion_retries_locally_without_restoring_the_event() {
     let (mut worker, account, mut events, path) = fixture();
     let created = CreatedEvent { event: draft().event("created".into()).unwrap(), conference_pending: true };
-    worker.start_create(47, account, "primary".into(), std::future::ready(Ok(created)));
+    worker.start_create(48, account.clone(), "primary".into(), std::future::ready(Ok(created)));
     let result = worker.event_creates.join_next_with_id().await.unwrap();
     worker.event_created(result);
-    assert!(matches!(events.try_recv().unwrap(), Event::EventCreated { op: 47, error: None }));
+    while events.try_recv().is_ok() {}
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_delete BEFORE DELETE ON events BEGIN SELECT RAISE(FAIL, 'fixture write failure'); END;").unwrap();
     worker.pending_events[0].retry_at = tokio::time::Instant::now();
     worker.retry_events_with(|_, _, _| std::future::ready(Err(Error::NotFound)));
     let result = worker.event_creates.join_next_with_id().await.unwrap();
     worker.event_created(result);
+    assert!(matches!(events.try_recv().unwrap(), Event::CalendarSync(_, SyncState::Failed(_))));
+    assert_eq!(worker.pending_events.len(), 1);
+    assert_eq!(worker.store.today_events("2026-11-09", 0, i64::MAX).unwrap().len(), 1);
+    db.execute_batch("DROP TRIGGER reject_delete; CREATE TRIGGER reject_insert BEFORE INSERT ON events BEGIN SELECT RAISE(FAIL, 'deleted events must not be restored'); END;").unwrap();
+    worker.retry_events_with::<_, std::future::Ready<_>>(|_, _, _| panic!("confirmed deletion needs only a cache retry"));
     assert!(worker.pending_events.is_empty());
-    while let Ok(event) = events.try_recv() { assert!(!matches!(event, Event::EventCreated { .. })); }
+    assert!(worker.store.today_events("2026-11-09", 0, i64::MAX).unwrap().is_empty());
+    drop(db);
     drop(worker);
     std::fs::remove_file(path).unwrap();
 }
