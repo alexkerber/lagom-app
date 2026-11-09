@@ -271,12 +271,12 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         assert!(cx.debug_bounds("recipient-0-3-invalid").is_some());
-        cx.simulate_keystrokes("secondary-enter");
+        cx.simulate_keystrokes("cmd-enter");
         assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem == Some("A recipient is not an email address")));
         click(cx, "recipient-0-3-invalid");
         cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("fixed@example.com");
-        cx.simulate_keystrokes("tab secondary-enter");
+        cx.simulate_keystrokes("tab cmd-enter");
         assert!(view.read_with(cx, |v, _| v.undoable()));
         assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).to.last().cloned()), Some("fixed@example.com".into()));
     }
@@ -308,7 +308,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).cc), ["\"Team, East\" <east@example.com>", "invalid"]);
-        cx.simulate_keystrokes("secondary-enter");
+        cx.simulate_keystrokes("cmd-enter");
         assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem.is_some()));
         view.update(cx, |v, _| { v.store = None; v._save_delay = None; v._contacts = None; });
         let path = store.path().to_owned();
