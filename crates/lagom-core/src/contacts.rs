@@ -112,7 +112,7 @@ impl Store {
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(5)?;
             // shortcut: copies without Message-ID count separately; deduplicate when a reliable provider identity is stored.
-            if !message_id.is_empty() && !messages.insert(message_id) { continue; }
+            let first_message = message_id.is_empty() || messages.insert(message_id);
             let from: String = row.get(1)?;
             let sent = own.contains(&from.to_lowercase());
             let date: i64 = row.get(4)?;
@@ -132,7 +132,7 @@ impl Store {
                 let named = !name.trim().is_empty() && !name.eq_ignore_ascii_case(&address);
                 let first = seen.insert(address.clone());
                 let (contact, named_at) = entries.entry(address.clone()).or_insert_with(|| (Contact { name: String::new(), address, score: 0. }, i64::MIN));
-                if first { contact.score += score; }
+                if first && first_message { contact.score += score; }
                 if named && date >= *named_at {
                     contact.name = name;
                     *named_at = date;
@@ -201,6 +201,30 @@ mod tests {
         received.summary.message_id = "another@example.com".into();
         store.save_message(&received).unwrap();
         assert_eq!(store.contacts(&account.id, 10).unwrap().suggest("received")[0].score, 2.);
+    }
+
+    #[test]
+    fn folder_copies_contribute_names_without_duplicate_scores() {
+        let (_temp, store, account, inbox, sent) = fixture();
+        let mut message = Message { summary: MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, date: 10,
+            message_id: "copy@example.com".into(), from_address: "sender@example.com".into(),
+            to: "west@example.com".into(), cc: "east@example.com".into(), ..Default::default()
+        }, ..Default::default() };
+        store.save_message(&message).unwrap();
+        let before = store.contacts(&account.id, 10).unwrap().suggest("example");
+        message.summary.folder = sent;
+        message.summary.from_name = "Team Sender".into();
+        message.summary.to = "Team West <west@example.com>".into();
+        message.summary.cc = "Team East <east@example.com>".into();
+        store.save_message(&message).unwrap();
+        let contacts = store.contacts(&account.id, 10).unwrap();
+        let named = contacts.suggest("Team");
+        assert_eq!(named.len(), 3);
+        for contact in named {
+            assert_eq!(contact.score, before.iter().find(|old| old.address == contact.address).unwrap().score);
+            assert!(contact.name.starts_with("Team "));
+        }
     }
 
     #[test]

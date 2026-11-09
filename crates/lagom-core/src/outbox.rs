@@ -10,6 +10,9 @@ pub struct Draft {
     pub account: String,
     pub to: String,
     pub cc: String,
+    // Keep separately entered invalid tokens from combining into a valid mailbox on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_tokens: Option<[Vec<String>; 2]>,
     pub subject: String,
     pub text: String,
     pub reply: Option<(Option<String>, Vec<String>)>,

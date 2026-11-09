@@ -175,11 +175,13 @@ impl Compose {
     }
 
     pub fn restore(draft: Draft, account: Account, store: Rc<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::new(&account.email, &draft.to, &draft.subject, draft.reply, window, cx);
+        // shortcut: legacy drafts only retain joined text; remove this fallback when their format is retired.
+        let tokens = draft.recipient_tokens.unwrap_or_else(|| [recipients(&draft.to), recipients(&draft.cc)]);
+        let mut this = Self::new(&account.email, "", &draft.subject, draft.reply, window, cx);
         this.message_id = draft.id;
         this.attachments = draft.attachments;
         this.forward_source = draft.forward_source;
-        this.addresses.tokens[1] = recipients(&draft.cc);
+        this.addresses.tokens = tokens;
         this.body.update(cx, |input, cx| input.set_text(&draft.text, cx));
         this.show_cc = !draft.cc.is_empty();
         this.keep = true;
@@ -190,9 +192,11 @@ impl Compose {
     }
 
     fn draft(&self, account: &Account, cx: &gpui::App) -> Draft {
+        let tokens = [self.address_tokens(0, cx), self.address_tokens(1, cx)];
         Draft {
             id: self.message_id.clone(), account: account.id.clone(),
-            to: self.address_text(0, cx), cc: self.address_text(1, cx),
+            to: tokens[0].join(", "), cc: tokens[1].join(", "),
+            recipient_tokens: Some(tokens),
             subject: self.subject.read(cx).text().into(), text: self.body.read(cx).text().into(),
             reply: self.reply.clone(),
             attachments: self.attachments.clone(),
@@ -402,8 +406,8 @@ impl Compose {
         let text = |f: &Entity<TextInput>| f.read(cx).text().to_string();
         let (in_reply_to, references) = self.reply.clone().unwrap_or_default();
         Outgoing {
-            to: recipients(&self.address_text(0, cx)),
-            cc: recipients(&self.address_text(1, cx)),
+            to: self.address_tokens(0, cx),
+            cc: self.address_tokens(1, cx),
             subject: text(&self.subject),
             text: text(&self.body),
             in_reply_to,

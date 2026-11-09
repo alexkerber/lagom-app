@@ -35,10 +35,10 @@ impl Compose {
         }));
     }
 
-    pub(super) fn address_text(&self, field: usize, cx: &gpui::App) -> String {
+    pub(super) fn address_tokens(&self, field: usize, cx: &gpui::App) -> Vec<String> {
         let mut parts = self.addresses.tokens[field].clone();
         parts.extend(split_recipients(self.fields()[field].read(cx).text()));
-        parts.join(", ")
+        parts
     }
 
     pub(super) fn suggest(&mut self, field: usize, cx: &mut Context<Self>) {
@@ -302,14 +302,84 @@ mod tests {
         let draft = store.drafts().unwrap().remove(0);
         assert_eq!(draft.to, "Team West <west@example.com>");
         assert_eq!(draft.cc, "\"Team, East\" <east@example.com>, invalid");
+        for draft in [Draft { recipient_tokens: None, ..draft.clone() }, draft] {
+            view.update_in(cx, |v, window, cx| {
+                *v = Compose::restore(draft, account.clone(), store.clone(), window, cx);
+                v.reopen(window, cx);
+            });
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).to), ["Team West <west@example.com>"]);
+            assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).cc), ["\"Team, East\" <east@example.com>", "invalid"]);
+            cx.simulate_keystrokes("cmd-enter");
+            assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem.is_some()));
+        }
+        view.update(cx, |v, _| { v.store = None; v._save_delay = None; v._contacts = None; });
+        let path = store.path().to_owned();
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn paste_unbalanced_tokens(cx: &mut VisualTestContext) {
+        for token in ["\"Team", "alice@example.com", "West\" <west@example.com>"] {
+            cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(token.into())));
+            cx.simulate_keystrokes("secondary-v");
+        }
+    }
+
+    #[gpui::test]
+    fn separate_invalid_tokens_cannot_combine_to_bypass_send_validation(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        for field in 0..2 {
+            if field == 1 {
+                view.update_in(cx, |v, window, cx| {
+                    v.addresses.tokens[0].clear();
+                    v.add_cc(window, cx);
+                });
+            }
+            paste_unbalanced_tokens(cx);
+            assert_eq!(view.read_with(cx, |v, _| v.addresses.tokens[field].clone()), ["\"Team", "alice@example.com", "West\" <west@example.com>"]);
+            cx.simulate_keystrokes("cmd-enter");
+            assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem == Some("A recipient is not an email address")));
+            let mail = view.read_with(cx, |v, cx| v.outgoing(cx));
+            assert_eq!(if field == 0 { mail.to } else { mail.cc }, ["\"Team", "alice@example.com", "West\" <west@example.com>"]);
+        }
+    }
+
+    #[gpui::test]
+    fn draft_restore_preserves_invalid_token_boundaries_and_uncommitted_addresses(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let (store, account, _) = fixture();
+        let store = Rc::new(store);
+        view.update(cx, |v, cx| v.persist(store.clone(), account.clone(), cx));
+        paste_unbalanced_tokens(cx);
+        cx.simulate_input("pending@example.com");
+        view.update_in(cx, |v, window, cx| v.add_cc(window, cx));
+        paste_unbalanced_tokens(cx);
+        cx.simulate_keystrokes("escape");
+        let draft = store.drafts().unwrap().remove(0);
         view.update_in(cx, |v, window, cx| {
             *v = Compose::restore(draft, account, store.clone(), window, cx);
             v.reopen(window, cx);
         });
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).cc), ["\"Team, East\" <east@example.com>", "invalid"]);
+        let expected = ["\"Team", "alice@example.com", "West\" <west@example.com>"];
+        let mail = view.read_with(cx, |v, cx| v.outgoing(cx));
+        assert_eq!(mail.to, expected.into_iter().chain(["pending@example.com"]).collect::<Vec<_>>());
+        assert_eq!(mail.cc, expected);
         cx.simulate_keystrokes("cmd-enter");
-        assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem.is_some()));
+        assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem == Some("A recipient is not an email address")));
+        let account = view.read_with(cx, |v, _| v.account_id().unwrap().to_owned());
+        assert!(store.due_outbox(&account, i64::MAX).unwrap().is_empty());
+        view.update(cx, |v, _| {
+            for tokens in &mut v.addresses.tokens { tokens.retain(|token| valid_recipient(token)); }
+        });
+        cx.simulate_keystrokes("cmd-enter");
+        assert!(view.read_with(cx, |v, _| v.undoable()));
+        let queued = store.due_outbox(&account, i64::MAX).unwrap();
+        assert_eq!(queued.len(), 1);
+        let mail = store.pending(&queued[0]).unwrap().mail;
+        assert_eq!(mail.to, ["alice@example.com", "pending@example.com"]);
+        assert_eq!(mail.cc, ["alice@example.com"]);
         view.update(cx, |v, _| { v.store = None; v._save_delay = None; v._contacts = None; });
         let path = store.path().to_owned();
         drop(store);
