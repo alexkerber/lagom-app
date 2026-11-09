@@ -32,7 +32,8 @@ fn parts(body: &BodyStructure<'_>, path: &[u32], ids: &HashSet<String>, remainin
 impl ImapSync {
     pub async fn fetch_inline(&mut self, store: &mut Store, id: i64) -> Result<()> {
         if store.inline_loaded(id)? { return Ok(()); }
-        let message = store.message_summary(id)?;
+        // Pending moves change the visible folder before the server folder/UID.
+        let message = store.message(id)?.summary;
         if message.account != self.account.id { return Err(Error::NotFound); }
         let before = store.folder(message.folder)?.uidvalidity;
         let (folder, _) = self.select(store, message.folder).await?;

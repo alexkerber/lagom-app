@@ -8,15 +8,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn related_images_sync_and_legacy_fetch_preserves_cached_attachments() {
-    for legacy in [false, true] { roundtrip(legacy, false).await; }
+    for legacy in [false, true] { roundtrip(legacy, false, false).await; }
 }
 
 #[tokio::test]
 async fn inline_fetch_rejects_a_server_literal_over_the_budget() {
-    roundtrip(true, true).await;
+    roundtrip(true, true, false).await;
 }
 
-async fn roundtrip(legacy: bool, oversized: bool) {
+#[tokio::test]
+async fn inline_fetch_uses_source_folder_and_uid_during_pending_move() {
+    roundtrip(true, false, true).await;
+}
+
+async fn roundtrip(legacy: bool, oversized: bool, pending_move: bool) {
     let raw = include_str!("fixtures/related.eml").replace('\n', "\r\n");
     let chunks: Vec<_> = raw.split("--related\r\n").collect();
     let header = chunks[0].to_owned();
@@ -32,6 +37,7 @@ async fn roundtrip(legacy: bool, oversized: bool) {
         let mut read = BufReader::new(read);
         write.write_all(b"* OK fixture\r\n").await.unwrap();
         let mut images = 0;
+        let mut target_selected = false;
         loop {
             let mut line = String::new();
             assert_ne!(read.read_line(&mut line).await.unwrap(), 0);
@@ -39,6 +45,10 @@ async fn roundtrip(legacy: bool, oversized: bool) {
             let data = if command.starts_with("LOGIN ") { String::new() }
             else if command == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n".into() }
             else if command == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into() }
+            else if pending_move && command == "SELECT \"Archive\"" {
+                target_selected = true;
+                "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+            }
             else if command == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
             else if command.contains("BODYSTRUCTURE") {
                 if legacy { assert_eq!(command, "UID FETCH 1 (UID BODYSTRUCTURE)"); }
@@ -53,6 +63,7 @@ async fn roundtrip(legacy: bool, oversized: bool) {
                     std::future::pending::<()>().await;
                     unreachable!();
                 }
+                let image = if target_selected { image.replace("iVBOR", "AAAAA") } else { image.clone() };
                 // FLAGS-only and unrelated UID/section replies must not supply the image.
                 format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 BODY[2] {{4}}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[3] {{4}}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[2] {{{}}}\r\n{image})\r\n", image.len())
             } else if command == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
@@ -73,12 +84,23 @@ async fn roundtrip(legacy: bool, oversized: bool) {
     let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
     store.reset_uidvalidity(folder, 7).unwrap();
     let mut imap = ImapSync::login(&account, "fixture").await.unwrap();
-    if legacy {
+    let id = if legacy {
         let mut message = lagom_core::mime::parse(raw.as_bytes()).unwrap();
         message.summary.account = account.id.clone();
         message.summary.folder = folder;
         message.summary.uid = 1;
         let id = store.save_message(&message).unwrap();
+        let target = if pending_move {
+            let target = store.save_folder(&account.id, "Archive", None, FolderRole::Archive).unwrap();
+            store.reset_uidvalidity(target, 7).unwrap();
+            let mut other = message.clone();
+            other.summary.folder = target;
+            other.summary.message_id = "other@example.test".into();
+            let other_id = store.save_message(&other).unwrap();
+            store.begin_move(id, target).unwrap();
+            assert_eq!(store.message_summary(id).unwrap().folder, target);
+            Some((target, other_id))
+        } else { None };
         assert!(!store.inline_loaded(id).unwrap());
         let db = rusqlite::Connection::open(&path).unwrap();
         db.execute("PRAGMA foreign_keys=ON", []).unwrap();
@@ -99,10 +121,17 @@ async fn roundtrip(legacy: bool, oversized: bool) {
         assert_eq!(store.cached_attachment(id, "3").unwrap().as_deref(), Some(b"cached".as_slice()));
         assert_eq!(store.attachments(id).unwrap(), attachments);
         assert_eq!(store.message(id).unwrap().body_html, message.body_html);
+        if let Some((target, other_id)) = target {
+            assert_eq!(store.message_summary(id).unwrap().folder, target);
+            assert_eq!(store.message(id).unwrap().summary.folder, folder);
+            assert!(!store.inline_loaded(other_id).unwrap());
+            assert!(store.inline_parts(other_id).unwrap().is_empty());
+        }
+        id
     } else {
         imap.sync_folder(&mut store, folder, 20).await.unwrap();
-    }
-    let id = store.list_messages(folder, 0, 20, 0).unwrap()[0].id;
+        store.list_messages(folder, 0, 20, 0).unwrap()[0].id
+    };
     imap.fetch_inline(&mut store, id).await.unwrap();
     imap.logout().await.unwrap();
     server.await.unwrap();
