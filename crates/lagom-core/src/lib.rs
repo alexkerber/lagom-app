@@ -8,6 +8,7 @@ pub mod discovery;
 pub use discovery::{discover, Discovery, Preset};
 pub mod imap_sync;
 pub mod mime;
+pub mod html;
 pub mod inline;
 pub mod presets;
 pub mod oauth;

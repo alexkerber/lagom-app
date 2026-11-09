@@ -551,6 +551,17 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// A flat mailbox across accounts, or local Later when no folder role is supplied.
+    pub fn mailbox_messages(&self, account: Option<&str>, role: Option<FolderRole>, now: i64, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m JOIN folders f ON f.id=m.folder
+            WHERE (?1 IS NULL OR m.account=?1) AND
+            ((?2 IS NULL AND m.snoozed_until>?3) OR
+             (f.role=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)))
+            ORDER BY m.date DESC,m.id DESC LIMIT ?4 OFFSET ?5"))?;
+        let rows = stmt.query_map(params![account, role.map(FolderRole::as_str), now, limit, offset], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn list_messages(
         &self,
         folder: i64,
