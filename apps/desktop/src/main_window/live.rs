@@ -406,6 +406,20 @@ impl MainWindow {
                     self.today.calendar_sync.insert(account, state);
                     read = true;
                 }
+                Event::Inline { id: store, error } => {
+                    if let Some(mail) = self.inbox.mail.iter_mut().find(|m| m.store == Some(store)) {
+                        mail.inline_pending = false;
+                        mail.inline_retry_after = error.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_secs(60));
+                    }
+                    if let Some(error) = error { self.notify(format!("Could not load inline images: {error}"), cx); }
+                    else if let Some(id) = self.inbox.mail.iter().position(|m| m.store == Some(store)) {
+                        self.inbox.mail[id].body.clear();
+                        self.open_message(id, false, cx);
+                        if let Some(body) = self.expanded.get(&id) {
+                            body.update(cx, |body, cx| body.refresh(&self.inbox.mail[id], cx));
+                        }
+                    }
+                }
                 Event::Changed => read = true,
                 Event::NewMail(messages) => new_mail.extend(messages),
                 Event::Seen(id) => {
@@ -814,14 +828,21 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         let Some(store) = self.inbox.mail[id].store else { return };
         if self.inbox.mail[id].body.is_empty() {
-            self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?))) {
-                Ok((m, parts)) => {
+            self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?, live.store.inline_parts(store)?))) {
+                Ok((m, parts, inline)) => {
+                    self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
                     mail::paragraphs(&m.body_text)
                 }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
+        }
+        if !self.inbox.mail[id].inline_pending
+            && self.inbox.mail[id].inline_retry_after.is_none_or(|after| std::time::Instant::now() >= after)
+            && live.store.inline_loaded(store).is_ok_and(|loaded| !loaded)
+            && self.inbox.mail[id].html.as_deref().is_some_and(|h| !lagom_core::inline::referenced_ids(h).is_empty()) {
+            self.inbox.mail[id].inline_pending = live.bridge.send(Cmd::Inline(store));
         }
         // Reading a filtered list must not consume the next unread row on every reload.
         if mark_read && !self.inbox.unread_only && !self.inbox.keep_unread.contains(&id) && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
@@ -1216,6 +1237,58 @@ mod tests {
         }));
         view.update(cx, |v, cx| { v.live = Some(fixture_live(store, bridge)); v.page = Page::Mail; cx.notify(); });
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn legacy_inline_failure_waits_before_retry_and_completion_survives_summary_reload(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut summary = incoming(v, 1);
+            summary.has_attachments = true;
+            let id = summary.id;
+            store.save_message(&lagom_core::store::Message {
+                summary, body_text: "Inline fixture".into(), body_html: Some("<img src='cid:logo@test'>".into()),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.single().unwrap();
+            v.open_message(selected, false, cx);
+            v.reload(cx);
+            v.open_message(selected, false, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
+            assert!(rx.try_recv().is_err());
+            v.on_events(vec![Event::Inline { id, error: Some("offline".into()) }], window, cx);
+            assert!(!v.inbox.mail[selected].body.is_empty());
+            assert!(!v.inbox.mail[selected].inline_pending);
+            assert!(rx.try_recv().is_err());
+        });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(rx.try_recv().is_err(), "render must not retry a failed inline load");
+        view.update_in(cx, |v, window, cx| {
+            let selected = v.inbox.single().unwrap();
+            let store = v.live.as_ref().unwrap().store.clone();
+            let id = v.inbox.mail[selected].store.unwrap();
+            v.reload(cx);
+            v.open_current(false, cx);
+            assert!(rx.try_recv().is_err(), "summary reload must retain the retry gate");
+            assert!(v.inbox.mail[selected].inline_retry_after.unwrap() > std::time::Instant::now());
+            v.inbox.mail[selected].inline_retry_after = Some(std::time::Instant::now());
+            v.open_current(false, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
+            v.open_message(selected, false, cx);
+            assert!(rx.try_recv().is_err());
+            let db = rusqlite::Connection::open(store.path()).unwrap();
+            db.execute("INSERT INTO inline_parts VALUES (?1,'logo@test','image/png',x'00ff')", [id]).unwrap();
+            db.execute("UPDATE messages SET inline_loaded=1 WHERE id=?1", [id]).unwrap();
+            v.on_events(vec![Event::Inline { id, error: None }], window, cx);
+            assert!(v.inbox.mail[selected].inline_retry_after.is_none());
+            assert_eq!(v.inbox.mail[selected].inline[0].data, [0, 255]);
+            v.reload(cx);
+            assert_eq!(v.inbox.mail[selected].inline[0].data, [0, 255]);
+            assert!(rx.try_recv().is_err());
+        });
     }
 
     #[gpui::test]

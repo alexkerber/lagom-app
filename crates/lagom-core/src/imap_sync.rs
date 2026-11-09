@@ -1,6 +1,7 @@
 //! async-imap provides CONDSTORE and cancellable IDLE without a dedicated polling
 //! thread; Tokio/rustls also shares the desktop's existing runtime dependencies.
 mod guard;
+mod inline;
 mod mailbox;
 pub(crate) use mailbox::decode as decode_mailbox;
 use mailbox::encode as encode_mailbox;
@@ -345,19 +346,18 @@ impl ImapSync {
         // never stops the folder's later UIDs.
         if header.len() >= 262144 {
             let message = mime::metadata_only(header).unwrap_or_else(|_| mime::placeholder());
-            return self.save(store, folder, uid, fetch, message, &attachments);
+            return self.save(store, folder, uid, fetch, message, &attachments).map(|_| ());
         }
         let mut message;
         // The first text part (search, and the reading pane where HTML does not render) and the
         // first HTML part (the rendered view), in one fetch.
-        // shortcut: further inline parts are not combined; combine them when needed.
         parts.sort_by_key(|p| p.1);
         let picks: Vec<_> = [parts.iter().find(|p| !p.1), parts.iter().find(|p| p.1)].into_iter().flatten().collect();
         if picks.is_empty() {
             message = mime::parse(header)?;
         } else {
             if picks.iter().map(|p| p.2 as usize).sum::<usize>() > mime::MAX_MIME_BYTES {
-                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments);
+                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments).map(|_| ());
             }
             let section = |path: &[u32]| path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
             // GreenMail emits malformed partial text responses; check octets before full part fetch.
@@ -391,7 +391,7 @@ impl ImapSync {
                 .ok_or(Error::Network("MIME text part missing"))?;
                 total += headers.len() + text.len();
                 if headers.len() >= 65536 || total > mime::MAX_MIME_BYTES {
-                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments);
+                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments).map(|_| ());
                 }
                 let mut raw = headers.to_vec();
                 if !raw.ends_with(b"\r\n") {
@@ -416,10 +416,12 @@ impl ImapSync {
             }
             message.summary.snippet = mime::snippet(&message.body_text, message.body_html.as_deref());
         }
-        self.save(store, folder, uid, fetch, message, &attachments)
+        let inline = self.inline_parts(uid, body, message.body_html.as_deref().unwrap_or_default()).await?;
+        let id = self.save(store, folder, uid, fetch, message, &attachments)?;
+        store.save_inline_parts(id, &inline)
     }
     /// Fills the IMAP-side fields of a parsed message and stores it.
-    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: &[Attachment]) -> Result<()> {
+    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: &[Attachment]) -> Result<i64> {
         let (seen, flagged) = flags(fetch);
         let m = &mut message.summary;
         m.account = self.account.id.clone();
@@ -442,8 +444,7 @@ impl ImapSync {
                 .map(|d| d.timestamp())
                 .unwrap_or_default();
         }
-        store.save_synced_message(&message, attachments)?;
-        Ok(())
+        store.save_synced_message(&message, attachments)
     }
     pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
         let message = store.message(id)?.summary;

@@ -68,6 +68,7 @@ pub enum Cmd {
     EmptyTrash { op: u64, folder: i64 },
     CreateFolder { op: u64, account: String, name: String },
     MarkSeen(i64),
+    Inline(i64),
     ForwardAttachments { draft: String, id: i64 },
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
@@ -115,6 +116,7 @@ pub enum Event {
     Added(Result<String, String>),
     /// A MarkSeen finished, done or not.
     Seen(i64),
+    Inline { id: i64, error: Option<String> },
     Downloaded(Result<PathBuf, String>),
     ForwardAttachments { draft: String, result: Result<Vec<lagom_core::smtp::OutgoingAttachment>, String> },
     /// `error` says why, also when the message went out but its Sent copy failed.
@@ -408,6 +410,10 @@ impl Worker {
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| e.to_string());
                 self.emit(Event::Downloaded(result));
+            }
+            Cmd::Inline(id) => {
+                let error = self.load_inline(id).await.err().map(|e| e.to_string());
+                self.emit(Event::Inline { id, error });
             }
             Cmd::MarkSeen(id) => {
                 // Either way the UI drops its override: the store says what the server has.
@@ -917,6 +923,14 @@ impl Worker {
             self.sync_folder(&account, folder).await?;
         }
         self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
+    }
+
+    async fn load_inline(&mut self, id: i64) -> lagom_core::Result<()> {
+        let account = self.account(&self.store.message_summary(id)?.account)?;
+        let mut session = self.take(&account).await?;
+        let result = session.fetch_inline(&mut self.store, id).await;
+        self.give(&account.id, session, &result);
+        result
     }
 
     async fn attachment_bytes(&mut self, id: i64, section: &str) -> lagom_core::Result<Vec<u8>> {

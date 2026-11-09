@@ -1,0 +1,19 @@
+From: sender@example.test
+To: recipient@example.test
+Subject: Inline fixture
+Message-ID: <inline@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary=related
+
+--related
+Content-Type: text/html; charset=utf-8
+
+<html><body><img src="cid:Logo%2B1%40example.test"><img src="https://example.test/remote.png"></body></html>
+--related
+Content-Type: image/png
+Content-ID: <Logo+1@example.test>
+Content-Disposition: inline
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFOkAAAAASUVORK5CYII=
+--related--

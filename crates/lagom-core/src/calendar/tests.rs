@@ -41,7 +41,7 @@ fn calendar_migrates_v9_without_changing_mail_or_tasks() {
     store.set_account_scopes(&account.id, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
     store.save_account(&account).unwrap();
     assert!(crate::oauth::calendar_allowed(&store.account_scopes(&account.id).unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn v11_cache_upgrade_preserves_events_without_inventing_coverage() {
     assert_eq!(cached[0].event.title, "Kept");
     assert!(cached[0].event.html_link.is_none());
     assert!(crate::oauth::calendar_allowed(&store.account_scopes("fixture").unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
 }
 
 #[test]

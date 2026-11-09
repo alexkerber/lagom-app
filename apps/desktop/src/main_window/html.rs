@@ -26,7 +26,8 @@ pub(super) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "wi
 /// The CSP for a mail document. `base-uri` and `form-action` do not fall back to `default-src`.
 pub(super) fn csp(remote: bool) -> String {
     let remote = if remote { " https: http:" } else { "" };
-    format!("default-src 'none'; img-src data: cid:{remote}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+    let local = if cfg!(target_os = "windows") { "http://lagom-cid.localhost" } else { "lagom-cid:" };
+    format!("default-src 'none'; img-src data: {local}{remote}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
 }
 
 /// Links open outside only for these schemes.
@@ -153,8 +154,9 @@ fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, B
     (bounds, clip)
 }
 
-/// (message id, HTML length, remote images, dark): the document on screen.
-type Key = (usize, usize, bool, bool);
+/// (message id, HTML length, remote images, dark, inline parts): the document on screen.
+type Key = (usize, usize, bool, bool, usize);
+type Inline = std::sync::Arc<std::sync::Mutex<Option<(i64, std::sync::Arc<Vec<lagom_core::inline::InlinePart>>)>>>;
 type Placement = (Bounds<Pixels>, Bounds<Pixels>, f32);
 
 /// The window's web view and what it shows.
@@ -166,6 +168,7 @@ pub(super) struct Web {
     ours: Rc<std::cell::Cell<bool>>,
     /// The document asked for last.
     shown: Option<Key>,
+    inline: Inline,
     /// A document finished loading since the view was last hidden for plain text.
     ready: bool,
     visible: Rc<std::cell::Cell<bool>>,
@@ -234,27 +237,31 @@ impl Web {
             // on an empty page, so the first HTML message opens as fast as the rest.
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if self.view.is_none() {
-                self.view = Self::create(self.ours.clone(), theme, window, cx).map(Rc::new);
+                self.view = Self::create(self.ours.clone(), self.inline.clone(), theme, window, cx).map(Rc::new);
                 if let Some(view) = &self.view {
                     self.ours.set(view.load_html("<!DOCTYPE html><title></title>").is_ok());
                 }
             }
             // Plain text: the next HTML message waits for its own load, never shows a stale one.
+            *self.inline.lock().unwrap() = None;
             self.shown = None;
             self.ready = false;
             self.drawable.set(false);
             self.set_visible(false);
             return;
         };
-        let key = (id, html.len(), m.remote, theme.dark);
+        let key = (id, html.len(), m.remote, theme.dark, m.inline.len());
         if self.shown != Some(key) {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 if self.view.is_none() {
-                    self.view = Self::create(self.ours.clone(), theme, window, cx).map(Rc::new);
+                    self.view = Self::create(self.ours.clone(), self.inline.clone(), theme, window, cx).map(Rc::new);
                 }
                 let Some(view) = self.view.clone() else { return };
-                let doc = document(html, theme, m.remote);
+                let message = m.store.unwrap_or(-(id as i64) - 1);
+                *self.inline.lock().unwrap() = Some((message, m.inline.clone()));
+                let html = lagom_core::inline::rewrite(html, message, cfg!(target_os = "windows"));
+                let doc = document(&html, theme, m.remote);
                 self.ours.set(true);
                 let _ = view.set_background_color(rgba8(theme.bg));
                 if view.load_html(&doc).is_err() {
@@ -355,7 +362,7 @@ impl Web {
     /// The web view, hidden and unfocused, with page scripts, navigation and downloads off and
     /// nothing kept on disk.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn create<T: WebHost>(ours: Rc<std::cell::Cell<bool>>, theme: &Theme, window: &mut Window, cx: &mut Context<T>) -> Option<native::View> {
+    fn create<T: WebHost>(ours: Rc<std::cell::Cell<bool>>, inline: Inline, theme: &Theme, window: &mut Window, cx: &mut Context<T>) -> Option<native::View> {
         // GPUI's test windows have no native handle.
         if cfg!(test) {
             return None;
@@ -368,7 +375,22 @@ impl Web {
             .with_focused(false)
             .with_visible(false)
             .with_background_color(rgba8(theme.bg))
-            .with_initialization_script(BRIDGE)
+            .with_custom_protocol("lagom-cid".into(), move |_, request| {
+                let state = inline.lock().unwrap();
+                let part = state.as_ref().and_then(|(message, parts)| {
+                    (request.method() == "GET").then(|| lagom_core::inline::resolve(*message, parts, &request.uri().to_string())).flatten()
+                });
+                let response = wry::http::Response::builder()
+                    .header("Content-Security-Policy", "default-src 'none'; sandbox")
+                    .header("X-Content-Type-Options", "nosniff")
+                    .header("Cache-Control", "no-store");
+                match part {
+                    Some(part) => response.header("Content-Type", &part.mime_type).body(std::borrow::Cow::Owned(part.data.clone()))
+                        .unwrap_or_else(|_| wry::http::Response::builder().status(404).body(std::borrow::Cow::Owned(Vec::new())).unwrap()),
+                    None => response.status(404).body(std::borrow::Cow::Owned(Vec::new())).unwrap(),
+                }
+            })
+            .with_initialization_script(format!("{BRIDGE}\n{}", include_str!("html/fit.js")))
             .with_navigation_handler(move |_| ours.replace(false))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
@@ -462,7 +484,7 @@ mod tests {
             v.inbox.select(0);
             let id = v.inbox.current().unwrap();
             v.inbox.mail[id].html = Some("<p>Selected</p>".into());
-            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), false, v.theme.dark));
+            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), false, v.theme.dark, v.inbox.mail[id].inline.len()));
             v.web.ready = true;
             v.inbox.click(1, false, true);
             v.inbox.click(1, false, true);
@@ -480,7 +502,7 @@ mod tests {
             v.open_box(None, cx);
             let id = v.inbox.current().unwrap();
             v.inbox.mail[id].html = Some("<p>Still visible</p>".into());
-            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark));
+            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark, v.inbox.mail[id].inline.len()));
             v.web.ready = true;
             v.notify("Task created", cx);
             v.task_undo = Some(1);
@@ -510,12 +532,13 @@ mod tests {
         let doc = document("<p>Hi</p>", &Theme::light(DEFAULT_ACCENT), false);
         // The CSP comes before anything from the mail, and allows no network source.
         assert!(doc.find("Content-Security-Policy").unwrap() < doc.find("<p>Hi</p>").unwrap());
-        assert_eq!(csp_of(&doc), "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+        let local = if cfg!(target_os = "windows") { "http://lagom-cid.localhost" } else { "lagom-cid:" };
+        assert_eq!(csp_of(&doc), format!("default-src 'none'; img-src data: {local}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
         // The wrapper itself loads nothing and runs nothing.
-        assert!(!doc.contains("://") && !doc.contains("<script") && !doc.contains("<link"));
+        assert!(!doc.contains("src=") && !doc.contains("<script") && !doc.contains("<link"));
         // Remote images, when asked for: images only.
         let doc = document("", &Theme::light(DEFAULT_ACCENT), true);
-        assert_eq!(csp_of(&doc), "default-src 'none'; img-src data: cid: https: http:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+        assert_eq!(csp_of(&doc), format!("default-src 'none'; img-src data: {local} https: http:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
     }
 
     fn csp_of(doc: &str) -> &str {

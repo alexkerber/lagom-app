@@ -27,6 +27,13 @@ impl html::WebHost for MessageBody {
 }
 
 impl MessageBody {
+    pub(super) fn refresh(&mut self, mail: &Mail, cx: &mut Context<Self>) {
+        let remote = self.mail.remote;
+        self.mail = mail.clone();
+        self.mail.remote = remote;
+        cx.notify();
+    }
+
     pub(super) fn prepare(&mut self, theme: Theme, overlay: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.theme.dark != theme.dark || self.overlay != overlay { cx.notify(); }
         self.theme = theme;
@@ -91,5 +98,28 @@ impl MainWindow {
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(id, true, cx))))
                     .children(self.expanded.get(&id).cloned())
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn inline_completion_refreshes_expanded_mail_without_resetting_remote_consent(cx: &mut gpui::TestAppContext) {
+        let (main, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+        main.update(cx, |main, cx| {
+            let id = main.inbox.single().unwrap();
+            main.toggle_message(id, false, cx);
+            let expanded = main.expanded[&id].clone();
+            let mut mail = main.inbox.mail[id].clone();
+            mail.inline = std::sync::Arc::new(vec![lagom_core::inline::InlinePart { cid: "logo".into(), mime_type: "image/png".into(), data: vec![1] }]);
+            expanded.update(cx, |body, cx| {
+                body.mail.remote = true;
+                body.refresh(&mail, cx);
+                assert!(body.mail.remote);
+                assert_eq!(body.mail.inline[0].data, [1]);
+            });
+        });
     }
 }

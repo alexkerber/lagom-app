@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 15 {
+        if version > 16 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -122,6 +122,9 @@ impl Store {
             }
             store.db.execute_batch(include_str!("schema_v15.sql"))?;
             tx.commit()?;
+        }
+        if version < 16 {
+            store.db.execute_batch(include_str!("schema_v16.sql"))?;
         }
         Ok(store)
     }
@@ -292,7 +295,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -499,7 +502,7 @@ impl Store {
         params![m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,message.body_text,message.body_html,thread,m.thread_refs],|r|r.get(0))?;
         Ok(id)
     }
-    pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<()> {
+    pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
         let tx = self.db.unchecked_transaction()?;
         let id = self.insert_message(message)?;
         self.db.execute("DELETE FROM attachments WHERE message=?1", [id])?;
@@ -509,7 +512,7 @@ impl Store {
         }
         self.db.execute("UPDATE messages SET attachments_loaded=1,threading_loaded=1 WHERE id=?1", [id])?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
     pub fn attachment_metadata_loaded(&self, message: i64) -> Result<bool> {
         Ok(self.db.query_row("SELECT attachments_loaded FROM messages WHERE id=?1", [message], |r| r.get(0))?)
@@ -794,7 +797,49 @@ mod mail_tests {
         }
     }
     #[test]
-    fn v12_upgrade_to_v14_preserves_signatures_attachments_tasks_and_lists() {
+    fn v15_upgrade_preserves_messages_folders_and_pending_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v15.db");
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql"), include_str!("schema_v11.sql"), include_str!("schema_v12.sql"), include_str!("schema_v13.sql"), include_str!("schema_v14.sql"), include_str!("schema_v15.sql")] { db.execute_batch(schema).unwrap(); }
+        let mut old = Store { db };
+        assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+        let account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        let inbox = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        // Already-decoded v15 names must not undergo the v15 conversion again.
+        let custom = old.save_folder(&account.id, "台北/R&-D", Some("/"), FolderRole::Other).unwrap();
+        old.reset_uidvalidity(custom, 7).unwrap();
+        let first = old.save_message(&mail(&account, inbox, 1)).unwrap();
+        let second = old.save_message(&mail(&account, custom, 2)).unwrap();
+        old.finish_sync(custom, &std::collections::HashSet::from([2]), 2, Some(3), Some(4)).unwrap();
+        old.begin_move(first, custom).unwrap();
+        let messages = [old.message(first).unwrap(), old.message(second).unwrap()];
+        let folders = [old.folder(inbox).unwrap(), old.folder(custom).unwrap()];
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
+        for message in &messages {
+            assert_eq!(store.message(message.summary.id).unwrap(), *message);
+            assert!(!store.inline_loaded(message.summary.id).unwrap());
+            assert!(store.inline_parts(message.summary.id).unwrap().is_empty());
+        }
+        for folder in &folders { assert_eq!(store.folder(folder.id).unwrap(), *folder); }
+        assert_eq!(store.db.query_row("SELECT move_target FROM messages WHERE id=?1", [first], |r| r.get::<_, i64>(0)).unwrap(), custom);
+        let parts = [crate::inline::InlinePart { cid: "logo".into(), mime_type: "image/png".into(), data: vec![1, 2, 3] }];
+        store.save_inline_parts(second, &parts).unwrap();
+        drop(store);
+        let store = Store::open(path).unwrap();
+        assert!(store.inline_loaded(second).unwrap());
+        assert_eq!(store.inline_parts(second).unwrap(), parts);
+        for message in messages { assert_eq!(store.message(message.summary.id).unwrap(), message); }
+        for folder in folders { assert_eq!(store.folder(folder.id).unwrap(), folder); }
+        assert!(store.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none());
+    }
+
+    #[test]
+    fn v12_upgrade_preserves_signatures_attachments_tasks_and_lists() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("v12.db");
         let db = Connection::open(&path).unwrap();
@@ -818,7 +863,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -899,7 +944,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -1053,7 +1098,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1125,7 +1170,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1195,7 +1240,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            15
+            16
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1224,7 +1269,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 16);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

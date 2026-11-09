@@ -2852,6 +2852,9 @@ impl Inbox {
             Some(&id) => {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
                 fresh.html = self.mail[id].html.take();
+                fresh.inline = self.mail[id].inline.clone();
+                fresh.inline_pending = self.mail[id].inline_pending;
+                fresh.inline_retry_after = self.mail[id].inline_retry_after;
                 fresh.remote = self.mail[id].remote;
                 fresh.attachments = std::mem::take(&mut self.mail[id].attachments);
                 if m.has_attachments && fresh.attachments.is_empty() {
