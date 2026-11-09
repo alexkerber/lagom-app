@@ -345,6 +345,10 @@ impl MainWindow {
                         Err(error) => self.notify(format!("Could not sign in: {error}"), cx),
                     }
                 }
+                Event::TasksSync(account, state) => {
+                    self.today.task_sync.insert(account, state);
+                    read = true;
+                }
                 Event::CalendarSync(account, state) => {
                     self.today.calendar_sync.insert(account, state);
                     read = true;
@@ -2086,6 +2090,62 @@ mod tests {
             }).collect();
             assert_eq!(restored, marked);
         });
+    }
+
+    #[gpui::test]
+    fn task_edits_notify_sync_after_commit_and_status_refresh_keeps_local_tasks(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update_in(cx, |v, window, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut account = store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            store.save_authorized_account(&account, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+            v.reload(cx);
+            v.show_section(3, window, cx);
+            let list = store.default_task_list().unwrap();
+            assert!(v.save_task(super::tasks::TaskChange::Add { list, title: "Durable before sync".into() }, cx));
+            assert_eq!(store.tasks(list, false).unwrap()[0].title, "Durable before sync");
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::TasksEdited));
+            v.on_events(vec![Event::TasksSync(account.id.clone(), SyncState::Synced(1)), Event::Changed], window, cx);
+            assert_eq!(v.today.task_sync.get(&account.id), Some(&SyncState::Synced(1)));
+            assert_eq!(store.tasks(list, false).unwrap().len(), 1);
+            v.on_events(vec![Event::TasksSync(account.id.clone(), SyncState::Failed("offline".into()))], window, cx);
+            assert_eq!(v.today.task_sync.get(&account.id), Some(&SyncState::Failed("offline".into())));
+            account.id
+        });
+        cx.run_until_parked();
+        let selector: &'static str = Box::leak(format!("tasks-sync-{id}").into_boxed_str());
+        assert!(cx.debug_bounds(selector).is_some(), "Tasks status belongs on Todo");
+        view.update_in(cx, |v, window, cx| v.show_home(window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector).is_none(), "Home keeps its calendar status");
+    }
+
+    #[gpui::test]
+    fn review_tasks_scope_loss_offers_consent_with_calendar_still_authorized(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update_in(cx, |v, window, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            let mut account = store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            let scopes = lagom_core::oauth::GOOGLE_CALENDAR_SCOPES.split_whitespace()
+                .filter(|s| *s != lagom_core::oauth::GOOGLE_TASKS_SCOPE).collect::<Vec<_>>().join(" ");
+            store.save_authorized_account(&account, &scopes).unwrap();
+            v.reload(cx);
+            v.show_section(3, window, cx);
+            assert!(v.today.calendar_accounts[0].1);
+            account.id
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("allow-calendar-0").is_none());
+        let selector: &'static str = Box::leak(format!("allow-tasks-{id}").into_boxed_str());
+        let button = cx.debug_bounds(selector).expect("Tasks consent action");
+        cx.simulate_click(button.center(), Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::AllowCalendar(account) if account == id));
+        cx.run_until_parked();
+        let button = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::CancelSignIn));
     }
 
     #[gpui::test]
