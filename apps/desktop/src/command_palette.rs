@@ -56,15 +56,16 @@ enum Action {
 impl Action {
     fn icon(&self) -> &'static str {
         match self {
-            Self::Move(_) | Self::Fill(_) => "icons/move.svg",
+            Self::Move(MoveTo::Folder(_)) => "icons/folder.svg",
+            Self::Move(MoveTo::New(_)) => "icons/new-folder.svg",
+            Self::Fill(_) => "icons/move.svg",
             Self::Run(run) => match run {
-                Run::NewTask => "icons/new-task.svg", Run::Done => "icons/done.svg", Run::Later(_) => "icons/later.svg",
+                Run::NewTask => "icons/plus.svg", Run::Done => "icons/done.svg", Run::Later(_) => "icons/later.svg",
                 Run::Delete => "icons/trash.svg", Run::Reply => "icons/reply.svg", Run::ReplyAll => "icons/reply-all.svg",
-                Run::Forward => "icons/forward.svg", Run::ToggleRead => "icons/mark-unread.svg",
-                Run::Compose => "icons/new-message.svg", Run::InsertFile => "icons/attachment.svg",
-                Run::Sync => "icons/sync.svg", Run::Settings => "icons/settings.svg", Run::AddAccount => "icons/add-account.svg",
-                Run::Open(_) => "icons/mail.svg",
-            },
+                Run::Forward => "icons/forward.svg", Run::ToggleRead => "icons/unread.svg", Run::Compose => "icons/compose.svg",
+                Run::InsertFile => "icons/attachment.svg", Run::Sync => "icons/sync.svg", Run::Settings => "icons/settings.svg",
+                Run::AddAccount => "icons/add-account.svg", Run::Open(_) => "icons/mail.svg",
+            }
         }
     }
 }
@@ -471,6 +472,18 @@ mod tests {
             assert!(items.iter().any(|i| i.action == Action::Run(Run::NewTask)));
             assert!(!items.iter().any(|i| matches!(i.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply | Run::ReplyAll | Run::Forward | Run::ToggleRead) | Action::Move(_) | Action::Fill(_))));
         });
+    }
+
+    #[test]
+    fn commands_have_embedded_icons() {
+        use gpui::AssetSource;
+        assert_eq!(Action::Run(Run::NewTask).icon(), "icons/plus.svg");
+        for command in COMMANDS {
+            assert!(crate::Assets.load(command.action.icon()).unwrap().is_some(), "{}", command.label);
+        }
+        for action in [Action::Move(MoveTo::Folder(0)), Action::Move(MoveTo::New("Fixture".into())), Action::Run(Run::Open(1))] {
+            assert!(crate::Assets.load(action.icon()).unwrap().is_some());
+        }
     }
 
     #[test]

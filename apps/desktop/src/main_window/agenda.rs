@@ -42,7 +42,7 @@ impl MainWindow {
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
             controls = controls.child(div().flex().items_center().gap(px(8.))
-                .child(icon(match state { Some(SyncState::Failed(_)) => "icons/sync-failed.svg", Some(SyncState::Synced(_)) => "icons/synced.svg", _ => "icons/sync.svg" }, t.ink2, 16.))
+                .when(*allowed, |d| d.child(icon(if matches!(state, Some(SyncState::Failed(_))) { "icons/cloud-off.svg" } else { "icons/cloud.svg" }, t.ink2, 16.)))
                 .child(mono(account.email.clone(), t.ink2))
                 .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))
@@ -63,52 +63,75 @@ impl MainWindow {
 
     pub(super) fn agenda_view(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let has_calendar = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || !self.today.events.is_empty();
-        let mut agenda = div().id("today-agenda").w_full().flex_shrink_0().max_h(px(280.)).overflow_y_scroll()
-            .flex().flex_col().gap(px(12.))
-            .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
-        agenda = agenda.child(self.calendar_controls(cx));
-        if has_calendar && self.today.events.is_empty() {
-            agenda = agenda.child(div().flex().flex_col().items_center().gap(px(8.)).child(icon("icons/calendar.svg", t.ink2, 32.)).child(mono("No cached events for today", t.ink2)));
+        let now = chrono::Local::now();
+        let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
+        let mut agenda = div().debug_selector(|| "today-agenda".into()).w_full().flex().flex_col().gap(px(12.))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Schedule"));
+        if !has_calendar {
+            let account = self.today.calendar_accounts.first().map(|(a, _)| a.id.clone());
+            return agenda.child(pressable(div().id("home-calendar-consent"), &t, false)
+                .debug_selector(|| "Show your Google Calendar".into()).flex().items_center().gap(px(8.)).min_h(px(32.)).text_color(t.ink2)
+                .child(icon("icons/calendar.svg", t.ink2, 16.)).child("Show your Google Calendar")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(id) = &account {
+                        if let Some(live) = &this.live {
+                            if !live.bridge.send(Cmd::AllowCalendar(id.clone())) { this.worker_gone(cx); }
+                        }
+                    } else { this.add_account(window, cx); }
+                })));
         }
-        // shortcut: Today lays out every event, virtualize when large agendas need bounded layout.
-        for (ix, entry) in self.today.events.iter().enumerate() {
+        if self.today.events.is_empty() {
+            return agenda.child(div().py(px(16.)).flex().flex_col().gap(px(8.))
+                .child(icon("icons/calendar.svg", t.ink2, 32.)).child(mono("Nothing scheduled today", t.ink2)));
+        }
+        let now_line = || div().debug_selector(|| "today-now".into()).flex().items_center().gap(px(10.)).min_h(px(24.))
+            .child(mono(now.format("%H:%M").to_string(), t.swipe_later).w(px(48.)).flex_shrink_0())
+            .child(div().h(px(2.)).flex_1().bg(t.swipe_later));
+        let mut entries: Vec<_> = self.today.events.iter().enumerate().collect();
+        entries.sort_by_key(|(ix, entry)| (!entry.event.all_day, entry.event.start_utc, *ix));
+        let mut marked_now = false;
+        for (ix, entry) in entries {
             let event = &entry.event;
-            let when = if event.all_day { "All day".into() } else {
-                chrono::DateTime::from_timestamp(event.start_utc, 0).map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default()
-            };
-            agenda = agenda.child(div().id(("agenda-event", ix)).debug_selector(move || format!("agenda-event-{ix}"))
-                .flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(radius::CONTROL)).bg(t.subtle)
-                .child(div().flex().items_center().gap(px(6.)).when(event.all_day, |d| d.child(icon("icons/all-day.svg", t.ink2, 16.))).child(mono(format!("{when} · {}", entry.calendar), t.ink2)))
-                .child(event.title.clone())
-                .children(event.location.clone().map(|location| mono(location, t.ink2)))
-                .children(event.join_url.clone().filter(|url| lagom_core::google::safe_join_url(url)).map(|url|
-                    button(&t, "Join meeting", None).on_click(move |_, _, cx| cx.open_url(&url)))));
+            if !event.all_day && !marked_now && event.start_utc > now.timestamp() {
+                agenda = agenda.child(now_line()); marked_now = true;
+            }
+            let when = chrono::DateTime::from_timestamp(event.start_utc, 0).map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
+            let past = !event.all_day && event.end_utc <= now.timestamp();
+            let index = self.live.as_ref().and_then(|live| live.accounts.iter().position(|a| a.id == entry.account)).unwrap_or(0);
+            let accent = self.account_accent(index);
+            let entry = entry.clone();
+            agenda = agenda.child(pressable(div().id(("agenda-event", ix)), &t, false).debug_selector(move || format!("agenda-event-{ix}"))
+                .flex().items_center().gap(px(10.)).min_h(px(36.)).rounded(px(radius::KEY))
+                .when(!event.all_day, |d| d.child(mono(when, t.ink2).w(px(48.)).flex_shrink_0())
+                    .child(div().w(px(2.)).h(px(24.)).flex_shrink_0().bg(accent)))
+                .when(event.all_day, |d| d.child(div().w(px(48.)).flex_shrink_0().flex().justify_end().child(icon("icons/sun.svg", t.ink2, 16.)))
+                    .child(div().size(px(4.)).rounded_full().bg(accent)))
+                .child(div().flex_1().min_w(px(0.)).one_line().text_color(if past { t.ink2 } else { t.ink }).child(event.title.clone()))
+                .when(event.join_url.is_some(), |d| d.child(icon("icons/video.svg", t.ink2, 16.)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.show_section(2, window, cx);
+                    this.move_week(0, cx);
+                    this.week.detail = Some(entry.clone());
+                    cx.notify();
+                })));
         }
-        div().w_full().flex_shrink_0().child(agenda)
+        if !marked_now { agenda = agenda.child(now_line()); }
+        agenda
     }
 }
 
 pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::AgendaEvent> {
-    let mut events: Vec<_> = [(9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
+    [(0, "Planning day"), (9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
         let start = day.and_hms_opt(hour, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
-        let end = start + chrono::Duration::minutes(45);
+        let end = start + if hour == 0 { chrono::Duration::days(1) } else { chrono::Duration::minutes(45) };
         Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(), calendar_id: "demo".into(),
             event: lagom_core::calendar::Event {
-                remote_id: format!("demo-{hour}"), title: title.into(), start: start.to_rfc3339(), end: end.to_rfc3339(),
-                start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: false,
-                location: None, join_url: None, html_link: None,
+                remote_id: format!("demo-{hour}"), title: title.into(), start: if hour == 0 { day.to_string() } else { start.to_rfc3339() }, end: if hour == 0 { day.succ_opt().unwrap().to_string() } else { end.to_rfc3339() },
+                start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: hour == 0,
+                location: None, join_url: (hour == 11).then(|| "https://meet.example.test/demo".into()), html_link: None,
             },
         })
-    }).collect();
-    events.push(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(), calendar_id: "demo".into(),
-        event: lagom_core::calendar::Event {
-            remote_id: "demo-all-day".into(), title: "Planning day".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
-            start_utc: day_start(day, &chrono::Local), end_utc: day_start(day.succ_opt().unwrap(), &chrono::Local), all_day: true,
-            location: None, join_url: None, html_link: None,
-        },
-    });
-    events
+    }).collect()
 }
 
 pub(super) fn day_start<T: chrono::TimeZone>(date: chrono::NaiveDate, zone: &T) -> i64 {

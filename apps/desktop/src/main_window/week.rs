@@ -199,7 +199,7 @@ impl MainWindow {
         }
     }
 
-    fn move_week(&mut self, delta: i64, cx: &mut Context<Self>) {
+    pub(super) fn move_week(&mut self, delta: i64, cx: &mut Context<Self>) {
         if self.week.editor.is_some() || self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         let today = chrono::Local::now().date_naive();
         let day = if delta == 0 { today } else if self.week.view == View::Month { shift_month(self.week.anchor, delta) }

@@ -32,9 +32,33 @@ struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
+            "icons/add-account.svg" => include_bytes!("../assets/icons/add-account.svg"),
             "icons/chevron-left.svg" => include_bytes!("../assets/icons/chevron-left.svg"),
-            "icons/calendar-panel.svg" => include_bytes!("../assets/icons/calendar-panel.svg"),
+            "icons/close.svg" => include_bytes!("../assets/icons/close.svg"),
+            "icons/cloud-off.svg" => include_bytes!("../assets/icons/cloud-off.svg"),
+            "icons/cloud.svg" => include_bytes!("../assets/icons/cloud.svg"),
+            "icons/connect.svg" => include_bytes!("../assets/icons/connect.svg"),
+            "icons/download.svg" => include_bytes!("../assets/icons/download.svg"),
+            "icons/forward.svg" => include_bytes!("../assets/icons/forward.svg"),
+            "icons/image.svg" => include_bytes!("../assets/icons/image.svg"),
+            "icons/more.svg" => include_bytes!("../assets/icons/more.svg"),
+            "icons/move.svg" => include_bytes!("../assets/icons/move.svg"),
             "icons/new-event.svg" => include_bytes!("../assets/icons/new-event.svg"),
+            "icons/new-folder.svg" => include_bytes!("../assets/icons/new-folder.svg"),
+            "icons/new-list.svg" => include_bytes!("../assets/icons/new-list.svg"),
+            "icons/read.svg" => include_bytes!("../assets/icons/read.svg"),
+            "icons/rename.svg" => include_bytes!("../assets/icons/rename.svg"),
+            "icons/reply-all.svg" => include_bytes!("../assets/icons/reply-all.svg"),
+            "icons/reply.svg" => include_bytes!("../assets/icons/reply.svg"),
+            "icons/settings.svg" => include_bytes!("../assets/icons/settings.svg"),
+            "icons/sun.svg" => include_bytes!("../assets/icons/sun.svg"),
+            "icons/undo.svg" => include_bytes!("../assets/icons/undo.svg"),
+            "icons/unread.svg" => include_bytes!("../assets/icons/unread.svg"),
+            "icons/video.svg" => include_bytes!("../assets/icons/video.svg"),
+            "icons/attachment.svg" => include_bytes!("../assets/icons/attachment.svg"),
+            "icons/compose.svg" => include_bytes!("../assets/icons/compose.svg"),
+            "icons/sync.svg" => include_bytes!("../assets/icons/sync.svg"),
+            "icons/calendar-panel.svg" => include_bytes!("../assets/icons/calendar-panel.svg"),
             "icons/calendar-day.svg" => include_bytes!("../assets/icons/calendar-day.svg"),
             "icons/calendar-week.svg" => include_bytes!("../assets/icons/calendar-week.svg"),
             "icons/calendar-month.svg" => include_bytes!("../assets/icons/calendar-month.svg"),
@@ -43,30 +67,17 @@ impl AssetSource for Assets {
             "icons/remove-guest.svg" => include_bytes!("../assets/icons/remove-guest.svg"),
             "icons/meet.svg" => include_bytes!("../assets/icons/meet.svg"),
             "icons/all-day.svg" => include_bytes!("../assets/icons/all-day.svg"),
-            "icons/reply.svg" => include_bytes!("../assets/icons/reply.svg"),
-            "icons/reply-all.svg" => include_bytes!("../assets/icons/reply-all.svg"),
-            "icons/forward.svg" => include_bytes!("../assets/icons/forward.svg"),
             "icons/new-task.svg" => include_bytes!("../assets/icons/new-task.svg"),
-            "icons/new-list.svg" => include_bytes!("../assets/icons/new-list.svg"),
-            "icons/rename.svg" => include_bytes!("../assets/icons/rename.svg"),
             "icons/linked-mail.svg" => include_bytes!("../assets/icons/linked-mail.svg"),
             "icons/synced.svg" => include_bytes!("../assets/icons/synced.svg"),
             "icons/sync-failed.svg" => include_bytes!("../assets/icons/sync-failed.svg"),
-            "icons/sync.svg" => include_bytes!("../assets/icons/sync.svg"),
-            "icons/close.svg" => include_bytes!("../assets/icons/close.svg"),
             "icons/save-event.svg" => include_bytes!("../assets/icons/save-event.svg"),
             "icons/open-calendar.svg" => include_bytes!("../assets/icons/open-calendar.svg"),
             "icons/new-message.svg" => include_bytes!("../assets/icons/new-message.svg"),
-            "icons/move.svg" => include_bytes!("../assets/icons/move.svg"),
             "icons/mark-read.svg" => include_bytes!("../assets/icons/mark-read.svg"),
             "icons/mark-unread.svg" => include_bytes!("../assets/icons/mark-unread.svg"),
-            "icons/undo.svg" => include_bytes!("../assets/icons/undo.svg"),
             "icons/images.svg" => include_bytes!("../assets/icons/images.svg"),
             "icons/load-more.svg" => include_bytes!("../assets/icons/load-more.svg"),
-            "icons/add-account.svg" => include_bytes!("../assets/icons/add-account.svg"),
-            "icons/connect.svg" => include_bytes!("../assets/icons/connect.svg"),
-            "icons/attachment.svg" => include_bytes!("../assets/icons/attachment.svg"),
-            "icons/settings.svg" => include_bytes!("../assets/icons/settings.svg"),
             "icons/remove-account.svg" => include_bytes!("../assets/icons/remove-account.svg"),
             "icons/keep-account.svg" => include_bytes!("../assets/icons/keep-account.svg"),
             "icons/delete-list.svg" => include_bytes!("../assets/icons/delete-list.svg"),
@@ -165,11 +176,11 @@ mod action_icon_tests {
     fn action_icons_are_distinct_and_embedded_in_the_house_stroke_style() {
         let labels = ["Reply", "Reply all", "Forward", "Later", "Done", "New event", "New task", "Day", "Week", "Month", "Today",
             "Join", "Save event", "Open in Google Calendar", "Cancel", "Add list", "Rename", "Delete list", "Open mail",
-            "Delete", "Move", "Move to Inbox", "Mark read", "Mark unread", "Undo", "Send", "Load remote images", "Load more",
-            "Add account", "Connect", "Remove", "Keep", "Show your Google Calendar", "Allow Google Tasks access"];
+            "Move", "Move to Inbox", "Mark read", "Mark unread", "Undo", "Send", "Load remote images", "Load more",
+            "Add account", "Connect", "Allow Google Tasks access"];
         let mut paths = std::collections::HashSet::new();
         for label in labels {
-            let path = main_window::action_icon(label);
+            let path = main_window::action_icon(label).expect("action icon");
             assert!(paths.insert(path), "different actions must have different icons: {label}");
             let bytes = Assets.load(path).unwrap().expect("embedded action icon");
             let svg = std::str::from_utf8(&bytes).unwrap();

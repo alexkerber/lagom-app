@@ -58,7 +58,7 @@ fn day_week_month_controls_load_their_ranges_and_month_overflow_opens_day(cx: &m
 
 #[gpui::test]
 fn week_now_line_spans_grid_and_hour_minutes_are_smaller(cx: &mut TestAppContext) {
-    let (_, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
     cx.simulate_resize(gpui::size(px(1440.), px(900.)));
     cx.run_until_parked();
     let line = cx.debug_bounds("current-time").unwrap();
@@ -71,7 +71,8 @@ fn week_now_line_spans_grid_and_hour_minutes_are_smaller(cx: &mut TestAppContext
     assert_eq!(number.size, gpui::size(px(30.), px(30.)));
     assert!(number.size.height > weekday.size.height);
     let all_day = cx.debug_bounds("week-all-day").unwrap();
-    let event = cx.debug_bounds(format!("week-event-{today}-3").leak()).unwrap();
+    let index = view.read_with(cx, |v, _| v.week.days[today as usize].iter().position(|e| e.event.all_day).unwrap());
+    let event = cx.debug_bounds(format!("week-event-{today}-{index}").leak()).unwrap();
     assert!(event.top() >= all_day.top() && event.bottom() <= all_day.bottom());
     assert!(event.size.height <= px(26.), "all-day titles use one compact line");
     let hour = cx.debug_bounds("hour-13").unwrap();

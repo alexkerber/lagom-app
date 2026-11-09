@@ -121,9 +121,14 @@ impl Store {
         delete_task_list(&tx, id)?;
         Ok(tx.commit()?)
     }
-    /// Undated and overdue tasks stay visible until completed.
+    /// Due tasks across lists, followed by five other open tasks from the default list.
     pub fn today_tasks(&self, today: &str) -> Result<Vec<Task>> {
-        let mut stmt = self.db.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks WHERE deleted=0 AND done_at IS NULL AND (due IS NULL OR substr(due,1,10)<=?1) ORDER BY list,position,id"))?;
+        let mut stmt = self.db.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks WHERE deleted=0 AND done_at IS NULL AND (
+            substr(due,1,10)<=?1 OR id IN (SELECT id FROM tasks WHERE deleted=0 AND done_at IS NULL
+                AND list=(SELECT list FROM task_settings WHERE id=1) AND (due IS NULL OR substr(due,1,10)>?1)
+                ORDER BY position,id LIMIT 5))
+            ORDER BY CASE WHEN substr(due,1,10)<=?1 THEN 0 ELSE 1 END,
+                CASE WHEN substr(due,1,10)<=?1 THEN due END,position,id"))?;
         let rows = stmt.query_map([today], task_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -225,7 +230,7 @@ mod tests {
         (temp, store)
     }
     #[test]
-    fn today_keeps_undated_and_overdue_tasks_but_not_future_or_done() {
+    fn today_prioritizes_due_then_default_tasks_and_excludes_done_or_deleted() {
         let (_temp, s) = setup();
         let list = s.default_task_list().unwrap();
         let undated = s.add_task(list, "Undated", "", None).unwrap();
@@ -236,8 +241,28 @@ mod tests {
         let deleted = s.add_task(list, "Deleted", "", None).unwrap();
         s.set_done(done.id, true).unwrap();
         s.delete_task(deleted.id).unwrap();
-        assert_eq!(s.today_tasks("2026-11-09").unwrap(), [undated.clone(), overdue.clone(), today.clone()]);
-        assert_eq!(s.today_tasks("2026-11-10").unwrap(), [undated, overdue, today, future]);
+        assert_eq!(s.today_tasks("2026-11-09").unwrap(), [overdue.clone(), today.clone(), undated.clone(), future.clone()]);
+        assert_eq!(s.today_tasks("2026-11-10").unwrap(), [overdue, today, future, undated]);
+    }
+
+    #[test]
+    fn today_bounds_default_fallback_and_keeps_due_tasks_from_other_lists() {
+        let (_temp, s) = setup();
+        let default = s.default_task_list().unwrap();
+        let other = s.add_task_list("Other").unwrap();
+        let hidden = s.add_task(other.id, "Undated elsewhere", "", None).unwrap();
+        let overdue = s.add_task(other.id, "Overdue", "", Some("2026-11-08".into())).unwrap();
+        let due = s.add_task(default, "Due", "", Some("2026-11-09T00:00:00Z".into())).unwrap();
+        let extra: Vec<_> = (0..8).map(|i| s.add_task(default, &format!("Task {i}"), "", None).unwrap()).collect();
+        let tasks = s.today_tasks("2026-11-09").unwrap();
+        assert_eq!(tasks.len(), 7);
+        assert_eq!(&tasks[..2], &[overdue.clone(), due]);
+        assert_eq!(&tasks[2..], &extra[..5]);
+        s.set_default_task_list(other.id).unwrap();
+        let tasks = s.today_tasks("2026-11-09").unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks.last(), Some(&hidden));
+        assert_eq!(tasks.iter().filter(|t| t.id == overdue.id).count(), 1);
     }
 
     #[test]
