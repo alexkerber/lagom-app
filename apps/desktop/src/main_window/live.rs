@@ -31,6 +31,7 @@ pub struct Live {
     /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
     want: Option<i64>,
     notification_target: Option<crate::notifications::Target>,
+    task_target: Option<i64>,
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
@@ -157,6 +158,7 @@ impl Live {
             pin: None,
             want: None,
             notification_target: None,
+            task_target: None,
             seen: HashSet::new(),
             due: None,
         })
@@ -413,6 +415,9 @@ impl MainWindow {
         if let Some(target) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.notification_target.take()) {
             self.open_notification(target, window, cx);
         }
+        if let Some(id) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.task_target.take()) {
+            self.open_task_mail(id, cx);
+        }
         self.notify_mail(new_mail, window, cx);
         cx.notify();
     }
@@ -437,6 +442,27 @@ impl MainWindow {
             }
             Event::Failed(error) => self.notify(error, cx),
             Event::Clicked(target) => self.open_notification(target, window, cx),
+        }
+    }
+
+    pub(super) fn open_task_mail(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        if !live.ops.is_empty() {
+            live.task_target = Some(id);
+            return;
+        }
+        let result = live.store.task_mail(id).and_then(|id| id.map(|id| live.store.message_summary(id)).transpose());
+        match result {
+            Ok(Some(mail)) => {
+                let Some(account) = live.accounts.iter().position(|a| a.id == mail.account) else {
+                    self.notify("The linked account is no longer available", cx);
+                    return;
+                };
+                self.switch_account(account, cx);
+                self.open_found(mail.id, cx);
+            }
+            Ok(None) => self.notify("The linked mail is no longer available locally", cx),
+            Err(e) => self.notify(format!("Could not open linked mail: {e}"), cx),
         }
     }
 
@@ -984,6 +1010,105 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_task_link_waits_for_failed_move(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let (task, mail) = view.update(cx, |v, cx| {
+            let mut mail = incoming(v, 1);
+            mail.message_id = "<pending-task@test>".into();
+            let store = &v.live.as_ref().unwrap().store;
+            store.save_message(&lagom_core::store::Message { summary: mail.clone(), ..Default::default() }).unwrap();
+            let task = store.task_from_mail(store.default_task_list().unwrap(), &mail).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.act(Move::Done, cx);
+            (task.id, mail.id)
+        });
+        let op = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|cmd| match cmd {
+            Cmd::Op { op, .. } => Some(op), _ => None,
+        }).unwrap();
+        view.update_in(cx, |v, window, cx| {
+            v.show_today(window, cx);
+            v.open_task_mail(task, cx);
+            assert!(!v.inbox.mail.is_empty(), "pending move still needs its rollback row");
+            assert!(matches!(v.page, Page::Today));
+            v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            assert!(matches!(v.page, Page::Mail));
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(mail));
+        });
+    }
+
+    #[gpui::test]
+    fn review_quit_commits_submitted_task_add_and_rename(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Submitted task");
+        cx.simulate_keystrokes("enter");
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        view.read_with(cx, |v, _| {
+            let store = Store::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap()[0].title, "Submitted task");
+        });
+        finish_tasks(&view, cx, &mut rx);
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        cx.simulate_keystrokes("enter secondary-a");
+        cx.simulate_input("Submitted rename");
+        cx.simulate_keystrokes("enter");
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        view.read_with(cx, |v, _| {
+            let store = Store::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap()[0].title, "Submitted rename");
+        });
+        finish_tasks(&view, cx, &mut rx);
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        view.read_with(cx, |v, _| {
+            let store = Store::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            let tasks = store.tasks(store.default_task_list().unwrap(), false).unwrap();
+            assert_eq!(tasks.len(), 1, "worker must not apply a quit-flushed write twice");
+            assert_eq!(tasks[0].title, "Submitted rename");
+        });
+    }
+
+    #[gpui::test]
+    fn review_quit_retries_failed_task_flush_after_worker_stops(cx: &mut TestAppContext) {
+        let (view, cx, rx) = window(cx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let fixture = rusqlite::Connection::open(store.path()).unwrap();
+        fixture.execute_batch("CREATE TRIGGER refuse_task_write BEFORE INSERT ON tasks BEGIN SELECT RAISE(ABORT, 'fixture write failed'); END;").unwrap();
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Keep submitted text");
+        cx.simulate_keystrokes("enter");
+        assert!(view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(toast(&view, cx).contains("fixture write failed"));
+        drop(rx);
+        view.update(cx, |v, cx| v.worker_gone(cx));
+        fixture.execute_batch("DROP TRIGGER refuse_task_write;").unwrap();
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
+        let tasks = store.tasks(store.default_task_list().unwrap(), false).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Keep submitted text");
+    }
+
+    #[gpui::test]
+    fn review_today_undo_cancels_pending_send(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        send_one(cx);
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("secondary-z");
+        assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.sending.is_empty()));
+        cx.executor().advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(rx.try_recv().is_err(), "undone send must never reach delivery");
+        view.read_with(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            assert!(live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().is_empty());
+            assert_eq!(live.store.drafts().unwrap().len(), 1);
+        });
+    }
+
+    #[gpui::test]
     fn task_key_creates_link_in_selected_default_and_undo_works_from_today(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let (store, mail, default) = view.update(cx, |v, cx| {
@@ -1174,6 +1299,7 @@ mod tests {
             pin: None,
             want: None,
             notification_target: None,
+            task_target: None,
             seen: HashSet::new(),
             failed: Vec::new(),
             due: None,

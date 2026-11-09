@@ -590,13 +590,14 @@ impl MainWindow {
     /// Only a failed local write can hold an exit; drafts and sends need no network wait.
     fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
         let mut saved = true;
+        let tasks_saved = self.save_tasks(cx);
         for compose in self.drafts.iter().chain(self.compose.iter()) {
             if compose.read(cx).is_modal() || compose.read(cx).keeps_draft() {
                 saved &= compose.update(cx, |c, cx| c.save(cx));
             }
         }
         if !saved { self.notify("Could not save draft. Check local storage before closing.", cx); }
-        !saved
+        !saved || !tasks_saved
     }
 
     fn watch_compose(&mut self, compose: &Entity<Compose>, window: &mut Window, cx: &mut Context<Self>) {
@@ -2059,10 +2060,10 @@ impl Render for MainWindow {
                     cx.propagate();
                     return;
                 }
-                if matches!(this.page, Page::Today) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
                 // The newest send in its Undo window goes first: its toast is the one on top.
                 let sent = this.sending.iter().rev().find(|c| c.read(cx).undoable()).cloned();
                 if !sent.is_some_and(|c| c.update(cx, |c, cx| c.undo(window, cx))) {
+                    if matches!(this.page, Page::Today) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
                     this.undo(cx);
                 }
             }))

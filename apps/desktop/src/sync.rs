@@ -37,7 +37,7 @@ pub enum Act {
     Snooze(Option<i64>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TaskChange {
     Add { list: i64, title: String },
     FromMail(lagom_core::store::MessageSummary),
@@ -69,8 +69,32 @@ impl TaskChange {
     }
 }
 
+// Quit may flush a queued write before the mail worker reaches it.
+#[derive(Clone)]
+pub struct TaskWrite(std::sync::Arc<std::sync::Mutex<TaskWriteState>>);
+
+struct TaskWriteState {
+    change: Option<TaskChange>,
+    created: Option<i64>,
+}
+
+impl TaskWrite {
+    pub(crate) fn new(change: TaskChange) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(TaskWriteState { change: Some(change), created: None })))
+    }
+
+    pub(crate) fn apply(&self, store: &Store) -> lagom_core::Result<Option<i64>> {
+        let mut state = self.0.lock().map_err(|_| Error::Invalid("Task write interrupted"))?;
+        if let Some(change) = state.change.clone() {
+            state.created = change.apply(store)?;
+            state.change = None;
+        }
+        Ok(state.created)
+    }
+}
+
 pub enum Cmd {
-    Task(TaskChange),
+    Task(TaskWrite),
     #[cfg(test)]
     Pause(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
     /// Onboarding API; the UI consumes OpenUrl on its own thread.
@@ -736,6 +760,31 @@ fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_i
 mod tests {
     use super::*;
 
+    #[test]
+    fn review_concurrent_task_flush_commits_once() {
+        let path = std::env::temp_dir().join(format!("lagom-task-flush-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = Store::open(&path).unwrap();
+        let worker_store = Store::open(&path).unwrap();
+        let list = store.default_task_list().unwrap();
+        let write = TaskWrite::new(TaskChange::Add { list, title: "Save once".into() });
+        let worker_write = write.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_start = start.clone();
+        let worker = std::thread::spawn(move || {
+            worker_start.wait();
+            worker_write.apply(&worker_store).unwrap()
+        });
+        start.wait();
+        let created = write.apply(&store).unwrap().unwrap();
+        assert_eq!(worker.join().unwrap(), Some(created));
+        assert_eq!(write.apply(&store).unwrap(), Some(created));
+        let tasks = store.tasks(list, false).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, created);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[tokio::test]
     async fn local_task_commands_run_on_worker_without_accounts_and_report_errors() {
         let path = std::env::temp_dir().join(format!("lagom-task-worker-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -743,15 +792,15 @@ mod tests {
         let (events, mut out) = unbounded_channel();
         let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, reauth_required: HashSet::new(), discovery: None, me, events };
         let default = worker.store.default_task_list().unwrap();
-        worker.quick(Cmd::Task(TaskChange::Add { list: default, title: "Local task".into() })).await;
+        worker.quick(Cmd::Task(TaskWrite::new(TaskChange::Add { list: default, title: "Local task".into() }))).await;
         let Some(Event::TaskChanged(Ok(Some(id)))) = out.recv().await else { panic!("expected created task") };
         assert!(matches!(out.recv().await, Some(Event::Changed)));
-        worker.quick(Cmd::Task(TaskChange::DeleteList(default))).await;
+        worker.quick(Cmd::Task(TaskWrite::new(TaskChange::DeleteList(default)))).await;
         let Some(Event::TaskChanged(Err(error))) = out.recv().await else { panic!("expected default-list guard") };
         assert!(error.contains("default task list"));
         assert!(matches!(out.recv().await, Some(Event::Changed)));
         assert_eq!(worker.store.tasks(default, false).unwrap()[0].id, id);
-        worker.quick(Cmd::Task(TaskChange::Delete(id))).await;
+        worker.quick(Cmd::Task(TaskWrite::new(TaskChange::Delete(id)))).await;
         assert!(matches!(out.recv().await, Some(Event::TaskChanged(Ok(None)))));
         assert!(matches!(out.recv().await, Some(Event::Changed)));
         assert!(worker.store.tasks(default, true).unwrap().is_empty());

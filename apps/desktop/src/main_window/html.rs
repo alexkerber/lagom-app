@@ -182,7 +182,7 @@ impl MainWindow {
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
         let want = self.inbox.current().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
-        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty() || self.toast.is_some();
+        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
         self.web.frame(want, &self.theme, overlay, window, cx);
         let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());
         for body in self.expanded.values() {
@@ -375,6 +375,21 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[gpui::test]
+    fn review_task_toast_keeps_html_drawable(cx: &mut gpui::TestAppContext) {
+        if !SUPPORTED { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        view.update_in(cx, |v, window, cx| {
+            let id = v.inbox.current().unwrap();
+            v.inbox.mail[id].html = Some("<p>Still visible</p>".into());
+            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark));
+            v.web.ready = true;
+            v.task_changed(Ok(Some(1)), cx);
+            v.web_frame(window, cx);
+            assert!(v.web.drawable.get(), "task toast must not blank the HTML body");
+        });
+    }
 
     #[test]
     fn scrolling_clips_without_resizing_or_reanchoring_the_document() {

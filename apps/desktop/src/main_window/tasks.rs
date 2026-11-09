@@ -1,6 +1,6 @@
 use super::*;
 use gpui::Focusable;
-use crate::sync::TaskChange;
+use crate::sync::{TaskChange, TaskWrite};
 use lagom_core::tasks::{Task as LocalTask, TaskList};
 
 #[derive(Default)]
@@ -13,6 +13,7 @@ pub(super) struct Today {
     scroll: ScrollHandle,
     day: String,
     midnight: Option<Task<()>>,
+    pending: std::collections::VecDeque<TaskWrite>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -71,10 +72,24 @@ impl MainWindow {
             self.notify("Tasks need the local store; unavailable in demo mode", cx);
             return;
         };
-        if !live.bridge.send(Cmd::Task(change)) { self.worker_gone(cx); }
+        let write = TaskWrite::new(change);
+        self.today.pending.push_back(write.clone());
+        if !live.bridge.send(Cmd::Task(write)) { self.worker_gone(cx); }
+    }
+
+    pub(super) fn save_tasks(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(live) = &self.live else { return true };
+        for write in &self.today.pending {
+            if let Err(e) = write.apply(&live.store) {
+                self.notify(format!("Could not save task: {e}. Check local storage before closing."), cx);
+                return false;
+            }
+        }
+        true
     }
 
     pub(super) fn task_changed(&mut self, result: Result<Option<i64>, String>, cx: &mut Context<Self>) {
+        self.today.pending.pop_front();
         match result {
             Ok(Some(id)) => {
                 self.notify("Task created", cx);
@@ -162,23 +177,6 @@ impl MainWindow {
         if other.list != task.list { return; }
         let position = other.position.unwrap_or(0) + i64::from(down);
         self.send_task(TaskChange::Move { id: task.id, list: task.list, position }, cx);
-    }
-
-    pub(super) fn open_task_mail(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(live) = &self.live else { return };
-        let result = live.store.task_mail(id).and_then(|id| id.map(|id| live.store.message_summary(id)).transpose());
-        match result {
-            Ok(Some(mail)) => {
-                let Some(account) = live.accounts.iter().position(|a| a.id == mail.account) else {
-                    self.notify("The linked account is no longer available", cx);
-                    return;
-                };
-                self.switch_account(account, cx);
-                self.open_found(mail.id, cx);
-            }
-            Ok(None) => self.notify("The linked mail is no longer available locally", cx),
-            Err(e) => self.notify(format!("Could not open linked mail: {e}"), cx),
-        }
     }
 
     fn task_input(&self, edit: Edit) -> Option<Entity<TextInput>> {
