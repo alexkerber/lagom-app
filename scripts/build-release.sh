@@ -12,10 +12,9 @@ if [[ ! -f "$env_file" ]]; then
     exit 1
 fi
 set -a
-if ! source "$env_file" >/dev/null 2>&1; then
-    echo 'Could not load OAuth env file.' >&2
-    exit 1
-fi
+trap 'echo "Could not load OAuth env file." >&2' EXIT
+source "$env_file" >/dev/null 2>&1
+trap - EXIT
 set +a
 cd -- "$repo"
 exec cargo build --release -p lagom

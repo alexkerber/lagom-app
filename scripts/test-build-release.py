@@ -19,6 +19,7 @@ class BuildRelease(unittest.TestCase):
         cargo = self.repo / "cargo"
         cargo.write_text('''#!/usr/bin/env bash
 set -eu
+touch "$FIXTURE_REPO/cargo-ran"
 [[ "$*" == 'build --release -p lagom' ]]
 [[ "$PWD" == "$FIXTURE_REPO" ]]
 [[ "$LAGOM_GOOGLE_CLIENT_ID" == 'fixture-google' ]]
@@ -63,6 +64,14 @@ exit "${FIXTURE_EXIT:-0}"
         (self.repo / ".env.oauth").write_text("return 1\n")
         self.assertEqual(self.run_script().returncode, 1)
         self.assertEqual(self.run_script("one", "two").returncode, 2)
+
+    def test_bad_assignment_before_valid_lines_fails_before_cargo(self):
+        config = self.repo / ".env.oauth"
+        self.config(config)
+        config.write_text(config.read_text().replace("LAGOM_GOOGLE_CLIENT_ID=", "LAGOM_GOOGLE_CLIENT_ID = "))
+        result = self.run_script()
+        self.assertFalse((self.repo / "cargo-ran").exists(), "invalid config must stop before Cargo")
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

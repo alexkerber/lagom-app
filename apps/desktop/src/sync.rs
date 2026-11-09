@@ -172,7 +172,10 @@ async fn run(path: PathBuf, mut rx: UnboundedReceiver<Cmd>, me: UnboundedSender<
         }
         tokio::select! {
             result = async {
-                match &mut w.sign_in { Some(flow) => flow.await, None => std::future::pending().await }
+                match &mut w.sign_in {
+                    Some(flow) => flow.await.unwrap_or(Err(Error::Network("sign-in task failed"))),
+                    None => std::future::pending().await,
+                }
             } => {
                 w.sign_in = None;
                 w.signed_in(result);
@@ -204,7 +207,7 @@ struct Worker {
     moved: HashMap<i64, (i64, String)>,
     /// Commands that arrived during a sync and wait for it to finish.
     deferred: VecDeque<Cmd>,
-    sign_in: Option<Flow<lagom_core::Result<SignedIn>>>,
+    sign_in: Option<tokio::task::JoinHandle<lagom_core::Result<SignedIn>>>,
     reauth: Option<String>,
     reauth_required: HashSet<String>,
     discovery: Option<Flow<(String, Discovery)>>,
@@ -238,9 +241,9 @@ impl Worker {
             Cmd::SignIn(provider) => {
                 self.cancel_sign_in();
                 let events = self.events.clone();
-                self.sign_in = Some(Box::pin(oauth::sign_in(provider, move |url| {
+                self.start_sign_in(oauth::sign_in(provider, move |url| {
                     let _ = events.send(Event::OpenUrl(url.into()));
-                })));
+                }));
             }
             Cmd::Reauthenticate(id) => {
                 if self.reauth.as_ref() == Some(&id) { return; }
@@ -250,11 +253,11 @@ impl Worker {
                     Ok(account) => {
                         self.emit(Event::Sync(id, SyncState::SigningIn));
                         let events = self.events.clone();
-                        self.sign_in = Some(Box::pin(async move {
+                        self.start_sign_in(async move {
                             oauth::reauthenticate(&account, move |url| {
                                 let _ = events.send(Event::OpenUrl(url.into()));
                             }).await
-                        }));
+                        });
                     }
                     Err(error) => self.signed_in(Err(error)),
                 }
@@ -299,8 +302,14 @@ impl Worker {
         }
     }
 
+    fn start_sign_in(&mut self, flow: impl Future<Output = lagom_core::Result<SignedIn>> + Send + 'static) {
+        // OAuth must keep polling while the worker awaits another account's network work.
+        self.sign_in = Some(tokio::spawn(flow));
+    }
+
     fn cancel_sign_in(&mut self) {
-        if self.sign_in.take().is_some() {
+        if let Some(flow) = self.sign_in.take() {
+            flow.abort();
             self.signed_in(Err(Error::Cancelled));
         }
     }
@@ -771,6 +780,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reauthentication_progresses_while_another_account_syncs() {
+        use lagom_core::account::{Auth, Security, ServerConfig};
+        use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::oneshot};
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+            let account = Account::new("sync@example.test".into(), config.clone(), config).unwrap();
+            let (listing, listed) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                    if command.starts_with("LIST ") {
+                        listing.send(()).unwrap();
+                        released.await.unwrap();
+                        socket.get_mut().write_all(format!("{tag} OK no folders\r\n").as_bytes()).await.unwrap();
+                        break;
+                    }
+                    let data = match command {
+                        "LOGIN \"fixture\" \"fixture\"" => "",
+                        "CAPABILITY" => "* CAPABILITY IMAP4rev1\r\n",
+                        _ => panic!("unexpected fixture command: {command}"),
+                    };
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                }
+            });
+            let path = std::env::temp_dir().join(format!("lagom-reauth-sync-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let (me, mut rx) = unbounded_channel();
+            let (events, mut out) = unbounded_channel();
+            let session = ImapSync::login(&account, "fixture").await.unwrap();
+            let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, reauth_required: HashSet::new(), discovery: None, me, events };
+            worker.store.save_account(&account).unwrap();
+            let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
+            let mut reauth = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+            reauth.auth = Auth::OAuth(Provider::Google);
+            worker.store.save_account(&reauth).unwrap();
+            worker.require_reauth(&reauth.id);
+            worker.reauth = Some(reauth.id);
+            let (callback, code) = oneshot::channel();
+            let (complete, completed) = oneshot::channel();
+            worker.start_sign_in(async move {
+                code.await.unwrap();
+                complete.send(()).unwrap();
+                Err(Error::Cancelled)
+            });
+            tokio::join!(worker.handle(Cmd::Sync(Some(account.id.clone())), &mut rx), async {
+                listed.await.unwrap();
+                callback.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(1), completed).await
+                    .expect("OAuth callback must progress before the other account finishes syncing").unwrap();
+                release.send(()).unwrap();
+            });
+            assert!(std::iter::from_fn(|| out.try_recv().ok()).any(|event| matches!(event, Event::Sync(id, SyncState::Synced(_)) if id == account.id)));
+            let _ = worker.sign_in.take().unwrap().await;
+            drop(worker);
+            server.await.unwrap();
+            std::fs::remove_file(path).unwrap();
+        }).await.expect("fixture completes without keychain or external servers");
+    }
+
+    #[tokio::test]
     async fn reauthentication_cancellation_failure_and_success_keep_the_same_account() {
         use lagom_core::account::Auth;
         let path = std::env::temp_dir().join(format!("lagom-reauth-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -805,7 +880,7 @@ mod tests {
         for error in [Error::Invalid("Sign in with the same email address as this account"), Error::Network("sign-in timed out"), Error::Secret] {
             worker.quick(Cmd::Reauthenticate(account.id.clone())).await;
             out.try_recv().unwrap();
-            worker.sign_in = None;
+            worker.sign_in.take().unwrap().abort();
             worker.signed_in(Err(error));
             assert!(matches!(out.try_recv().unwrap(), Event::ReauthRequired(_)));
             assert!(matches!(out.try_recv().unwrap(), Event::Reauthenticated { account: id, result: Err(_) } if id == account.id));
@@ -814,7 +889,7 @@ mod tests {
         }
         worker.quick(Cmd::Reauthenticate(account.id.clone())).await;
         out.try_recv().unwrap();
-        worker.sign_in = None;
+        worker.sign_in.take().unwrap().abort();
         worker.signed_in(Ok(SignedIn { email: account.email.clone(), display_name: account.display_name.clone(), account: account.clone() }));
         worker.idle.remove(&account.id).unwrap().abort();
         assert!(matches!(out.try_recv().unwrap(), Event::Changed));
@@ -840,6 +915,16 @@ mod tests {
         assert!(worker.sign_in.is_some());
         worker.quick(Cmd::CancelSignIn).await;
         assert!(worker.sign_in.is_none());
+        assert!(matches!(out.recv().await, Some(Event::SignInCancelled)));
+        let (mut callback, code) = tokio::sync::oneshot::channel::<()>();
+        worker.start_sign_in(async move {
+            code.await.unwrap();
+            panic!("cancelled sign-in must not finish");
+        });
+        tokio::task::yield_now().await;
+        worker.quick(Cmd::CancelSignIn).await;
+        tokio::time::timeout(Duration::from_secs(1), callback.closed()).await
+            .expect("cancellation must drop the pending callback");
         assert!(matches!(out.recv().await, Some(Event::SignInCancelled)));
         worker.quick(Cmd::Discover("alice@gmail.com".into())).await;
         let (email, result) = worker.discovery.take().unwrap().await;
