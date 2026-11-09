@@ -30,6 +30,7 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone)]
 pub enum Act {
     Archive,
+    Read(bool),
     Trash,
     Inbox,
     Move(i64),
@@ -324,7 +325,7 @@ impl Worker {
             }
             Cmd::MarkSeen(id) => {
                 // Either way the UI drops its override: the store says what the server has.
-                let _ = self.mark_seen(id).await;
+                let _ = self.mark_seen(id, true).await;
                 self.emit(Event::Seen(id));
                 self.emit(Event::Changed);
             }
@@ -611,6 +612,7 @@ impl Worker {
 
     async fn op(&mut self, id: i64, act: Act) -> lagom_core::Result<()> {
         let id = self.resolve(id).await?;
+        if let Act::Read(seen) = act { return self.mark_seen(id, seen).await; }
         if let Act::Snooze(until) = act {
             return self.store.snooze(id, until);
         }
@@ -643,7 +645,7 @@ impl Worker {
                     session.move_message(store, id, folder).await?;
                     Some(folder)
                 }
-                Act::Snooze(_) => unreachable!("handled above"),
+                Act::Snooze(_) | Act::Read(_) => unreachable!("handled above"),
             };
             Ok(target)
         }
@@ -692,10 +694,10 @@ impl Worker {
         lagom_core::attachment::save_download(&part.filename, &result?)
     }
 
-    async fn mark_seen(&mut self, id: i64) -> lagom_core::Result<()> {
+    async fn mark_seen(&mut self, id: i64, seen: bool) -> lagom_core::Result<()> {
         let account = self.account(&self.store.message(id)?.summary.account)?;
         let mut session = self.take(&account).await?;
-        let result = session.mark_seen(&mut self.store, id, true).await;
+        let result = session.mark_seen(&mut self.store, id, seen).await;
         self.give(&account.id, session, &result);
         result
     }
@@ -800,6 +802,61 @@ fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn review_followup_read_rejection_preserves_flags_and_reports_failure() {
+        use lagom_core::account::{Security, ServerConfig};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for status in ["NO", "BAD"] {
+            for seen in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+                let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = BufReader::new(socket);
+                    socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                    loop {
+                        let mut line = String::new();
+                        assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                        let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                        let data = match command {
+                            "LOGIN \"fixture\" \"fixture\"" => "",
+                            "CAPABILITY" => "* CAPABILITY IMAP4rev1\r\n",
+                            "SELECT \"INBOX\"" => "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n",
+                            _ => {
+                                assert_eq!(command, format!("UID STORE 1 {}FLAGS.SILENT (\\Seen)", if seen { "+" } else { "-" }));
+                                socket.get_mut().write_all(format!("{tag} {status} refused\r\n").as_bytes()).await.unwrap();
+                                break;
+                            }
+                        };
+                        socket.get_mut().write_all(format!("{data}{tag} OK fixture\r\n").as_bytes()).await.unwrap();
+                    }
+                });
+                let path = std::env::temp_dir().join(format!("lagom-read-rejection-{}.db", account.id));
+                let mut store = Store::open(&path).unwrap();
+                store.save_account(&account).unwrap();
+                let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+                store.reset_uidvalidity(folder, 7).unwrap();
+                let id = store.save_message(&lagom_core::store::Message { summary: lagom_core::store::MessageSummary {
+                    account: account.id.clone(), folder, uid: 1, seen: !seen, flagged: true, ..Default::default()
+                }, ..Default::default() }).unwrap();
+                let (me, _rx) = unbounded_channel();
+                let (events, mut out) = unbounded_channel();
+                let session = ImapSync::login(&account, "fixture").await.unwrap();
+                let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+                worker.quick(Cmd::Op { op: 42, id, act: Act::Read(seen) }).await;
+                let completion = out.recv().await.unwrap();
+                let summary = worker.store.message(id).unwrap().summary;
+                drop(worker);
+                server.await.unwrap();
+                std::fs::remove_file(path).unwrap();
+                assert!(matches!(completion, Event::Op { op: 42, error: Some(_) }), "{status} must fail the operation");
+                assert_eq!(summary.seen, !seen, "{status} must not change local read flags");
+                assert!(summary.flagged);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn calendar_jobs_deduplicate_and_discard_cancelled_results() {
@@ -1219,6 +1276,7 @@ mod tests {
                 let mut deleted = false;
                 let mut inbox = false;
                 let mut restored = false;
+                let mut read_flags = Vec::new();
                 loop {
                     let mut line = String::new();
                     if socket.read_line(&mut line).await.unwrap() == 0 { break; }
@@ -1232,6 +1290,8 @@ mod tests {
                         }
                         "UID STORE 4 -FLAGS.SILENT (\\Deleted)" => String::new(),
                         "UID MOVE 4 \"INBOX\"" => { restored = true; String::new() }
+                        "UID STORE 8 +FLAGS.SILENT (\\Seen)" => { read_flags.push(true); String::new() }
+                        "UID STORE 8 -FLAGS.SILENT (\\Seen)" => { read_flags.push(false); String::new() }
                         "UID FETCH 8 (UID FLAGS)" => "* 1 FETCH (UID 8 FLAGS ())\r\n".into(),
                         "UID FETCH 5 (UID FLAGS)" => "* 1 FETCH (UID 5 FLAGS ())\r\n".into(),
                         "UID SEARCH ALL" => if inbox { "* SEARCH 8\r\n".into() } else if deleted { "* SEARCH\r\n".into() } else { "* SEARCH 5\r\n".into() },
@@ -1255,6 +1315,7 @@ mod tests {
                 }
                 assert_eq!(deleted, !reject);
                 assert_eq!(restored, !reject);
+                assert_eq!(read_flags, if reject { vec![] } else { vec![true, false] });
             });
             let path = std::env::temp_dir().join(format!("lagom-empty-trash-{}-{}.db", std::process::id(), account.id));
             let mut store = Store::open(&path).unwrap();
@@ -1276,6 +1337,13 @@ mod tests {
                 assert!(matches!(out.recv().await, Some(Event::Changed)));
                 assert_eq!(worker.store.known_uids(inbox).unwrap(), [8]);
                 assert!(worker.store.message(restore).is_err());
+                let id = worker.store.list_messages(inbox, now(), 1, 0).unwrap()[0].id;
+                for seen in [true, false] {
+                    worker.quick(Cmd::Op { op: 43, id, act: Act::Read(seen) }).await;
+                    assert!(matches!(out.recv().await, Some(Event::Op { op: 43, error: None })));
+                    assert!(matches!(out.recv().await, Some(Event::Changed)));
+                    assert_eq!(worker.store.message(id).unwrap().summary.seen, seen);
+                }
             }
             worker.quick(Cmd::EmptyTrash { op: 42, folder }).await;
             let Event::Op { op, error } = out.recv().await.unwrap() else { panic!("missing completion") };

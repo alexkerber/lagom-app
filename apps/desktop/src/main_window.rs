@@ -24,7 +24,7 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
 
 pub fn bind_keys(cx: &mut App) {
     tasks::bind_keys(cx);
@@ -42,6 +42,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", SelectNext, keys),
         KeyBinding::new("k", SelectPrev, keys),
         KeyBinding::new("up", SelectPrev, keys),
+        KeyBinding::new("shift-down", ExtendNext, keys),
+        KeyBinding::new("shift-up", ExtendPrev, keys),
+        KeyBinding::new("secondary-a", crate::text_input::SelectAll, keys),
+        KeyBinding::new("secondary-shift-u", ToggleRead, keys),
         KeyBinding::new("e", Done, keys),
         KeyBinding::new("t", NewTask, keys),
         // Arrows mirror the swipe directions: right is Done, left is Later.
@@ -163,6 +167,7 @@ fn row_y(ix: usize) -> f32 {
 
 mod html;
 mod conversation;
+mod selection;
 mod live;
 mod tasks;
 mod agenda;
@@ -417,6 +422,12 @@ impl MainWindow {
         }
         match screen.as_str() {
             "palette" => this.open_palette("done", window, cx),
+            // Three adjacent rows and one apart: the joined selection block and a separate one.
+            "multi" => {
+                this.inbox.click(0, false, false);
+                this.inbox.click(2, true, false);
+                this.inbox.click(4, false, true);
+            }
             "later" => this.open_palette("later", window, cx),
             "folders" => {
                 let first = folders::tree(&this.inbox.folders, false).first().map(|r| r.0);
@@ -506,7 +517,7 @@ impl MainWindow {
             .filter(|(f, _)| on_mail && self.inbox.folders[*f].kind == Kind::Custom)
             .map(|(f, _)| (f, folders::path(&self.inbox.folders, f)))
             .collect();
-        let subject = self.inbox.current().filter(|_| on_mail).map(|id| self.inbox.mail[id].subject.clone());
+        let subject = self.inbox.single().filter(|_| on_mail).map(|id| self.inbox.mail[id].subject.clone());
         let search = self.live.as_ref().filter(|_| on_mail).and_then(|l| l.search());
         let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
         let palette = cx.new(|cx| CommandPalette::new(query, composing, on_mail, targets, subject, search, window, cx));
@@ -555,7 +566,7 @@ impl MainWindow {
         match run {
             Run::NewTask => self.new_task(window, cx),
             Run::Done => self.act(Move::Done, cx),
-            Run::Later(when) => self.act_with(self.inbox.selected, Move::Later, 0., when, cx),
+            Run::Later(when) => self.act_selected(Move::Later, when, cx),
             Run::Delete => self.act(Move::Delete, cx),
             Run::Reply => self.open_compose(true, window, cx),
             Run::Compose => self.open_compose(false, window, cx),
@@ -575,7 +586,7 @@ impl MainWindow {
     /// `reply`: to the selected message. One draft at a time: R and C bring back a draft that
     /// Esc closed, whichever message is selected.
     fn open_compose(&mut self, reply: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.compose_for(self.inbox.current().filter(|_| reply), window, cx);
+        self.compose_for(self.inbox.single().filter(|_| reply), window, cx);
     }
 
     /// `reply`: to this message id. See `open_compose`.
@@ -666,7 +677,7 @@ impl MainWindow {
     }
 
     fn act(&mut self, what: Move, cx: &mut Context<Self>) {
-        self.act_at(self.inbox.selected, what, 0., cx);
+        self.act_selected(what, LaterWhen::Tomorrow, cx);
     }
 
     fn act_at(&mut self, ix: usize, what: Move, dx: f32, cx: &mut Context<Self>) {
@@ -677,9 +688,18 @@ impl MainWindow {
     /// `when`: the time a Later move brings the message back.
     fn act_with(&mut self, ix: usize, what: Move, dx: f32, when: LaterWhen, cx: &mut Context<Self>) {
         if self.emptying_trash() { return; }
-        let Some(&row) = self.inbox.list().get(ix) else { return };
-        let members = self.inbox.members(row);
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
+        let members = self.inbox.batches.last().cloned().unwrap_or_default();
+        if matches!(what, Move::Read(_)) {
+            let mut sent = true;
+            for member in members { sent &= self.server(what, member, when, cx); }
+            self.clear_motion();
+            if !sent { return; }
+            self.notify(if what == Move::Read(true) { "Marked read" } else { "Marked unread" }, cx);
+            if let Some(toast) = &mut self.toast { toast.1 = true; }
+            cx.notify();
+            return;
+        }
         // The list changes height under the highlight; rows paint the selection until it settles.
         self.glide = None;
         for g in &mut self.ghosts {
@@ -690,10 +710,12 @@ impl MainWindow {
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, at: Instant::now(), dx });
+        let mut sent = true;
         for member in members {
-            self.server(what, member, when, cx);
+            sent &= self.server(what, member, when, cx);
             self.close_popouts(Some(member), cx);
         }
+        if !sent { return; }
         // The toast's Undo is ⌘Z, so it only shows while ⌘Z would undo this delete.
         if what == Move::Delete {
             self.notify("Deleted", cx);
@@ -742,11 +764,18 @@ impl MainWindow {
         let open = self.inbox.open;
         let members = self.inbox.batches.last().cloned().unwrap_or_default();
         let Some((what, id, ix)) = self.inbox.undo() else { return };
+        let members_len = members.len();
         for member in members { self.unserver(what, member, cx); }
         self.inbox.regroup();
         let (id, ix) = if self.inbox.group { (self.inbox.current().unwrap_or(id), self.inbox.selected) } else { (id, ix) };
         self.toast = None;
-        self.come_back(what, id, ix, self.inbox.open != open, cx);
+        if members_len > 1 || matches!(what, Move::Read(_)) {
+            self.clear_motion();
+            self.reveal_row(self.inbox.selected);
+            cx.notify();
+        } else {
+            self.come_back(what, id, ix, self.inbox.open != open, cx);
+        }
     }
 
     /// The reverse motion of `what` for a row put back at `ix`, after undo or a failed move.
@@ -908,7 +937,11 @@ impl MainWindow {
         let before = self.inbox.selected;
         f(&mut self.inbox);
         let ix = self.inbox.selected;
-        if ix == before {
+        if ix == before || self.inbox.multi() {
+            self.glide = None;
+            self.reveal_row(ix);
+            self.near_end(cx);
+            cx.notify();
             return;
         }
         self.prune();
@@ -940,6 +973,7 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
     // Opaque, so the colour of the move shows only where the row has left (see `with_behind`).
     let row = row.bg(t.bg);
     match what {
+        Move::Read(_) => row,
         // A move to a folder leaves like Done.
         Move::Inbox | Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)),
         // Delete leaves the other way, at the same speed.
@@ -952,7 +986,7 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
 /// The colour behind a row for the move it commits to, and the ink on it. `None`: short of a threshold.
 fn swipe_colors(t: &Theme, what: Option<Move>) -> (Rgba, Rgba) {
     match what {
-        None => (t.sel, t.ink2),
+        None | Some(Move::Read(_)) => (t.sel, t.ink2),
         Some(Move::Inbox | Move::Done | Move::Folder(_)) => (t.swipe_done, t.accent_ink),
         Some(Move::Later) => (t.swipe_later, t.accent_ink),
         Some(Move::Delete) => (t.danger, t.accent_ink),
@@ -1496,7 +1530,7 @@ impl MainWindow {
             })
         };
         // The selection highlight glides between rows while nothing else moves the list.
-        let gliding = self.glide.filter(|_| self.ghosts.is_empty() && self.entering.is_empty());
+        let gliding = self.glide.filter(|_| !self.inbox.multi() && self.inbox.chosen.is_none() && self.ghosts.is_empty() && self.entering.is_empty());
         // One reading of the clock per frame: the highlight, its copies below and the row colours
         // agree. Each with_animation would start when its element first appears instead.
         let (landed, fill_y) = gliding.map_or((true, 0.), |g| (g.landed(now), g.y(now)));
@@ -1527,10 +1561,16 @@ impl MainWindow {
         for i in visible.clone() {
             let id = self.inbox.list()[i];
             rows.extend(ghosts_at(i));
-            let selected = i == self.inbox.selected;
+            let selected = self.inbox.is_selected(id);
             // A row under the fingers or springing back paints its own fill and gets no copy.
             let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
+            // Adjacent selected rows join into one block, as in Finder and Mail: only its outer corners round.
+            let list = self.inbox.list();
+            let joined_above = selected && i > 0 && self.inbox.is_selected(list[i - 1]);
+            let joined_below = selected && list.get(i + 1).is_some_and(|&next| self.inbox.is_selected(next));
             let el = row(id, selected && gliding.is_none(), selected && (landed || moving))
+                .when(joined_above, |d| d.rounded_t(px(0.)))
+                .when(joined_below, |d| d.rounded_b(px(0.)))
                 .id(("row", id))
                 // Arrow at rest, as in native lists.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.
@@ -1544,9 +1584,11 @@ impl MainWindow {
                     _ => this.press(id, e.position),
                 }))
                 // Runs before the window's mouse up ends the drag: a dragged row is not a click.
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
                     if this.swipe.offset(id).is_none() {
-                        this.select(|inbox| inbox.select(i), cx)
+                        window.focus(&this.focus);
+                        let modifiers = e.modifiers();
+                        this.select(|inbox| inbox.click(i, modifiers.shift, modifiers.secondary()), cx)
                     }
                 }))
                 .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
@@ -1643,33 +1685,18 @@ impl MainWindow {
         }
 
         let filter = div()
-            .flex()
-            .p(px(2.))
-            .rounded(px(radius::CONTROL))
-            .bg(t.subtle)
-            .border_1()
-            .border_color(t.line)
-            .text_size(px(size::SMALL))
-            .child(
-                div()
-                    .h(px(22.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .bg(t.raised)
-                    .child("All"),
-            )
-            .child(
-                pressable(div().id("filter-unread"), t, false)
-                    .h(px(22.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .text_color(t.ink2)
-                    .child("Unread"),
-            );
+            .flex().p(px(2.)).rounded(px(radius::CONTROL)).bg(t.subtle)
+            .border_1().border_color(t.line).text_size(px(size::SMALL))
+            .children([("All", false, "filter-all"), ("Unread", true, "filter-unread")].into_iter().map(|(label, unread, id)| {
+                let control = pressable(div().id(id), t, false)
+                    .h(px(22.)).px(px(10.)).flex().items_center().rounded(px(6.))
+                    .when(self.inbox.unread_only == unread, |d| d.bg(t.raised))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.filter_unread(unread, cx)));
+                #[cfg(test)]
+                let control = control.debug_selector(move || id.into());
+                control
+            }));
 
         // Title and subtitle as in a macOS toolbar: the count, and a quiet sync status.
         let left = self.inbox.shown_count();
@@ -1767,7 +1794,15 @@ impl MainWindow {
 
     fn reading_pane(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
-        let Some(id) = self.inbox.current() else { return div().flex_1() };
+        if self.inbox.multi() { return self.selection_pane(cx); }
+        let Some(id) = self.inbox.single() else {
+            let more = self.has_more();
+            return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
+                .when(self.inbox.unread_only, |d| d
+                    .child(if more { "No unread messages in loaded mail" } else { "No unread messages" })
+                    .when(more, |d| d.child(button(t, "Load more", None)
+                        .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))))));
+        };
         let m = &self.inbox.mail[id];
         let trash = self.inbox.open_kind() == Some(Kind::Trash);
         let this = cx.entity().downgrade();
@@ -1788,7 +1823,10 @@ impl MainWindow {
             .flex_col()
             .child(
                 toolbar(t)
+                    .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
+                    .child(button(t, "Move", None).on_click(cx.listener(|this, _, window, cx| this.open_palette("move ", window, cx))))
+                    .child(button(t, if self.inbox.selection_unread() { "Mark read" } else { "Mark unread" }, None).on_click(cx.listener(|this, _, _, cx| this.toggle_read(cx))))
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
                     .when(!trash, |d| d.child(
                         button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
@@ -1801,7 +1839,7 @@ impl MainWindow {
                     })
                     // shortcut: no Forward button until forwarding exists.
                     .child(div().flex_1())
-                    .child(mono(format!("{} / {}", self.inbox.selected + 1, self.inbox.shown_count()), t.ink2))
+                    .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2))
                     .child(
                         icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
@@ -2026,7 +2064,7 @@ impl Render for MainWindow {
             window.set_window_title(&title);
             self.title = title;
         }
-        let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none();
+        let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && !self.inbox.unread_only;
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         let panel = match &self.page {
             Page::Home | Page::Todo => self.tasks_view(cx),
@@ -2083,6 +2121,10 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.new_task(window, cx); }))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
+            .on_action(cx.listener(|this, _: &ExtendNext, _, cx| if !this.overlay_open(cx) { this.select(|inbox| inbox.extend(1), cx) }))
+            .on_action(cx.listener(|this, _: &ExtendPrev, _, cx| if !this.overlay_open(cx) { this.select(|inbox| inbox.extend(-1), cx) }))
+            .on_action(cx.listener(|this, _: &crate::text_input::SelectAll, _, cx| if !this.overlay_open(cx) { this.select(Inbox::select_all, cx) }))
+            .on_action(cx.listener(|this, _: &ToggleRead, _, cx| if !this.overlay_open(cx) { this.toggle_read(cx) }))
             .on_action(cx.listener(|this, _: &Done, _, cx| if !this.overlay_open(cx) { this.act(Move::Done, cx) }))
             .on_action(cx.listener(|this, _: &Later, _, cx| if !this.overlay_open(cx) { this.act(Move::Later, cx) }))
             // The guard hands ⌫ to the palette, where it edits the query.
@@ -2113,6 +2155,7 @@ impl Render for MainWindow {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) {
+                this.select(|inbox| inbox.select(inbox.selected), cx);
                 this.confirm_empty_trash = false;
                 this.finish_resize(cx);
                 this.release(false, cx);
@@ -2204,6 +2247,7 @@ enum Move {
     Folder(usize),
     /// To Trash.
     Delete,
+    Read(bool),
 }
 
 /// Finger travel before the swipe locks to one direction.
@@ -2306,11 +2350,16 @@ struct Inbox {
     /// The list on screen: the inbox (`None`) or a folder.
     open: Option<usize>,
     selected: usize,
+    chosen: Option<HashSet<usize>>,
+    anchor: Option<usize>,
+    unread_only: bool,
+    // Explicitly unread messages stay unread until the user selects again.
+    keep_unread: HashSet<usize>,
     later: usize,
     /// Deleted message ids, newest first.
     trash: Vec<usize>,
-    // (what, message id, list it left, index it left from).
-    history: Vec<(Move, usize, Option<usize>, usize)>,
+    // (what, message id, list it left, index it left from, worker operation).
+    history: Vec<(Move, usize, Option<usize>, usize, Option<u64>)>,
     batches: Vec<Vec<usize>>,
     group: bool,
     rows: Vec<usize>,
@@ -2319,7 +2368,7 @@ struct Inbox {
 
 impl Inbox {
     fn new(len: usize, later: usize) -> Self {
-        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new() }
+        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, chosen: None, anchor: None, unread_only: false, keep_unread: HashSet::new(), later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new() }
     }
 
     /// The sample inbox and folders, with their unread counts.
@@ -2339,7 +2388,7 @@ impl Inbox {
     }
 
     fn list(&self) -> &Vec<usize> {
-        if self.group { &self.rows } else { self.raw_list() }
+        if self.group || self.unread_only { &self.rows } else { self.raw_list() }
     }
 
     fn members(&self, id: usize) -> Vec<usize> {
@@ -2348,6 +2397,7 @@ impl Inbox {
 
     fn regroup(&mut self) {
         let keep = self.current();
+        let chosen = self.chosen.as_ref().map(|ids| ids.iter().flat_map(|&id| self.members(id)).collect::<HashSet<_>>());
         let mut groups: HashMap<(String, mail::Place, String), usize> = HashMap::new();
         self.members.clear();
         let mut rows = Vec::new();
@@ -2365,10 +2415,17 @@ impl Inbox {
             *rep = latest;
         }
         rows.sort_by_key(|&id| std::cmp::Reverse((self.mail[id].date, self.mail[id].store.unwrap_or(0))));
+        if !self.group { rows = self.raw_list().clone(); }
+        if self.unread_only {
+            rows.retain(|&id| self.members(id).iter().any(|&id| self.mail[id].unread));
+        }
         self.rows = rows;
-        if self.group {
-            self.selected = keep.and_then(|id| self.rows.iter().position(|rep| self.members[rep].contains(&id)))
+        if self.group || self.unread_only {
+            self.selected = keep.and_then(|id| self.rows.iter().position(|&rep| self.members(rep).contains(&id)))
                 .unwrap_or(self.selected).min(self.rows.len().saturating_sub(1));
+        }
+        if let Some(chosen) = chosen {
+            self.chosen = Some(self.list().iter().copied().filter(|&rep| self.members(rep).iter().any(|id| chosen.contains(id))).collect());
         }
     }
 
@@ -2392,7 +2449,7 @@ impl Inbox {
 
     /// The count for the list on screen.
     fn shown_count(&self) -> usize {
-        if self.group { return self.rows.len(); }
+        if self.group || self.unread_only { return self.rows.len(); }
         match self.open {
             None => self.count(),
             Some(_) => self.list().len(),
@@ -2409,6 +2466,10 @@ impl Inbox {
 
     fn open(&mut self, f: Option<usize>) {
         self.open = f;
+        if self.open_kind() == Some(Kind::Trash) { self.unread_only = false; }
+        self.chosen = None;
+        self.anchor = None;
+        self.keep_unread.clear();
         self.selected = 0;
         self.regroup();
         self.selected = 0;
@@ -2435,9 +2496,10 @@ impl Inbox {
     }
 
     fn select(&mut self, ix: usize) {
-        if ix < self.list().len() {
-            self.selected = ix;
-        }
+        self.selected = ix.min(self.list().len().saturating_sub(1));
+        self.chosen = None;
+        self.anchor = self.current();
+        self.keep_unread.clear();
     }
 
     fn next(&mut self) {
@@ -2445,7 +2507,7 @@ impl Inbox {
     }
 
     fn prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.select(self.selected.saturating_sub(1));
     }
 
     /// Unread counts and the Later count follow a message that leaves the list `from` for
@@ -2462,7 +2524,7 @@ impl Inbox {
         match what {
             Move::Later => step(&mut self.later, 1, !back),
             Move::Folder(f) => step(&mut self.folders[f].unread, unread, !back),
-            Move::Inbox | Move::Done | Move::Delete => {}
+            Move::Inbox | Move::Done | Move::Delete | Move::Read(_) => {}
         }
     }
 
@@ -2470,19 +2532,7 @@ impl Inbox {
     /// becomes selected. A swipe can hit any row, so otherwise the selection stays on its message.
     fn act_at(&mut self, ix: usize, what: Move) -> Option<(usize, usize)> {
         let id = *self.list().get(ix)?;
-        let keep = self.current();
-        let selected = self.selected;
-        let members = self.members(id);
-        let mut moved = Vec::new();
-        for member in members {
-            let Some(at) = self.raw_list().iter().position(|&i| i == member) else { continue };
-            if self.act_one(at, what).is_some() { moved.push(member); }
-        }
-        if moved.is_empty() { return None; }
-        self.batches.push(moved);
-        self.regroup();
-        self.selected = keep.and_then(|keep| self.list().iter().position(|&rep| self.members(rep).contains(&keep)))
-            .unwrap_or(selected).min(self.list().len().saturating_sub(1));
+        self.act_rows(&[id], what)?;
         Some((id, ix))
     }
 
@@ -2499,12 +2549,22 @@ impl Inbox {
             Move::Done => Some(Kind::Done),
             Move::Later => Some(Kind::Later),
             Move::Delete => Some(Kind::Trash),
-            Move::Inbox | Move::Folder(_) => None,
+            Move::Inbox | Move::Folder(_) | Move::Read(_) => None,
         };
         if here.is_some() && self.open_kind() == here {
             return None;
         }
         let id = *self.raw_list().get(ix)?;
+        let unread = self.mail[id].unread;
+        if let Move::Read(seen) = what {
+            if unread == seen {
+                self.set_unread(id, !seen);
+                self.keep_unread.insert(id);
+                self.history.push((what, id, self.open, ix, None));
+                return Some((id, ix));
+            }
+            return None;
+        }
         self.list_mut().remove(ix);
         if ix < self.selected {
             self.selected -= 1;
@@ -2515,9 +2575,9 @@ impl Inbox {
             Move::Inbox => self.items.insert(0, id),
             Move::Folder(f) => self.folders[f].items.insert(0, id),
             Move::Delete => self.trash.insert(0, id),
-            Move::Later | Move::Done => {}
+            Move::Later | Move::Done | Move::Read(_) => {}
         }
-        self.history.push((what, id, self.open, ix));
+        self.history.push((what, id, self.open, ix, None));
         Some((id, ix))
     }
 
@@ -2525,14 +2585,16 @@ impl Inbox {
     fn undo(&mut self) -> Option<(Move, usize, usize)> {
         let batch = self.batches.pop()?;
         let mut result = None;
-        for id in batch.into_iter().rev() {
+        self.chosen = None;
+        for id in batch.iter().copied().rev() {
             if let Some(at) = self.history.iter().rposition(|h| h.1 == id) {
                 result = self.restore(at, true);
             }
         }
         self.regroup();
+        self.chosen = Some(self.list().iter().copied().filter(|&rep| self.members(rep).iter().any(|id| batch.contains(id))).collect());
         result.map(|(what, id, ix)| {
-            let row = self.list().iter().position(|&rep| self.members(rep).contains(&id)).unwrap_or(ix);
+            let row = self.list().iter().position(|&rep| self.members(rep).contains(&id)).unwrap_or(ix).min(self.list().len().saturating_sub(1));
             self.selected = row;
             (what, self.list().get(row).copied().unwrap_or(id), row)
         })
@@ -2540,9 +2602,11 @@ impl Inbox {
 
     /// A move of `id` failed on the server: take it back. Returns where the row reappears, if its
     /// list is on screen; otherwise the next store read shows it there.
-    fn revert(&mut self, id: usize) -> Option<(Move, usize, usize)> {
-        let at = self.history.iter().rposition(|h| h.1 == id)?;
-        if let Some(batch) = self.batches.iter_mut().rev().find(|batch| batch.contains(&id)) {
+    fn revert(&mut self, id: usize, op: Option<u64>) -> Option<(Move, usize, usize)> {
+        let at = self.history.iter().rposition(|h| h.1 == id && (op.is_none() || h.4 == op))?;
+        // The same message can belong to several undo batches.
+        let newer = self.history[at + 1..].iter().filter(|h| h.1 == id).count();
+        if let Some(batch) = self.batches.iter_mut().rev().filter(|batch| batch.contains(&id)).nth(newer) {
             batch.retain(|&member| member != id);
         }
         self.batches.retain(|batch| !batch.is_empty());
@@ -2560,13 +2624,18 @@ impl Inbox {
 
     /// `switch`: open the list the message left (undo). Otherwise the selection stays on its message.
     fn restore(&mut self, at: usize, switch: bool) -> Option<(Move, usize, usize)> {
-        let (what, id, from, ix) = self.history.remove(at);
+        let (what, id, from, ix, _) = self.history.remove(at);
+        if let Move::Read(seen) = what {
+            self.set_unread(id, seen);
+            self.keep_unread.insert(id);
+            return Some((what, id, ix));
+        }
         self.recount(id, from, what, true);
         match what {
             Move::Inbox => self.items.retain(|&i| i != id),
             Move::Folder(f) => self.folders[f].items.retain(|&i| i != id),
             Move::Delete => self.trash.retain(|&i| i != id),
-            Move::Later | Move::Done => {}
+            Move::Later | Move::Done | Move::Read(_) => {}
         }
         if !switch && self.open != from {
             return None;
@@ -2696,7 +2765,7 @@ mod tests {
         inbox.mail[1].thread_id = "thread".into();
         inbox.regroup();
         inbox.act_at(0, Move::Delete).unwrap();
-        inbox.revert(0).unwrap();
+        inbox.revert(0, None).unwrap();
         assert_eq!(inbox.batches, [vec![1]]);
         inbox.undo().unwrap();
         assert_eq!(inbox.items.iter().filter(|&&id| id == 0).count(), 1);
@@ -2990,16 +3059,16 @@ mod tests {
         assert_eq!(inbox.items, [0, 2, 4, 5, 6]);
         inbox.select(2);
         // The server refuses the first move: 1 comes back at its place, 4 stays selected.
-        assert_eq!(inbox.revert(1), Some((Move::Done, 1, 1)));
+        assert_eq!(inbox.revert(1, None), Some((Move::Done, 1, 1)));
         assert_eq!((inbox.items.as_slice(), inbox.current()), ([0, 1, 2, 4, 5, 6].as_slice(), Some(4)));
         // The second fails while another list is open: no row now, but the counts go back.
         let before = inbox.unread(1);
         inbox.open(Some(0));
-        assert_eq!(inbox.revert(3), None);
+        assert_eq!(inbox.revert(3, None), None);
         assert_eq!(inbox.unread(1), before - 1);
         assert!(!inbox.folders[1].items.contains(&3));
         // Nothing left to revert or undo.
-        assert_eq!(inbox.revert(3), None);
+        assert_eq!(inbox.revert(3, None), None);
         assert_eq!(inbox.undo(), None);
     }
 
@@ -3086,7 +3155,7 @@ mod dispatch {
 
     use super::*;
 
-    fn open(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext) {
+    pub(super) fn open(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext) {
         cx.update(|cx| {
             bind_keys(cx);
             crate::text_input::bind_keys(cx);

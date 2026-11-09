@@ -7,8 +7,9 @@ use super::*;
 enum Op {
     /// A move of this row (id in `Inbox::mail`). On failure the row comes back.
     Move(usize),
+    Read(usize),
     /// Undo of a move: on failure only a message.
-    Undo,
+    Undo(usize),
     EmptyTrash(String),
     CreateFolder { account: String, name: String },
 }
@@ -268,7 +269,8 @@ impl MainWindow {
             Some((_, None)) => mail::View::Inbox,
         };
         self.inbox.group = self.panes.group_conversations;
-        match mail::load(&live.store, &account, view, live.limit, now(), live.pin, self.inbox.group) {
+        let pins = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(live.pin);
+        match mail::load(&live.store, &account, view, live.limit, now(), pins, self.inbox.group) {
             Ok(snap) => {
                 live.stale = false;
                 self.reading_dirty = true;
@@ -372,14 +374,32 @@ impl MainWindow {
                             self.notify("Trash emptied", cx);
                         }
                         (Op::EmptyTrash(_), Some(e)) => self.notify(format!("Could not empty Trash: {e}"), cx),
+                        (Op::Undo(id), None) => {
+                            if let Some(mail) = self.inbox.mail.get_mut(id) {
+                                if let (Some(old), mail::Place::Folder(folder)) = (mail.store, &mail.folder) {
+                                    if matches!(live.store.message_summary(old), Err(lagom_core::Error::NotFound)) {
+                                        if let Ok(Some(new)) = live.store.find_message(*folder, &mail.message_id) {
+                                            // MOVE replaces store rows; keep the UI id used by selection and history.
+                                            self.inbox.by_store.remove(&old);
+                                            self.inbox.by_store.insert(new, id);
+                                            mail.store = Some(new);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         (_, None) => {}
                         (Op::CreateFolder { account, name }, Some(e)) => {
                             self.folder_failed(&account, &name);
                             self.notify(format!("Could not create folder: {e}"), cx);
                         }
+                        (Op::Read(id), Some(e)) => {
+                            self.inbox.revert(id, Some(op));
+                            self.notify(format!("Could not change read status: {e}"), cx);
+                        }
                         (Op::Move(id), Some(e)) => {
                             self.inbox.back(id);
-                            if let Some((what, id, ix)) = self.inbox.revert(id) {
+                            if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
                                 self.come_back(what, id, ix, false, cx);
                             }
                             self.notify(format!("Not moved: {e}"), cx);
@@ -508,17 +528,19 @@ impl MainWindow {
     pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
-        let ops: Vec<_> = live.ops.drain().map(|(_, op)| op).collect();
+        let mut ops: Vec<_> = live.ops.drain().collect();
+        ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
-        for op in ops {
-            match op {
+        for (op, action) in ops {
+            match action {
                 Op::Move(id) => {
                     self.inbox.back(id);
-                    if let Some((what, id, ix)) = self.inbox.revert(id) {
+                    if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
                         self.come_back(what, id, ix, false, cx);
                     }
                 }
-                Op::Undo | Op::EmptyTrash(_) => {}
+                Op::Read(id) => { self.inbox.revert(id, Some(op)); }
+                Op::Undo(_) | Op::EmptyTrash(_) => {}
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
@@ -526,11 +548,20 @@ impl MainWindow {
     }
 
     /// The worker half of an optimistic move.
-    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) {
-        let Some(store) = self.inbox.mail[id].store else { return };
-        let Some(live) = &mut self.live else { return };
+    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) -> bool {
+        let Some(store) = self.inbox.mail[id].store else { return true };
+        let Some(live) = &mut self.live else { return true };
+        if let Move::Read(seen) = what {
+            live.seen.remove(&store);
+            let op = live.op(Op::Read(id));
+            if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
+            let sent = live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) });
+            if !sent { self.worker_gone(cx); }
+            return sent;
+        }
         let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store).map(mail::Place::Folder);
         let (act, target) = match what {
+            Move::Read(_) => unreachable!("handled above"),
             Move::Inbox => {
                 let inbox = live.account().and_then(|a| live.store.folders(&a.id, now()).ok())
                     .and_then(|fs| fs.into_iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox));
@@ -550,9 +581,10 @@ impl MainWindow {
         self.inbox.left(id, target);
         self.inbox.mail[id].snoozed_until = match act { Act::Snooze(until) => until, _ => None };
         let op = live.op(Op::Move(id));
-        if !live.bridge.send(Cmd::Op { op, id: store, act }) {
-            self.worker_gone(cx);
-        }
+        if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
+        let sent = live.bridge.send(Cmd::Op { op, id: store, act });
+        if !sent { self.worker_gone(cx); }
+        sent
     }
 
     /// Undo on the server: the message goes back to the folder it was in, or off Later.
@@ -561,8 +593,17 @@ impl MainWindow {
         if self.live.is_none() {
             return;
         }
+        if matches!(what, Move::Read(_)) {
+            let seen = !self.inbox.mail[id].unread;
+            let live = self.live.as_mut().unwrap();
+            live.seen.remove(&store);
+            let op = live.op(Op::Undo(id));
+            if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) }) { self.worker_gone(cx); }
+            return;
+        }
         let back = self.inbox.back(id);
         let act = match what {
+            Move::Read(_) => unreachable!("handled above"),
             Move::Later => Act::Snooze(self.inbox.mail[id].snoozed_until),
             Move::Inbox | Move::Done | Move::Delete | Move::Folder(_) => match back {
                 mail::Place::Folder(id) => Act::Move(id),
@@ -571,14 +612,14 @@ impl MainWindow {
             },
         };
         let Some(live) = &mut self.live else { return };
-        let op = live.op(Op::Undo);
+        let op = live.op(Op::Undo(id));
         if !live.bridge.send(Cmd::Op { op, id: store, act }) {
             self.worker_gone(cx);
             return;
         }
         if what != Move::Later {
             if let Some(until) = self.inbox.mail[id].snoozed_until {
-                let op = live.op(Op::Undo);
+                let op = live.op(Op::Undo(id));
                 if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Snooze(Some(until)) }) { self.worker_gone(cx); }
             }
         }
@@ -595,7 +636,7 @@ impl MainWindow {
     /// Before a frame: the selected message's body comes from the store once, and opening a
     /// message marks it read. One indexed row read, only when the selection changed.
     pub(super) fn open_current(&mut self, mark_read: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.inbox.current() else {
+        let Some(id) = self.inbox.single() else {
             self.reading_thread = None;
             self.reading_members.clear();
             self.expanded.clear();
@@ -658,7 +699,8 @@ impl MainWindow {
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
         }
-        if mark_read && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
+        // Reading a filtered list must not consume the next unread row on every reload.
+        if mark_read && !self.inbox.unread_only && !self.inbox.keep_unread.contains(&id) && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
             self.inbox.mail[id].unread = false;
             if let Some(f) = self.inbox.open.filter(|&f| self.inbox.folders[f].store == match self.inbox.mail[id].folder { mail::Place::Folder(id) => Some(id), _ => None }) {
                 self.inbox.folders[f].unread = self.inbox.folders[f].unread.saturating_sub(1);
@@ -670,14 +712,20 @@ impl MainWindow {
         }
     }
 
+    pub(super) fn has_more(&self) -> bool {
+        let loaded = if self.inbox.group { self.inbox.members.len() } else { self.inbox.raw_list().len() };
+        self.live.as_ref().is_some_and(|live| loaded as u32 >= live.limit)
+    }
+
+    pub(super) fn load_more(&mut self, cx: &mut Context<Self>) {
+        if !self.has_more() { return; }
+        if let Some(live) = &mut self.live { live.limit += PAGE; }
+        self.reload(cx);
+    }
+
     /// Reads the next page when the selection nears the end of what is loaded.
     pub(super) fn near_end(&mut self, cx: &mut Context<Self>) {
-        let Some(live) = &mut self.live else { return };
-        let len = self.inbox.list().len();
-        if len as u32 >= live.limit && self.inbox.selected + 20 >= len {
-            live.limit += PAGE;
-            self.reload(cx);
-        }
+        if self.inbox.selected + 20 >= self.inbox.list().len() { self.load_more(cx); }
     }
 
     pub(super) fn emptying_trash(&self) -> bool {
@@ -811,6 +859,7 @@ impl MainWindow {
             // INBOX is not in `folders`: no match means the inbox.
             self.inbox.folders.iter().position(|f| f.store == Some(m.summary.folder) && !f.gone)
         };
+        self.inbox.unread_only = false;
         self.open_box(list, cx);
         if let Some(live) = &mut self.live {
             (live.pin, live.want) = (Some(store), Some(store));
@@ -1018,6 +1067,439 @@ mod tests {
         view.read_with(cx, |v, _| { assert!(matches!(v.page, Page::Todo)); assert_eq!(v.today.tasks[0].title, "Future task"); });
         cx.simulate_keystrokes("secondary-1");
         assert!(view.read_with(cx, |v, _| v.today.tasks.is_empty()));
+    }
+
+    #[gpui::test]
+    fn review_followup_undo_rebinds_selection_after_store_ids_change(cx: &mut TestAppContext) {
+        for group in [false, true] {
+            for count in [1, 2] {
+                let (view, cx, mut rx) = window(cx);
+                view.update_in(cx, |v, window, cx| {
+                    let store = v.live.as_ref().unwrap().store.clone();
+                    let account = v.live.as_ref().unwrap().accounts[0].id.clone();
+                    let archive = store.save_folder(&account, "Archive", None, lagom_core::store::FolderRole::Archive).unwrap();
+                    for uid in 1..=count {
+                        let mut m = incoming(v, uid);
+                        m.message_id = format!("message-{uid}@test");
+                        m.subject = format!("Message {uid}");
+                        store.save_message(&lagom_core::store::Message { summary: m, body_text: "Restored body".into(), ..Default::default() }).unwrap();
+                    }
+                    v.panes.group_conversations = group;
+                    v.inbox = Inbox::live();
+                    v.reload(cx);
+                    v.inbox.select_all();
+                    v.act(Move::Done, cx);
+                    let mut moved = Vec::new();
+                    let mut events = Vec::new();
+                    while let Ok(cmd) = rx.try_recv() {
+                        if let Cmd::Op { op, id, act: Act::Archive } = cmd {
+                            let mut mail = store.message(id).unwrap();
+                            let source = mail.summary.folder;
+                            mail.summary.folder = archive;
+                            let new = store.save_message(&mail).unwrap();
+                            assert_ne!(new, id);
+                            store.delete_message(id).unwrap();
+                            moved.push((id, new, source));
+                            events.push(Event::Op { op, error: None });
+                        }
+                    }
+                    assert_eq!(moved.len(), count as usize);
+                    v.on_events(events, window, cx);
+                    assert!(v.inbox.list().is_empty());
+                    v.undo(cx);
+                    assert_eq!(v.inbox.selected_members().len(), count as usize);
+                    let mut restored = HashSet::new();
+                    let mut events = Vec::new();
+                    while let Ok(cmd) = rx.try_recv() {
+                        if let Cmd::Op { op, id, act: Act::Move(folder) } = cmd {
+                            let (_, current, source) = moved.iter().find(|m| m.0 == id).unwrap();
+                            assert_eq!(folder, *source);
+                            let mut mail = store.message(*current).unwrap();
+                            mail.summary.folder = folder;
+                            mail.summary.uid += 100;
+                            let new = store.save_message(&mail).unwrap();
+                            assert_ne!(new, id);
+                            store.delete_message(*current).unwrap();
+                            restored.insert(new);
+                            events.push(Event::Op { op, error: None });
+                        }
+                    }
+                    assert_eq!(restored.len(), count as usize);
+                    v.live.as_mut().unwrap().limit = 1;
+                    v.on_events(events, window, cx);
+                    let selected: HashSet<_> = v.inbox.selected_members().iter().map(|&id| v.inbox.mail[id].store.unwrap()).collect();
+                    assert_eq!(selected, restored, "Undo must retain the selection through the completion reload");
+                    v.open_current(false, cx);
+                    if count == 1 {
+                        assert!(v.inbox.single().is_some());
+                        assert_eq!(v.reading_members.len(), 1);
+                        assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Restored body"]);
+                    }
+                    v.act(Move::Delete, cx);
+                    let deleted: HashSet<_> = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|cmd| match cmd {
+                        Cmd::Op { id, act: Act::Trash, .. } => Some(id), _ => None,
+                    }).collect();
+                    assert_eq!(deleted, restored);
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn review_followup_html_task_uses_sole_selection(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            for uid in 1..=2 {
+                let mut m = incoming(v, uid);
+                m.message_id = format!("message-{uid}@test");
+                m.subject = format!("Message {uid}");
+                store.save_message(&lagom_core::store::Message { summary: m, body_html: Some("<p>Body</p>".into()), ..Default::default() }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.current().unwrap();
+            v.inbox.click(1, false, true);
+            v.inbox.click(1, false, true);
+            assert_ne!(v.inbox.current(), Some(selected));
+            v.open_current(false, cx);
+            assert_eq!(v.reading_thread, Some(selected));
+            html::WebHost::new_task(v, cx);
+            let tasks = store.tasks(store.default_task_list().unwrap(), false).unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].mail_message_id.as_deref(), Some(v.inbox.mail[selected].message_id.as_str()));
+            assert_eq!(tasks[0].title, v.inbox.mail[selected].subject);
+        });
+    }
+
+    #[gpui::test]
+    fn review_followup_popout_reveals_read_message_before_acting(cx: &mut TestAppContext) {
+        for what in [Move::Done, Move::Later, Move::Delete] {
+            let (view, cx, mut rx) = window(cx);
+            let target = view.update_in(cx, |v, window, cx| {
+                let mut m = incoming(v, 1);
+                m.seen = true;
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message { summary: m.clone(), ..Default::default() }).unwrap();
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.open_popout(window, cx);
+                v.filter_unread(true, cx);
+                assert!(v.inbox.list().is_empty());
+                assert_eq!(v.inbox.raw_list().len(), 1);
+                m.id
+            });
+            while rx.try_recv().is_ok() {}
+            let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+            popout.update(cx, |p, _, cx| p.act(what, cx)).unwrap();
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|cmd| match cmd {
+                Cmd::Op { id, act, .. } => Some((id, act)), _ => None,
+            }).collect();
+            assert_eq!(commands.len(), 1, "{what:?} must reach the worker");
+            assert_eq!(commands[0].0, target);
+            assert!(matches!((what, &commands[0].1), (Move::Done, Act::Archive) | (Move::Later, Act::Snooze(Some(_))) | (Move::Delete, Act::Trash)));
+            assert!(!toast(&view, cx).contains("not in a loaded list"));
+        }
+    }
+
+    #[gpui::test]
+    fn review_failed_read_preserves_later_delete_undo(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=2 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            let reads = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            v.act(Move::Delete, cx);
+            let deletes = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            for cmd in reads {
+                let Cmd::Op { op, .. } = cmd else { panic!("expected read") };
+                v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            }
+            assert_eq!(v.inbox.batches.len(), 1);
+            assert!(v.inbox.history.iter().all(|h| h.0 == Move::Delete));
+            for cmd in deletes {
+                let Cmd::Op { op, .. } = cmd else { panic!("expected delete") };
+                v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            }
+            v.undo(cx);
+            assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|cmd| matches!(cmd, Cmd::Op { act: Act::Move(_), .. })).count(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn review_old_read_failure_cannot_revert_a_new_read(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            incoming(v, 1);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.toggle_read(cx);
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("expected read") };
+            v.undo(cx);
+            v.toggle_read(cx);
+            v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            assert!(!v.inbox.mail[0].unread);
+            assert_eq!(v.inbox.batches.len(), 1);
+            assert_eq!(v.inbox.history.len(), 1);
+            v.undo(cx);
+            assert!(v.inbox.mail[0].unread);
+        });
+    }
+
+    #[gpui::test]
+    fn review_stopped_worker_reverts_read_and_delete_in_reverse_order(cx: &mut TestAppContext) {
+        let (view, cx, rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=2 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            v.act(Move::Delete, cx);
+        });
+        drop(rx);
+        view.update(cx, |v, cx| {
+            v.worker_gone(cx);
+            assert!(v.inbox.history.is_empty() && v.inbox.batches.is_empty());
+            assert_eq!(v.inbox.items.len(), 2);
+            assert!(v.inbox.mail.iter().all(|m| m.unread));
+        });
+    }
+
+    #[gpui::test]
+    fn review_sync_keeps_selection_past_page_boundary(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=200 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let selected = v.inbox.selected_members();
+            incoming(v, 201);
+            v.reload(cx);
+            assert_eq!(v.inbox.selected_members(), selected);
+            assert_eq!(v.inbox.list().len(), 201);
+            v.act(Move::Done, cx);
+            assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|cmd| matches!(cmd, Cmd::Op { act: Act::Archive, .. })).count(), 200);
+        });
+    }
+
+    #[gpui::test]
+    fn review_sync_drops_selected_messages_that_leave_the_list(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let removed = incoming(v, 1);
+            let snoozed = incoming(v, 2);
+            incoming(v, 3);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let live = v.live.as_ref().unwrap();
+            live.store.delete_message(removed.id).unwrap();
+            live.store.snooze(snoozed.id, Some(now() + 3600)).unwrap();
+            v.reload(cx);
+            assert_eq!(v.inbox.selected_members().len(), 1);
+            assert!(v.inbox.selected_members().iter().all(|&id| ![removed.id, snoozed.id].contains(&v.inbox.mail[id].store.unwrap())));
+        });
+    }
+
+    #[gpui::test]
+    fn review_search_reveals_read_target_under_unread_filter(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let mut target = incoming(v, 1);
+            target.seen = true;
+            v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message { summary: target.clone(), ..Default::default() }).unwrap();
+            incoming(v, 2);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.open_found(target.id, cx);
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(target.id));
+            v.act(Move::Delete, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Op { id, act: Act::Trash, .. }) if id == target.id));
+        });
+    }
+
+    #[gpui::test]
+    fn review_trash_does_not_inherit_hidden_unread_filter(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let mut target = incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            target.folder = live.store.save_folder(&target.account, "Trash", None, lagom_core::store::FolderRole::Trash).unwrap();
+            target.seen = true;
+            let target = live.store.save_message(&lagom_core::store::Message { summary: target, ..Default::default() }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.open_box(v.inbox.find_kind(Kind::Trash), cx);
+            assert!(!v.inbox.unread_only);
+            assert!(v.inbox.list().iter().any(|&id| v.inbox.mail[id].store == Some(target)));
+        });
+    }
+
+    #[gpui::test]
+    fn review_cmd_toggle_reads_sole_selection_not_cursor(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=2 {
+                let summary = incoming(v, uid);
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                    summary, body_text: format!("Body {uid}"), body_html: Some(format!("<p>Body {uid}</p>")), ..Default::default()
+                }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.current().unwrap();
+            v.inbox.click(1, false, true);
+            v.inbox.click(1, false, true);
+            assert_ne!(v.inbox.current(), Some(selected));
+            v.open_current(false, cx);
+            assert_eq!(v.reading_thread, Some(selected));
+            assert_eq!(v.inbox.mail[selected].body, ["Body 2"]);
+            assert_eq!(v.inbox.mail[selected].html.as_ref().map(|html| html.as_ref()), Some("<p>Body 2</p>"));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Reply").is_some());
+    }
+
+    #[gpui::test]
+    fn unread_pages_remain_reachable_after_filter_hides_loaded_rows(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=205 {
+                let mut m = incoming(v, uid);
+                m.seen = uid > 2;
+                m.subject = format!("Message {uid}");
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message { summary: m, ..Default::default() }).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            assert!(v.inbox.list().is_empty());
+            assert!(v.has_more());
+        });
+        cx.run_until_parked();
+        let at = cx.debug_bounds("Load more").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.list().len(), 2);
+            assert!(!v.has_more());
+            assert!(v.inbox.list().iter().all(|&id| v.inbox.mail[id].unread));
+        });
+    }
+
+    #[gpui::test]
+    fn multi_selection_queues_actions_and_one_undo_for_all_rows(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.open_current(true, cx);
+            assert!(v.reading_members.is_empty());
+            assert!(v.inbox.selected_members().iter().all(|&id| v.inbox.mail[id].unread));
+        });
+        assert!(rx.try_recv().is_err(), "the summary must not load or mark one message read");
+        view.update(cx, |v, cx| v.act(Move::Done, cx));
+        let moved = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Archive, .. } => id,
+            _ => panic!("expected archive"),
+        }).collect::<Vec<_>>();
+        assert_eq!(moved.len(), 3);
+        assert!(view.read_with(cx, |v, _| v.inbox.list().is_empty()));
+        view.update(cx, |v, cx| v.undo(cx));
+        let restored = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Move(_), .. } => id,
+            _ => panic!("expected restore"),
+        }).collect::<Vec<_>>();
+        assert_eq!(restored, moved);
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.list().len()), 3);
+        assert!(view.read_with(cx, |v, _| v.inbox.history.is_empty() && v.inbox.batches.is_empty()));
+    }
+
+    #[gpui::test]
+    fn manual_read_flags_undo_failure_and_stopped_worker(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let ids = view.update(cx, |v, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            v.inbox.mail[1].unread = false;
+            v.toggle_read(cx);
+            assert!(v.inbox.mail.iter().all(|m| !m.unread));
+            v.inbox.mail.iter().map(|m| m.store.unwrap()).collect::<Vec<_>>()
+        });
+        let marked = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Read(true), .. } => id,
+            _ => panic!("expected mark read"),
+        }).collect::<Vec<_>>();
+        assert_eq!(marked, [ids[0], ids[2]]);
+        view.update(cx, |v, cx| v.undo(cx));
+        let restored = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+            Cmd::Op { id, act: Act::Read(false), .. } => id,
+            _ => panic!("expected mark unread"),
+        }).collect::<Vec<_>>();
+        assert_eq!(restored, marked);
+        view.update_in(cx, |v, window, cx| {
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            let commands = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+            let Cmd::Op { op, .. } = commands[0] else { panic!("expected operation") };
+            v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+            assert!(v.inbox.mail[0].unread);
+            assert!(!v.inbox.mail[2].unread);
+            v.undo(cx);
+            assert!(v.inbox.mail[2].unread);
+        });
+        drop(rx);
+        view.update(cx, |v, cx| {
+            v.inbox.select_all();
+            v.toggle_read(cx);
+            assert!(v.inbox.mail[0].unread && v.inbox.mail[2].unread);
+            assert!(!v.inbox.mail[1].unread);
+        });
+    }
+
+    #[gpui::test]
+    fn calendar_updates_preserve_unread_selection_and_pending_batch(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.inbox.select_all();
+            let selected = v.inbox.selected_members();
+            let account = v.live.as_ref().unwrap().accounts[0].id.clone();
+            v.on_events(vec![Event::CalendarSync(account.clone(), SyncState::Synced(0)), Event::Changed], window, cx);
+            assert!(v.inbox.unread_only);
+            assert_eq!(v.inbox.selected_members(), selected);
+            v.toggle_read(cx);
+            let marked: HashSet<_> = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+                Cmd::Op { id, act: Act::Read(true), .. } => id,
+                _ => panic!("expected mark read"),
+            }).collect();
+            assert_eq!(marked.len(), 3);
+            v.on_events(vec![Event::CalendarSync(account, SyncState::Synced(1)), Event::Changed], window, cx);
+            assert!(v.inbox.list().is_empty());
+            assert_eq!(v.inbox.batches.len(), 1);
+            v.undo(cx);
+            assert_eq!(v.inbox.selected_members(), selected);
+            let restored: HashSet<_> = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+                Cmd::Op { id, act: Act::Read(false), .. } => id,
+                _ => panic!("expected mark unread"),
+            }).collect();
+            assert_eq!(restored, marked);
+        });
     }
 
     #[gpui::test]
@@ -1570,7 +2052,7 @@ mod tests {
         let first = cx.update(|cx| crate::open_main_window(false, cx).unwrap());
         let (bridge, old_op, weak) = first.update(cx, |view, _, cx| {
             let live = view.live.as_mut().unwrap();
-            (live.bridge.clone(), live.op(Op::Undo), cx.entity().downgrade())
+            (live.bridge.clone(), live.op(Op::Undo(0)), cx.entity().downgrade())
         }).unwrap();
         first.update(cx, |_, window, _| window.remove_window()).unwrap();
         cx.run_until_parked();
@@ -1579,7 +2061,7 @@ mod tests {
         let store = reopened.update(cx, |view, _, _| {
             let live = view.live.as_mut().unwrap();
             assert!(bridge.same_worker(&live.bridge), "Dock reopen must reuse the running worker");
-            assert!(live.op(Op::Undo) > old_op, "old completions must not match new operations");
+            assert!(live.op(Op::Undo(0)) > old_op, "old completions must not match new operations");
             live.ops.clear();
             live.store.clone()
         }).unwrap();
@@ -1622,7 +2104,7 @@ mod tests {
             assert!(store.drafts().unwrap().is_empty());
             assert!(!store.retry_send(&id, i64::MAX).unwrap());
             assert!(!store.claim_send(&id, i64::MAX).unwrap());
-            view.live.as_mut().unwrap().op(Op::Undo)
+            view.live.as_mut().unwrap().op(Op::Undo(0))
         }).unwrap();
         assert!(bridge.send(Cmd::Op { op, id: -1, act: Act::Snooze(None) }));
         store.delete_account(&account.id).unwrap();
@@ -2030,7 +2512,7 @@ mod tests {
         cx.simulate_input("Unfinished fixture draft");
         let target = view.update(cx, |v, _| {
             let m = incoming(v, 1);
-            v.live.as_mut().unwrap().ops.insert(1, Op::Undo);
+            v.live.as_mut().unwrap().ops.insert(1, Op::Undo(0));
             Target { account: m.account, message: Some(m.id) }
         });
         view.update_in(cx, |v, window, cx| {
