@@ -8,8 +8,8 @@ settings:
     # shortcut: arm64 simulator only; add x86_64 when Intel Mac development is needed.
     ARCHS: arm64
     TARGETED_DEVICE_FAMILY: '1,2'
-    # Placeholder: replace the bundle identifier before release.
-    PRODUCT_BUNDLE_IDENTIFIER: iq.lagom.app
+    PRODUCT_BUNDLE_IDENTIFIER: com.alexkerber.lagom
+    DEVELOPMENT_TEAM: 3KFU9JQ5LH
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: '0.1.0'
     CURRENT_PROJECT_VERSION: '1'
@@ -54,7 +54,7 @@ targets:
       - target: Lagom
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: iq.lagom.app.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.alexkerber.lagom.tests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   Lagom:
