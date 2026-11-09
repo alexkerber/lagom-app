@@ -290,7 +290,7 @@ impl ImapSync {
                 self.fetch_message(store, &folder, uid).await?;
             }
         }
-        for uid in store.missing_attachments(id, limit)? {
+        for uid in store.missing_metadata(id, limit)? {
             if present.contains(&uid) {
                 self.fetch_message(store, &folder, uid).await?;
             }
@@ -351,6 +351,7 @@ impl ImapSync {
         Ok(())
     }
     async fn fetch_message(&mut self, store: &Store, folder: &Folder, uid: u32) -> Result<()> {
+        // shortcut: async-imap exposes no X-GM-THRID accessor; add it to this FETCH when the dependency supports it.
         let metadata=net(async {self.session.uid_fetch(uid.to_string(),"(UID ENVELOPE FLAGS BODYSTRUCTURE RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER]<0.262144>)").await?.try_collect::<Vec<_>>().await}).await?;
         let Some(fetch) = metadata.iter().find(|f| f.uid == Some(uid)) else {
             return Ok(());
@@ -720,12 +721,14 @@ fn attachment_filename(common: &async_imap::imap_proto::BodyContentCommon<'_>) -
     let name = message.attachments().next()?.attachment_name().filter(|s| !s.is_empty()).map(str::to_owned);
     name
 }
+type TextPart = (Vec<u32>, bool, u32, String);
+
 fn text_parts(
     body: &BodyStructure<'_>,
     path: &[u32],
     depth: usize,
     attached_parent: bool,
-    parts: &mut Vec<(Vec<u32>, bool, u32, String)>,
+    parts: &mut Vec<TextPart>,
     attachments: &mut Vec<Attachment>,
 ) {
     let common = match body {
@@ -783,7 +786,7 @@ fn text_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parsed_parts(structure: &str) -> (Vec<(Vec<u32>, bool, u32, String)>, Vec<Attachment>) {
+    fn parsed_parts(structure: &str) -> (Vec<TextPart>, Vec<Attachment>) {
         use async_imap::imap_proto::{AttributeValue, Response};
         let wire = format!("* 1 FETCH (BODYSTRUCTURE {structure})\r\n");
         let (_, Response::Fetch(_, attrs)) = Response::parse(wire.as_bytes()).unwrap() else { panic!("fetch") };

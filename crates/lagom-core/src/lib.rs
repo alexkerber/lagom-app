@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod smtp;
 pub mod outbox;
 pub mod store;
+mod threading;
 pub mod tasks;
 
 #[derive(Debug, thiserror::Error)]

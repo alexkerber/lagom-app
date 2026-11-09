@@ -8,7 +8,7 @@ use crate::main_window::{button, mono, MainWindow, OneLine};
 use crate::theme::{radius, size, Theme};
 
 /// `confirm`: the id of the account whose removal waits for a yes.
-pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, notifications: bool, cx: &mut Context<MainWindow>) -> Div {
+pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool, notifications: bool, cx: &mut Context<MainWindow>) -> Div {
     let mut list = div().flex().flex_col().pt(px(20.)).border_t_1().border_color(t.line);
     for a in accounts {
         let id = a.id.clone();
@@ -51,6 +51,8 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, notification
             1 => "One account.".to_string(),
             n => format!("{n} accounts."),
         })))
+        .child(div().flex().items_center().gap(px(12.)).child(div().flex_1().child("Group by conversation"))
+            .child(button(t, if group { "On" } else { "Off" }, None).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx)))))
         .child(div().flex().items_center().justify_between()
             .child("Notifications for new mail")
             .child(button(t, if notifications { "On" } else { "Off" }, None)

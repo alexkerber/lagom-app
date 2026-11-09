@@ -289,7 +289,7 @@ mod tests {
                 Err(Error::Invalid(_))
             ));
         }
-        assert_eq!(s.tasks(list, true).unwrap(), [task.clone()]);
+        assert_eq!(s.tasks(list, true).unwrap(), std::slice::from_ref(&task));
         reset_dirty(&s, task.id);
         s.update_task(task.id, "  Revised ", "new notes", None)
             .unwrap();
@@ -437,7 +437,7 @@ mod tests {
         assert_ne!(id, moved_id);
         assert_eq!(
             s.tasks_for_mail(&account.id, &mail.message_id).unwrap(),
-            [task.clone()]
+            std::slice::from_ref(&task)
         );
         assert!(s
             .tasks_for_mail("other-account", &mail.message_id)

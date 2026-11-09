@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -82,7 +82,14 @@ impl Store {
         if version < 7 {
             db.execute_batch(include_str!("schema_v7.sql"))?;
         }
-        Ok(Self { db })
+        let store = Self { db };
+        if version < 8 {
+            let tx = store.db.unchecked_transaction()?;
+            store.db.execute_batch(include_str!("schema_v8.sql"))?;
+            store.backfill_threads()?;
+            tx.commit()?;
+        }
+        Ok(store)
     }
     pub fn path(&self) -> &Path {
         Path::new(self.db.path().expect("file-backed store"))
@@ -188,7 +195,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 7);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -269,6 +276,8 @@ pub struct MessageSummary {
     pub uid: u32,
     pub message_id: String,
     pub thread_key: String,
+    pub thread_id: String,
+    pub thread_refs: String,
     pub from_name: String,
     pub from_address: String,
     pub to: String,
@@ -294,8 +303,8 @@ pub struct Counts {
     pub later: u64,
 }
 
-const SUMMARY_COLUMNS: &str = "m.id,m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to_addresses,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,m.snoozed_until";
-fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
+pub(crate) const SUMMARY_COLUMNS: &str = "m.id,m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to_addresses,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,m.snoozed_until,m.thread_id,m.thread_refs";
+pub(crate) fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     Ok(MessageSummary {
         id: r.get(0)?,
         account: r.get(1)?,
@@ -315,6 +324,8 @@ fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
         has_attachments: r.get(15)?,
         size: r.get(16)?,
         snoozed_until: r.get(17)?,
+        thread_id: r.get(18)?,
+        thread_refs: r.get(19)?,
     })
 }
 fn folder_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
@@ -368,21 +379,29 @@ impl Store {
         self.db.query_row("SELECT id,account,name,delimiter,role,uidvalidity,uidnext,last_uid,highest_modseq,0 FROM folders WHERE id=?1",[id],folder_row).optional()?.ok_or(Error::NotFound)
     }
     pub fn save_message(&self, message: &Message) -> Result<i64> {
+        let tx = self.db.unchecked_transaction()?;
+        let id = self.insert_message(message)?;
+        tx.commit()?;
+        Ok(id)
+    }
+    fn insert_message(&self, message: &Message) -> Result<i64> {
         let m = &message.summary;
-        Ok(self.db.query_row("INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,body_html)
-        SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18 FROM folders WHERE id=?2 AND account=?1
-        ON CONFLICT(folder,uid) DO UPDATE SET message_id=excluded.message_id,thread_key=excluded.thread_key,from_name=excluded.from_name,from_address=excluded.from_address,to_addresses=excluded.to_addresses,cc=excluded.cc,subject=excluded.subject,date=excluded.date,snippet=excluded.snippet,seen=excluded.seen,flagged=excluded.flagged,has_attachments=excluded.has_attachments,size=excluded.size,body_text=excluded.body_text,body_html=excluded.body_html RETURNING id",
-        params![m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,message.body_text,message.body_html],|r|r.get(0))?)
+        let thread = self.resolve_thread(m)?;
+        let id = self.db.query_row("INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,body_html,thread_id,thread_refs)
+        SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20 FROM folders WHERE id=?2 AND account=?1
+        ON CONFLICT(folder,uid) DO UPDATE SET message_id=excluded.message_id,thread_key=excluded.thread_key,from_name=excluded.from_name,from_address=excluded.from_address,to_addresses=excluded.to_addresses,cc=excluded.cc,subject=excluded.subject,date=excluded.date,snippet=excluded.snippet,seen=excluded.seen,flagged=excluded.flagged,has_attachments=excluded.has_attachments,size=excluded.size,body_text=excluded.body_text,body_html=excluded.body_html,thread_id=excluded.thread_id,thread_refs=excluded.thread_refs RETURNING id",
+        params![m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,message.body_text,message.body_html,thread,m.thread_refs],|r|r.get(0))?;
+        Ok(id)
     }
     pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
-        let id = self.save_message(message)?;
+        let id = self.insert_message(message)?;
         self.db.execute("DELETE FROM attachments WHERE message=?1", [id])?;
         for part in attachments {
             self.db.execute("INSERT INTO attachments VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, part.section, part.filename, part.mime_type, part.size, part.encoding])?;
         }
-        self.db.execute("UPDATE messages SET attachments_loaded=1 WHERE id=?1", [id])?;
+        self.db.execute("UPDATE messages SET attachments_loaded=1,threading_loaded=1 WHERE id=?1", [id])?;
         tx.commit()?;
         Ok(())
     }
@@ -393,8 +412,8 @@ impl Store {
         }))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
-    pub(crate) fn missing_attachments(&self, folder: i64, limit: usize) -> Result<Vec<u32>> {
-        let mut stmt = self.db.prepare("SELECT uid FROM messages WHERE folder=?1 AND NOT attachments_loaded ORDER BY uid DESC LIMIT ?2")?;
+    pub(crate) fn missing_metadata(&self, folder: i64, limit: usize) -> Result<Vec<u32>> {
+        let mut stmt = self.db.prepare("SELECT uid FROM messages WHERE folder=?1 AND (NOT attachments_loaded OR NOT threading_loaded) ORDER BY uid DESC LIMIT ?2")?;
         let rows = stmt.query_map(params![folder, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -402,7 +421,7 @@ impl Store {
         self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.id=?1"), [id], summary_row).optional()?.ok_or(Error::NotFound)
     }
     pub fn message(&self, id: i64) -> Result<Message> {
-        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(18)?,body_html:r.get(19)? })).optional()?.ok_or(Error::NotFound)
+        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(20)?,body_html:r.get(21)? })).optional()?.ok_or(Error::NotFound)
     }
     pub fn list_messages(
         &self,
@@ -627,9 +646,82 @@ mod mail_tests {
             .is_empty());
         assert!(s.search(&a.id, "\"", 100, 10, 0).is_err());
     }
+    fn save_legacy(old: &Store, message: Message) -> Message {
+        let m = &message.summary;
+        old.db.execute("INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,body_html)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            params![m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,message.body_text,message.body_html]).unwrap();
+        let id = old.db.last_insert_rowid();
+        let mut saved_message = message;
+        saved_message.summary.id = id;
+        saved_message
+    }
+
+    #[test]
+    fn v7_upgrade_preserves_data_and_adds_thread_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.db");
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql")] {
+            db.execute_batch(schema).unwrap();
+        }
+        let old = Store { db };
+        let (imap, smtp) = crate::presets::servers("fixture@fastmail.com").unwrap();
+        let account = Account::new("fixture@fastmail.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        let folder = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let mut root = mail(&account, folder, 1);
+        root.summary.message_id = "root@test".into();
+        root.summary.thread_key = "root@test".into();
+        let mut child = mail(&account, folder, 2);
+        child.summary.message_id = "child@test".into();
+        child.summary.thread_key = "root@test".into();
+        let mut root = save_legacy(&old, root);
+        let mut child = save_legacy(&old, child);
+        old.snooze(root.summary.id, Some(1000)).unwrap();
+        root.summary.snoozed_until = Some(1000);
+        old.db.execute("INSERT INTO attachments VALUES (?1,'2','report.pdf','application/pdf',128,'base64')", [root.summary.id]).unwrap();
+        let attachments = old.attachments(root.summary.id).unwrap();
+        let saved_folder = old.folder(folder).unwrap();
+        old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        for (index, columns) in [
+            ("messages_thread", vec!["account", "thread_id", "date", "id"]),
+            ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
+            ("messages_later_date", vec!["account", "date", "id"]),
+        ] {
+            let actual = store.db.prepare(&format!("PRAGMA index_info({index})")).unwrap()
+                .query_map([], |r| r.get::<_, String>(2)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(actual, columns);
+        }
+        assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
+        assert_eq!(store.folder(folder).unwrap(), saved_folder);
+        assert_eq!(store.attachments(root.summary.id).unwrap(), attachments);
+        let a = store.message(root.summary.id).unwrap();
+        let b = store.message(child.summary.id).unwrap();
+        root.summary.thread_id = a.summary.thread_id.clone();
+        child.summary.thread_id = a.summary.thread_id.clone();
+        root.summary.thread_refs = "root@test".into();
+        child.summary.thread_refs = "root@test".into();
+        assert_eq!(a, root);
+        assert_eq!(b, child);
+        assert_eq!(store.list_conversations(&account.id, Some(folder), 0, 1).unwrap(), std::slice::from_ref(&b.summary));
+        assert_eq!(store.list_conversations(&account.id, None, 0, 1).unwrap(), std::slice::from_ref(&a.summary));
+        assert_eq!(a.summary.thread_id, b.summary.thread_id);
+        assert_eq!(b.summary.thread_refs, "root@test");
+        assert_eq!(b.body_text, child.body_text);
+        assert_eq!(store.missing_metadata(folder, 10).unwrap(), [2, 1]);
+        store.save_synced_message(&b, &[]).unwrap();
+        assert_eq!(store.missing_metadata(folder, 10).unwrap(), [1]);
+        drop(store);
+        assert_eq!(Store::open(path).unwrap().message(a.summary.id).unwrap(), a);
+    }
+
     #[test]
     fn attachment_migration_roundtrip_rollback_and_cascade() {
-        for version in [4, 5, 6] {
+        for version in [4, 5, 6, 7] {
             attachment_migration(version);
         }
     }
@@ -638,7 +730,7 @@ mod mail_tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(format!("v{version}.db"));
         let db = Connection::open(&path).unwrap();
-        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql")].iter().take(version) {
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql")].iter().take(version) {
             db.execute_batch(schema).unwrap();
         }
         let old = Store { db };
@@ -648,8 +740,8 @@ mod mail_tests {
         let folder = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
         let mut message = mail(&account, folder, 1);
         message.summary.has_attachments = false;
-        let id = old.save_message(&message).unwrap();
-        let saved_message = old.message(id).unwrap();
+        let saved_message = save_legacy(&old, message.clone());
+        let id = saved_message.summary.id;
         let saved_folder = old.folder(folder).unwrap();
         let draft = Draft { id: "draft".into(), account: account.id.clone(), text: "unfinished draft".into(), ..Default::default() };
         let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "queued mail".into(), ..Default::default() };
@@ -659,42 +751,45 @@ mod mail_tests {
             old.db.execute("INSERT INTO outbox(id,account,content,raw,ready_at,submitted) VALUES ('queued',?1,?2,?3,1234,1)",
                 params![account.id, serde_json::to_string(&outgoing).unwrap(), b"queued MIME bytes".as_slice()]).unwrap();
         }
-        if version == 6 {
+        if version >= 6 {
             old.db.execute_batch("UPDATE drafts SET revision='saved-revision';
                 UPDATE outbox SET state='failed',attempts=3,copied=1;").unwrap();
         }
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 7);
-        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
+        let mut saved_message = saved_message;
+        saved_message.summary.thread_id = store.message(id).unwrap().summary.thread_id;
+        assert!(!saved_message.summary.thread_id.is_empty());
         assert_eq!(store.message(id).unwrap(), saved_message);
         assert_eq!(store.search(&account.id, "sqlite", 100, 10, 0).unwrap(), [saved_message.summary]);
         if version >= 5 {
-            assert_eq!(store.drafts().unwrap(), [draft.clone()]);
+            assert_eq!(store.drafts().unwrap(), std::slice::from_ref(&draft));
             let pending = store.pending("queued").unwrap();
             assert_eq!(pending.mail.text, outgoing.text);
             assert_eq!(pending.raw, b"queued MIME bytes");
             assert!(pending.submitted);
-            assert_eq!(pending.copied, version == 6);
-            assert_eq!(pending.state, if version == 6 { "failed" } else { "ready" });
-            assert_eq!(store.db.query_row("SELECT ready_at,attempts FROM outbox", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?))).unwrap(), (1234, if version == 6 { 3 } else { 0 }));
+            assert_eq!(pending.copied, version >= 6);
+            assert_eq!(pending.state, if version >= 6 { "failed" } else { "ready" });
+            assert_eq!(store.db.query_row("SELECT ready_at,attempts FROM outbox", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?))).unwrap(), (1234, if version >= 6 { 3 } else { 0 }));
             let revision = store.draft_revision(&draft.id).unwrap();
             assert!(!revision.is_empty());
-            if version == 6 { assert_eq!(revision, "saved-revision"); }
+            if version >= 6 { assert_eq!(revision, "saved-revision"); }
         } else {
             store.save_draft(&draft).unwrap();
             assert_eq!(store.drafts().unwrap(), [draft]);
             assert!(store.due_outbox(&account.id, i64::MAX).unwrap().is_empty());
         }
-        assert_eq!(store.missing_attachments(folder, 1).unwrap(), [1]);
+        assert_eq!(store.missing_metadata(folder, 1).unwrap(), [1]);
         let part = Attachment { section: "2.1".into(), filename: "report.pdf".into(), mime_type: "application/pdf".into(), size: 128, encoding: "base64".into() };
-        store.save_synced_message(&message, &[part.clone()]).unwrap();
-        assert_eq!(store.attachments(id).unwrap(), [part.clone()]);
-        assert!(store.missing_attachments(folder, 1).unwrap().is_empty());
+        store.save_synced_message(&message, std::slice::from_ref(&part)).unwrap();
+        assert_eq!(store.attachments(id).unwrap(), std::slice::from_ref(&part));
+        assert!(store.missing_metadata(folder, 1).unwrap().is_empty());
         assert!(store.save_synced_message(&message, &[part.clone(), part.clone()]).is_err());
-        assert_eq!(store.attachments(id).unwrap(), [part.clone()]);
+        assert_eq!(store.attachments(id).unwrap(), std::slice::from_ref(&part));
         drop(store);
         store = Store::open(&path).unwrap();
         assert_eq!(store.attachments(id).unwrap(), [part]);
@@ -733,7 +828,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -752,16 +847,17 @@ mod mail_tests {
         let a = Account::new("a@gmail.com".into(), i, o).unwrap();
         old.save_account(&a).unwrap();
         let f = old.save_folder(&a.id, "INBOX", None, FolderRole::Inbox).unwrap();
-        let id = old.save_message(&mail(&a, f, 1)).unwrap();
-        let message = old.message(id).unwrap();
+        let mut message = save_legacy(&old, mail(&a, f, 1));
+        let id = message.summary.id;
         let folder = old.folder(f).unwrap();
         drop(old);
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.accounts().unwrap(), [a.clone()]);
+        assert_eq!(s.accounts().unwrap(), std::slice::from_ref(&a));
         assert_eq!(s.folder(f).unwrap(), folder);
+        message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 7);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

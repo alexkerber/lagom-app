@@ -61,3 +61,20 @@ and checks the scroll extent. Companion tests cover keyboard navigation, swipe,
 wheel scrolling, resizing, folder changes, animated heights and loading the next
 200-row page from a fixture store. Timing is reported, not asserted: these debug
 measurements do not establish the release frame-time budget above.
+
+## Conversation queries
+
+Measured with `cargo test -p lagom-core conversation_page_does_not_scan -- --nocapture`
+in a debug build on macOS, using 100,000 fixture messages in about 50,000 threads
+and a 200-conversation page. No app or native view is started.
+
+| Query | Before | Indexed page |
+| --- | ---: | ---: |
+| Inbox | 176.63 ms / 4,169,009 SQLite VM steps | 2.95 ms / 34,912 steps |
+| Later (all messages snoozed) | — | 2.97 ms / 32,520 steps |
+
+The regression test asserts fewer than 100,000 VM steps, independent of machine
+speed. The query walks the date index to select each thread's latest visible
+message, then reads only the selected threads through the thread index. Schema
+v9 adds a partial date index for Later. These query measurements exclude account
+counts and rendering; they do not establish the full reload or frame budget.

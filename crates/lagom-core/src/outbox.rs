@@ -271,7 +271,7 @@ mod tests {
             store.send_failed(&id, &Error::Network("temporary refusal"), now).unwrap();
             assert!(store.due_outbox(&account.id, now + delay - 1).unwrap().is_empty());
             now += delay;
-            assert_eq!(store.due_outbox(&account.id, now).unwrap(), [id.clone()]);
+            assert_eq!(store.due_outbox(&account.id, now).unwrap(), std::slice::from_ref(&id));
         }
     }
 
@@ -341,10 +341,10 @@ mod tests {
         drop(store);
         let store = Store::open(dir.path().join("mail.db")).unwrap();
         store.recover_outbox().unwrap();
-        assert_eq!(store.pending(&interrupted).unwrap().state, "uncertain");
-        assert_eq!(store.pending(&failed).unwrap().state, "uncertain");
+        assert_eq!(store.pending(interrupted).unwrap().state, "uncertain");
+        assert_eq!(store.pending(failed).unwrap().state, "uncertain");
         assert_eq!(store.due_outbox(&account.id, 0).unwrap(), [submitted]);
-        assert!(store.undo_send(&interrupted).unwrap());
+        assert!(store.undo_send(interrupted).unwrap());
         assert_eq!(store.drafts().unwrap()[0].text, "keep me");
     }
 
@@ -358,7 +358,7 @@ mod tests {
         let draft = Draft { id: smtp::message_id(&account.email), account: account.id.clone(), ..Default::default() };
         store.save_draft(&draft).unwrap();
         assert!(store.enqueue(&account, &Outgoing { message_id: Some(draft.id.clone()), ..Default::default() }, 0).is_err());
-        assert_eq!(store.drafts().unwrap(), [draft.clone()]);
+        assert_eq!(store.drafts().unwrap(), std::slice::from_ref(&draft));
         store.delete_draft(&draft.id).unwrap();
         assert!(store.drafts().unwrap().is_empty());
     }

@@ -85,7 +85,7 @@ pub fn parse(text: &str) -> Markdown {
                 let hashes = text[line.clone()].bytes().take_while(|b| *b == b'#').count();
                 if hashes > 0 {
                     let end = line.start + hashes + text[line.start + hashes..line.end].bytes().take_while(|b| *b == b' ').count();
-                    md.hide.push(Hide { markers: vec![line.start..end], span: line });
+                    md.hide.push(Hide { markers: std::iter::once(line.start..end).collect(), span: line });
                 }
             }
             Event::Start(Tag::Item) => {
