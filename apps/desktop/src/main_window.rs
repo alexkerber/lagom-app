@@ -86,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-r", ReplyAll, message),
         KeyBinding::new("f", Forward, message),
         KeyBinding::new("shift-u", ToggleRead, message),
+        KeyBinding::new("m", OpenMovePalette, message),
     ]);
 }
 
@@ -645,6 +646,7 @@ impl MainWindow {
     }
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.release(false, cx);
         self.toast = None;
         let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
@@ -1145,8 +1147,11 @@ pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     el
 }
 
-pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> impl IntoElement {
-    svg().path(path).size(px(s)).flex_shrink_0().text_color(color)
+pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> gpui::Svg {
+    let icon = svg().path(path).size(px(s)).flex_shrink_0().text_color(color);
+    #[cfg(test)]
+    let icon = icon.debug_selector(move || format!("icon-{path}"));
+    icon
 }
 
 fn app_mark() -> gpui::Img {
@@ -1183,8 +1188,9 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
 }
 
 fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Option<usize>) -> Stateful<Div> {
+    let ink = t.ink;
     let base = div()
-        .id(label)
+        .id(label).group(label)
         .debug_selector(move || label.into())
         .flex()
         .items_center()
@@ -1193,6 +1199,10 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .rounded(px(radius::CONTROL))
         .text_size(px(size::BASE))
         .font_weight(FontWeight::MEDIUM)
+        .gap(px(6.))
+        .when_some(polish::action_icon(label), |d, path| d.child(
+            icon(path, if fill.is_some() { t.accent_ink } else { t.ink2 }, 16.)
+                .when(fill.is_none(), |icon| icon.group_hover(label, move |s| s.text_color(ink)))))
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
             underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
         }))));
@@ -1844,7 +1854,9 @@ impl MainWindow {
                             .flex_col()
                             .min_w(px(0.))
                             .child(div().font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
-                            .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}"))),
+                            .child(div().flex().items_center().gap(px(6.))
+                                .child(icon(self.sync_icon(), t.ink2, 16.))
+                                .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}")))),
                     )
                     .child(if self.inbox.open_kind() == Some(Kind::Trash) {
                         let controls = div().flex().gap(px(8.));
@@ -1909,6 +1921,8 @@ impl MainWindow {
         let Some(id) = self.inbox.single() else {
             let more = self.has_more();
             return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
+                .child(icon("icons/inbox.svg", t.ink2, 32.))
+                .when(!self.inbox.unread_only, |d| d.child("No messages"))
                 .when(self.inbox.unread_only, |d| d
                     .child(if more { "No unread messages in loaded mail" } else { "No unread messages" })
                     .when(more, |d| d.child(button(t, "Load more", None)
@@ -1937,7 +1951,7 @@ impl MainWindow {
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
                     .child(polish::shortcut_button(t, "Reply", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
-                    .child(icon_button(t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
+                    .child(icon_button(t, "reply-all", "icons/reply-all.svg", "Reply all · Shift+R").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
                     .child(polish::shortcut_button(t, "Forward", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .when(!trash, |d| d.child(
                         polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
@@ -1951,7 +1965,7 @@ impl MainWindow {
                     .child(div().flex_1())
                     .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2).debug_selector(|| "message-counter".into()))
                     .child(
-                        icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
+                        icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window · ⌘O")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
                     )
                     .child(
@@ -1973,14 +1987,14 @@ fn toolbar(t: &Theme) -> Div {
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
 fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
-    pressable(div().id(id), t, false)
+    pressable(div().id(id).group(id), t, false)
         .debug_selector(move || id.into())
         .flex()
         .items_center()
         .justify_center()
         .size(px(28.))
         .rounded(px(radius::CONTROL))
-        .child(icon(path, t.ink2, 16.))
+        .child(icon(path, t.ink2, 16.).group_hover(id, move |s| s.text_color(theme.ink)))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
 }
 
@@ -2037,7 +2051,7 @@ fn reading_view(
             .px(px(14.)).py(px(10.)).rounded(px(radius::ATTACHMENT))
             .border_1().border_color(t.line).bg(t.subtle)
             .text_size(px(size::SNIPPET)).line_height(relative(LEADING))
-            .child(icon("icons/folder.svg", t.ink2, 16.))
+            .child(icon("icons/attachment.svg", t.ink2, 16.))
             .child(div().flex_1().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).child(part.filename.clone()))
             .child(mono(attachment_size(part.size), t.ink2))
             .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
@@ -2068,9 +2082,8 @@ fn reading_view(
                     div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
             .children(attachment()))
         .when(!web, |d| d.child(div().flex_1()))
-        .child(div().id("reply-box").flex().flex_shrink_0().items_center().justify_between()
-            .h(px(36.)).px(px(12.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line)
-            .bg(t.raised).text_color(t.ink2).on_click(on_reply).child(format!("Reply to {}", m.from)))
+        .child(div().flex().flex_shrink_0().h(px(36.))
+            .child(icon_button(t, "reply-box", "icons/reply.svg", "Reply · R").on_click(on_reply)))
 }
 
 impl Render for MainWindow {
@@ -2126,7 +2139,7 @@ impl Render for MainWindow {
                 crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, &self.signatures, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
-            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
+            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_icon(), self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
             Page::Mail => div().flex_1().min_w(px(0.)).flex().child(div().id("mail-content").flex_1().min_w(px(0.)).flex()
                 .on_hover(cx.listener(|this, over: &bool, window, cx| this.update_hints(*over, window.modifiers(), cx)))
                 .child(self.message_list(list_height, cx)).child(self.reading_pane(cx))),

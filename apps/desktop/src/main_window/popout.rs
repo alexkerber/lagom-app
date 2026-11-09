@@ -76,9 +76,7 @@ impl MessageWindow {
         self.main
             .update(cx, |main, window, cx| {
                 window.activate_window();
-                if main.palette.is_none() && !main.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) {
-                    main.compose_kind(Some(id), kind, window, cx);
-                }
+                main.compose_kind(Some(id), kind, window, cx);
             })
             .ok();
     }
@@ -127,6 +125,13 @@ impl Render for MessageWindow {
                 let id = this.id;
                 this.main.update(cx, |main, window, cx| main.toggle_read_on(id, window, cx)).ok();
             }))
+            .on_action(cx.listener(|this, _: &OpenMovePalette, _, cx| {
+                let id = this.id;
+                this.main.update(cx, |main, window, cx| {
+                    window.activate_window();
+                    main.message_action(id, polish::MessageAction::Move, window, cx);
+                }).ok();
+            }))
             .on_action(cx.listener(|this, _: &Reply, _, cx| this.reply(cx)))
             .map(|d| quit_through_main(d, cx))
             .size_full()
@@ -139,11 +144,12 @@ impl Render for MessageWindow {
             .line_height(relative(LEADING))
             .child(
                 toolbar(&t)
+                    .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     // macOS: the traffic lights sit in the toolbar, as in the main window's sidebar.
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
-                    .child(icon_button(&t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
+                    .child(icon_button(&t, "reply-all", "icons/reply-all.svg", "Reply all · Shift+R").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
                     .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))

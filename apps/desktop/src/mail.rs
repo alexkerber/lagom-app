@@ -242,6 +242,7 @@ pub struct Snapshot {
     /// When the next message on Later comes back.
     pub next_due: Option<i64>,
     pub account_unread: std::collections::HashMap<String, [usize; 3]>,
+    pub more: bool,
 }
 
 /// Bounded queries on indexed columns: a few ms for a 100 000-message store. Runs when the
@@ -290,14 +291,14 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
         }
     }
     let next_due = store.later(account, now, 1, 0)?.first().and_then(|m| m.snoozed_until);
-    Ok(Snapshot { inbox, inbox_total: counts.inbox, later_total: counts.later, folders, open, next_due, account_unread: Default::default() })
+    Ok(Snapshot { inbox, inbox_total: counts.inbox, later_total: counts.later, folders, open, next_due, account_unread: Default::default(), more: false })
 }
 
 /// System mailboxes merge bounded pages; custom folders stay with the current account.
-pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::account::Account], current: &str,
+pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::account::Account], current: &str, filter: Option<&str>,
     view: View, limit: u32, now: i64, pins: Vec<i64>, group: bool) -> lagom_core::Result<Snapshot> {
     use lagom_core::store::FolderRole;
-    let mut result = load(store, current, view, limit, now, pins.iter().copied(), group)?;
+    let mut result = load(store, current, view, limit.saturating_add(1), now, pins.iter().copied(), group)?;
     let role = match view {
         View::Inbox => Some(FolderRole::Inbox),
         View::Role(role) => Some(role),
@@ -316,16 +317,34 @@ pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::a
             Some(role) => View::Role(role),
             None => View::Inbox,
         };
-        let other = load(store, &account.id, other_view, limit, now, pins.iter().copied(), group)?;
+        let other = load(store, &account.id, other_view, limit.saturating_add(1), now, pins.iter().copied(), group)?;
         result.next_due = result.next_due.into_iter().chain(other.next_due).min();
         result.inbox.extend(other.inbox);
         result.inbox_total += other.inbox_total;
         if role.is_some() { result.open.extend(other.open); }
     }
-    for rows in [&mut result.inbox, &mut result.open] {
-        rows.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
-    }
+    let inbox_more = page(&mut result.inbox, limit, filter, &pins, group);
+    let open_more = page(&mut result.open, limit, filter, &pins, group);
+    result.more = if matches!(view, View::Inbox) { inbox_more } else { open_more };
     Ok(result)
+}
+
+fn page(rows: &mut Vec<MessageSummary>, limit: u32, filter: Option<&str>, pins: &[i64], group: bool) -> bool {
+    rows.retain(|m| filter.is_none_or(|account| m.account == account));
+    rows.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
+    let key = |m: &MessageSummary| (m.account.clone(), m.folder,
+        if group && !m.thread_id.is_empty() { m.thread_id.clone() } else { m.id.to_string() });
+    let mut seen = std::collections::HashSet::new();
+    let mut keep = std::collections::HashSet::new();
+    for m in rows.iter() {
+        let key = key(m);
+        if seen.insert(key.clone()) && seen.len() <= limit as usize { keep.insert(key); }
+    }
+    let more = seen.len() > limit as usize;
+    // A pinned member retains its entire conversation, even beyond the global page.
+    keep.extend(rows.iter().filter(|m| pins.contains(&m.id)).map(key));
+    rows.retain(|m| keep.contains(&key(m)));
+    more
 }
 
 struct Sample {
@@ -537,10 +556,10 @@ mod tests {
         for personal_due in [None, Some(150), Some(250)] {
             store.snooze(ids[0], personal_due).unwrap();
             store.snooze(ids[1], Some(200)).unwrap();
-            let snap = load_accounts(&store, &accounts, "personal", View::Inbox, 200, 100, vec![], false).unwrap();
+            let snap = load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 100, vec![], false).unwrap();
             assert_eq!(snap.next_due, Some(personal_due.unwrap_or(200).min(200)));
             assert!(!snap.inbox.iter().any(|m| m.id == ids[1]));
-            let awake = load_accounts(&store, &accounts, "personal", View::Inbox, 200, 200, vec![], false).unwrap();
+            let awake = load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 200, vec![], false).unwrap();
             assert!(awake.inbox.iter().any(|m| m.id == ids[1]));
         }
         drop(store);
@@ -570,19 +589,60 @@ mod tests {
             }
         }
         for group in [false, true] {
-            let snap = load_accounts(&store, &accounts, "personal", View::Inbox, 2, 100, vec![ids[0], ids[4]], group).unwrap();
+            let snap = load_accounts(&store, &accounts, "personal", None, View::Inbox, 2, 100, vec![ids[0], ids[4]], group).unwrap();
             assert_eq!(snap.inbox_total, 8);
             assert_eq!(snap.account_unread["personal"], [3, 3, 0]);
             assert_eq!(snap.account_unread["work"], [3, 3, 3]);
-            assert_eq!(snap.inbox.len(), 6);
+            assert_eq!(snap.inbox.len(), 4);
+            assert!(snap.more);
             assert!(snap.inbox.windows(2).all(|w| w[0].date >= w[1].date));
             assert!(snap.inbox.iter().any(|m| m.id == ids[0]) && snap.inbox.iter().any(|m| m.id == ids[4]));
-            for (role, len) in [(FolderRole::Archive, 4), (FolderRole::Sent, 2)] {
-                let snap = load_accounts(&store, &accounts, "personal", View::Role(role), 2, 100, vec![], group).unwrap();
+            for (role, len) in [(FolderRole::Archive, 2), (FolderRole::Sent, 2)] {
+                let snap = load_accounts(&store, &accounts, "personal", None, View::Role(role), 2, 100, vec![], group).unwrap();
                 assert_eq!(snap.open.len(), len);
                 assert!(snap.open.iter().all(|m| store.folder(m.folder).unwrap().role == role));
             }
         }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unified_page_boundary_keeps_threads_ties_pins_and_account_filters() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-page-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("mail.sqlite3")).unwrap();
+        let accounts = demo_accounts();
+        let mut ids = Vec::new();
+        for account in &accounts {
+            store.save_account(account).unwrap();
+            let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            for (uid, date, thread) in [(1, 100, "new@test"), (2, 1, "new@test"), (3, 90, "old@test"), (4, 0, "old@test")] {
+                let summary = MessageSummary { account: account.id.clone(), folder, uid, date,
+                    message_id: format!("{uid}@test"), thread_refs: thread.into(), ..Default::default() };
+                ids.push(store.save_message(&Message { summary, ..Default::default() }).unwrap());
+            }
+        }
+        let load = |limit, filter, pins, group| load_accounts(&store, &accounts, "personal", filter, View::Inbox, limit, 200, pins, group).unwrap();
+        let row_ids = |snap: &Snapshot| snap.inbox.iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(row_ids(&load(1, None, vec![], false)), [ids[4]]);
+        let first = load(1, None, vec![], true);
+        assert_eq!(row_ids(&first), [ids[4], ids[5]]);
+        assert!(first.more);
+        let pinned = load(1, None, vec![ids[3]], true);
+        assert_eq!(row_ids(&pinned), [ids[4], ids[2], ids[5], ids[3]]);
+        assert!(pinned.more);
+        for (account, start) in [("personal", 0), ("work", 4)] {
+            let first = load(1, Some(account), vec![], true);
+            assert_eq!(row_ids(&first), [ids[start], ids[start + 1]]);
+            assert!(first.more);
+            let all = load(2, Some(account), vec![], true);
+            assert_eq!(all.inbox.len(), 4);
+            assert!(!all.more);
+        }
+        assert_eq!(load(4, None, vec![], true).inbox.len(), 8);
+        assert!(!load(4, None, vec![], true).more);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

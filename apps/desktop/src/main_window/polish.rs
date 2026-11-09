@@ -138,22 +138,38 @@ pub(super) enum MessageAction { Menu, Close, ReplyAll, Forward, Unread, Move, Co
 
 pub(super) fn reading_menu(t: &Theme, id: usize, open: bool,
     action: impl Fn(&MessageAction, &mut Window, &mut App) + 'static) -> Div {
+    let theme = *t;
     let action = Rc::new(action);
     let toggle = action.clone();
     div().relative().flex_shrink_0()
-        .child(button(t, "⋯", None).debug_selector(move || format!("message-menu-{id}"))
+        .child(icon_button(t, "message-menu", "icons/more.svg", "Message actions").debug_selector(move || format!("message-menu-{id}"))
             .on_click(move |_, window, cx| toggle(&if open { MessageAction::Close } else { MessageAction::Menu }, window, cx)))
-        .when(open, |d| d.child(gpui::deferred(div().absolute().right_0().top(px(32.)).w(px(150.)).p(px(4.))
+        .when(open, |d| d.child(gpui::deferred(div().absolute().right_0().top(px(32.)).w(px(180.)).p(px(4.))
             .bg(t.raised).border_1().border_color(t.line).rounded(px(radius::CONTROL)).flex().flex_col()
             .occlude()
-            .children([("Reply all", MessageAction::ReplyAll), ("Forward", MessageAction::Forward),
-                ("Mark unread", MessageAction::Unread), ("Move", MessageAction::Move), ("Copy address", MessageAction::Copy)]
-                .into_iter().map(|(label, run)| {
+            .children([("Reply all", "Reply all · Shift+R", MessageAction::ReplyAll), ("Forward", "Forward · F", MessageAction::Forward),
+                ("Mark unread", "Mark unread · Shift+U", MessageAction::Unread), ("Move", "Move · M", MessageAction::Move),
+                ("Copy address", "Copy address", MessageAction::Copy)]
+                .into_iter().map(|(label, tip, run)| {
                     let action = action.clone();
-                    pressable(div().id(label), t, false).debug_selector(move || format!("menu-{label}"))
-                        .h(px(28.)).px(px(8.)).flex().items_center().rounded(px(radius::KEY)).child(label)
+                    pressable(div().id(label).group(label), t, false).debug_selector(move || format!("menu-{label}"))
+                        .h(px(28.)).px(px(8.)).flex().items_center().gap(px(8.)).rounded(px(radius::KEY))
+                        .child(icon(action_icon(label).unwrap(), t.ink2, 16.).group_hover(label, |s| s.text_color(theme.ink)))
+                        .child(label).tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
                         .on_click(move |_, window, cx| action(&run, window, cx))
                 }))).priority(1)))
+}
+
+pub(super) fn action_icon(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "Reply" => "icons/reply.svg", "Reply all" => "icons/reply-all.svg", "Forward" => "icons/forward.svg",
+        "Later" => "icons/later.svg", "Done" => "icons/done.svg", "Move to Inbox" => "icons/restore.svg",
+        "Move" => "icons/move.svg", "Mark unread" => "icons/unread.svg", "Mark read" => "icons/read.svg",
+        "Copy address" => "icons/copy.svg", "Load remote images" => "icons/image.svg", "Load more" => "icons/load-more.svg",
+        "Delete" => "icons/trash.svg", "Empty Trash" | "Delete all" => "icons/empty-trash.svg", "Cancel" => "icons/cancel.svg",
+        "Undo" => "icons/undo.svg", "Send again" => "icons/retry-send.svg", "Edit draft" => "icons/edit-draft.svg",
+        _ => return None,
+    })
 }
 
 pub(super) fn shortcut_button(t: &Theme, label: &'static str, fill: Option<Rgba>, hints: bool) -> Stateful<Div> {
@@ -175,6 +191,48 @@ impl Inbox {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn mail_action_icons_are_embedded_distinct_and_use_house_strokes() {
+        use gpui::AssetSource;
+        let mut paths = HashSet::new();
+        let mut drawings = HashSet::new();
+        for label in ["Reply", "Reply all", "Forward", "Later", "Done", "Move to Inbox", "Move", "Mark unread", "Mark read",
+            "Copy address", "Load remote images", "Load more", "Delete", "Empty Trash", "Cancel", "Undo", "Send again", "Edit draft"] {
+            let path = action_icon(label).unwrap();
+            assert!(paths.insert(path), "{label} must have its own meaning");
+            let bytes = crate::Assets.load(path).unwrap().unwrap();
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("viewBox=\"0 0 16 16\"") && svg.contains("stroke-width=\"1.5\""));
+            assert!(drawings.insert(svg.to_string()), "{label} must have its own drawing");
+        }
+        for path in ["icons/more.svg", "icons/attachment.svg"] {
+            assert!(crate::Assets.load(path).unwrap().is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn mail_icons_fit_a_narrow_popout_and_move_shortcut_targets_its_message(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        cx.simulate_keystrokes("secondary-o j");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        let mut popup = gpui::VisualTestContext::from_window(popout.into(), cx);
+        popup.simulate_resize(gpui::size(px(420.), px(800.)));
+        popup.run_until_parked();
+        for label in ["Reply", "reply-all", "Forward", "Later", "Done"] {
+            let bounds = popup.debug_bounds(label).unwrap();
+            assert!(bounds.left() >= px(0.) && bounds.right() <= px(420.), "{label} must fit the toolbar");
+        }
+        for path in ["reply", "reply-all", "forward", "later", "done", "more"] {
+            let bounds = popup.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
+            assert_eq!(bounds.size, gpui::size(px(16.), px(16.)));
+        }
+        popup.simulate_keystrokes("m");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.inbox.current(), Some(0));
+            assert_eq!(v.palette.as_ref().unwrap().read(cx).query(cx), "move ");
+        });
+    }
 
     #[gpui::test]
     fn unified_launch_uses_two_demo_accounts_without_a_hint(cx: &mut TestAppContext) {

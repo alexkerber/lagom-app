@@ -27,6 +27,7 @@ pub struct Live {
     stale: bool,
     /// Rows per list read. Grows when the selection nears the end.
     limit: u32,
+    more: bool,
     /// The ⌘K hit on screen: loaded even past `limit`, until another list opens.
     pub(super) pin: Option<i64>,
     /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
@@ -157,6 +158,7 @@ impl Live {
             pending: mail.pending.clone(),
             stale: false,
             limit: PAGE,
+            more: false,
             pin: None,
             want: None,
             notification_target: None,
@@ -291,6 +293,7 @@ impl MainWindow {
         }
         live.current = live.current.min(live.accounts.len().saturating_sub(1));
         let Some(account) = live.account().map(|a| a.id.clone()) else {
+            live.more = false;
             self.inbox = Inbox::live();
             self.reading_thread = None;
             self.close_popouts(None, cx);
@@ -308,10 +311,11 @@ impl MainWindow {
         };
         self.inbox.group = self.panes.group_conversations;
         let pins = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(live.pin).collect();
-        let result = mail::load_accounts(&live.store, &live.accounts, &account, view, live.limit, now(), pins, self.inbox.group);
+        let result = mail::load_accounts(&live.store, &live.accounts, &account, self.inbox.account_filter.as_deref(), view, live.limit, now(), pins, self.inbox.group);
         match result {
             Ok(snap) => {
                 live.stale = false;
+                live.more = snap.more;
                 self.reading_dirty = true;
                 let due = snap.next_due;
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
@@ -816,16 +820,7 @@ impl MainWindow {
     }
 
     pub(super) fn has_more(&self) -> bool {
-        let Some(live) = &self.live else { return false };
-        let mut counts = HashMap::new();
-        let rows: Vec<_> = if self.inbox.group { self.inbox.members.keys().copied().collect() } else { self.inbox.raw_list().clone() };
-        for id in rows {
-            let account = &self.inbox.mail[id].account;
-            if self.inbox.account_filter.as_ref().is_none_or(|filter| filter == account) {
-                *counts.entry(account).or_insert(0u32) += 1;
-            }
-        }
-        counts.values().any(|&count| count >= live.limit)
+        self.live.as_ref().is_some_and(|live| live.more)
     }
 
     pub(super) fn load_more(&mut self, cx: &mut Context<Self>) {
@@ -916,6 +911,15 @@ impl MainWindow {
     pub(super) fn sync_line(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
         Some(format!("{} · {}", short_name(live.account()?), self.sync_state()?).into())
+    }
+
+    pub(super) fn sync_icon(&self) -> &'static str {
+        let Some(live) = &self.live else { return "icons/cloud-synced.svg" };
+        match live.account().and_then(|a| live.sync.get(&a.id)) {
+            Some(SyncState::Synced(_)) => "icons/cloud-synced.svg",
+            Some(SyncState::Failed(_) | SyncState::ReauthRequired) => "icons/cloud-failed.svg",
+            _ => "icons/cloud-syncing.svg",
+        }
     }
 
     /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
@@ -2057,6 +2061,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mail_sync_status_has_distinct_embedded_icons(cx: &mut TestAppContext) {
+        use gpui::AssetSource;
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, _| {
+            assert_eq!(v.sync_icon(), "icons/cloud-syncing.svg");
+            for (state, path) in [(SyncState::Synced(0), "icons/cloud-synced.svg"),
+                (SyncState::Failed("fixture".into()), "icons/cloud-failed.svg"),
+                (SyncState::ReauthRequired, "icons/cloud-failed.svg"),
+                (SyncState::SigningIn, "icons/cloud-syncing.svg"), (SyncState::Syncing, "icons/cloud-syncing.svg")] {
+                let live = v.live.as_mut().unwrap();
+                live.sync.insert(live.accounts[0].id.clone(), state);
+                assert_eq!(v.sync_icon(), path);
+                assert!(crate::Assets.load(path).unwrap().is_some());
+            }
+        });
+    }
+
+    #[gpui::test]
     fn unread_pages_remain_reachable_after_filter_hides_loaded_rows(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         view.update(cx, |v, cx| {
@@ -2739,6 +2761,7 @@ mod tests {
             pending: Default::default(),
             stale: false,
             limit: PAGE,
+            more: false,
             pin: None,
             want: None,
             notification_target: None,
@@ -3893,6 +3916,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_unified_navigation_visits_every_message_in_date_order(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        for group in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            let expected = view.update(cx, |v, cx| {
+                let live = v.live.as_ref().unwrap();
+                let mut ids = Vec::new();
+                for (ix, account) in mail::demo_accounts().iter().enumerate() {
+                    live.store.save_account(account).unwrap();
+                    let folder = live.store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+                    let count = if ix == 0 { 400 } else { 200 };
+                    for uid in 1..=count {
+                        let summary = MessageSummary { account: account.id.clone(), folder, uid,
+                            date: if ix == 0 { 1000 + uid as i64 } else { uid as i64 }, seen: true, ..Default::default() };
+                        ids.push((summary.date, live.store.save_message(&Message { summary, ..Default::default() }).unwrap()));
+                    }
+                }
+                ids.sort_by_key(|row| std::cmp::Reverse(*row));
+                v.panes.group_conversations = group;
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                ids.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+            });
+            for (ix, id) in expected.iter().enumerate() {
+                if ix > 0 { cx.simulate_keystrokes("j"); }
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(*id), "row {ix}, grouped={group}");
+                });
+            }
+            assert!(!view.read_with(cx, |v, _| v.has_more()));
+        }
+    }
+
+    #[gpui::test]
     fn virtual_list_navigation_loads_the_next_page(cx: &mut TestAppContext) {
         use lagom_core::store::{FolderRole, Message, MessageSummary};
         let (view, cx, _rx) = window(cx);
@@ -4068,6 +4125,49 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
         cx.simulate_keystrokes("cmd-backspace");
         assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+    }
+
+    #[gpui::test]
+    fn review_popout_menu_keeps_unsaved_and_failed_drafts(cx: &mut TestAppContext) {
+        for (action, failed_save) in [("Reply all", false), ("Forward", false), ("Reply all", true), ("Forward", true)] {
+            let (view, cx, _rx) = window(cx);
+            cx.simulate_keystrokes("secondary-o j r");
+            cx.simulate_input("Unsaved edits");
+            let (draft, outgoing, stored, popout) = view.read_with(cx, |v, cx| {
+                let draft = v.compose.as_ref().unwrap();
+                (draft.entity_id(), draft.read(cx).outgoing(cx), v.live.as_ref().unwrap().store.drafts().unwrap(), v.popouts[0].1)
+            });
+            assert_ne!(stored[0].text, outgoing.text);
+            let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+            let writer = rusqlite::Connection::open(store.path()).unwrap();
+            if failed_save {
+                writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+                view.update(cx, |v, cx| assert!(!store.with_short_lock_wait(|_| {
+                    Ok(v.compose.as_ref().unwrap().update(cx, |c, cx| c.save(cx)))
+                }).unwrap()));
+            }
+            let mut popup = VisualTestContext::from_window(popout.into(), cx);
+            popup.run_until_parked();
+            let at = popup.debug_bounds("message-menu-0").unwrap().center();
+            popup.simulate_click(at, Default::default());
+            popup.run_until_parked();
+            let at = popup.debug_bounds(format!("menu-{action}").leak()).unwrap().center();
+            popup.simulate_click(at, Default::default());
+            view.read_with(cx, |v, cx| {
+                let current = v.compose.as_ref().unwrap();
+                assert_eq!(current.entity_id(), draft, "{action} replaced the open composer");
+                assert_eq!(current.read(cx).outgoing(cx), outgoing);
+                assert_eq!(v.live.as_ref().unwrap().store.drafts().unwrap(), stored);
+            });
+            if failed_save {
+                writer.execute_batch("ROLLBACK").unwrap();
+                view.update(cx, |v, cx| assert!(v.compose.as_ref().unwrap().update(cx, |c, cx| c.save(cx))));
+            } else {
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+            }
+            assert_eq!(store.drafts().unwrap()[0].text, outgoing.text);
+        }
     }
 
     #[gpui::test]
@@ -4267,6 +4367,7 @@ mod tests {
             review_accounts(v, cx);
             for uid in 4..=200 { incoming(v, uid); }
             v.reload(cx);
+            v.load_more(cx);
             let live = v.live.as_ref().unwrap();
             for account in &live.accounts {
                 live.store.save_folder(&account.id, "Archive", None, lagom_core::store::FolderRole::Archive).unwrap();
