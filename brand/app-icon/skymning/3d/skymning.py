@@ -81,6 +81,9 @@ PUNCH["SE2"] = dict(PUNCH["C2"], **GOLD_CORE,
 PUNCH["SE3"] = dict(PUNCH["C2"], **GOLD_CORE,
     plate=[(0.0, "#FFCE1F"), (0.18, "#F6AE3E"), (0.40, "#D79A9A"), (0.66, "#3D6FB8"), (1.0, "#0B3F86")],
     sheen_tint="#FFE8D8")
+# SE2b: SE2 with the flag's yellow carried by a hotter, wider gold core and a warm sheen.
+PUNCH["SE2b"] = dict(PUNCH["SE2"], glow=("#FFC400", "#FFE45C"), ember="#FFCC00", ember_energy=420,
+    glow_strength=5.6, glow_power=1.6, spill_strength=3.4, sheen_tint="#FFF1B8", diffuse="#FFFBEA")
 P = dict(BASE, **PUNCH[VARIANT])
 
 
