@@ -36,7 +36,8 @@
     .wrap { max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 56px); }
 
     nav { position: relative; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 88px; }
-    .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-size: 24px; }
+    .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 700; letter-spacing: -0.05em; line-height: 1; }
+    .brand img { border-radius: 22%; }
     .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
     .links a { display: flex; align-items: center; height: 40px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
     .links a:hover { background: var(--card); }
@@ -105,8 +106,8 @@
 <body>
   <div class="wrap">
     <nav aria-label="Site">
-      <a class="brand display" href="./">
-        <img src="apple-touch-icon-180.png" width="36" height="36" alt="">
+      <a class="brand" href="./">
+        <img src="apple-touch-icon-180.png" width="30" height="30" alt="">
         lagom
       </a>
       <div class="links">
