@@ -54,6 +54,7 @@
 - [ ] Text input: try by hand. Typing, an IME (Japanese, Pinyin), dead keys, mouse and double-click selection, drag past the edge, scrolling a long body, the Edit menu. Tests cover the editing model and GPUI key dispatch only.
 - [ ] Text input: caret, accent selection and focus ring are not in a screenshot yet. GPUI blurs fields in an inactive window, and the capture window was inactive.
 - [x] Compose: debounce autosave for 300 ms and write off the UI thread; revision checks preserve Send/Undo/Discard ordering; restore drafts on start and release retained drafts after account removal.
+- [x] Compose: local per-account address autocomplete in To/Cc, weighted sent/recent contacts, accent-insensitive word prefixes, six suggestions, keyboard/click acceptance, editable recipient tokens and paste validation. Background index snapshot; 50k-message lookup budget and headless flows covered.
 - [ ] Compose: sync local drafts with the server-side Drafts folder.
 - [ ] Motion: the key moments in `docs/motion.md` (Done, archive, Later, send, undo, inbox zero).
 - [x] Feel: hover and press on everything clickable, the selection glides, spring easing, the message list scrolls, Done button in the Done colour, each sample message has its own sender and body (`feat/feel`).

@@ -78,3 +78,17 @@ speed. The query walks the date index to select each thread's latest visible
 message, then reads only the selected threads through the thread index. Schema
 v9 adds a partial date index for Later. These query measurements exclude account
 counts and rendering; they do not establish the full reload or frame budget.
+
+## Address autocomplete
+
+`cargo test -p lagom-core --release lookup_50k_messages_under_5ms -- --nocapture`
+builds a disposable store with 50,000 messages and 50,000 distinct correspondents.
+A release measurement on macOS: 240 ms to read, rank and index the snapshot;
+0.2–1.6 µs for six common, selective, accent-folded and missing prefix lookups.
+The test asserts each lookup takes less than 5 ms and verifies result counts.
+The budget excludes building the index, rendering and executor scheduling.
+
+Compose builds this account-local snapshot on the background executor when opened,
+then reads only the in-memory prefix index while typing. Reopening refreshes it;
+an already open sheet keeps its snapshot until reopened. Dormant restored drafts
+do not build an index. No network call, migration or real account is involved.

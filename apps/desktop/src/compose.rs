@@ -2,6 +2,8 @@
 //! A reply sheet over the main window. To, Cc (on demand), Subject and Body are `TextInput`s.
 //! Edits are saved locally; Send atomically moves the draft to the outbox.
 
+mod addresses;
+
 use std::{io::Read, rc::Rc, path::{Path, PathBuf}, time::Duration};
 
 use gpui::{
@@ -45,6 +47,8 @@ pub struct Compose {
     theme: Theme,
     phase: Phase,
     focus: FocusHandle,
+    addresses: addresses::Addresses,
+    _contacts: Option<Task<()>>,
     to: Entity<TextInput>,
     cc: Entity<TextInput>,
     subject: Entity<TextInput>,
@@ -92,7 +96,8 @@ impl Compose {
             this.theme = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
             cx.notify();
         });
-        let to = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients").with_text(to));
+        let tokens = recipients(to);
+        let to = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
         let cc = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
         let subject = cx.new(|cx| TextInput::new(window, cx).placeholder("Subject").with_text(subject));
         let body = cx.new(|cx| TextInput::new(window, cx).markdown().placeholder("Write your message"));
@@ -113,6 +118,8 @@ impl Compose {
             theme: Theme::for_appearance(window.appearance(), DEFAULT_ACCENT),
             phase: Phase::Open,
             focus: cx.focus_handle(),
+            addresses: addresses::Addresses { tokens: [tokens, Vec::new()], ..Default::default() },
+            _contacts: None,
             to,
             cc,
             subject,
@@ -132,13 +139,14 @@ impl Compose {
 
     pub fn persist(&mut self, store: Rc<Store>, account: Account, cx: &mut Context<Self>) {
         self.store = Some((store, account));
+        self.load_contacts(cx);
         self.save(cx);
     }
 
     pub fn restore(draft: Draft, account: Account, store: Rc<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::new(&account.email, &draft.to, &draft.subject, draft.reply, window, cx);
         this.message_id = draft.id;
-        this.cc.update(cx, |input, cx| input.set_text(&draft.cc, cx));
+        this.addresses.tokens[1] = recipients(&draft.cc);
         this.body.update(cx, |input, cx| input.set_text(&draft.text, cx));
         this.show_cc = !draft.cc.is_empty();
         this.keep = true;
@@ -151,7 +159,7 @@ impl Compose {
     fn draft(&self, account: &Account, cx: &gpui::App) -> Draft {
         Draft {
             id: self.message_id.clone(), account: account.id.clone(),
-            to: self.to.read(cx).text().into(), cc: self.cc.read(cx).text().into(),
+            to: self.address_text(0, cx), cc: self.address_text(1, cx),
             subject: self.subject.read(cx).text().into(), text: self.body.read(cx).text().into(),
             reply: self.reply.clone(),
         }
@@ -318,6 +326,7 @@ impl Compose {
 
     /// Esc kept the draft: the sheet comes back as it was, focus where it was.
     pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_contacts(cx);
         self.keep = false;
         self.set(Phase::Open, cx);
         let focus = self.refocus.take().unwrap_or_else(|| self.body.focus_handle(cx));
@@ -329,7 +338,11 @@ impl Compose {
     }
 
     fn on_field(&mut self, field: &Entity<TextInput>, e: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(e, TextInputEvent::Changed) { self.save_later(cx); }
+        if matches!(e, TextInputEvent::Changed) {
+            if *field == self.to { self.address_changed(0, cx); }
+            if *field == self.cc { self.address_changed(1, cx); }
+            self.save_later(cx);
+        }
         match e {
             TextInputEvent::Escape => self.close(window, cx),
             // Enter in To, Cc or Subject moves on, as Tab does.
@@ -353,8 +366,8 @@ impl Compose {
         let text = |f: &Entity<TextInput>| f.read(cx).text().to_string();
         let (in_reply_to, references) = self.reply.clone().unwrap_or_default();
         Outgoing {
-            to: recipients(&text(&self.to)),
-            cc: recipients(&text(&self.cc)),
+            to: recipients(&self.address_text(0, cx)),
+            cc: recipients(&self.address_text(1, cx)),
             subject: text(&self.subject),
             text: text(&self.body),
             in_reply_to,
@@ -369,6 +382,8 @@ impl Compose {
         if self.phase == Phase::Sent || self.phase == Phase::Gone {
             return;
         }
+        self.commit_address(0, cx);
+        self.commit_address(1, cx);
         let mail = self.outgoing(cx);
         if mail.to.is_empty() && mail.cc.is_empty() {
             self.problem = Some("Add a recipient");
@@ -376,7 +391,7 @@ impl Compose {
             cx.notify();
             return;
         }
-        if mail.to.iter().chain(&mail.cc).any(|a| !a.contains('@')) {
+        if mail.to.iter().chain(&mail.cc).any(|a| !lagom_core::contacts::valid_recipient(a)) {
             self.problem = Some("A recipient is not an email address");
             window.focus(&self.to.focus_handle(cx));
             cx.notify();
@@ -513,7 +528,7 @@ impl Compose {
         cx.stop_propagation();
     }
 
-    fn sheet(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sheet(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let field = |label: &'static str| {
             div()
@@ -574,7 +589,7 @@ impl Compose {
                     .flex_col()
                     .px(px(24.))
                     .child(field("From").child(self.from.clone()))
-                    .child(field("To").child(grow(&self.to)).when(!self.show_cc, |d| {
+                    .child(field("To").child(self.address_field(0, window, cx)).when(!self.show_cc, |d| {
                         d.child(
                             pressable(div().id("add-cc"), t, false)
                                 .flex()
@@ -588,7 +603,7 @@ impl Compose {
                                 .child("Cc"),
                         )
                     }))
-                    .when(self.show_cc, |d| d.child(field("Cc").child(grow(&self.cc))))
+                    .when(self.show_cc, |d| d.child(field("Cc").child(self.address_field(1, window, cx))))
                     .child(field("Subject").child(grow(&self.subject).font_weight(FontWeight::SEMIBOLD))),
             )
             .child(
@@ -664,7 +679,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
 impl gpui::EventEmitter<gpui::DismissEvent> for Compose {}
 
 impl Render for Compose {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.phase == Phase::Gone {
             return div();
         }
@@ -678,7 +693,7 @@ impl Render for Compose {
             .items_center()
             .justify_center()
             .bg(scrim)
-            .child(self.sheet(cx));
+            .child(self.sheet(window, cx));
         // Bottom padding shifts the centred sheet up by half its value.
         let out = |d: Div, v: f32| d.opacity(1. - v).pb(px(160. * v));
         let layer = match self.phase {
