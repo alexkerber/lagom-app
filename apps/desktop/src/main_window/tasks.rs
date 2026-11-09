@@ -145,7 +145,7 @@ impl MainWindow {
                 self.today.default = default;
                 self.today.tasks = tasks;
                 self.today.day = day;
-                if !self.today.tasks.iter().any(|t| Some(t.id) == self.today.selected) {
+                if !self.visible_tasks().iter().any(|t| Some(t.id) == self.today.selected) {
                     self.today.selected = self.visible_tasks().first().map(|t| t.id);
                 }
             }
@@ -214,7 +214,10 @@ impl MainWindow {
     }
 
     fn edit_task(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.task_input(edit).is_some() { return; }
+        if let Some(input) = self.task_input(edit) {
+            window.focus(&input.focus_handle(cx));
+            return;
+        }
         let text = match edit {
             Edit::Rename(id) => self.today.tasks.iter().find(|t| t.id == id).map(|t| t.title.as_str()),
             Edit::RenameList(id) => self.today.lists.iter().find(|l| l.id == id).map(|l| l.name.as_str()),
@@ -781,6 +784,53 @@ mod tests {
         });
         cx.simulate_keystrokes("escape down enter");
         assert!(view.read_with(cx, |v, _| matches!(v.today.editor, Some((Edit::Rename(1), _)))));
+    }
+
+    #[gpui::test]
+    fn reopening_task_rename_restores_editor_focus(cx: &mut TestAppContext) {
+        reopening_rename_restores_editor_focus(cx, Edit::Rename(2), "task-menu-2");
+    }
+
+    #[gpui::test]
+    fn reopening_list_rename_restores_editor_focus(cx: &mut TestAppContext) {
+        reopening_rename_restores_editor_focus(cx, Edit::RenameList(2), "list-menu-2");
+    }
+
+    fn reopening_rename_restores_editor_focus(cx: &mut TestAppContext, edit: Edit, menu: &'static str) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        for finish in ["escape", "enter"] {
+            cx.run_until_parked();
+            let at = cx.debug_bounds(menu).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_keystrokes("enter secondary-a");
+            cx.simulate_input("Unsaved name");
+            let input = view.read_with(cx, |v, _| v.task_input(edit).unwrap());
+            cx.run_until_parked();
+            let at = cx.debug_bounds(menu).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            view.update_in(cx, |v, window, _| assert!(v.today.menu_focus.as_ref().unwrap().is_focused(window)));
+            cx.simulate_keystrokes("enter");
+            view.update_in(cx, |v, window, cx| {
+                assert!(v.today.menu.is_none());
+                assert_eq!(v.task_input(edit).unwrap(), input);
+                assert!(input.focus_handle(cx).is_focused(window));
+                assert_eq!(input.read(cx).text(), "Unsaved name");
+            });
+            cx.simulate_input(" continued");
+            assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "Unsaved name continued");
+            cx.simulate_keystrokes(finish);
+            view.update_in(cx, |v, window, _| {
+                assert!(v.today.editor.is_none());
+                assert!(v.focus.is_focused(window));
+                let (name, original) = match edit {
+                    Edit::Rename(id) => (v.today.tasks.iter().find(|t| t.id == id).unwrap().title.as_str(), "Pick up groceries"),
+                    Edit::RenameList(id) => (v.today.lists.iter().find(|l| l.id == id).unwrap().name.as_str(), "Work"),
+                    _ => unreachable!(),
+                };
+                assert_eq!(name, if finish == "enter" { "Unsaved name continued" } else { original });
+            });
+        }
     }
 
     #[gpui::test]

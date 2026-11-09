@@ -2129,6 +2129,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn synced_task_completion_keeps_keyboard_selection_visible(cx: &mut TestAppContext) {
+        for (remaining, expanded) in [(true, false), (false, false), (true, true)] {
+            let (view, cx, _rx) = window(cx);
+            let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+            let list = store.default_task_list().unwrap();
+            let fallback = remaining.then(|| store.add_task(list, "Still open", "", None).unwrap());
+            let task = store.add_task(list, "Completed elsewhere", "", None).unwrap();
+            if expanded { store.set_done(store.add_task(list, "Already done", "", None).unwrap().id, true).unwrap(); }
+            view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
+            cx.run_until_parked();
+            if expanded {
+                let at = cx.debug_bounds(format!("completed-{list}").leak()).unwrap().center();
+                cx.simulate_click(at, Default::default());
+            }
+            let row = format!("task-{}", task.id).leak();
+            let at = cx.debug_bounds(row).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            let worker_store = Store::open(store.path()).unwrap();
+            worker_store.set_done(task.id, true).unwrap();
+            view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Changed], window, cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            view.read_with(cx, |v, _| assert!(v.today.tasks.iter().find(|t| t.id == task.id).unwrap().done_at.is_some()));
+            cx.simulate_keystrokes("enter");
+            if remaining {
+                cx.simulate_keystrokes("secondary-a");
+                cx.simulate_input("Renamed visible task");
+                cx.simulate_keystrokes("enter");
+                let expected = if expanded { task.id } else { fallback.unwrap().id };
+                assert_eq!(store.tasks(list, true).unwrap().iter().find(|t| t.id == expected).unwrap().title, "Renamed visible task");
+            }
+            view.update_in(cx, |v, window, _| assert!(v.focus.is_focused(window), "Enter must not focus a hidden editor"));
+            assert!(store.tasks(list, true).unwrap().iter().find(|t| t.id == task.id).unwrap().done_at.is_some());
+        }
+    }
+
+    #[gpui::test]
     fn review_tasks_scope_loss_offers_consent_with_calendar_still_authorized(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let id = view.update_in(cx, |v, window, cx| {
