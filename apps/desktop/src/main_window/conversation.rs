@@ -11,6 +11,10 @@ pub(super) struct MessageBody {
 }
 
 impl html::WebHost for MessageBody {
+    fn new_task(&mut self, cx: &mut Context<Self>) {
+        let id = self.id;
+        self.main.update(cx, |main, cx| main.task_from_mail(id, cx)).ok();
+    }
     fn web(&mut self) -> &mut html::Web { &mut self.web }
     fn keys(&self) -> FocusHandle { self.focus.clone() }
 }

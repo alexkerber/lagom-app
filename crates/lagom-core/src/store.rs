@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 8 {
+        if version > 9 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -89,10 +89,32 @@ impl Store {
             store.backfill_threads()?;
             tx.commit()?;
         }
+        if version < 9 {
+            store.db.execute_batch(include_str!("schema_v9.sql"))?;
+        }
         Ok(store)
     }
     pub fn path(&self) -> &Path {
         Path::new(self.db.path().expect("file-backed store"))
+    }
+
+    /// Runs `write` with at most ~250 ms of lock waiting, then restores the normal timeout.
+    pub fn with_short_lock_wait<T>(&self, write: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        use std::time::{Duration, Instant};
+        // A wall-clock deadline, not a count of sleeps: macOS can oversleep short sleeps severalfold,
+        // so SQLite's own timeout and any fixed number of naps ran to about a second on CI.
+        thread_local!(static DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
+        fn short_wait(_attempt: i32) -> bool {
+            let left = DEADLINE.with(|d| d.get()).map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
+            !left.is_zero() && { std::thread::sleep(left.min(Duration::from_millis(5))); true }
+        }
+        let previous: u64 = self.db.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
+        DEADLINE.with(|d| d.set(Some(Instant::now() + Duration::from_millis(250))));
+        self.db.busy_handler(Some(short_wait))?;
+        let result = write(self);
+        DEADLINE.with(|d| d.set(None));
+        self.db.busy_timeout(std::time::Duration::from_millis(previous))?;
+        result
     }
 
     pub fn save_account(&self, account: &Account) -> Result<()> {
@@ -156,6 +178,32 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_task_write_restores_timeout_and_leaves_worker_timeout_unchanged() {
+        use std::time::{Duration, Instant};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("busy.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let worker = Store::open(&path).unwrap();
+        let timeout = |s: &Store| s.db.pragma_query_value(None, "busy_timeout", |r| r.get::<_, u64>(0)).unwrap();
+        let list = store.default_task_list().unwrap();
+        worker.db.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = Instant::now();
+        let result = store.with_short_lock_wait(|s| s.add_task(list, "Retry", "", None));
+        let elapsed = started.elapsed();
+        assert!(matches!(result, Err(Error::Store(rusqlite::Error::SqliteFailure(e, _))) if e.code == rusqlite::ErrorCode::DatabaseBusy));
+        assert!(elapsed < Duration::from_millis(750), "task write blocked for {elapsed:?}");
+        assert_eq!(timeout(&store), 5000);
+        assert_eq!(timeout(&worker), 5000);
+        worker.db.execute_batch("ROLLBACK;").unwrap();
+        assert!(store.tasks(list, true).unwrap().is_empty());
+        store.db.busy_timeout(Duration::from_millis(1234)).unwrap();
+        let task = store.with_short_lock_wait(|s| s.add_task(list, "Retry", "", None)).unwrap();
+        assert_eq!(store.tasks(list, false).unwrap(), [task]);
+        assert_eq!(timeout(&store), 1234);
+        assert_eq!(timeout(&worker), 5000);
+    }
+
     #[cfg(unix)]
     #[test]
     fn store_files_are_owner_only_also_when_they_existed() {
@@ -195,7 +243,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 9);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -686,7 +734,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 9);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -758,7 +806,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 9);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -828,7 +876,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            8
+            9
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -857,7 +905,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 8);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 9);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

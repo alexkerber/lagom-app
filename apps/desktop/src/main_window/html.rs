@@ -104,6 +104,7 @@ pub(super) enum Msg {
     Loaded,
     Open(String),
     Escape,
+    NewTask,
 }
 
 /// Runs in every document before the mail, as an app script: the CSP and the page-script switch
@@ -115,7 +116,12 @@ addEventListener('click', e => {
   const a = e.composedPath().find(n => (n.tagName === 'A' || n.tagName === 'AREA') && typeof n.href === 'string' && n.href);
   if (a) { e.preventDefault(); if (e.isTrusted) window.ipc.postMessage('open ' + a.href); }
 }, true);
-addEventListener('keydown', e => { if (e.key === 'Escape') window.ipc.postMessage('escape'); }, true);
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') window.ipc.postMessage('escape');
+  if (e.isTrusted && e.key === 't' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.target.closest?.('input,textarea,[contenteditable]')) {
+    e.preventDefault(); window.ipc.postMessage('task');
+  }
+}, true);
 "#;
 
 fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
@@ -150,13 +156,17 @@ pub(super) struct Web {
 }
 
 /// A window with a mail web view: the main window and each message window.
-pub(super) trait WebHost: 'static {
+pub(super) trait WebHost: 'static + Sized {
     fn web(&mut self) -> &mut Web;
     /// Where the keys go when Esc leaves the web view.
     fn keys(&self) -> FocusHandle;
+    fn new_task(&mut self, cx: &mut Context<Self>);
 }
 
 impl WebHost for MainWindow {
+    fn new_task(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.inbox.current() { self.task_from_mail(id, cx); }
+    }
     fn web(&mut self) -> &mut Web {
         &mut self.web
     }
@@ -290,6 +300,11 @@ impl Web {
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     fn event<T: WebHost>(host: &mut T, msg: Msg, window: &mut Window, cx: &mut Context<T>) {
         match msg {
+            Msg::NewTask => {
+                host.web().unfocus();
+                window.focus(&host.keys());
+                host.new_task(cx);
+            }
             Msg::Loaded => host.web().ready = true,
             Msg::Open(url) if link_allowed(&url) => cx.open_url(&url),
             Msg::Open(_) => {}
@@ -331,6 +346,7 @@ impl Web {
                 let msg = match body.split_once(' ') {
                     Some(("open", url)) => Msg::Open(url.to_string()),
                     _ if body == "escape" => Msg::Escape,
+                    _ if body == "task" => Msg::NewTask,
                     _ => return,
                 };
                 let _ = ipc_tx.send(msg);
@@ -359,6 +375,23 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[gpui::test]
+    fn review_task_toast_keeps_html_drawable(cx: &mut gpui::TestAppContext) {
+        if !SUPPORTED { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        view.update_in(cx, |v, window, cx| {
+            let id = v.inbox.current().unwrap();
+            v.inbox.mail[id].html = Some("<p>Still visible</p>".into());
+            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark));
+            v.web.ready = true;
+            v.notify("Task created", cx);
+            v.task_undo = Some(1);
+            v.toast.as_mut().unwrap().1 = true;
+            v.web_frame(window, cx);
+            assert!(v.web.drawable.get(), "task toast must not blank the HTML body");
+        });
+    }
 
     #[test]
     fn scrolling_clips_without_resizing_or_reanchoring_the_document() {

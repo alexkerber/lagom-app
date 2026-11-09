@@ -132,9 +132,11 @@ fn tasks_from_mail_use_default_or_selected_list_without_network_or_secrets() {
     assert_eq!(run(&db, &["tasks", "from-mail", &id]), "1\t \tReply tomorrow\n");
     assert_eq!(run(&db, &["tasks", "from-mail", &id, "--list", "pRiVaTe"]), "2\t \tReply tomorrow\n");
     assert_eq!(run(&db, &["tasks", "from-mail", &id, "--list", "2"]), "3\t \tReply tomorrow\n");
+    store.set_default_task_list(2).unwrap();
+    assert_eq!(run(&db, &["tasks", "from-mail", &id]), "4\t \tReply tomorrow\n");
     let tasks = store.tasks_for_mail(&account.id, "<cli@test>").unwrap();
-    assert_eq!(tasks.len(), 3);
-    assert_eq!(tasks.iter().map(|t| t.list).collect::<Vec<_>>(), [1, 2, 2]);
+    assert_eq!(tasks.len(), 4);
+    assert_eq!(tasks.iter().map(|t| t.list).collect::<Vec<_>>(), [1, 2, 2, 2]);
     assert!(tasks.iter().all(|t| t.mail_subject.as_deref() == Some("Reply tomorrow")));
 }
 
