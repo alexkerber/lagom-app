@@ -1036,7 +1036,7 @@ mod tests {
             bind_keys(cx);
             crate::text_input::bind_keys(cx);
         });
-        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
         let (bridge, rx) = crate::sync::Bridge::detached();
         let dir = std::env::temp_dir().join(format!("lagom-live-{}-{:?}-{:?}", std::process::id(), std::thread::current().id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1794,11 +1794,31 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_task_controls_follow_page_and_visible_tasks(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        view.update_in(cx, |v, window, cx| v.show_home(window, cx));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds("Add list").is_none());
+        assert!(cx.debug_bounds("task-hint").is_none());
+        let task = store.add_task(store.default_task_list().unwrap(), "Fixture task", "", None).unwrap();
+        view.update_in(cx, |v, window, cx| v.show_home(window, cx));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds("Add list").is_none());
+        assert!(cx.debug_bounds("task-hint").is_some());
+        store.set_done(task.id, true).unwrap();
+        view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds("Add list").is_some());
+        assert!(cx.debug_bounds("task-hint").is_some());
+    }
+
+    #[gpui::test]
     fn local_task_list_failed_writes_keep_editor_text(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
         let fixture = rusqlite::Connection::open(store.path()).unwrap();
-        view.update_in(cx, |v, window, cx| v.show_home(window, cx));
+        view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         for rename in [false, true] {
             let selector = if rename { format!("rename-list-{}", store.task_lists().unwrap().last().unwrap().id) } else { "Add list".into() };
             cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });

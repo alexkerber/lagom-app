@@ -4,7 +4,10 @@ use lagom_core::{account::Auth, oauth::{self, Provider}};
 
 impl MainWindow {
     pub(super) fn reload_agenda(&mut self, cx: &mut Context<Self>) {
-        let Some(live) = &self.live else { return };
+        let Some(live) = &self.live else {
+            if self.demo { self.today.events = demo_events(chrono::Local::now().date_naive()); }
+            return;
+        };
         let result = (|| -> lagom_core::Result<_> {
             let day = chrono::Local::now().date_naive();
             let events = live.store.today_events(&day.to_string(), day_start(day, &chrono::Local), day_start(day.succ_opt().unwrap(), &chrono::Local))?;
@@ -24,6 +27,7 @@ impl MainWindow {
     }
 
     pub(super) fn calendar_controls(&self, cx: &mut Context<Self>) -> Div {
+        if self.demo && self.live.is_none() { return div(); }
         let t = self.theme;
         let mut controls = div().id("calendar-accounts").flex_shrink_0().max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
         if self.today.calendar_accounts.is_empty() && self.today.events.is_empty() {
@@ -78,6 +82,20 @@ impl MainWindow {
         }
         div().w_full().flex_shrink_0().child(agenda)
     }
+}
+
+pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::AgendaEvent> {
+    [(9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
+        let start = day.and_hms_opt(hour, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
+        let end = start + chrono::Duration::minutes(45);
+        Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(),
+            event: lagom_core::calendar::Event {
+                remote_id: format!("demo-{hour}"), title: title.into(), start: start.to_rfc3339(), end: end.to_rfc3339(),
+                start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: false,
+                location: None, join_url: None, html_link: None,
+            },
+        })
+    }).collect()
 }
 
 pub(super) fn day_start<T: chrono::TimeZone>(date: chrono::NaiveDate, zone: &T) -> i64 {

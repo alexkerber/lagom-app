@@ -67,6 +67,69 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    #[test]
+    fn review_section_icons_are_embedded_and_distinct() {
+        use gpui::AssetSource;
+        let icons: HashSet<_> = SECTIONS.iter().map(|(_, path, _)| {
+            let bytes = crate::Assets.load(path).unwrap().expect("sidebar icon must be embedded");
+            let svg = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(svg.contains("viewBox=\"0 0 16 16\""));
+            assert!(svg.contains("stroke-width=\"1.5\""));
+            svg
+        }).collect();
+        assert_eq!(icons.len(), 4);
+    }
+
+    #[gpui::test]
+    fn review_mailboxes_have_spacing_without_a_duplicate_heading(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        cx.run_until_parked();
+        let todo = cx.debug_bounds("section-3").unwrap();
+        let inbox = cx.debug_bounds("nav-Inbox").unwrap();
+        let gap = inbox.top() - todo.bottom();
+        assert!(gap >= px(12.) && gap <= px(16.), "mailboxes need a small gap, not a heading: {gap:?}");
+    }
+
+    #[gpui::test]
+    fn review_demo_home_has_events_without_consent_or_task_controls(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Show your Google Calendar").is_none());
+        assert!(cx.debug_bounds("Add list").is_none());
+        assert!(cx.debug_bounds("task-hint").is_none());
+        assert!(cx.debug_bounds("agenda-event-0").is_some());
+        view.read_with(cx, |v, _| {
+            assert!(v.live.is_none());
+            assert!(v.preferences_path.is_none());
+            assert_eq!(v.today.events.len(), 3);
+            let day = chrono::Local::now().date_naive();
+            for entry in &v.today.events {
+                let event = &entry.event;
+                assert_eq!(chrono::DateTime::from_timestamp(event.start_utc, 0).unwrap().with_timezone(&chrono::Local).date_naive(), day);
+                assert!(event.end_utc > event.start_utc);
+                assert!(event.join_url.is_none() && event.html_link.is_none());
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn review_launch_screens_match_the_smoke_list(cx: &mut TestAppContext) {
+        let smoke = include_str!("../../../../scripts/smoke.sh");
+        let screens = smoke.lines().find_map(|line| line.strip_prefix("screens='")).unwrap().trim_end_matches('\'');
+        for screen in ["home", "inbox", "calendar", "todo"] {
+            assert!(screens.split_whitespace().any(|s| s == screen));
+            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, screen, window, cx));
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                assert!(v.live.is_none() && v.preferences_path.is_none());
+                assert!(matches!((&v.page, screen), (Page::Home, "home") | (Page::Mail, "inbox") | (Page::Calendar, "calendar") | (Page::Todo, "todo")));
+            });
+            assert_eq!(cx.debug_bounds("Add list").is_some(), screen == "todo");
+            assert_eq!(cx.debug_bounds("task-hint").is_some(), screen == "todo");
+            assert!(cx.debug_bounds("Show your Google Calendar").is_none());
+        }
+    }
+
     #[gpui::test]
     fn home_start_sidebar_order_icons_shortcuts_and_mail_opens_inbox(cx: &mut TestAppContext) {
         cx.update(|cx| bind_keys(cx));

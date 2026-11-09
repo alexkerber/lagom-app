@@ -95,8 +95,18 @@ impl MainWindow {
     }
 
     pub(super) fn reload_week(&mut self, cx: &mut Context<Self>) {
-        self.week.loaded_day = Some(chrono::Local::now().date_naive());
-        let Some(live) = &self.live else { return };
+        let today = chrono::Local::now().date_naive();
+        self.week.loaded_day = Some(today);
+        let Some(live) = &self.live else {
+            if self.demo {
+                self.week.days = vec![vec![]; 7];
+                let index = (today - self.week.start).num_days();
+                if (0..7).contains(&index) { self.week.days[index as usize] = agenda::demo_events(today); }
+                let start = monday(today);
+                self.week.windows = vec![Some((agenda::day_start(start, &chrono::Local), agenda::day_start(start + chrono::Duration::weeks(1), &chrono::Local)))];
+            }
+            return;
+        };
         let result = (|| -> lagom_core::Result<_> {
             let windows = self.today.calendar_accounts.iter().map(|(account, _)| live.store.calendar_window(&account.id))
                 .collect::<lagom_core::Result<Vec<_>>>()?;
@@ -247,6 +257,27 @@ mod tests {
         } }
     }
 
+    #[gpui::test]
+    fn review_demo_calendar_shares_today_events_and_clears_other_weeks(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+        cx.run_until_parked();
+        let today = chrono::Local::now().date_naive();
+        let day = today.weekday().num_days_from_monday() as usize;
+        assert!(cx.debug_bounds(format!("week-event-{day}-0").leak()).is_some());
+        assert!(cx.debug_bounds("Show your Google Calendar").is_none());
+        assert!(cx.debug_bounds("week-unsynced").is_none());
+        view.update(cx, |v, cx| {
+            assert!(v.live.is_none());
+            assert_eq!(v.week.days[day], v.today.events);
+            assert_eq!(v.week.days.iter().map(Vec::len).sum::<usize>(), 3);
+            v.move_week(1, cx);
+            assert!(v.week.days.iter().all(Vec::is_empty));
+            v.move_week(-1, cx);
+            assert_eq!(v.week.days[day], v.today.events);
+            assert_eq!(v.week.days.iter().map(Vec::len).sum::<usize>(), 3);
+        });
+    }
+
     #[test]
     fn overlap_chains_share_lanes_and_touching_events_reuse_full_width() {
         let day = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
@@ -288,6 +319,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         let start = view.read_with(cx, |v, _| v.week.start);
         view.update(cx, |v, _| {
+            v.demo = false;
             v.week.days[0] = vec![entry(start, 0, 1440, true), entry(start, 540, 600, false)];
             v.week.windows = vec![Some((agenda::day_start(start, &chrono::Local), agenda::day_start(start + chrono::Duration::weeks(1), &chrono::Local)))];
         });
@@ -333,6 +365,7 @@ mod tests {
         cx.update(|cx| super::super::bind_keys(cx));
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
+            v.demo = false;
             let mut account = mail::demo_accounts().remove(0);
             account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
             v.today.calendar_accounts = vec![(account, true)];

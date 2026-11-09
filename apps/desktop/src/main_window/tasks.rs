@@ -75,8 +75,8 @@ impl MainWindow {
         self.reload_agenda(cx);
         if matches!(self.page, Page::Home) { self.reload_unread(cx); }
         if matches!(self.page, Page::Calendar) { self.reload_week(cx); }
-        let Some(live) = &self.live else { return };
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let Some(live) = &self.live else { self.today.day = day; return };
         let snapshot = (|| -> lagom_core::Result<_> {
             let lists = live.store.task_lists()?;
             let tasks = if matches!(self.page, Page::Todo) {
@@ -290,9 +290,11 @@ impl MainWindow {
             .child(div().id("today").flex_1().min_h(px(0.)).flex().flex_col().gap(px(16.))
                 .child(div().flex().items_center().justify_between()
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child(if matches!(self.page, Page::Todo) { "Todo" } else { "Home" }))
-                    .child(button(&t, "Add list", None).on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
-                .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
+                    .when(matches!(self.page, Page::Todo), |d| d.child(button(&t, "Add list", None)
+                        .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))))))
+                .when(matches!(self.page, Page::Todo), |d| d.children(self.task_input(Edit::AddList).map(|input| div().child(input))))
                 .child(groups)
-                .child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2)))
+                .when(matches!(self.page, Page::Todo) || !self.today.tasks.is_empty(), |d|
+                    d.child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2).debug_selector(|| "task-hint".into()))))
     }
 }

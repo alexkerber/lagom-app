@@ -275,6 +275,7 @@ pub struct MainWindow {
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
+    demo: bool,
     page: Page,
     today: tasks::Today,
     week: week::Week,
@@ -317,6 +318,12 @@ pub struct MainWindow {
 impl MainWindow {
     /// `demo`: the sample mail, no store and no network.
     pub fn new(demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
+        let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
+        Self::with_screen(demo, &screen, window, cx)
+    }
+
+    fn with_screen(demo: bool, screen: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             this.theme = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
             cx.notify();
@@ -326,8 +333,6 @@ impl MainWindow {
         // Flush local edits before close; queued sends need no network wait.
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| this.update(cx, |this, cx| !this.hold_exit(cx)).unwrap_or(true));
-        // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
-        let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
             true => (None, None),
             false => match Live::start(cx) {
@@ -379,6 +384,7 @@ impl MainWindow {
             drafts: Vec::new(),
             sending: Vec::new(),
             live,
+            demo,
             page: if demo && !screen.is_empty() { Page::Mail } else { Page::Home },
             today: tasks::Today::default(),
             week: week::Week::default(),
@@ -421,7 +427,10 @@ impl MainWindow {
                 this.add_account(window, cx);
             }
         }
-        match screen.as_str() {
+        match screen {
+            "home" => this.show_section(0, window, cx),
+            "calendar" => this.show_section(2, window, cx),
+            "todo" => this.show_section(3, window, cx),
             "palette" => this.open_palette("done", window, cx),
             // Three adjacent rows and one apart: the joined selection block and a separate one.
             "multi" => {
@@ -451,7 +460,7 @@ impl MainWindow {
             "compose-text" | "compose-cc" | "compose-md" | "compose-md-bar" => {
                 this.open_compose(true, window, cx);
                 if let Some(c) = this.compose.clone() {
-                    c.update(cx, |c, cx| match screen.as_str() {
+                    c.update(cx, |c, cx| match screen {
                         "compose-text" => c.sample(cx),
                         "compose-cc" => c.add_cc(window, cx),
                         s => c.sample_markdown(s == "compose-md-bar", cx),
@@ -1220,6 +1229,7 @@ impl MainWindow {
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let nav = |path: &'static str, label: &'static str, count: Option<usize>, active: bool| {
             pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
+                .debug_selector(move || format!("nav-{label}"))
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -1328,9 +1338,8 @@ impl MainWindow {
                             .child(mono(shortcut, t.ink2))
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     }))
-                    .child(heading("Mail").mt(px(12.)))
                     .child(
-                        nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none())
+                        nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none()).mt(px(12.))
                             .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
                     )
                     .child(
