@@ -82,6 +82,13 @@
     .tile.dusk p { color: rgba(255, 255, 255, 0.82); }
     .tile.dusk .big { margin: 0 0 auto; font-size: clamp(56px, 6vw, 84px); font-weight: 800; line-height: 0.9; letter-spacing: -0.05em; }
 
+    .about { display: grid; grid-template-columns: 1fr; gap: clamp(40px, 6vw, 96px); }
+    @media (min-width: 900px) { .about { grid-template-columns: 5fr 7fr; } }
+    .about .story { margin: 0; font-size: clamp(24px, 2.6vw, 32px); line-height: 1.25; letter-spacing: -0.02em; font-weight: 500; text-wrap: pretty; }
+    .about .word { display: flex; flex-direction: column; gap: 18px; color: var(--ink2); }
+    .about .word p { margin: 0; }
+    .about .word strong { color: var(--ink); font-weight: 600; }
+    .about .source { font-size: 13px; }
     .principles { display: grid; grid-template-columns: 1fr; gap: 40px; padding-top: 8px; border-top: 1px solid var(--line); }
     @media (min-width: 800px) { .principles { grid-template-columns: repeat(3, 1fr); } }
     .principles div { padding-top: 32px; }
@@ -90,7 +97,7 @@
 
     footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: clamp(96px, 12vw, 160px); padding: 24px 0 48px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
     footer span { overflow-wrap: anywhere; }
-    /* The Swedish flag, as on Swedish brands: lagom is a Swedish word with no direct translation. */
+    /* The Swedish flag, as on Swedish brands: lagom is a Swedish word, and a Swedish idea. */
     .sv { display: inline-flex; align-items: center; gap: 0.45em; }
     .flag { width: 1.4em; height: 0.875em; flex-shrink: 0; border-radius: 2px; box-shadow: 0 0 0 1px var(--line); }
   </style>
@@ -161,6 +168,21 @@
             <figure><img src="detail-status.webp" width="462" height="96" alt="The status bar: 7 left, J K move, E done, Command K run."></figure>
             <div><h3>Always know what is left.</h3><p>The status bar counts down and reminds you of the keys.</p></div>
           </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="about">
+        <p class="kicker">About</p>
+        <h2 id="about" class="display">An email app that only does email.</h2>
+        <div class="about">
+          <p class="story">We are a group of friends who got tired of looking for a mail app that does what we need, and not a hundred thousand other things. So we are building one.</p>
+          <div class="word">
+            <p><strong>The word is old.</strong> It comes from Old Swedish <em>laghum</em>, "by the law": the way things should be. Over the centuries it softened into "fitting", then "just enough".</p>
+            <p><strong>The popular story is a myth.</strong> Farmhands sharing one cup "laget om", around the table, each drinking just enough, was made up long after the word existed.</p>
+            <p><strong>It is not untranslatable either.</strong> Norwegian has the same word, and Japanese <em>chōdo</em> comes close. But Swedes still hear it as a small piece of who they are. In 1992 Lund even set up a granite reference measure for one lagom.</p>
+            <p>For an email client it means one thing: enough features to get to an empty inbox, and nothing that gets in the way.</p>
+            <p class="source mono">Source: <a href="https://sv.wikipedia.org/wiki/Lagom">sv.wikipedia.org/wiki/Lagom</a></p>
+          </div>
         </div>
       </section>
 
