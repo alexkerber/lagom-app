@@ -24,15 +24,20 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
 
 pub fn bind_keys(cx: &mut App) {
     tasks::bind_keys(cx);
+    week::bind_keys(cx);
     let ctx = Some("MainWindow");
     // Plain keys type into a focused text field instead. The cmd keys stay: the overlay guard
     // hands them on, and a field handles ⌘Z itself because it sits deeper in the dispatch path.
-    let keys = Some("MainWindow && !TextInput && !Today");
+    let keys = Some("MainWindow && !TextInput && !Tasks && !Calendar");
     cx.bind_keys([
+        KeyBinding::new("secondary-1", ShowHome, ctx),
+        KeyBinding::new("secondary-2", ShowMail, ctx),
+        KeyBinding::new("secondary-3", ShowCalendar, ctx),
+        KeyBinding::new("secondary-4", ShowTodo, ctx),
         KeyBinding::new("j", SelectNext, keys),
         KeyBinding::new("down", SelectNext, keys),
         KeyBinding::new("k", SelectPrev, keys),
@@ -41,6 +46,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", ExtendPrev, keys),
         KeyBinding::new("secondary-a", crate::text_input::SelectAll, keys),
         KeyBinding::new("secondary-shift-u", ToggleRead, keys),
+        KeyBinding::new("shift-u", ToggleRead, keys),
         KeyBinding::new("e", Done, keys),
         KeyBinding::new("t", NewTask, keys),
         // Arrows mirror the swipe directions: right is Done, left is Later.
@@ -59,7 +65,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("r", Reply, keys),
         KeyBinding::new("shift-r", ReplyAll, keys),
         KeyBinding::new("f", Forward, keys),
-        KeyBinding::new("shift-u", ToggleRead, keys),
         KeyBinding::new("secondary-n", NewMessage, ctx),
         KeyBinding::new("c", NewMessage, keys),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
@@ -111,7 +116,7 @@ const LIST_PAD: f32 = 6.;
 const SIDEBAR_ROW: f32 = 28.;
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
-/// 600 pt tall keeps the sidebar's groups on screen.
+/// Compact windows scroll the sidebar groups beneath Search.
 pub const MIN_WINDOW: (f32, f32) = (970., 600.);
 
 mod panes;
@@ -173,16 +178,27 @@ mod selection;
 mod live;
 mod tasks;
 mod agenda;
+mod week;
+mod home;
 pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
 pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
+const SECTIONS: [(&str, &str, &str); 4] = [
+    ("Home", "icons/home.svg", "⌘1"),
+    ("Mail", "icons/mail.svg", "⌘2"),
+    ("Calendar", "icons/calendar.svg", "⌘3"),
+    ("Todo", "icons/todo.svg", "⌘4"),
+];
+
 /// What fills the main panel.
 enum Page {
     Mail,
-    Today,
+    Home,
+    Calendar,
+    Todo,
     AddAccount(Entity<AddAccount>),
     /// Settings, with the account whose removal waits for a confirm.
     Settings(Option<String>),
@@ -265,8 +281,10 @@ pub struct MainWindow {
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
+    demo: bool,
     page: Page,
     today: tasks::Today,
+    week: week::Week,
     task_undo: Option<i64>,
     signatures: HashMap<String, Entity<TextInput>>,
     // "N more" was clicked, so every folder row shows.
@@ -274,6 +292,7 @@ pub struct MainWindow {
     confirm_empty_trash: bool,
     folder_name: Option<Entity<TextInput>>,
     folder_scroll: ScrollHandle,
+    sidebar_scroll: ScrollHandle,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -306,6 +325,12 @@ pub struct MainWindow {
 impl MainWindow {
     /// `demo`: the sample mail, no store and no network.
     pub fn new(demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
+        let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
+        Self::with_screen(demo, &screen, window, cx)
+    }
+
+    fn with_screen(demo: bool, screen: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             this.theme = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
             cx.notify();
@@ -315,8 +340,6 @@ impl MainWindow {
         // Flush local edits before close; queued sends need no network wait.
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| this.update(cx, |this, cx| !this.hold_exit(cx)).unwrap_or(true));
-        // `LAGOM_SCREEN` opens one screen at launch, for screenshots.
-        let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
             true => (None, None),
             false => match Live::start(cx) {
@@ -368,14 +391,17 @@ impl MainWindow {
             drafts: Vec::new(),
             sending: Vec::new(),
             live,
-            page: if demo { Page::Mail } else { Page::Today },
+            demo,
+            page: if demo && !screen.is_empty() { Page::Mail } else { Page::Home },
             today: tasks::Today::default(),
+            week: week::Week::default(),
             task_undo: None,
             signatures: HashMap::new(),
             all_folders: false,
             confirm_empty_trash: false,
             folder_name: None,
             folder_scroll: ScrollHandle::new(),
+            sidebar_scroll: ScrollHandle::new(),
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -409,7 +435,10 @@ impl MainWindow {
                 this.add_account(window, cx);
             }
         }
-        match screen.as_str() {
+        match screen {
+            "home" => this.show_section(0, window, cx),
+            "calendar" => this.show_section(2, window, cx),
+            "todo" => this.show_section(3, window, cx),
             "palette" => this.open_palette("done", window, cx),
             // Three adjacent rows and one apart: the joined selection block and a separate one.
             "multi" => {
@@ -439,7 +468,7 @@ impl MainWindow {
             "compose-text" | "compose-cc" | "compose-md" | "compose-md-bar" => {
                 this.open_compose(true, window, cx);
                 if let Some(c) = this.compose.clone() {
-                    c.update(cx, |c, cx| match screen.as_str() {
+                    c.update(cx, |c, cx| match screen {
                         "compose-text" => c.sample(cx),
                         "compose-cc" => c.add_cc(window, cx),
                         s => c.sample_markdown(s == "compose-md-bar", cx),
@@ -522,6 +551,7 @@ impl MainWindow {
                     }
                     this.all_folders = true;
                     this.folder_scroll.scroll_to_bottom();
+                    this.sidebar_scroll.scroll_to_item(1);
                     this.inbox.create_folder(name)
                 }
             };
@@ -1271,6 +1301,7 @@ impl MainWindow {
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let nav = |path: &'static str, label: &'static str, count: Option<usize>, active: bool| {
             pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
+                .debug_selector(move || format!("nav-{label}"))
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -1297,7 +1328,7 @@ impl MainWindow {
                         .size(px(8.))
                         .flex_shrink_0()
                         .rounded_full()
-                        .when(active, |d| d.bg(t.accent))
+                        .when(active, |d| d.bg(self.account_accent(ix)))
                         .when(!active, |d| d.border_1().border_color(t.ink2)),
                 )
                 .child(
@@ -1314,7 +1345,6 @@ impl MainWindow {
             Some(live) => live.accounts.iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == live.current)).collect(),
             None => mail::demo_accounts().iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == 0)).collect(),
         };
-        let current = accounts.iter().find(|a| a.2).map_or(SharedString::from("Lagom"), |a| a.0.clone());
         let on_mail = matches!(self.page, Page::Mail);
         let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
@@ -1337,7 +1367,7 @@ impl MainWindow {
             // Room for the macOS traffic lights.
             .when(cfg!(target_os = "macos"), |d| d.child(div().h(px(16.)).flex_shrink_0()))
             .child(
-                pressable(div().id("account-switcher"), t, false)
+                div().id("sidebar-brand").debug_selector(|| "sidebar-brand".into())
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -1347,8 +1377,7 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(app_mark())
-                    .child(div().flex_1().min_w(px(0.)).one_line().child(current))
-                    .child(icon("icons/chevron.svg", t.ink2, 14.)),
+                    .child("Lagom"),
             )
             .children(self.live.as_ref().and_then(|live| self.reauth_control(live.current, "sidebar-reauth", cx)))
             .child(
@@ -1369,16 +1398,20 @@ impl MainWindow {
                     .child(icon("icons/search.svg", t.ink2, 14.))
                     .child(div().flex_1().child("Search")),
             )
-            .child(
-                div()
+            .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
+                .child(div()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
                     .flex_shrink_0()
-                    .child(nav("icons/done.svg", "Today", None, matches!(self.page, Page::Today))
-                        .on_click(cx.listener(|this, _, window, cx| this.show_today(window, cx))))
+                    .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
+                        let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
+                        nav(path, label, None, active).debug_selector(move || format!("section-{ix}"))
+                            .child(mono(shortcut, t.ink2))
+                            .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
+                    }))
                     .child(
-                        nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none())
+                        nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none()).mt(px(12.))
                             .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
                     )
                     .child(
@@ -1387,11 +1420,9 @@ impl MainWindow {
                     )
                     .child(nav("icons/sent.svg", "Sent", None, open_kind(Kind::Sent)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Sent, cx))))
                     .child(nav("icons/done.svg", "Done", None, open_kind(Kind::Done)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Done, cx))))
-                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Trash, cx)))),
-            )
-            .child(self.folder_group(heading("Folders"), cx))
-            .child(account_rows)
-            .child(div().flex_1())
+                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| this.open_kind(Kind::Trash, cx)))))
+                .child(self.folder_group(heading("Folders"), cx).flex_shrink_0().max_h(px(200.)))
+                .child(account_rows))
             .child(
                 pressable(div().id("settings"), t, in_settings)
                     .flex()
@@ -2103,7 +2134,9 @@ impl Render for MainWindow {
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
-            Page::Today => "Today".into(),
+            Page::Home => "Home".into(),
+            Page::Todo => "Todo".into(),
+            Page::Calendar => "Calendar".into(),
             Page::Settings(_) => "Settings".into(),
             Page::AddAccount(_) => "Add Account".into(),
         };
@@ -2115,14 +2148,15 @@ impl Render for MainWindow {
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
         let panel = match &self.page {
-            Page::Today => self.tasks_view(cx),
+            Page::Home | Page::Todo => self.tasks_view(cx),
+            Page::Calendar => self.week_view(cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
                 crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, &self.signatures, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
-            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
+            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
             Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(list_height, cx)).child(self.reading_pane(cx)),
         };
         // Toasts sit bottom-centre in the reading pane, above its reply field, so they never cover
@@ -2149,7 +2183,12 @@ impl Render for MainWindow {
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
         let tint = Rgba { a: 0.96, ..frost };
         div()
-            .key_context(if matches!(self.page, Page::Today) { "MainWindow Today" } else { "MainWindow" })
+            .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", _ => "MainWindow" })
+            .map(|d| Self::week_keys(d, cx))
+            .on_action(cx.listener(|this, _: &ShowHome, window, cx| this.show_section(0, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowMail, window, cx| this.show_section(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowCalendar, window, cx| this.show_section(2, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowTodo, window, cx| this.show_section(3, window, cx)))
             .map(|d| Self::task_keys(d, cx))
             // Mouse swipe: the root sees every move inside the window; `on_mouse_up_out` catches a
             // release outside it. shortcut: moves outside the window are not followed (the row waits
@@ -2160,7 +2199,7 @@ impl Render for MainWindow {
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Today) { this.new_task(window, cx); }))
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.new_task(window, cx); }))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
             .on_action(cx.listener(|this, _: &ExtendNext, _, cx| if !this.overlay_open(cx) { this.select(|inbox| inbox.extend(1), cx) }))
@@ -2178,12 +2217,12 @@ impl Render for MainWindow {
                 // The newest send in its Undo window goes first: its toast is the one on top.
                 let sent = this.sending.iter().rev().find(|c| c.read(cx).undoable()).cloned();
                 if !sent.is_some_and(|c| c.update(cx, |c, cx| c.undo(window, cx))) {
-                    if matches!(this.page, Page::Today) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
+                    if matches!(this.page, Page::Home | Page::Todo | Page::Calendar) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
                     this.undo(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
-                if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Today) { this.open_palette("", window, cx); }
+                if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.open_palette("", window, cx); }
             }))
             .on_action(cx.listener(|this, _: &OpenMovePalette, window, cx| if !this.overlay_open(cx) { this.open_palette("move ", window, cx) }))
             .on_action(cx.listener(|this, _: &ReplyAll, window, cx| if !this.overlay_open(cx) { this.compose_selected(ComposeKind::ReplyAll, window, cx) }))
@@ -3205,7 +3244,9 @@ mod dispatch {
             bind_keys(cx);
             crate::text_input::bind_keys(cx);
         });
-        cx.add_window_view(|window, cx| MainWindow::new(true, window, cx))
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        view.update(cx, |v, cx| v.open_box(None, cx));
+        (view, cx)
     }
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
@@ -3263,7 +3304,7 @@ mod dispatch {
         let (view, cx) = open(cx);
         view.update_in(cx, |v, window, cx| {
             v.act(Move::Done, cx);
-            v.show_today(window, cx);
+            v.show_home(window, cx);
         });
         let count = inbox_len(&view, cx);
         cx.simulate_keystrokes("secondary-z");
@@ -3932,9 +3973,9 @@ mod dispatch {
         let (view, cx) = open(cx);
         cx.simulate_keystrokes("secondary-,");
         frame(cx);
-        assert!(cx.debug_bounds("signature-home").is_some());
+        assert!(cx.debug_bounds("signature-personal").is_some());
         assert!(cx.debug_bounds("signature-work").is_some());
-        for id in ["home", "work"] {
+        for id in ["personal", "work"] {
             view.update_in(cx, |v, window, cx| window.focus(&v.signatures[id].read(cx).focus_handle(cx)));
             cx.simulate_input(id);
             cx.simulate_keystrokes("enter");
@@ -3950,11 +3991,11 @@ mod dispatch {
         frame(cx);
         view.update_in(cx, |v, window, cx| {
             assert!(v.live.is_none());
-            assert_eq!(v.signatures["home"].read(cx).text(), "home\nTeam");
+            assert_eq!(v.signatures["personal"].read(cx).text(), "personal\nTeam");
             assert_eq!(v.signatures["work"].read(cx).text(), "work\nTeam");
             v.page = Page::Mail;
             v.inbox.mail[0].account = "work".into();
-            for (target, kind, signature) in [(None, ComposeKind::Reply, "home"), (Some(0), ComposeKind::Reply, "work"), (Some(0), ComposeKind::ReplyAll, "work"), (Some(0), ComposeKind::Forward, "work")] {
+            for (target, kind, signature) in [(None, ComposeKind::Reply, "personal"), (Some(0), ComposeKind::Reply, "work"), (Some(0), ComposeKind::ReplyAll, "work"), (Some(0), ComposeKind::Forward, "work")] {
                 v.compose_kind(target, kind, window, cx);
                 let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
                 assert!(mail.text.contains(&format!("-- \n{signature}\nTeam")));
@@ -3967,6 +4008,11 @@ mod dispatch {
     #[gpui::test]
     fn review_settings_hides_empty_default_task_list_block(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
+        view.update(cx, |v, cx| {
+            v.today.lists.clear();
+            v.today.default = None;
+            cx.notify();
+        });
         cx.simulate_keystrokes("secondary-,");
         frame(cx);
         assert!(cx.debug_bounds("default-task-lists").is_none());

@@ -85,7 +85,11 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub fn add_task_list(&self, name: &str) -> Result<TaskList> {
-        Ok(self.db.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position", [title(name)?], list_row)?)
+        let tx = self.db.unchecked_transaction()?;
+        let list = tx.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position", [title(name)?], list_row)?;
+        tx.execute("INSERT INTO task_settings(id,list) VALUES(1,?1) ON CONFLICT(id) DO NOTHING", [list.id])?;
+        tx.commit()?;
+        Ok(list)
     }
     pub fn rename_task_list(&self, id: i64, name: &str) -> Result<()> {
         changed(self.db.execute(
@@ -304,6 +308,20 @@ mod tests {
         assert!((now - 5..=now).contains(&updated));
         assert!(dirty);
     }
+    #[test]
+    fn first_list_becomes_default_in_an_empty_store() {
+        let store = Store { db: rusqlite::Connection::open_in_memory().unwrap() };
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql")] {
+            let empty = schema.lines().filter(|line| !line.starts_with("INSERT INTO task_lists")).collect::<Vec<_>>().join("\n");
+            store.db.execute_batch(&empty).unwrap();
+        }
+        assert!(store.task_lists().unwrap().is_empty());
+        let first = store.add_task_list("First list").unwrap();
+        assert_eq!(store.default_task_list().unwrap(), first.id);
+        store.add_task_list("Second list").unwrap();
+        assert_eq!(store.default_task_list().unwrap(), first.id);
+    }
+
     #[test]
     fn lists_crud_move_tasks_and_default_guard() {
         let (_temp, s) = setup();

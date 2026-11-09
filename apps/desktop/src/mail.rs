@@ -351,7 +351,7 @@ const SAMPLE: &[Sample] = &[
 pub fn demo_accounts() -> Vec<lagom_core::account::Account> {
     use lagom_core::account::{Account, Auth, Security, ServerConfig};
     let server = |host: &str, port, user: &str| ServerConfig { host: host.into(), port, security: Security::Tls, username: user.into() };
-    [("Home", "you@home.example", "home.example"), ("Work", "you@work.example", "work.example")]
+    [("Personal", "you@home.example", "home.example"), ("Work", "you@work.example", "work.example")]
         .into_iter()
         .map(|(name, email, domain)| Account {
             id: name.to_lowercase(),
