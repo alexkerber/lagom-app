@@ -214,6 +214,7 @@ impl MainWindow {
     }
 
     fn edit_task(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.task_input(edit).is_some() { return; }
         let text = match edit {
             Edit::Rename(id) => self.today.tasks.iter().find(|t| t.id == id).map(|t| t.title.as_str()),
             Edit::RenameList(id) => self.today.lists.iter().find(|l| l.id == id).map(|l| l.name.as_str()),
@@ -464,6 +465,7 @@ impl MainWindow {
     }
 
     fn open_task_menu(&mut self, menu: TaskMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.page, Page::Todo) { return; }
         let focus = self.today.menu_focus.get_or_insert_with(|| cx.focus_handle());
         window.focus(focus);
         self.today.menu = Some(menu);
@@ -762,6 +764,54 @@ mod tests {
         let row = cx.debug_bounds("task-40").unwrap();
         let viewport = cx.debug_bounds("today-groups").unwrap();
         assert!(row.top() >= viewport.top() && row.bottom() <= viewport.bottom(), "row {row:?}, viewport {viewport:?}, offset {:?}", view.read_with(cx, |v, _| v.today.scroll.offset()));
+    }
+
+    #[gpui::test]
+    fn task_menu_shortcut_on_today_preserves_task_focus(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("task-4").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.simulate_keystrokes("alt-enter");
+        view.update_in(cx, |v, window, _| {
+            assert!(v.today.menu.is_none());
+            assert!(v.focus.is_focused(window));
+            assert_eq!(v.today.selected, Some(4));
+        });
+        cx.simulate_keystrokes("escape down enter");
+        assert!(view.read_with(cx, |v, _| matches!(v.today.editor, Some((Edit::Rename(1), _)))));
+    }
+
+    #[gpui::test]
+    fn double_click_in_task_editor_preserves_text_selection_and_undo(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        for screen in ["home", "todo"] {
+            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, screen, window, cx));
+            cx.run_until_parked();
+            let at = cx.debug_bounds("task-2").unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.simulate_keystrokes("enter secondary-a");
+            cx.simulate_input("Buy groceries");
+            cx.run_until_parked();
+            let input = view.read_with(cx, |v, _| v.task_input(Edit::Rename(2)).unwrap());
+            let row = cx.debug_bounds("task-2").unwrap();
+            let at = gpui::point(row.left() + px(50.), row.center().y);
+            cx.simulate_event(MouseDownEvent { position: at, button: MouseButton::Left, click_count: 2, ..Default::default() });
+            view.read_with(cx, |v, cx| {
+                assert_eq!(v.task_input(Edit::Rename(2)).unwrap(), input);
+                assert_eq!(input.read(cx).text(), "Buy groceries");
+            });
+            cx.simulate_input("Fresh");
+            assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "Fresh groceries");
+            cx.simulate_keystrokes("secondary-z secondary-z");
+            assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "Pick up groceries");
+            cx.simulate_keystrokes("secondary-shift-z secondary-shift-z enter");
+            view.read_with(cx, |v, _| {
+                assert!(v.today.editor.is_none());
+                assert_eq!(v.today.tasks.iter().find(|t| t.id == 2).unwrap().title, "Fresh groceries");
+            });
+        }
     }
 
     #[gpui::test]
