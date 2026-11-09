@@ -143,7 +143,8 @@ fn calendar_title(title: gpui::StyledText) -> Div {
         if let Some(layouts) = layouts.borrow_mut().as_mut() { layouts.push(title.layout().clone()); }
     });
     // A full-width line in normal flow gives GPUI a width before it shapes and truncates text.
-    div().w_full().min_w(px(0.)).flex_shrink_0().one_line().child(title)
+    // Same construction as the week title that works on main: no min_w(0), and nowrap rather than a line clamp.
+    div().w_full().flex_shrink_0().whitespace_nowrap().text_ellipsis().child(title)
 }
 
 fn event_time(event: &CalendarEvent) -> String {
@@ -266,7 +267,7 @@ impl MainWindow {
         let entry = entry.clone();
         pressable(div().id(("week-event", day * 100_000 + ix)), &t, false)
             .debug_selector(move || format!("week-event-{day}-{ix}"))
-            .min_w(px(0.)).flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
+            .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
             .child(calendar_title(title).debug_selector(|| "week-title".into()).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM))
             .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/camera.svg", t.ink2, 16.))).child(mono(short_time(&entry.event), t.ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
