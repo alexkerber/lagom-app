@@ -507,6 +507,7 @@ async fn main() -> Result<()> {
                     in_reply_to,
                     references,
                     message_id: None,
+                    attachments: Vec::new(),
                 },
                 &mut store,
             )

@@ -11,6 +11,10 @@ pub(super) struct MessageBody {
 }
 
 impl html::WebHost for MessageBody {
+    fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.id;
+        self.main.update(cx, |main, cx| main.mail_action_on(id, action, window, cx)).ok();
+    }
     fn new_task(&mut self, cx: &mut Context<Self>) {
         let id = self.id;
         self.main.update(cx, |main, cx| main.task_from_mail(id, cx)).ok();
