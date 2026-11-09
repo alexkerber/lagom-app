@@ -279,41 +279,9 @@ async fn connection(account: &Account) -> Result<ImapSync> {
     let password = account.password()?;
     Ok(ImapSync::login(account, &password).await?)
 }
-fn browser_command(url: &str) -> std::process::Command {
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(not(target_os = "windows"))]
-    command.arg(url);
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        use std::os::windows::process::CommandExt;
-        let mut command = std::process::Command::new("cmd");
-        // OAuth URLs are URL-encoded; explicit quotes protect their ampersands from cmd.exe.
-        command
-            .args(["/C", "start", ""])
-            .raw_arg(format!("\"{url}\""));
-        command
-    };
-    command
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    command
-}
 async fn sign_in(provider: Provider) -> Result<oauth::SignedIn> {
-    let (failed, failure) = tokio::sync::oneshot::channel();
-    tokio::select! {
-        result = oauth::sign_in(provider, |url| {
-            let command = browser_command(url);
-            tokio::spawn(async move {
-                if !tokio::process::Command::from(command).status().await.is_ok_and(|s| s.success()) {
-                    let _ = failed.send(());
-                }
-            });
-        }) => Ok(result?),
-        _ = async { if failure.await.is_err() { std::future::pending::<()>().await; } } => bail!("Could not open the browser"),
-    }
+    // A browser launched with the URL as an argument would show its state and PKCE challenge to other local users in `ps`.
+    Ok(oauth::sign_in(provider, |url| eprintln!("Open this URL in your browser to sign in:\n{url}")).await?)
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
