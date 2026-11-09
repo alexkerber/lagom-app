@@ -299,6 +299,8 @@ async fn callback(listener: &TcpListener, state: &str) -> Result<Zeroizing<Strin
             continue;
         }
         let result = parse_callback(parts[1], state);
+        // Any local process can reach the port; only our state may end the wait.
+        let ours = !matches!(result, Err(Error::Invalid("invalid sign-in callback" | "sign-in state mismatch")));
         let body =
             "<!doctype html><title>Lagom</title><p>You can close this tab and return to Lagom.</p>";
         let status = if result.is_ok() {
@@ -309,7 +311,7 @@ async fn callback(listener: &TcpListener, state: &str) -> Result<Zeroizing<Strin
         let reply = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
         let _ =
             tokio::time::timeout(Duration::from_secs(3), stream.write_all(reply.as_bytes())).await;
-        return result;
+        if ours { return result; }
     }
 }
 
