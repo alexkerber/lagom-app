@@ -259,7 +259,7 @@ impl MainWindow {
                         }))
                     .child(button(&t, "Add task", None).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
                     .child(button(&t, "Rename", None).debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
-                    .when(self.today.default != Some(list_id), |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
+                    .when(self.today.default != Some(list_id) && !list.google_default, |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
                         .on_click(cx.listener(move |this, _, _, cx| { this.save_task(TaskChange::DeleteList(list_id), cx); })))));
             group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
             let tasks: Vec<_> = self.today.tasks.iter().filter(|task| task.list == list_id).collect();
@@ -300,7 +300,22 @@ impl MainWindow {
                         let state = self.today.task_sync.get(&account.id);
                         let text = task_sync_label(self.today.task_access.contains(&account.id), state)?;
                         let id = account.id.clone();
-                        Some(div().debug_selector(move || format!("tasks-sync-{id}")).child(mono(format!("{} · {text}", account.email), t.ink2)))
+                        let signing_in = self.today.calendar_sync.get(&id) == Some(&crate::sync::SyncState::SigningIn);
+                        let allowed = self.today.task_access.contains(&id);
+                        Some(div().flex().items_center().gap(px(8.)).debug_selector({ let id = id.clone(); move || format!("tasks-sync-{id}") })
+                            .child(mono(account.email.clone(), t.ink2))
+                            .when(allowed, |d| d.child(mono(text.to_owned(), t.ink2)))
+                            .when(!allowed, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Allow Google Tasks access" }, None)
+                                .debug_selector({ let id = id.clone(); move || format!("allow-tasks-{id}") })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let cmd = if signing_in { crate::sync::Cmd::CancelSignIn } else { crate::sync::Cmd::AllowCalendar(id.clone()) };
+                                    if let Some(live) = &this.live {
+                                        if live.bridge.send(cmd) {
+                                            this.today.calendar_sync.insert(id.clone(), if signing_in { crate::sync::SyncState::Synced(0) } else { crate::sync::SyncState::SigningIn });
+                                        } else { this.worker_gone(cx); }
+                                    }
+                                    cx.notify();
+                                })))))
                     }))
                     .child(groups))
                 .child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2)))

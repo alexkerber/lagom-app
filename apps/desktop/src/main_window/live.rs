@@ -1502,6 +1502,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_tasks_scope_loss_offers_consent_with_calendar_still_authorized(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update_in(cx, |v, window, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            let mut account = store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            let scopes = lagom_core::oauth::GOOGLE_CALENDAR_SCOPES.split_whitespace()
+                .filter(|s| *s != lagom_core::oauth::GOOGLE_TASKS_SCOPE).collect::<Vec<_>>().join(" ");
+            store.save_authorized_account(&account, &scopes).unwrap();
+            v.reload(cx);
+            v.show_today(window, cx);
+            assert!(v.today.calendar_accounts[0].1);
+            account.id
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("allow-calendar-0").is_none());
+        let selector: &'static str = Box::leak(format!("allow-tasks-{id}").into_boxed_str());
+        let button = cx.debug_bounds(selector).expect("Tasks consent action");
+        cx.simulate_click(button.center(), Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::AllowCalendar(account) if account == id));
+        cx.run_until_parked();
+        let button = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::CancelSignIn));
+    }
+
+    #[gpui::test]
     fn today_offers_calendar_access_for_existing_google_accounts(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         view.update_in(cx, |v, window, cx| {

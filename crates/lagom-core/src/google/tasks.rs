@@ -54,14 +54,14 @@ impl Store {
             if list.id.is_empty() { return Err(Error::Network("Google task list ID missing")); }
             let existing: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE account=?1 AND remote_id=?2", params![account, list.id], |r| r.get(0)).optional()?;
             if existing.is_some() { continue; }
-            let local: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE (account IS NULL OR account=?1) AND remote_id IS NULL AND deleted=0 AND name=?2 ORDER BY id LIMIT 1", params![account, list.title], |r| r.get(0)).optional()?;
+            let local: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE ((account IS NULL AND detached=0) OR account=?1) AND remote_id IS NULL AND deleted=0 AND name=?2 ORDER BY id LIMIT 1", params![account, list.title], |r| r.get(0)).optional()?;
             if let Some(id) = local {
                 tx.execute("UPDATE task_lists SET account=?2,remote_id=?3,etag=?4,remote_updated=?5 WHERE id=?1", params![id, account, list.id, list.etag, list.updated])?;
             } else {
                 tx.execute("INSERT INTO task_lists(account,remote_id,name,position,dirty,etag,remote_updated) SELECT ?1,?2,?3,COALESCE(MAX(position),-1)+1,0,?4,?5 FROM task_lists", params![account, list.id, list.title, list.etag, list.updated])?;
             }
         }
-        tx.execute("UPDATE task_lists SET account=?1 WHERE account IS NULL AND deleted=0", [account])?;
+        tx.execute("UPDATE task_lists SET account=?1 WHERE account IS NULL AND detached=0 AND deleted=0", [account])?;
         tx.commit()?;
         Ok(())
     }
@@ -96,16 +96,22 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             if let Some(body) = &body { request = request.header("Content-Type", "application/json").body(body.to_string()); }
             let response = request.send().await.map_err(|_| Error::Network("Google Tasks unavailable"))?;
             let status = response.status();
-            let bytes = oauth::body(response).await?;
+            // A page can contain 100 notes of 8192 characters, including JSON escapes.
+            let bytes = oauth::body_limit(response, 16 * 1024 * 1024).await?;
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 if attempt == 1 { return Err(Error::ReauthRequired); }
                 access = (self.token)(Some(access.to_string())).await?;
                 continue;
             }
+            let list_delete = method == Method::DELETE && url.path().contains("/users/@me/lists/");
+            if list_delete && status == reqwest::StatusCode::BAD_REQUEST { return Err(Error::Invalid("Google task list cannot be deleted")); }
             if status == reqwest::StatusCode::FORBIDDEN {
                 let error: Value = serde_json::from_slice(&bytes).unwrap_or_default();
                 let scope = error["error"]["errors"].as_array().is_some_and(|e| e.iter().any(|e| e["reason"] == "insufficientPermissions"))
                     || error["error"]["details"].as_array().is_some_and(|e| e.iter().any(|e| e["reason"] == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"));
+                if list_delete && !scope && error["error"]["errors"].as_array().is_some_and(|e| e.iter().any(|e| e["reason"] == "forbidden")) {
+                    return Err(Error::Invalid("Google task list cannot be deleted"));
+                }
                 return Err(if scope { Error::TasksConsent } else { Error::Network("Google Tasks access refused") });
             }
             if method == Method::DELETE && (status.is_success() || status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE) { return Ok(Value::Null); }
@@ -153,11 +159,25 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     // List discovery is needed to map names before any task can be pushed.
     let remote: Vec<RemoteList> = client.pages(url).await?;
     store.link_google_lists(account, &remote)?;
+    let default: RemoteList = serde_json::from_value(client.request(Method::GET, client.url(&["users", "@me", "lists", "@default"])?, None).await?)
+        .map_err(|_| Error::Network("invalid Google default task list"))?;
+    if default.id.is_empty() { return Err(Error::Network("Google task list ID missing")); }
+    store.db.execute("UPDATE task_lists SET google_default=COALESCE(remote_id=?2,0) WHERE account=?1", params![account, default.id])?;
+    // Recover tombstones made before the provider's default list was known.
+    store.db.execute("UPDATE task_lists SET deleted=0,dirty=0 WHERE account=?1 AND google_default=1 AND deleted=1", [account])?;
     let mut pushed_lists = HashSet::new();
     let mut pushed_tasks = HashSet::new();
     for list in store.google_lists(account)? {
         if list.deleted {
-            if let Some(id) = &list.remote { client.request(Method::DELETE, client.url(&["users", "@me", "lists", id])?, None).await?; }
+            if let Some(id) = &list.remote {
+                match client.request(Method::DELETE, client.url(&["users", "@me", "lists", id])?, None).await {
+                    Err(Error::Invalid(_)) => {
+                        store.db.execute("UPDATE task_lists SET deleted=0,dirty=0 WHERE id=?1 AND revision=?2", params![list.id, list.revision])?;
+                        continue;
+                    }
+                    result => { result?; }
+                }
+            }
             store.db.execute("DELETE FROM task_lists WHERE id=?1 AND revision=?2 AND deleted=1", params![list.id, list.revision])?;
             continue;
         }

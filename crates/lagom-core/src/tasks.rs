@@ -12,6 +12,7 @@ pub struct TaskList {
     pub remote_id: Option<String>,
     pub name: String,
     pub position: i64,
+    pub google_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +61,7 @@ fn list_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskList> {
         remote_id: r.get(2)?,
         name: r.get(3)?,
         position: r.get(4)?,
+        google_default: r.get(5)?,
     })
 }
 fn title(value: &str) -> Result<&str> {
@@ -79,13 +81,13 @@ fn changed(rows: usize) -> Result<()> {
 impl Store {
     pub fn task_lists(&self) -> Result<Vec<TaskList>> {
         let mut stmt = self.db.prepare(
-            "SELECT id,account,remote_id,name,position FROM task_lists WHERE deleted=0 ORDER BY position,id",
+            "SELECT id,account,remote_id,name,position,google_default FROM task_lists WHERE deleted=0 ORDER BY position,id",
         )?;
         let rows = stmt.query_map([], list_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub fn add_task_list(&self, name: &str) -> Result<TaskList> {
-        Ok(self.db.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position", [title(name)?], list_row)?)
+        Ok(self.db.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position,google_default", [title(name)?], list_row)?)
     }
     pub fn rename_task_list(&self, id: i64, name: &str) -> Result<()> {
         changed(self.db.execute(
@@ -102,7 +104,8 @@ impl Store {
     pub fn delete_task_list(&self, id: i64) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let default = self.default_task_list()?;
-        if id == default {
+        let protected: bool = tx.query_row("SELECT google_default FROM task_lists WHERE id=?1", [id], |r| r.get(0)).optional()?.ok_or(Error::NotFound)?;
+        if id == default || protected {
             return Err(Error::Invalid("cannot delete the default task list"));
         }
         // Keep completed tasks and tombstones too, so deleting a list never loses task history.
