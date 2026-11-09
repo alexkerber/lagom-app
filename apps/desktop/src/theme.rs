@@ -43,7 +43,7 @@ pub struct Theme {
     pub accent: Rgba,
     pub accent_ink: Rgba,
     // Behind a swiped row, by the move it commits to. `accent_ink` sits on all three:
-    // 5.1–7.0:1 in light (white), 7.5–10:1 in dark (near black).
+    // 5.1–7.0:1 in light (white), 6.0–10:1 in dark (near black).
     pub swipe_done: Rgba,
     pub swipe_later: Rgba,
     /// Delete. The only red in the app.
