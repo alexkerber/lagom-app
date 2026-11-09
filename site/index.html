@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>lagom</title>
   <meta name="description" content="A fast, keyboard-first email client with one job: getting you back to an empty inbox. Open source. Early work, no release yet.">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon-180.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -19,53 +19,76 @@
     @font-face { font-family: "Hauora Sans"; font-weight: 500; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-500.woff2") format("woff2"); }
     @font-face { font-family: "Hauora Sans"; font-weight: 600; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-600.woff2") format("woff2"); }
     @font-face { font-family: "Hauora Sans"; font-weight: 800; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-800.woff2") format("woff2"); }
-    /* Concept D "Butik" tokens. */
+
+    /* White and calm. The only colour is the icon's dusk gradient. */
     :root {
-      --bg: #FFFFFF; --subtle: #F5F5F3; --raised: #FFFFFF; --ink: #111110; --ink2: #5F5F5A;
-      --line: #E6E6E2; --sel: #EFEFEC; --accent: #B03A2E; --accent-ink: #FFFFFF;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0B0B0A; --subtle: #0B0B0A; --raised: #151514; --ink: #F2F2EE; --ink2: #9B9B95;
-        --line: #262624; --sel: #1F1F1D; --accent: #EB6A55; --accent-ink: #0B0B0A;
-      }
+      --bg: #FFFFFF; --card: #F6F6F4; --ink: #111110; --ink2: #6B6B66; --line: #EBEBE7;
+      --blue: #2F55C8; --violet: #9A4BE0; --accent: #3A4FCF;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+    html { overflow-x: hidden; }
+    body { margin: 0; overflow-x: hidden; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
     a { color: inherit; }
-    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .display { font-family: "Hauora Sans", system-ui, sans-serif; font-weight: 800; }
+    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+    img { display: block; max-width: 100%; height: auto; }
+    .display { font-weight: 800; letter-spacing: -0.045em; }
     .mono { font-family: "Geist Mono", ui-monospace, monospace; }
-    .wrap { max-width: 1280px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px); }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 56px); }
 
-    nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 80px; }
-    .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-size: 28px; letter-spacing: -0.06em; }
+    nav { position: relative; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 88px; }
+    .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-size: 24px; }
     .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
-    .links a { display: flex; align-items: center; height: 40px; padding: 0 12px; border-radius: 8px; text-decoration: none; }
-    .links a:hover { background: var(--sel); }
+    .links a { display: flex; align-items: center; height: 40px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
+    .links a:hover { background: var(--card); }
 
-    .hero { display: grid; grid-template-columns: 1fr; gap: 48px; align-items: center; padding: clamp(32px, 5vw, 64px) 0 64px; }
+    /* Hero: the icon is larger than its column and spills over the right edge, its glow bleeding into the white. */
+    .hero { position: relative; display: grid; grid-template-columns: 1fr; align-items: center; min-height: min(86vh, 820px); padding: 48px 0 120px; }
     .hero > * { min-width: 0; }
-    @media (min-width: 1000px) { .hero { grid-template-columns: 5fr 7fr; } }
-    .copy { display: flex; flex-direction: column; gap: 28px; }
-    .entry { display: flex; flex-direction: column; gap: 14px; }
-    h1 { margin: 0; font-size: clamp(84px, 11vw, 168px); line-height: 0.82; letter-spacing: -0.065em; padding-bottom: 0.1em; }
-    .pron { margin: 0; font-size: clamp(17px, 1.8vw, 21px); line-height: 1.4; color: var(--ink2); }
+    .copy { position: relative; z-index: 2; display: flex; flex-direction: column; gap: 28px; max-width: 34rem; }
+    h1 { margin: 0; font-size: clamp(88px, 13vw, 184px); line-height: 0.8; padding-bottom: 0.08em; }
+    .pron { margin: 0; font-size: 19px; color: var(--ink2); }
     .pron .mono { font-size: 0.85em; color: var(--ink); }
-    .def { margin: 0; font-size: clamp(30px, 3.4vw, 44px); line-height: 1.08; letter-spacing: -0.03em; text-wrap: balance; }
-    .lede { margin: 0; max-width: 32em; font-size: 18px; line-height: 1.55; color: var(--ink2); }
-    .lede strong { color: var(--ink); font-weight: 500; }
+    .def { margin: 0; font-size: clamp(30px, 3.6vw, 46px); line-height: 1.08; text-wrap: balance; }
+    .lede { margin: 0; font-size: 19px; color: var(--ink2); }
+    .lede strong { color: var(--ink); font-weight: 600; }
     .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
-    .btn { display: flex; align-items: center; height: 48px; padding: 0 22px; border-radius: 8px; border: 1px solid var(--line); text-decoration: none; font-size: 16px; font-weight: 500; }
-    .btn:hover { background: var(--sel); }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+    .btn { display: flex; align-items: center; height: 52px; padding: 0 26px; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; font-size: 16px; font-weight: 600; background: var(--bg); }
+    .btn:hover { background: var(--card); }
+    .btn.primary { border: 0; color: #fff; background: linear-gradient(135deg, var(--blue), var(--violet)); }
     .btn.primary:hover { filter: brightness(1.08); }
     .status { margin: 0; font-size: 13px; color: var(--ink2); }
+    .spill { position: absolute; z-index: 1; top: 50%; right: max(-26vw, -340px); width: clamp(420px, 58vw, 860px); transform: translateY(-48%) rotate(-8deg); pointer-events: none; }
+    .spill::before { content: ""; position: absolute; inset: -18%; z-index: -1; border-radius: 50%; background: radial-gradient(closest-side, rgba(90, 92, 222, 0.30), rgba(154, 75, 224, 0.14) 55%, transparent); filter: blur(30px); }
+    @media (max-width: 899px) {
+      .hero { min-height: 0; padding-top: 24px; }
+      .spill { position: relative; top: auto; right: auto; width: 115%; margin: -40px -30% -40px auto; transform: rotate(-8deg); }
+    }
 
-    .shot { padding: clamp(12px, 2vw, 24px); border-radius: 16px; background: var(--subtle); border: 1px solid var(--line); }
-    .shot img { display: block; width: 100%; height: auto; }
+    section { padding: clamp(80px, 12vw, 160px) 0 0; }
+    .kicker { margin: 0 0 14px; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+    h2 { margin: 0 0 clamp(40px, 6vw, 72px); max-width: 16em; font-size: clamp(34px, 4.6vw, 60px); line-height: 1.04; text-wrap: balance; }
 
-    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 20px 0 40px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
+    .shot { border-radius: 20px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 40px 80px -40px rgba(47, 85, 200, 0.28), 0 2px 6px rgba(0, 0, 0, 0.04); }
+
+    /* Detail tiles: one crop of the real app each, shown at its natural size on a warm grey card. */
+    .details { display: grid; grid-template-columns: 1fr; gap: 24px; }
+    @media (min-width: 900px) { .details { grid-template-columns: repeat(6, 1fr); } .t1 { grid-column: span 4; } .t2 { grid-column: span 2; grid-row: span 2; } .t3 { grid-column: span 2; } .t4 { grid-column: span 2; } .t5 { grid-column: span 3; } .t6 { grid-column: span 3; } }
+    .tile { display: flex; flex-direction: column; gap: 24px; padding: clamp(24px, 3vw, 40px); border-radius: 24px; background: var(--card); }
+    .tile figure { flex: 1; display: flex; align-items: center; justify-content: center; margin: 0; }
+    .tile figure img { border-radius: 12px; box-shadow: 0 18px 40px -24px rgba(17, 17, 16, 0.35); }
+    .tile h3 { margin: 0 0 4px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+    .tile p { margin: 0; font-size: 15px; color: var(--ink2); }
+    .tile.dusk { justify-content: flex-end; color: #fff; background: linear-gradient(160deg, var(--blue), #6A55DA 55%, var(--violet)); }
+    .tile.dusk p { color: rgba(255, 255, 255, 0.82); }
+    .tile.dusk .big { margin: 0 0 auto; font-size: clamp(56px, 6vw, 84px); font-weight: 800; line-height: 0.9; letter-spacing: -0.05em; }
+
+    .principles { display: grid; grid-template-columns: 1fr; gap: 40px; padding-top: 8px; border-top: 1px solid var(--line); }
+    @media (min-width: 800px) { .principles { grid-template-columns: repeat(3, 1fr); } }
+    .principles div { padding-top: 32px; }
+    .principles h3 { margin: 0 0 8px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+    .principles p { margin: 0; color: var(--ink2); }
+
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: clamp(96px, 12vw, 160px); padding: 24px 0 48px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
     footer span { overflow-wrap: anywhere; }
     /* The Swedish flag, as on Swedish brands: lagom is a Swedish word with no direct translation. */
     .sv { display: inline-flex; align-items: center; gap: 0.45em; }
@@ -76,7 +99,7 @@
   <div class="wrap">
     <nav aria-label="Site">
       <a class="brand display" href="./">
-        <img src="apple-touch-icon-180.png" width="42" height="42" alt="">
+        <img src="apple-touch-icon-180.png" width="36" height="36" alt="">
         lagom
       </a>
       <div class="links">
@@ -86,32 +109,73 @@
       </div>
     </nav>
 
-    <main class="hero">
-      <div class="copy">
-        <div class="entry">
+    <main>
+      <div class="hero">
+        <div class="copy">
           <h1 class="display">lagom</h1>
           <p class="pron"><span class="mono">/ˈlɑːɡɔm/</span> ("LAH-gom") <em>adv., adj.</em> <span class="sv"><svg class="flag" viewBox="0 0 16 10" aria-hidden="true"><rect width="16" height="10" fill="#006AA7"/><rect x="5" width="2" height="10" fill="#FECC00"/><rect y="4" width="16" height="2" fill="#FECC00"/></svg>Swedish.</span></p>
           <p class="def display">Not too much. Not too little. Just right.</p>
+          <p class="lede">A fast, keyboard-first email client with one job: getting you back to an empty inbox. <strong>Written in Rust for macOS, Linux and Windows. Local-first.</strong></p>
+          <div class="ctas">
+            <a class="btn primary" href="https://github.com/alexkerber/lagom-app">View source</a>
+            <a class="btn" href="https://github.com/alexkerber/lagom-app/commits/main">Changelog</a>
+          </div>
+          <p class="status mono">Early work. No release to download yet.</p>
         </div>
-        <p class="lede">A fast, keyboard-first email client with one job: getting you back to an empty inbox. <strong>Written in Rust for macOS, Linux and Windows. Local-first.</strong></p>
-        <div class="ctas">
-          <a class="btn primary" href="https://github.com/alexkerber/lagom-app">View source</a>
-          <a class="btn" href="https://github.com/alexkerber/lagom-app/commits/main">Changelog</a>
-        </div>
-        <p class="status mono">Early work. No release to download yet.</p>
+        <img class="spill" src="icon-900.webp" width="900" height="900" alt="">
       </div>
 
-      <div class="shot">
-        <picture>
-          <source srcset="lagom-dark.webp" media="(prefers-color-scheme: dark)">
+      <section aria-labelledby="whole">
+        <p class="kicker">The app</p>
+        <h2 id="whole" class="display">One window. Everything in reach of a key.</h2>
+        <div class="shot">
           <img src="lagom-light.webp" width="1600" height="1000" alt="The Lagom main window: a sidebar with Inbox, Later, Sent and Done, a message list, and an open email with Done, Reply, Later and Forward buttons, each labelled with its shortcut key.">
-        </picture>
-      </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="details">
+        <p class="kicker">In detail</p>
+        <h2 id="details" class="display">Small things, done properly.</h2>
+        <div class="details">
+          <article class="tile t1">
+            <figure><img src="detail-toolbar.webp" width="840" height="230" alt="The reading toolbar: Done, Reply, Later and Forward, each with its key: E, R, L and F."></figure>
+            <div><h3>One key per decision.</h3><p>Done is E. Reply is R. Later is L. The keys sit on the buttons, so you learn them by looking.</p></div>
+          </article>
+          <article class="tile t2">
+            <figure><img src="detail-sidebar.webp" width="276" height="480" alt="The sidebar: search, Inbox with seven unread, Later, Sent and Done, and two accounts."></figure>
+            <div><h3>Three places, not thirty.</h3><p>Inbox, Later and Done. Folders are there when you need them.</p></div>
+          </article>
+          <article class="tile t3">
+            <figure><img src="detail-list.webp" width="456" height="312" alt="Three rows of the message list, each with sender, subject, preview and time."></figure>
+            <div><h3>Read the list, not the clutter.</h3><p>Sender, subject, one line. Unread gets a dot.</p></div>
+          </article>
+          <article class="tile t4 dusk">
+            <p class="big">0</p>
+            <div><h3>The point is an empty inbox.</h3><p>Every mail is done, later or answered.</p></div>
+          </article>
+          <article class="tile t5">
+            <figure><img src="detail-letter.webp" width="830" height="300" alt="An open email: a short letter from Ingrid with a PDF attachment."></figure>
+            <div><h3>Mail that reads like a letter.</h3><p>Calm type, wide margins, attachments where you expect them.</p></div>
+          </article>
+          <article class="tile t6">
+            <figure><img src="detail-status.webp" width="462" height="96" alt="The status bar: 7 left, J K move, E done, Command K run."></figure>
+            <div><h3>Always know what is left.</h3><p>The status bar counts down and reminds you of the keys.</p></div>
+          </article>
+        </div>
+      </section>
+
+      <section aria-label="Principles">
+        <div class="principles">
+          <div><h3>Fast.</h3><p>Written in Rust and drawn on the GPU. Opens in a blink.</p></div>
+          <div><h3>Yours.</h3><p>Local-first. Your mail stays on your computer and your server.</p></div>
+          <div><h3>Lagom.</h3><p>No AI features, no team features, no sign-up wall.</p></div>
+        </div>
+      </section>
     </main>
 
     <footer class="mono">
-      <span>Not included: AI features, team features, a sign-up wall.</span>
-      <span class="sv"><svg class="flag" viewBox="0 0 16 10" aria-hidden="true"><rect width="16" height="10" fill="#006AA7"/><rect x="5" width="2" height="10" fill="#FECC00"/><rect y="4" width="16" height="2" fill="#FECC00"/></svg>Made in Sweden · Open source · MIT · github.com/alexkerber/lagom-app</span>
+      <span>Open source · MIT · github.com/alexkerber/lagom-app</span>
+      <span class="sv"><svg class="flag" viewBox="0 0 16 10" aria-hidden="true"><rect width="16" height="10" fill="#006AA7"/><rect x="5" width="2" height="10" fill="#FECC00"/><rect y="4" width="16" height="2" fill="#FECC00"/></svg>Made in Sweden</span>
     </footer>
   </div>
 </body>
