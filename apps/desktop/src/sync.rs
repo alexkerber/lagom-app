@@ -38,6 +38,8 @@ pub enum Act {
 }
 
 pub enum Cmd {
+    #[cfg(test)]
+    Pause(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
     /// Onboarding API; the UI consumes OpenUrl on its own thread.
     #[allow(dead_code)]
     SignIn(Provider),
@@ -92,6 +94,7 @@ pub enum Event {
     Reauthenticated { account: String, result: Result<(), String> },
     /// The store changed: read it again.
     Changed,
+    NewMail(Vec<lagom_core::store::MessageSummary>),
     Sync(String, SyncState),
     Op { op: u64, error: Option<String> },
     /// The new account's id, or why it could not connect.
@@ -113,6 +116,9 @@ impl Bridge {
         let (tx, rx) = unbounded_channel();
         (Self(tx), rx)
     }
+
+    #[cfg(test)]
+    pub fn same_worker(&self, other: &Self) -> bool { self.0.same_channel(&other.0) }
 
     /// False when the worker has stopped (it could not open the store, or it panicked).
     #[must_use]
@@ -224,6 +230,11 @@ impl Worker {
     /// Commands that a running sync handles between folders, so a triage key never waits long.
     async fn quick(&mut self, cmd: Cmd) {
         match cmd {
+            #[cfg(test)]
+            Cmd::Pause(ready, resume) => {
+                ready.send(()).unwrap();
+                resume.recv().expect("resume fixture worker");
+            }
             Cmd::SignIn(provider) => {
                 self.cancel_sign_in();
                 let events = self.events.clone();
@@ -442,11 +453,11 @@ impl Worker {
             while let Ok(cmd) = rx.try_recv() {
                 self.quick(cmd).await;
             }
-            let mut session = self.take(account).await?;
-            let result = session.sync_folder(&mut self.store, folder.id, DEFAULT_LIMIT).await;
-            self.give(&account.id, session, &result);
+            let result = self.sync_folder(account, folder.id).await;
             match result {
-                Ok(()) => self.emit(Event::Changed),
+                Ok(()) => {
+                    self.emit(Event::Changed);
+                },
                 Err(e) if e.is_account_wide() => return Err(e),
                 Err(e) => {
                     first.get_or_insert(lagom_core::Error::Folder { folder: folder.name, source: Box::new(e) });
@@ -454,6 +465,24 @@ impl Worker {
             }
         }
         first.map_or(Ok(()), Err)
+    }
+
+    async fn sync_folder(&mut self, account: &Account, folder: i64) -> lagom_core::Result<()> {
+        let before = self.store.folder(folder)?;
+        let mut session = self.take(account).await?;
+        let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
+        self.give(&account.id, session, &result);
+        result?;
+        self.notify_new_mail(&before)
+    }
+
+    fn notify_new_mail(&self, before: &lagom_core::store::Folder) -> lagom_core::Result<()> {
+        if before.role != FolderRole::Inbox { return Ok(()); }
+        let after = self.store.folder(before.id)?;
+        let messages = self.store.messages_since(before.id, before.last_uid)?;
+        let messages = crate::notifications::new_mail(before, &after, messages);
+        if !messages.is_empty() { self.emit(Event::NewMail(messages)); }
+        Ok(())
     }
 
     async fn empty_trash(&mut self, folder: i64) -> lagom_core::Result<()> {
@@ -475,6 +504,7 @@ impl Worker {
         }
         let message = self.store.message(id)?.summary;
         let account = self.account(&message.account)?;
+        let before: Vec<_> = self.store.folders(&account.id, now())?.into_iter().filter(|f| f.role == FolderRole::Inbox).collect();
         let mut session = self.take(&account).await?;
         let store = &mut self.store;
         let result = async {
@@ -507,10 +537,12 @@ impl Worker {
         }
         .await;
         self.give(&account.id, session, &result);
+        // A move can finish the Inbox sync before a later folder fails.
+        let notified = before.iter().try_for_each(|folder| self.notify_new_mail(folder));
         if let Some(target) = result?.filter(|_| !message.message_id.is_empty()) {
             follow(&mut self.moved, id, message.folder, &message.message_id, target);
         }
-        Ok(())
+        notified
     }
 
     async fn create_folder(&mut self, account: &str, name: &str) -> lagom_core::Result<()> {
@@ -533,10 +565,7 @@ impl Worker {
         let Some((folder, message_id)) = self.moved.get(&id).cloned() else { return Ok(id) };
         if self.store.find_message(folder, &message_id)?.is_none() {
             let account = self.account(&self.store.folder(folder)?.account)?;
-            let mut session = self.take(&account).await?;
-            let result = session.sync_folder(&mut self.store, folder, DEFAULT_LIMIT).await;
-            self.give(&account.id, session, &result);
-            result?;
+            self.sync_folder(&account, folder).await?;
         }
         self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
     }
@@ -1068,3 +1097,7 @@ mod greenmail {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+#[path = "sync/notification_tests.rs"]
+mod notification_tests;

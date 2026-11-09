@@ -157,6 +157,7 @@ mod html;
 mod live;
 mod popout;
 pub use live::Live;
+pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
 /// What fills the main panel.
@@ -290,7 +291,7 @@ impl MainWindow {
         let screen = std::env::var("LAGOM_SCREEN").unwrap_or_default();
         let (live, problem) = match demo {
             true => (None, None),
-            false => match Live::start(window, cx) {
+            false => match Live::start(cx) {
                 Ok(live) => (Some(live), None),
                 Err(e) => (None, Some(format!("Could not open the mail store: {e}"))),
             },
@@ -302,7 +303,8 @@ impl MainWindow {
         let viewport = f32::from(window.viewport_size().width);
         // Demo mode never resolves a store path or reads/writes preferences.
         let preferences = if demo { Ok(None) } else {
-            Store::default_path().map(|p| Some(p.with_file_name("window.json")))
+            live.as_ref().map(|live| live.store.path().to_path_buf())
+                .map_or_else(Store::default_path, Ok).map(|p| Some(p.with_file_name("window.json")))
         };
         let mut preference_problem = None;
         let preferences_path = match preferences {
@@ -1000,6 +1002,12 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
 }
 
 impl MainWindow {
+    pub(crate) fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        self.panes.notifications = !self.panes.notifications;
+        self.save_panes(cx);
+        cx.notify();
+    }
+
     fn save_panes(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = &self.preferences_path {
             if let Err(e) = self.panes.save(path) {
@@ -1914,7 +1922,7 @@ impl Render for MainWindow {
         if !self.ghosts.is_empty() || !self.entering.is_empty() || self.spring.is_some() {
             window.request_animation_frame();
         }
-        self.open_current(cx);
+        self.open_current(window.is_window_active(), cx);
         self.window_active = window.is_window_active();
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
@@ -1939,7 +1947,7 @@ impl Render for MainWindow {
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
-                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), cx)
+                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.notifications, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
@@ -3267,7 +3275,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, notifications: true };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();

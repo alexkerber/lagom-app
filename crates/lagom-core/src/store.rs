@@ -398,6 +398,9 @@ impl Store {
         let rows = stmt.query_map(params![folder, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+    pub fn message_summary(&self, id: i64) -> Result<MessageSummary> {
+        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.id=?1"), [id], summary_row).optional()?.ok_or(Error::NotFound)
+    }
     pub fn message(&self, id: i64) -> Result<Message> {
         self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(18)?,body_html:r.get(19)? })).optional()?.ok_or(Error::NotFound)
     }
@@ -474,6 +477,13 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+    /// Metadata saved beyond a completed sync checkpoint, including snoozed rows.
+    pub fn messages_since(&self, folder: i64, uid: u32) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.folder=?1 AND m.uid>?2 ORDER BY m.uid"))?;
+        let rows = stmt.query_map(params![folder, uid], summary_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn known_uids(&self, folder: i64) -> Result<Vec<u32>> {
         let mut stmt = self
             .db
@@ -549,6 +559,44 @@ mod mail_tests {
             body_html: None,
         }
     }
+    #[test]
+    fn message_summary_revalidates_metadata_without_reading_bodies() {
+        let (_temp, s, a, inbox) = setup();
+        let id = s.save_message(&mail(&a, inbox, 1)).unwrap();
+        let mut expected = s.message(id).unwrap().summary;
+        // Invalid body types make accidental body decoding fail deterministically.
+        s.db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [id]).unwrap();
+        assert!(s.message(id).is_err());
+        assert_eq!(s.message_summary(id).unwrap(), expected);
+        s.set_flags(inbox, 1, true, false).unwrap();
+        s.snooze(id, Some(1000)).unwrap();
+        expected.seen = true;
+        expected.snoozed_until = Some(1000);
+        assert_eq!(s.message_summary(id).unwrap(), expected);
+        s.delete_message(id).unwrap();
+        assert!(matches!(s.message_summary(id), Err(Error::NotFound)));
+    }
+
+    #[test]
+    fn messages_since_uses_folder_and_uid_not_date_or_read_state() {
+        let (_temp, s, a, inbox) = setup();
+        let done = s.save_folder(&a.id, "Archive", None, FolderRole::Archive).unwrap();
+        for uid in 1..=3 {
+            s.save_message(&mail(&a, inbox, uid)).unwrap();
+            s.save_message(&mail(&a, done, uid)).unwrap();
+        }
+        let mut m = mail(&a, inbox, 3);
+        m.summary.date = 0;
+        m.summary.seen = true;
+        let id = s.save_message(&m).unwrap();
+        s.snooze(id, Some(1000)).unwrap();
+        let rows = s.messages_since(inbox, 1).unwrap();
+        assert_eq!(rows.iter().map(|m| m.uid).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(rows[1].seen);
+        assert_eq!(rows[1].snoozed_until, Some(1000));
+        assert!(s.messages_since(inbox, 3).unwrap().is_empty());
+    }
+
     #[test]
     fn insert_page_fts_and_snooze() {
         let (_temp, s, a, f) = setup();

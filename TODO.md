@@ -2,7 +2,7 @@
 
 ## Brand and site
 
-- [ ] Domain. `lagom.app`, `lagom.com` and `lagom.io` are taken (RDAP, 2026-11-06). Free on that date: `lagom-mail.com/.app/.io`, `lagomhq.com/.app/.io`, `lagommail.app/.io`, and `.se` for lagom-app, lagommail, lagom-mail and lagomhq.
+- [x] Domain: `lagommail.app`, chosen 2026-11-09 (`lagom.app`, `.se`, `.dev` and `.email` are taken). Bundle id `app.lagommail.desktop`. Registration not confirmed in the registry on 2026-11-09.
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42. Web pass done 2026-11-08: `docs/trademark-check.md` (medium risk, official databases still to search by hand).
 - [x] App icon: Blender source `brand/app-icon/skymning/3d/skymning.py`; platform assets rebuilt with `brand/app-icon/export.sh`.
@@ -11,7 +11,7 @@
 - [x] Exact colour tokens from Claude design, in `apps/desktop/src/theme.rs` (from ConceptD and MainWindowD).
 - [ ] Website: switch `site/` to the exact tokens and drop the rejected parts (0 kr cards, info strip, pill buttons).
 - [x] Website in `site/`, Concept D, deployed with GitHub Pages.
-- [ ] Website: point the domain at GitHub Pages.
+- [ ] Website: point `lagommail.app` at GitHub Pages (DNS at the registrar, then the Pages custom domain and HTTPS).
 
 ## Build
 
@@ -44,7 +44,7 @@
 - [x] Long left swipe deletes to Trash; ⌫ does the same; "Deleted" toast with Undo; swipe background coloured by state (`feat/folders`).
 - [ ] Swipe: try it by hand on a trackpad, a Magic Mouse and a mouse drag (incl. release outside the window), including the 245 px delete stage and the colour fade; tests cover only the state logic.
 - [ ] Swipe: haptic tick at each threshold. GPUI 0.2.2 has no API for `NSHapticFeedbackManager`.
-- [x] Trash: system sidebar entry mapped through IMAP special-use flags, confirmed Empty Trash on the worker (UIDPLUS required), and Move to Inbox. Display and empty use the same folder ID; emptying waits for pending operations and a successful list read. Popouts retain Move to Inbox for messages outside the loaded page. Restore clears `\Deleted` under the UIDVALIDITY guard after interrupted emptying; custom children of system folders stay visible. SEARCH has one command deadline. Fixture regressions cover the review fixes and coexistence with inline folder creation, including pending-operation and stale-snapshot guards. Delete moves to server Trash; demo mode keeps it in memory.
+- [x] Trash: system sidebar entry mapped through IMAP special-use flags, confirmed Empty Trash on the worker (UIDPLUS required), and Move to Inbox. Display and empty use the same folder ID; emptying waits for pending operations across window reopening and a successful list read. App-scoped Empty Trash metadata blocks Restore after reopening and preserves completion cleanup of newly opened popouts. Popouts retain Move to Inbox for messages outside the loaded page. Restore clears `\Deleted` under the UIDVALIDITY guard after interrupted emptying; custom children of system folders stay visible. SEARCH has one command deadline. Fixture regressions cover the review fixes and coexistence with inline folder creation, including pending-operation and stale-snapshot guards. Delete moves to server Trash; demo mode keeps it in memory.
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
 - [x] Swipe: drag a row with the mouse, same stages as the trackpad. Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
 - [x] Compose: Esc keeps the draft locally and R brings it back; Send moves it to the outbox and ⌘⌫ discards it.
@@ -112,7 +112,10 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Threading UI.
 - [x] Desktop on the core (`feat/real-mail`): a worker thread owns network and store writes; the UI reads the store. Add account (Gmail, iCloud, Fastmail, Outlook, Other IMAP) with IMAP and SMTP login check, launch, 2-minute and IDLE sync, real folders and counts, optimistic Done/Delete/Move/Later with revert and undo on the server, Send after the 5 s Undo window, Reply headers, C and ⌘N, ⌘K store search, Settings with in-app remove. `LAGOM_DEMO=1` keeps the sample mail. GreenMail covers the worker end to end (`LAGOM_GREENMAIL=1 cargo test -p lagom greenmail`).
 - [ ] Desktop: try by hand with a real account. Only GreenMail, tests and screenshots cover it; nobody has clicked or typed in the live window.
-- [ ] Notifications for new mail.
+- [x] Notifications for new mail: macOS UserNotifications (lazy permission) and Linux D-Bus, sender/subject or batch summary, click to message/Inbox, persisted On/Off setting. First sync, UIDVALIDITY resets, read, Later and Done mail are silent. All worker Inbox sync paths, including moves and undo, detect new mail. UI revalidation reads metadata only; pending permission batches stay per account. Notification handling and the single mail worker live at application scope; new mail and pending permission batches still post with the main window closed, respecting the saved setting and current message metadata; Dock and notification reopening reuse the worker and store without recovering active outbox sends. Operation IDs and pending-command guards survive reopening so old completions cannot match new actions or allow premature Empty Trash; completions release the guard even with no window. Clicks select the target. Fixture and headless tests cover delivery without a window, window release/reopen with the real worker, in-flight outbox protection, selection, activation and caller-level metadata-only revalidation.
+- [ ] Notifications: Linux cold-start activation via a desktop entry; current click callbacks need Lagom running.
+- [ ] Notifications: Windows toast app identity and activation registration with the installer; no Windows notifications yet.
+- [ ] Notifications: verify permission, delivery and clicks in a macOS app bundle and on a Linux notification server; no GUI acceptance run yet.
 - [ ] Outlook preset: password login is unsupported; use Microsoft browser sign-in after configuring the Entra registration. Replace the password form with the provider sign-in action during onboarding.
 - [ ] Bodies over 4 MiB are stored as headers with a "not downloaded" body; fetch on demand.
 - [ ] Undo of a move for a message without Message-ID fails with a toast (the worker finds moved mail by Message-ID).
