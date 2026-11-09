@@ -40,7 +40,8 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
             row.child(button(t, "Remove", None).on_click(cx.listener(move |this, _, _, cx| this.confirm_remove(Some(id.clone()), cx))))
         };
         list = list.child(row).children(signatures.get(&a.id).map(|input|
-            div().flex().flex_col().gap(px(6.)).py(px(12.)).child(mono("Signature", t.ink2))
+            div().debug_selector({ let id = a.id.clone(); move || format!("signature-{id}") })
+                .flex().flex_col().gap(px(6.)).py(px(12.)).child(mono("Signature", t.ink2))
                 .child(div().h(px(100.)).child(input.clone()))
         ));
     }
@@ -59,7 +60,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         })))
         .child(toggle_row(t, "Group by conversation", group).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
         .child(toggle_row(t, "Notifications for new mail", notifications).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
-        .child(div().flex().flex_col().gap(px(8.)).child("Default task list")
+        .when(!task_lists.is_empty(), |d| d.child(div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(8.)).child("Default task list")
             .children(task_lists.iter().map(|list| {
                 let id = list.id;
                 crate::main_window::pressable(div().id(("default-task-list", id as usize)), t, default_list == Some(id))
@@ -68,7 +69,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
                     .when(default_list == Some(id), |d| d.bg(t.sel))
                     .child(format!("{}{}", if default_list == Some(id) { "✓ " } else { "" }, list.name))
                     .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); }))
-            })))
+            }))))
         .child(list)
         .child(div().flex().child(button(t, "Add account", None).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))
         .child(mono("Removing an account keeps its mail on the server.", t.ink2));

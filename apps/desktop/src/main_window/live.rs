@@ -972,18 +972,20 @@ impl MainWindow {
     }
 
     pub(super) fn prepare_signatures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(live) = &self.live else { return };
-        self.signatures.retain(|id, _| live.accounts.iter().any(|a| &a.id == id));
-        for account in &live.accounts {
+        let demo = mail::demo_accounts();
+        let accounts = self.live.as_ref().map_or(&demo[..], |live| &live.accounts);
+        self.signatures.retain(|id, _| accounts.iter().any(|a| &a.id == id));
+        for account in accounts {
             if self.signatures.contains_key(&account.id) { continue; }
-            let text = match live.store.signature(&account.id) {
+            let text = match self.live.as_ref().map_or_else(|| Ok(String::new()), |live| live.store.signature(&account.id)) {
                 Ok(text) => text,
                 Err(_) => continue,
             };
-            let input = cx.new(|cx| TextInput::new(window, cx).markdown().bordered().placeholder("Signature (plain text or Markdown)").with_text(&text));
+            let input = cx.new(|cx| TextInput::new(window, cx).markdown().bordered().placeholder("Signature, added to new mail, replies and forwards").with_text(&text));
             let id = account.id.clone();
-            cx.subscribe(&input, move |this, input, event: &TextInputEvent, cx| {
-                if !matches!(event, TextInputEvent::Changed) { return; }
+            let focus = input.read(cx).focus_handle(cx);
+            cx.on_blur(&focus, window, move |this, _, cx| {
+                let Some(input) = this.signatures.get(&id) else { return };
                 if let Some(live) = &this.live {
                     if let Err(e) = live.store.with_short_lock_wait(|store| store.set_signature(&id, input.read(cx).text())) {
                         this.notify(format!("Could not save signature: {e}"), cx);
@@ -1377,8 +1379,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_signature_fields_save_each_account_on_blur(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let (store, first, second) = view.update(cx, |v, cx| {
+            let live = v.live.as_mut().unwrap();
+            let first = live.accounts[0].id.clone();
+            let config = live.accounts[0].imap.clone();
+            let other = Account::new("other@example.com".into(), config.clone(), config).unwrap();
+            live.store.save_account(&other).unwrap();
+            live.store.set_signature(&first, "First").unwrap();
+            live.store.set_signature(&other.id, "Second").unwrap();
+            live.accounts.push(other.clone());
+            let store = live.store.clone();
+            v.open_settings(cx);
+            (store, first, other.id)
+        });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        for id in [&first, &second] {
+            assert!(cx.debug_bounds(format!("signature-{id}").leak()).is_some());
+        }
+        view.update_in(cx, |v, window, cx| window.focus(&v.signatures[&first].read(cx).focus_handle(cx)));
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("First edited");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("Team");
+        assert_eq!(store.signature(&first).unwrap(), "First");
+        view.update_in(cx, |v, window, cx| window.focus(&v.signatures[&second].read(cx).focus_handle(cx)));
+        cx.run_until_parked();
+        assert_eq!(store.signature(&first).unwrap(), "First edited\nTeam");
+        assert_eq!(store.signature(&second).unwrap(), "Second");
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("Second edited");
+        assert_eq!(store.signature(&second).unwrap(), "Second");
+        view.update_in(cx, |v, window, _| window.focus(&v.focus));
+        cx.run_until_parked();
+        assert_eq!(store.signature(&first).unwrap(), "First edited\nTeam");
+        assert_eq!(store.signature(&second).unwrap(), "Second edited");
+        view.update_in(cx, |v, window, cx| {
+            v.signatures.clear();
+            v.prepare_signatures(window, cx);
+            assert_eq!(v.signatures[&first].read(cx).text(), "First edited\nTeam");
+            assert_eq!(v.signatures[&second].read(cx).text(), "Second edited");
+        });
+    }
+
+    #[gpui::test]
     fn signature_settings_and_reply_all_use_the_message_account(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
         view.update_in(cx, |v, window, cx| {
             let m = incoming(v, 1);
             let live = v.live.as_ref().unwrap();
@@ -1393,7 +1444,14 @@ mod tests {
             live.store.set_signature(&other.id, "Other signature").unwrap();
             v.open_settings(cx);
             v.prepare_signatures(window, cx);
+            window.focus(&v.signatures[&m.account].read(cx).focus_handle(cx));
             v.signatures[&m.account].update(cx, |input, cx| input.set_text("Team", cx));
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, _| {
+            let live = v.live.as_ref().unwrap();
+            assert_eq!(live.store.signature(&live.accounts[0].id).unwrap(), "");
+            window.focus(&v.focus);
         });
         cx.run_until_parked();
         view.update_in(cx, |v, window, cx| {

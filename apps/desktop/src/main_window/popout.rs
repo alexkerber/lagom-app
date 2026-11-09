@@ -133,10 +133,10 @@ impl Render for MessageWindow {
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
+                    .child(icon_button(&t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
                     .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
-                        .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
-                        .child(button(&t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx)))))
+                        .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
                     .when(web && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.main.update(cx, |main, _, cx| {

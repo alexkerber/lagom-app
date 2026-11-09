@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
-    App, Context, CursorStyle, Div, ElementId, Entity, FocusHandle, FontFeatures, FontWeight, KeyBinding, MouseButton,
+    App, Context, CursorStyle, Div, ElementId, Entity, FocusHandle, Focusable, FontFeatures, FontWeight, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, Stateful, Task, TouchPhase, Window,
 };
@@ -24,7 +24,7 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask]);
 
 pub fn bind_keys(cx: &mut App) {
     tasks::bind_keys(cx);
@@ -54,6 +54,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", DeleteMessage, keys),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-k", OpenPalette, ctx),
+        KeyBinding::new("m", OpenMovePalette, keys),
         KeyBinding::new("secondary-r", Reply, ctx),
         KeyBinding::new("r", Reply, keys),
         KeyBinding::new("shift-r", ReplyAll, keys),
@@ -609,7 +610,13 @@ impl MainWindow {
             }
             None => {
                 let m = reply.map(|id| &self.inbox.mail[id]);
-                let account = self.live.as_ref().and_then(|l| m.and_then(|m| l.accounts.iter().find(|a| a.id == m.account)).or_else(|| l.account())).cloned();
+                let account = match &self.live {
+                    Some(live) => m.and_then(|m| live.accounts.iter().find(|a| a.id == m.account)).or_else(|| live.account()).cloned(),
+                    None => {
+                        let accounts = mail::demo_accounts();
+                        m.and_then(|m| accounts.iter().find(|a| a.id == m.account)).or_else(|| accounts.first()).cloned()
+                    }
+                };
                 let from = account.as_ref().map_or("you@home.example", |a| a.email.as_str());
                 let (to, cc) = match (m, kind) {
                     (Some(m), ComposeKind::ReplyAll) => {
@@ -627,6 +634,8 @@ impl MainWindow {
                         Ok(signature) => signature,
                         Err(e) => { self.notify(format!("Could not read signature: {e}"), cx); return; }
                     },
+                    (None, Some(account)) => self.signatures.get(&account.id)
+                        .map_or_else(String::new, |input| input.read(cx).text().to_string()),
                     _ => String::new(),
                 };
                 let original = match (m.and_then(|m| m.store), &self.live) {
@@ -1865,10 +1874,9 @@ impl MainWindow {
                 toolbar(t)
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
-                    .child(button(t, "Move", None).on_click(cx.listener(|this, _, window, cx| this.open_palette("move ", window, cx))))
-                    .child(button(t, if self.inbox.selection_unread() { "Mark read" } else { "Mark unread" }, None).on_click(cx.listener(|this, _, _, cx| this.toggle_read(cx))))
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
-                    .child(button(t, "⌄", None).on_click(cx.listener(|this, _, window, cx| this.open_palette("Reply", window, cx))))
+                    .child(icon_button(t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
+                    .child(button(t, "Forward", None).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .when(!trash, |d| d.child(
                         button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     ))
@@ -1878,9 +1886,8 @@ impl MainWindow {
                             cx.notify();
                         })))
                     })
-                    .child(button(t, "Forward", None).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .child(div().flex_1())
-                    .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2))
+                    .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2).debug_selector(|| "message-counter".into()))
                     .child(
                         icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
@@ -1905,6 +1912,7 @@ fn toolbar(t: &Theme) -> Div {
 fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
     pressable(div().id(id), t, false)
+        .debug_selector(move || id.into())
         .flex()
         .items_center()
         .justify_center()
@@ -2177,6 +2185,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Today) { this.open_palette("", window, cx); }
             }))
+            .on_action(cx.listener(|this, _: &OpenMovePalette, window, cx| if !this.overlay_open(cx) { this.open_palette("move ", window, cx) }))
             .on_action(cx.listener(|this, _: &ReplyAll, window, cx| if !this.overlay_open(cx) { this.compose_selected(ComposeKind::ReplyAll, window, cx) }))
             .on_action(cx.listener(|this, _: &Forward, window, cx| if !this.overlay_open(cx) { this.compose_selected(ComposeKind::Forward, window, cx) }))
             .on_action(cx.listener(|this, _: &ToggleRead, _, cx| if !this.overlay_open(cx) { this.toggle_read(cx) }))
@@ -3857,6 +3866,118 @@ mod dispatch {
         cx.simulate_keystrokes("j secondary-o");
         cx.run_until_parked();
         assert_eq!(windows(cx), 3);
+    }
+
+    fn assert_reading_toolbar(cx: &mut VisualTestContext) {
+        frame(cx);
+        let buttons = ["Reply", "reply-all", "Forward", "Later", "Done"].map(|label| cx.debug_bounds(label).unwrap());
+        for pair in buttons.windows(2) {
+            assert!(pair[0].right() <= pair[1].left(), "reading actions stay in order");
+            assert_eq!(pair[0].top(), pair[1].top());
+        }
+        for removed in ["Move", "Mark read", "Mark unread", "Delete"] {
+            assert!(cx.debug_bounds(removed).is_none(), "{removed} crowds the reading toolbar");
+        }
+    }
+
+    #[gpui::test]
+    fn review_reading_toolbar_order_and_reply_all(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        assert_reading_toolbar(cx);
+        let counter = cx.debug_bounds("message-counter").unwrap();
+        let popout = cx.debug_bounds("pop-out").unwrap();
+        assert!(cx.debug_bounds("Later").unwrap().right() <= counter.left());
+        assert!(counter.right() <= popout.left());
+        assert!(popout.right() <= cx.debug_bounds("Done").unwrap().left());
+        view.update(cx, |v, _| v.inbox.mail[0].cc = "copy@example.com".into());
+        let at = cx.debug_bounds("reply-all").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, cx| assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx).cc, ["copy@example.com"]));
+    }
+
+    #[gpui::test]
+    fn review_popout_toolbar_order_and_reply_all_target(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, _| v.inbox.mail[0].cc = "copy@example.com".into());
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        view.update(cx, |v, cx| v.select(Inbox::next, cx));
+        let mut popcx = VisualTestContext::from_window(popout.into(), &cx.cx);
+        assert_reading_toolbar(&mut popcx);
+        let at = popcx.debug_bounds("reply-all").unwrap().center();
+        popcx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, cx| {
+            let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+            assert_eq!(mail.subject, mail::reply_subject(&v.inbox.mail[0].subject));
+            assert_eq!(mail.cc, ["copy@example.com"]);
+        });
+    }
+
+    #[gpui::test]
+    fn review_reading_move_and_read_actions_keep_keyboard_access(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("m");
+        view.read_with(cx, |v, cx| assert_eq!(v.palette.as_ref().unwrap().read(cx).query(cx), "move "));
+        cx.simulate_keystrokes("escape secondary-k");
+        cx.simulate_input("move ");
+        view.read_with(cx, |v, cx| assert_eq!(v.palette.as_ref().unwrap().read(cx).query(cx), "move "));
+        cx.simulate_keystrokes("escape");
+        let before = view.read_with(cx, |v, _| v.inbox.selection_unread());
+        cx.simulate_keystrokes("shift-u");
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.selection_unread()), !before);
+    }
+
+    #[gpui::test]
+    fn review_demo_signatures_are_multiline_and_survive_settings(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("secondary-,");
+        frame(cx);
+        assert!(cx.debug_bounds("signature-home").is_some());
+        assert!(cx.debug_bounds("signature-work").is_some());
+        for id in ["home", "work"] {
+            view.update_in(cx, |v, window, cx| window.focus(&v.signatures[id].read(cx).focus_handle(cx)));
+            cx.simulate_input(id);
+            cx.simulate_keystrokes("enter");
+            cx.simulate_input("Team");
+        }
+        view.update_in(cx, |v, window, cx| {
+            window.focus(&v.focus);
+            v.page = Page::Mail;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        frame(cx);
+        view.update_in(cx, |v, window, cx| {
+            assert!(v.live.is_none());
+            assert_eq!(v.signatures["home"].read(cx).text(), "home\nTeam");
+            assert_eq!(v.signatures["work"].read(cx).text(), "work\nTeam");
+            v.page = Page::Mail;
+            v.inbox.mail[0].account = "work".into();
+            for (target, kind, signature) in [(None, ComposeKind::Reply, "home"), (Some(0), ComposeKind::Reply, "work"), (Some(0), ComposeKind::ReplyAll, "work"), (Some(0), ComposeKind::Forward, "work")] {
+                v.compose_kind(target, kind, window, cx);
+                let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+                assert!(mail.text.contains(&format!("-- \n{signature}\nTeam")));
+                assert_eq!(mail.text.matches("-- \n").count(), 1);
+                v.compose = None;
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn review_settings_hides_empty_default_task_list_block(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("secondary-,");
+        frame(cx);
+        assert!(cx.debug_bounds("default-task-lists").is_none());
+        view.update(cx, |v, cx| {
+            v.today.lists.push(lagom_core::tasks::TaskList { id: 1, account: None, remote_id: None, name: "Tasks".into(), position: 0 });
+            v.today.default = Some(1);
+            cx.notify();
+        });
+        frame(cx);
+        assert!(cx.debug_bounds("default-task-lists").is_some());
+        assert!(cx.debug_bounds("default-task-list-1").is_some());
     }
 
     #[gpui::test]
