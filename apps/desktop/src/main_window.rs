@@ -1141,7 +1141,7 @@ impl MainWindow {
         };
         // A sidebar keeps a grey selection; the active row's icon takes the accent while the
         // window is active, as in Finder and Mail. Weight never changes, so labels never shift.
-        let active_icon = if self.window_active { t.sel_focus } else { t.ink2 };
+        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let nav = |path: &'static str, label: &'static str, count: Option<usize>, active: bool| {
             pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
                 .flex()
@@ -1331,7 +1331,7 @@ impl MainWindow {
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
         let slot = || div().size(px(12.)).flex_shrink_0();
-        let active_icon = if self.window_active { t.sel_focus } else { t.ink2 };
+        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
         for &(f, depth) in &rows[..shown] {

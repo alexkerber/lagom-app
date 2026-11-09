@@ -37,6 +37,9 @@ pub struct Theme {
     /// Selection in the focused list of the active window: the accent as a fill, white text on it.
     /// Darker than the accent itself where needed, so white text keeps 4.5:1 or more.
     pub sel_focus: Rgba,
+    /// The active sidebar row's icon: the selection colour, lifted halfway to white in dark mode
+    /// so it keeps 3:1 or more on the grey sidebar selection.
+    pub sel_icon: Rgba,
     pub accent: Rgba,
     pub accent_ink: Rgba,
     // Behind a swiped row, by the move it commits to. `accent_ink` sits on all three:
@@ -62,6 +65,7 @@ impl Theme {
             line: rgb(0xE6E6E2),
             sel: rgb(0xDCDCDC),
             sel_focus: rgb(accent.selection()),
+            sel_icon: rgb(accent.selection()),
             accent: rgb(accent.hex().0),
             accent_ink: rgb(0xFFFFFF),
             swipe_done: rgb(Accent::PineGreen.hex().0),
@@ -83,6 +87,7 @@ impl Theme {
             line: rgb(0x3A3A3A),
             sel: rgb(0x464646),
             sel_focus: rgb(accent.selection()),
+            sel_icon: rgb(accent.selection()),
             accent: rgb(accent.hex().1),
             accent_ink: rgb(0x1E1E1E),
             swipe_done: rgb(Accent::PineGreen.hex().1),
@@ -103,8 +108,14 @@ impl Theme {
         if let Some(fill) = system_selection() {
             t.sel_focus = rgb(fill);
         }
+        t.sel_icon = if dark { lift(t.sel_focus) } else { t.sel_focus };
         t
     }
+}
+
+/// Halfway to white.
+fn lift(c: Rgba) -> Rgba {
+    Rgba { r: (c.r + 1.) / 2., g: (c.g + 1.) / 2., b: (c.b + 1.) / 2., a: c.a }
 }
 
 impl Accent {
@@ -229,6 +240,15 @@ mod tests {
             assert!(contrast(0xFFFFFF, fill) >= 4.5, "white on {fill:06X}: {}", contrast(0xFFFFFF, fill));
         }
         assert_eq!(accent_fill(7), None);
+    }
+
+    #[test]
+    fn dark_sidebar_icon_reads_on_the_grey_selection() {
+        let hex = |c: Rgba| ((c.r * 255.).round() as u32) << 16 | ((c.g * 255.).round() as u32) << 8 | (c.b * 255.).round() as u32;
+        for fill in (-1..=6).filter_map(accent_fill).chain([DEFAULT_ACCENT.selection()]) {
+            let icon = hex(lift(rgb(fill)));
+            assert!(contrast(icon, 0x464646) >= 3.0, "{icon:06X} on the dark selection: {}", contrast(icon, 0x464646));
+        }
     }
 
     #[test]
