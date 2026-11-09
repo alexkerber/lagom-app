@@ -33,6 +33,8 @@ pub struct Mail {
     /// "Load remote images" was clicked for this message.
     pub remote: bool,
     pub attachments: Vec<Attachment>,
+    pub inline: std::sync::Arc<Vec<lagom_core::inline::InlinePart>>,
+    pub inline_pending: bool,
     pub unread: bool,
     /// Local store row id. `None` in demo mode.
     pub store: Option<i64>,
@@ -64,6 +66,8 @@ impl Mail {
             html: None,
             remote: false,
             attachments: Vec::new(),
+            inline: Default::default(),
+            inline_pending: false,
             unread: !m.seen,
             store: Some(m.id),
             folder: Place::Folder(m.folder),

@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 14 {
+        if version > 15 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -109,6 +109,9 @@ impl Store {
             if version < 13 {
                 store.db.execute("UPDATE task_lists SET detached=0", [])?;
             }
+        }
+        if version < 15 {
+            store.db.execute_batch(include_str!("schema_v15.sql"))?;
         }
         Ok(store)
     }
@@ -279,7 +282,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -483,7 +486,7 @@ impl Store {
         params![m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,message.body_text,message.body_html,thread,m.thread_refs],|r|r.get(0))?;
         Ok(id)
     }
-    pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<()> {
+    pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
         let tx = self.db.unchecked_transaction()?;
         let id = self.insert_message(message)?;
         self.db.execute("DELETE FROM attachments WHERE message=?1", [id])?;
@@ -493,7 +496,7 @@ impl Store {
         }
         self.db.execute("UPDATE messages SET attachments_loaded=1,threading_loaded=1 WHERE id=?1", [id])?;
         tx.commit()?;
-        Ok(())
+        Ok(id)
     }
     pub fn attachment_metadata_loaded(&self, message: i64) -> Result<bool> {
         Ok(self.db.query_row("SELECT attachments_loaded FROM messages WHERE id=?1", [message], |r| r.get(0))?)
@@ -721,7 +724,7 @@ mod mail_tests {
         }
     }
     #[test]
-    fn v12_upgrade_to_v14_preserves_signatures_attachments_tasks_and_lists() {
+    fn v12_upgrade_preserves_signatures_attachments_tasks_and_lists() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("v12.db");
         let db = Connection::open(&path).unwrap();
@@ -745,7 +748,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -826,7 +829,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -980,7 +983,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1052,7 +1055,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1122,7 +1125,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1151,7 +1154,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));
