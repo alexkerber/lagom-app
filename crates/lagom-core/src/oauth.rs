@@ -83,6 +83,10 @@ pub const GOOGLE_CALENDAR_SCOPES: &str = "https://www.googleapis.com/auth/calend
 
 pub fn has_scope(scopes: &str, scope: &str) -> bool { scopes.split_whitespace().any(|s| s == scope) }
 
+pub const GOOGLE_TASKS_SCOPE: &str = "https://www.googleapis.com/auth/tasks";
+
+pub fn tasks_allowed(scopes: &str) -> bool { has_scope(scopes, GOOGLE_TASKS_SCOPE) }
+
 pub fn calendar_allowed(scopes: &str) -> bool {
     has_scope(scopes, "https://www.googleapis.com/auth/calendar")
         || has_scope(scopes, "https://www.googleapis.com/auth/calendar.readonly")
@@ -353,14 +357,17 @@ pub(crate) fn http(timeout: Duration) -> Result<reqwest::Client> {
         .build()
         .map_err(|_| Error::Network("HTTP client failed"))
 }
-pub(crate) async fn body(mut response: reqwest::Response) -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) async fn body(response: reqwest::Response) -> Result<Zeroizing<Vec<u8>>> {
+    body_limit(response, 256 * 1024).await
+}
+pub(crate) async fn body_limit(mut response: reqwest::Response, limit: usize) -> Result<Zeroizing<Vec<u8>>> {
     let mut bytes = Zeroizing::new(Vec::new());
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| Error::Network("HTTP response failed"))?
     {
-        if bytes.len() + chunk.len() > 256 * 1024 {
+        if bytes.len() + chunk.len() > limit {
             return Err(Error::Network("HTTP response too large"));
         }
         bytes.extend_from_slice(&chunk);

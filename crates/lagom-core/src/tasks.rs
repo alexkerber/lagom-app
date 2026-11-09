@@ -12,6 +12,7 @@ pub struct TaskList {
     pub remote_id: Option<String>,
     pub name: String,
     pub position: i64,
+    pub google_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,8 +34,8 @@ pub struct Task {
     pub deleted: bool,
 }
 
-const TASK_COLUMNS: &str = "id,list,remote_id,title,notes,due,done_at,position,mail_account,mail_message_id,mail_subject,updated,dirty,deleted,created";
-fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+pub(crate) const TASK_COLUMNS: &str = "id,list,remote_id,title,notes,due,done_at,position,mail_account,mail_message_id,mail_subject,updated,dirty,deleted,created";
+pub(crate) fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
         list: r.get(1)?,
@@ -60,6 +61,7 @@ fn list_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskList> {
         remote_id: r.get(2)?,
         name: r.get(3)?,
         position: r.get(4)?,
+        google_default: r.get(5)?,
     })
 }
 fn title(value: &str) -> Result<&str> {
@@ -76,24 +78,35 @@ fn changed(rows: usize) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn delete_task_list(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
+    let default: i64 = tx.query_row("SELECT list FROM task_settings WHERE id=1", [], |r| r.get(0))?;
+    let protected: bool = tx.query_row("SELECT google_default FROM task_lists WHERE id=?1", [id], |r| r.get(0)).optional()?.ok_or(Error::NotFound)?;
+    if id == default || protected {
+        return Err(Error::Invalid("cannot delete the default task list"));
+    }
+    // Keep completed tasks and tombstones too, so deleting a list never loses task history.
+    tx.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL,list=?2,position=COALESCE(position,0)+(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?2),updated=unixepoch(),dirty=1 WHERE list=?1", params![id, default])?;
+    changed(tx.execute("UPDATE task_lists SET deleted=1,dirty=1 WHERE id=?1 AND deleted=0", [id])?)
+}
+
 impl Store {
     pub fn task_lists(&self) -> Result<Vec<TaskList>> {
         let mut stmt = self.db.prepare(
-            "SELECT id,account,remote_id,name,position FROM task_lists ORDER BY position,id",
+            "SELECT id,account,remote_id,name,position,google_default FROM task_lists WHERE deleted=0 ORDER BY position,id",
         )?;
         let rows = stmt.query_map([], list_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub fn add_task_list(&self, name: &str) -> Result<TaskList> {
         let tx = self.db.unchecked_transaction()?;
-        let list = tx.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position", [title(name)?], list_row)?;
+        let list = tx.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position,google_default", [title(name)?], list_row)?;
         tx.execute("INSERT INTO task_settings(id,list) VALUES(1,?1) ON CONFLICT(id) DO NOTHING", [list.id])?;
         tx.commit()?;
         Ok(list)
     }
     pub fn rename_task_list(&self, id: i64, name: &str) -> Result<()> {
         changed(self.db.execute(
-            "UPDATE task_lists SET name=?2 WHERE id=?1",
+            "UPDATE task_lists SET name=?2,dirty=1 WHERE id=?1 AND deleted=0",
             params![id, title(name)?],
         )?)
     }
@@ -101,17 +114,11 @@ impl Store {
         Ok(self.db.query_row("SELECT list FROM task_settings WHERE id=1", [], |r| r.get(0))?)
     }
     pub fn set_default_task_list(&self, id: i64) -> Result<()> {
-        changed(self.db.execute("UPDATE task_settings SET list=?1 WHERE id=1 AND EXISTS(SELECT 1 FROM task_lists WHERE id=?1)", [id])?)
+        changed(self.db.execute("UPDATE task_settings SET list=?1 WHERE id=1 AND EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND deleted=0)", [id])?)
     }
     pub fn delete_task_list(&self, id: i64) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
-        let default = self.default_task_list()?;
-        if id == default {
-            return Err(Error::Invalid("cannot delete the default task list"));
-        }
-        // Keep completed tasks and tombstones too, so deleting a list never loses task history.
-        tx.execute("UPDATE tasks SET list=?2,position=COALESCE(position,0)+(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?2),updated=unixepoch(),dirty=1 WHERE list=?1", params![id, default])?;
-        changed(tx.execute("DELETE FROM task_lists WHERE id=?1", [id])?)?;
+        delete_task_list(&tx, id)?;
         Ok(tx.commit()?)
     }
     /// Undated and overdue tasks stay visible until completed.
@@ -147,7 +154,7 @@ impl Store {
         mail: Option<&MessageSummary>,
     ) -> Result<Task> {
         Ok(self.db.query_row(&format!("INSERT INTO tasks(list,title,notes,due,position,mail_account,mail_message_id,mail_subject,updated,dirty,created)
-            VALUES(?1,?2,?3,?4,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1 AND deleted=0),?5,?6,?7,unixepoch(),1,unixepoch()) RETURNING {TASK_COLUMNS}"),
+            SELECT ?1,?2,?3,?4,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1 AND deleted=0),?5,?6,?7,unixepoch(),1,unixepoch() WHERE EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND deleted=0) RETURNING {TASK_COLUMNS}"),
             params![list, title(name)?, notes, due, mail.map(|m| &m.account), mail.map(|m| &m.message_id), mail.map(|m| &m.subject)], task_row)?)
     }
     pub fn rename_task(&self, id: i64, name: &str) -> Result<()> {
@@ -162,6 +169,13 @@ impl Store {
     /// Puts the task at `position` in `list`; tasks at or after it move down one.
     pub fn move_task(&self, id: i64, list: i64, position: i64) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
+        if !tx.query_row("SELECT EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND deleted=0)", [list], |r| r.get::<_, bool>(0))? { return Err(Error::NotFound); }
+        // A cross-list move needs the old account to delete its copy, including across providers.
+        let remote: Option<(String, Option<String>, i64)> = tx.query_row("SELECT remote_id,remote_list_id,list FROM tasks WHERE id=?1 AND list<>?2 AND remote_id IS NOT NULL AND deleted=0", params![id, list], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        if let Some((remote, remote_list, old_list)) = remote {
+            tx.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1", [id])?;
+            tx.execute("INSERT INTO tasks(list,remote_id,remote_list_id,title,updated,created,dirty,deleted) SELECT ?2,?3,?4,title,updated,created,1,1 FROM tasks WHERE id=?1", params![id, old_list, remote, remote_list])?;
+        }
         tx.execute("UPDATE tasks SET position=position+1,updated=unixepoch(),dirty=1 WHERE list=?1 AND position>=?2 AND id<>?3 AND deleted=0", params![list, position, id])?;
         changed(tx.execute("UPDATE tasks SET list=?2,position=?3,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, list, position])?)?;
         Ok(tx.commit()?)
@@ -311,7 +325,7 @@ mod tests {
     #[test]
     fn first_list_becomes_default_in_an_empty_store() {
         let store = Store { db: rusqlite::Connection::open_in_memory().unwrap() };
-        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql")] {
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql"), include_str!("schema_v13.sql"), include_str!("schema_v14.sql")] {
             let empty = schema.lines().filter(|line| !line.starts_with("INSERT INTO task_lists")).collect::<Vec<_>>().join("\n");
             store.db.execute_batch(&empty).unwrap();
         }

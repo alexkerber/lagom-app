@@ -36,6 +36,8 @@ pub enum Error {
     ReauthRequired,
     #[error("Allow calendar access")]
     CalendarConsent,
+    #[error("Allow Google Tasks access")]
+    TasksConsent,
     #[error("sign-in cancelled")]
     Cancelled,
     #[error("authentication rejected")]

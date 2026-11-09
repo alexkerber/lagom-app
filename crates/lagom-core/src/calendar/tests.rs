@@ -31,7 +31,8 @@ fn calendar_migrates_v9_without_changing_mail_or_tasks() {
     let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
     store.save_account(&account).unwrap();
     let list = store.default_task_list().unwrap();
-    let task = store.add_task(list, "Keep local task", "", None).unwrap();
+    store.db.execute("INSERT INTO tasks(list,title,updated,created,dirty) VALUES(?1,'Keep local task',42,42,1)", [list]).unwrap();
+    let task = store.tasks(list, false).unwrap().remove(0);
     drop(store);
     let store = Store::open(path).unwrap();
     assert_eq!(store.accounts().unwrap(), [account.clone()]);
@@ -40,7 +41,7 @@ fn calendar_migrates_v9_without_changing_mail_or_tasks() {
     store.set_account_scopes(&account.id, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
     store.save_account(&account).unwrap();
     assert!(crate::oauth::calendar_allowed(&store.account_scopes(&account.id).unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
 }
 
 #[test]
@@ -203,5 +204,5 @@ fn v11_cache_upgrade_preserves_events_without_inventing_coverage() {
     assert_eq!(cached[0].event.title, "Kept");
     assert!(cached[0].event.html_link.is_none());
     assert!(crate::oauth::calendar_allowed(&store.account_scopes("fixture").unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
 }

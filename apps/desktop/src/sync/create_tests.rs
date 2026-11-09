@@ -8,7 +8,7 @@ fn fixture() -> (Worker, Account, UnboundedReceiver<Event>, PathBuf) {
     let (me, _) = unbounded_channel();
     let (events, out) = unbounded_channel();
     let worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None,
-        calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(),
+        calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None,
         reauth_required: HashSet::new(), discovery: None, me, events };
     let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
     let mut account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
