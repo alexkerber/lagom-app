@@ -23,20 +23,17 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn agenda_view(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn calendar_controls(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let has_calendar = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || !self.today.events.is_empty();
-        let mut agenda = div().id("today-agenda").w_full().flex_shrink_0().max_h(px(280.)).overflow_y_scroll()
-            .flex().flex_col().gap(px(12.))
-            .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
+        let mut controls = div().id("calendar-accounts").flex_shrink_0().max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
         if self.today.calendar_accounts.is_empty() && self.today.events.is_empty() {
-            agenda = agenda.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
+            controls = controls.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
         }
         for (ix, (account, allowed)) in self.today.calendar_accounts.iter().enumerate() {
             let id = account.id.clone();
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
-            agenda = agenda.child(div().flex().items_center().gap(px(8.))
+            controls = controls.child(div().flex().items_center().gap(px(8.))
                 .child(mono(account.email.clone(), t.ink2))
                 .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))
@@ -52,6 +49,16 @@ impl MainWindow {
                 .when_some(state.and_then(|s| match s { SyncState::Failed(e) => Some(e.clone()), _ => None }),
                     |d, error| d.child(mono(error, t.ink2))));
         }
+        div().flex_shrink_0().child(controls)
+    }
+
+    pub(super) fn agenda_view(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let has_calendar = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || !self.today.events.is_empty();
+        let mut agenda = div().id("today-agenda").w_full().flex_shrink_0().max_h(px(280.)).overflow_y_scroll()
+            .flex().flex_col().gap(px(12.))
+            .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
+        agenda = agenda.child(self.calendar_controls(cx));
         if has_calendar && self.today.events.is_empty() {
             agenda = agenda.child(mono("No cached events for today", t.ink2));
         }

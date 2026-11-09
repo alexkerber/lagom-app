@@ -1,5 +1,5 @@
 use crate::{account::Account, store::Store, Error, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Calendar {
@@ -51,6 +51,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn calendar_window(&self, account: &str) -> Result<Option<(i64, i64)>> {
+        Ok(self.db.query_row("SELECT start_utc,end_utc FROM calendar_windows WHERE account=?1", [account],
+            |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
     /// Publish a complete window only after every page and calendar has arrived.
     pub fn replace_calendar_window(&self, account: &str, start: i64, end: i64, calendars: &[(Calendar, Vec<Event>)]) -> Result<()> {
         if start >= end { return Err(Error::Invalid("invalid calendar window")); }
@@ -74,6 +79,9 @@ impl Store {
                     params![id, event.remote_id, event.title, event.start, event.end, event.start_utc, event.end_utc, event.all_day, event.location, event.join_url, event.html_link])?;
             }
         }
+        // shortcut: coverage tracks the latest complete fetch; retain disjoint windows when arbitrary week fetching lands.
+        self.db.execute("INSERT INTO calendar_windows(account,start_utc,end_utc) VALUES(?1,?2,?3)
+            ON CONFLICT(account) DO UPDATE SET start_utc=excluded.start_utc,end_utc=excluded.end_utc", params![account, start, end])?;
         tx.commit()?;
         Ok(())
     }

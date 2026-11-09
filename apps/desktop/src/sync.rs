@@ -878,12 +878,18 @@ mod tests {
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(snapshot)));
         worker.calendar_finished(stale);
         assert!(worker.store.today_events("2026-11-09", 0, 3).unwrap().is_empty());
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), None);
         assert!(out.try_recv().is_err());
         assert_eq!(worker.calendar_tasks.len(), 1);
         let fresh = worker.calendars.join_next_with_id().await.unwrap();
         worker.calendar_finished(fresh);
         assert_eq!(worker.store.today_events("2026-11-09", 0, 3).unwrap().len(), 1);
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((0, 3)));
         assert!(worker.calendar_tasks.is_empty());
+        worker.start_calendar(account.clone(), 400, 500, std::future::ready(Err(Error::Network("offline"))));
+        let failed = worker.calendars.join_next_with_id().await.unwrap();
+        worker.calendar_finished(failed);
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((0, 3)));
         while out.try_recv().is_ok() {}
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Err(Error::CalendarConsent)));
         let stale = worker.calendars.join_next_with_id().await.unwrap();

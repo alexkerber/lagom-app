@@ -446,14 +446,18 @@ impl MainWindow {
         cx.notify();
     }
 
+    pub(super) fn pending_moves(&self) -> HashSet<i64> {
+        self.live.iter().flat_map(|live| live.ops.values()).filter_map(|op| match op {
+            Op::Move(id) => self.inbox.mail.get(*id).and_then(|m| m.store),
+            _ => None,
+        }).collect()
+    }
+
     fn notify_mail(&mut self, messages: Vec<lagom_core::store::MessageSummary>, window: &Window, cx: &mut Context<Self>) {
         if !self.panes.notifications || window.is_window_active() { return; }
+        let pending = self.pending_moves();
         let Some(live) = &mut self.live else { return };
-        let messages = messages.into_iter().filter(|m| {
-            !live.seen.contains(&m.id) && !live.ops.values().any(|op| {
-                matches!(op, Op::Move(id) if self.inbox.mail.get(*id).is_some_and(|row| row.store == Some(m.id)))
-            })
-        }).collect();
+        let messages = messages.into_iter().filter(|m| !live.seen.contains(&m.id) && !pending.contains(&m.id)).collect();
         show_mail(&live.store, messages, cx);
     }
 
@@ -499,6 +503,16 @@ impl MainWindow {
             return;
         }
         let Some(account) = live.accounts.iter().position(|a| a.id == target.account) else { return };
+        if let Some(id) = target.message {
+            match live.store.message_summary(id) {
+                Ok(message) if message.account == target.account => {}
+                Ok(_) | Err(lagom_core::Error::NotFound) => {
+                    self.notify("That message is no longer available locally", cx);
+                    return;
+                }
+                Err(e) => { self.notify(format!("Could not open message: {e}"), cx); return; }
+            }
+        }
         live.current = account;
         live.limit = PAGE;
         live.pin = None;
@@ -515,11 +529,7 @@ impl MainWindow {
         self.release(false, cx);
         self.clear_motion();
         self.reload(cx);
-        if let Some(id) = target.message {
-            if self.live.as_ref().is_some_and(|l| l.store.message(id).is_ok_and(|m| m.summary.account == target.account)) {
-                self.open_found(id, cx);
-            }
-        }
+        if let Some(id) = target.message { self.open_found(id, cx); }
         window.focus(&self.focus);
         cx.notify();
     }
@@ -1040,6 +1050,137 @@ mod tests {
         }));
         view.update(cx, |v, cx| { v.live = Some(fixture_live(store, bridge)); v.page = Page::Mail; cx.notify(); });
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn shift_u_uses_batch_read_path_and_rolls_back_rejection(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.panes.group_conversations = false;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.inbox.select_all();
+        });
+        cx.simulate_keystrokes("shift-u");
+        let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(commands.len(), 3);
+        let events = commands.into_iter().map(|cmd| match cmd {
+            Cmd::Op { op, act: Act::Read(true), .. } => Event::Op { op, error: Some("fixture rejected read".into()) },
+            _ => panic!("Shift+U must use the batch read command"),
+        }).collect();
+        assert!(view.read_with(cx, |v, _| v.inbox.list().is_empty()));
+        view.update_in(cx, |v, window, cx| v.on_events(events, window, cx));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.list().len(), 3);
+            assert!(v.inbox.list().iter().all(|&id| v.inbox.mail[id].unread));
+        });
+    }
+
+    #[gpui::test]
+    fn review_home_hides_pending_moves_and_fills_five_rows(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=7 { incoming(v, uid); }
+            v.panes.group_conversations = false;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            let moved = v.inbox.mail[v.inbox.current().unwrap()].store.unwrap();
+            v.act(Move::Done, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Op { id, act: Act::Archive, .. }) if id == moved));
+            v.show_home(window, cx);
+            assert_eq!(v.today.unread.len(), 5);
+            assert!(!v.today.unread.iter().any(|m| m.store == Some(moved)));
+        });
+    }
+
+    #[gpui::test]
+    fn review_home_rejects_deferred_click_after_move_replaces_store_row(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            incoming(v, 1);
+            incoming(v, 2);
+            v.panes.group_conversations = false;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            let moved = v.inbox.mail[v.inbox.current().unwrap()].store.unwrap();
+            let store = v.live.as_ref().unwrap().store.clone();
+            let account = store.message_summary(moved).unwrap().account;
+            v.act(Move::Done, cx);
+            let Cmd::Op { op, id, act: Act::Archive } = rx.try_recv().unwrap() else { panic!("missing move") };
+            assert_eq!(id, moved);
+            v.show_home(window, cx);
+            v.open_notification(crate::notifications::Target { account: account.clone(), message: Some(moved) }, window, cx);
+            assert!(v.live.as_ref().unwrap().notification_target.is_some());
+            // IMAP MOVE replaces the source row with a destination row during sync.
+            let mut message = store.message(moved).unwrap();
+            message.summary.folder = store.save_folder(&account, "Archive", None, lagom_core::store::FolderRole::Archive).unwrap();
+            let replacement = store.save_message(&message).unwrap();
+            store.delete_message(moved).unwrap();
+            assert_ne!(replacement, moved);
+            v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            assert!(matches!(v.page, Page::Home), "a stale target must not open the remaining Inbox message");
+            assert!(v.live.as_ref().unwrap().notification_target.is_none());
+            assert!(v.toast.as_ref().unwrap().0.contains("no longer available"));
+        });
+        cx.run_until_parked();
+        assert!(rx.try_recv().is_err(), "rejecting the click must not mark another message read");
+    }
+
+    #[gpui::test]
+    fn review_home_calendar_consent_survives_cached_events_and_mixed_accounts(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let account = view.update_in(cx, |v, window, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut account = store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            store.save_account(&account).unwrap();
+            let day = chrono::Local::now().date_naive();
+            let start = super::super::agenda::day_start(day, &chrono::Local);
+            store.replace_calendar_window(&account.id, start - 7 * 86400, start + 60 * 86400,
+                &[(lagom_core::calendar::Calendar { remote_id: "primary".into(), name: "Fixture".into(), color: None, shown: true, writable: false },
+                    vec![lagom_core::calendar::Event { remote_id: "cached".into(), title: "Cached event".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
+                        start_utc: start, end_utc: start + 86400, all_day: true, location: None, join_url: None, html_link: None }])]).unwrap();
+            store.set_account_scopes(&account.id, "").unwrap();
+            v.on_events(vec![Event::CalendarSync(account.id.clone(), SyncState::Failed("Calendar permission revoked".into())), Event::Changed], window, cx);
+            v.show_section(2, window, cx);
+            account
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("allow-calendar-0").is_some(), "cached events must not hide revoked consent");
+        assert!(cx.debug_bounds("week-grid").is_some());
+        view.update_in(cx, |v, window, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            let mut other = account.clone();
+            other.id = "second-calendar".into();
+            other.email = "second@example.test".into();
+            store.save_authorized_account(&other, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+            v.on_events(vec![Event::Changed], window, cx);
+        });
+        cx.run_until_parked();
+        let ix = view.read_with(cx, |v, _| v.today.calendar_accounts.iter().position(|(a, _)| a.id == account.id).unwrap());
+        let button = cx.debug_bounds(format!("allow-calendar-{ix}").leak()).expect("another authorized account must not hide consent");
+        cx.simulate_click(button.center(), Default::default());
+        assert!(matches!(rx.try_recv(), Ok(Cmd::AllowCalendar(id)) if id == account.id));
+    }
+
+    #[gpui::test]
+    fn review_home_calendar_reopened_offline_uses_successful_fetch_bounds(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_mut().unwrap();
+            let mut account = live.store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            live.store.save_authorized_account(&account, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+            let fetched = chrono::Local::now().timestamp() - 90 * 86400;
+            live.store.replace_calendar_window(&account.id, fetched - 7 * 86400, fetched + 60 * 86400, &[]).unwrap();
+            live.store = Rc::new(Store::open(live.store.path()).unwrap());
+            v.show_section(2, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("week-unsynced").is_some(), "today has never been fetched");
+        assert!(cx.debug_bounds("week-grid").is_none());
     }
 
     #[gpui::test]

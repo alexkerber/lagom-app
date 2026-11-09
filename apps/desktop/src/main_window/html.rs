@@ -381,6 +381,7 @@ mod tests {
         if !SUPPORTED { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
+            v.open_box(None, cx);
             v.inbox.group = false;
             v.inbox.select(0);
             let id = v.inbox.current().unwrap();

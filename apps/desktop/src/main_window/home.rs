@@ -21,8 +21,10 @@ impl MainWindow {
 
     pub(super) fn reload_unread(&mut self, cx: &mut Context<Self>) {
         if let Some(live) = &self.live {
-            match live.store.unread_mail(chrono::Local::now().timestamp(), 5) {
-                Ok(messages) => self.today.unread = messages.iter().map(|m| Mail::from_summary(m, chrono::Local::now())).collect(),
+            let pending = self.pending_moves();
+            match live.store.unread_mail(chrono::Local::now().timestamp(), 5u32.saturating_add(pending.len() as u32)) {
+                Ok(messages) => self.today.unread = messages.iter().filter(|m| !pending.contains(&m.id)).take(5)
+                    .map(|m| Mail::from_summary(m, chrono::Local::now())).collect(),
                 Err(e) => self.notify(format!("Could not read unread mail: {e}"), cx),
             }
         } else {
@@ -75,6 +77,10 @@ mod tests {
         let paths: HashSet<_> = SECTIONS.iter().map(|s| s.1).chain(["icons/inbox.svg", "icons/later.svg", "icons/sent.svg", "icons/done.svg", "icons/trash.svg"]).collect();
         assert_eq!(paths.len(), 9);
         cx.run_until_parked();
+        let brand = cx.debug_bounds("sidebar-brand").expect("static Lagom header");
+        assert!(cx.debug_bounds("account-switcher").is_none());
+        cx.simulate_click(brand.center(), Default::default());
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Home)));
         let rows: Vec<_> = (0..4).map(|i| cx.debug_bounds(format!("section-{i}").leak()).unwrap()).collect();
         assert!(rows.windows(2).all(|r| r[0].bottom() <= r[1].top()));
         for (key, section) in [("secondary-4", 3), ("secondary-3", 2), ("secondary-1", 0)] {

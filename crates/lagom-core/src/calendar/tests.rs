@@ -40,7 +40,7 @@ fn calendar_migrates_v9_without_changing_mail_or_tasks() {
     store.set_account_scopes(&account.id, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
     store.save_account(&account).unwrap();
     assert!(crate::oauth::calendar_allowed(&store.account_scopes(&account.id).unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 11);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
 }
 
 #[test]
@@ -155,4 +155,53 @@ fn v10_upgrade_keeps_cached_events_and_roundtrips_optional_html_link() {
     drop(store);
     let store = Store::open(path).unwrap();
     assert!(store.today_events("2026-11-09", 0, 1).unwrap().iter().any(|e| e.event == linked));
+}
+
+#[test]
+fn successful_fetch_bounds_persist_per_account_and_rollback_with_events() {
+    let (dir, store, account) = setup();
+    let mut other = account.clone();
+    other.id = "other".into();
+    store.save_account(&other).unwrap();
+    assert_eq!(store.calendar_window(&account.id).unwrap(), None);
+    store.replace_calendar_window(&account.id, 100, 200, &[]).unwrap();
+    store.replace_calendar_window(&other.id, 300, 400, &[]).unwrap();
+    let mut invalid = event("invalid", "2026-11-09", "2026-11-10", true);
+    invalid.end_utc = invalid.start_utc;
+    assert!(store.replace_calendar_window(&account.id, 500, 600, &[(calendar(), vec![invalid])]).is_err());
+    assert!(store.replace_calendar_window(&account.id, 600, 500, &[]).is_err());
+    drop(store);
+    let store = Store::open(dir.path().join("calendar.db")).unwrap();
+    assert_eq!(store.calendar_window(&account.id).unwrap(), Some((100, 200)));
+    assert_eq!(store.calendar_window(&other.id).unwrap(), Some((300, 400)));
+    store.replace_calendar_window(&account.id, 500, 600, &[]).unwrap();
+    assert_eq!(store.calendar_window(&account.id).unwrap(), Some((500, 600)), "a gap between fetches is not covered");
+    store.delete_account(&account.id).unwrap();
+    assert_eq!(store.calendar_window(&account.id).unwrap(), None);
+    assert_eq!(store.calendar_window(&other.id).unwrap(), Some((300, 400)));
+}
+
+#[test]
+fn v11_cache_upgrade_preserves_events_without_inventing_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calendar.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for schema in [include_str!("../schema_v1.sql"), include_str!("../schema_v2.sql"), include_str!("../schema_v3.sql"),
+        include_str!("../schema_v4.sql"), include_str!("../schema_v5.sql"), include_str!("../schema_v6.sql"),
+        include_str!("../schema_v7.sql"), include_str!("../schema_v8.sql"), include_str!("../schema_v9.sql"),
+        include_str!("../schema_v10.sql"), include_str!("../schema_v11.sql")] { db.execute_batch(schema).unwrap(); }
+    db.execute_batch("INSERT INTO accounts(id,display_name,email,imap_host,imap_port,imap_security,imap_username,smtp_host,smtp_port,smtp_security,smtp_username,scopes)
+        VALUES('fixture','Fixture','fixture@example.test','localhost',993,'tls','fixture','localhost',465,'tls','fixture','https://www.googleapis.com/auth/calendar');
+        INSERT INTO calendars(id,account,remote_id,name,writable) VALUES(1,'fixture','primary','Fixture',1);
+        INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,html_link)
+        VALUES(1,'cached','Kept','2026-11-09','2026-11-10',1,2,1,'https://www.google.com/calendar/event?eid=fixture');").unwrap();
+    drop(db);
+    let store = Store::open(path).unwrap();
+    assert_eq!(store.calendar_window("fixture").unwrap(), None);
+    let cached = store.today_events("2026-11-09", 0, 1).unwrap();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(cached[0].event.title, "Kept");
+    assert_eq!(cached[0].event.html_link.as_deref(), Some("https://www.google.com/calendar/event?eid=fixture"));
+    assert!(crate::oauth::calendar_allowed(&store.account_scopes("fixture").unwrap()));
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
 }

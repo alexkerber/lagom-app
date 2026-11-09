@@ -46,6 +46,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", ExtendPrev, keys),
         KeyBinding::new("secondary-a", crate::text_input::SelectAll, keys),
         KeyBinding::new("secondary-shift-u", ToggleRead, keys),
+        KeyBinding::new("shift-u", ToggleRead, keys),
         KeyBinding::new("e", Done, keys),
         KeyBinding::new("t", NewTask, keys),
         // Arrows mirror the swipe directions: right is Done, left is Later.
@@ -1262,7 +1263,6 @@ impl MainWindow {
             Some(live) => live.accounts.iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == live.current)).collect(),
             None => mail::demo_accounts().iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == 0)).collect(),
         };
-        let current = accounts.iter().find(|a| a.2).map_or(SharedString::from("Lagom"), |a| a.0.clone());
         let on_mail = matches!(self.page, Page::Mail);
         let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
@@ -1285,7 +1285,7 @@ impl MainWindow {
             // Room for the macOS traffic lights.
             .when(cfg!(target_os = "macos"), |d| d.child(div().h(px(16.)).flex_shrink_0()))
             .child(
-                pressable(div().id("account-switcher"), t, false)
+                div().id("sidebar-brand").debug_selector(|| "sidebar-brand".into())
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -1295,8 +1295,7 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(app_mark())
-                    .child(div().flex_1().min_w(px(0.)).one_line().child(current))
-                    .child(icon("icons/chevron.svg", t.ink2, 14.)),
+                    .child("Lagom"),
             )
             .children(self.live.as_ref().and_then(|live| self.reauth_control(live.current, "sidebar-reauth", cx)))
             .child(

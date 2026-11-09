@@ -8,6 +8,7 @@ const MIN_EVENT: f32 = 36.;
 pub(super) struct Week {
     start: NaiveDate,
     days: Vec<Vec<AgendaEvent>>,
+    windows: Vec<Option<(i64, i64)>>,
     detail: Option<AgendaEvent>,
     scroll: ScrollHandle,
     tick: Option<Task<()>>,
@@ -18,13 +19,16 @@ impl Default for Week {
     fn default() -> Self {
         let scroll = ScrollHandle::new();
         scroll.set_offset(gpui::point(px(0.), px(-8. * HOUR)));
-        Self { start: monday(chrono::Local::now().date_naive()), days: vec![vec![]; 7], detail: None, scroll, tick: None, loaded_day: None }
+        Self { start: monday(chrono::Local::now().date_naive()), days: vec![vec![]; 7], windows: vec![], detail: None, scroll, tick: None, loaded_day: None }
     }
 }
 
 fn monday(day: NaiveDate) -> NaiveDate { day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64) }
-// shortcut: boundary dates may be partially cached, use persisted sync bounds when arbitrary week fetching lands.
-fn synced_day(day: NaiveDate, today: NaiveDate) -> bool { (-7..=60).contains(&(day - today).num_days()) }
+fn synced_day(day: NaiveDate, windows: &[Option<(i64, i64)>]) -> bool {
+    let start = agenda::day_start(day, &chrono::Local);
+    let end = agenda::day_start(day.succ_opt().unwrap(), &chrono::Local);
+    !windows.is_empty() && windows.iter().all(|bounds| bounds.is_some_and(|(from, to)| from <= start && to >= end))
+}
 
 #[derive(Debug)]
 struct Block { event: usize, start: f32, end: f32, lane: usize, lanes: usize }
@@ -93,13 +97,22 @@ impl MainWindow {
     pub(super) fn reload_week(&mut self, cx: &mut Context<Self>) {
         self.week.loaded_day = Some(chrono::Local::now().date_naive());
         let Some(live) = &self.live else { return };
-        let result: lagom_core::Result<Vec<_>> = (0..7).map(|i| {
-            let day = self.week.start + chrono::Duration::days(i);
-            live.store.today_events(&day.to_string(), agenda::day_start(day, &chrono::Local), agenda::day_start(day.succ_opt().unwrap(), &chrono::Local))
-        }).collect();
+        let result = (|| -> lagom_core::Result<_> {
+            let windows = self.today.calendar_accounts.iter().map(|(account, _)| live.store.calendar_window(&account.id))
+                .collect::<lagom_core::Result<Vec<_>>>()?;
+            let days = (0..7).map(|i| {
+                let day = self.week.start + chrono::Duration::days(i);
+                live.store.today_events(&day.to_string(), agenda::day_start(day, &chrono::Local), agenda::day_start(day.succ_opt().unwrap(), &chrono::Local))
+            }).collect::<lagom_core::Result<Vec<_>>>()?;
+            Ok((days, windows))
+        })();
         match result {
-            Ok(days) => self.week.days = days,
-            Err(e) => { self.week.days = vec![vec![]; 7]; self.notify(format!("Could not read calendar: {e}"), cx); }
+            Ok((days, windows)) => { self.week.days = days; self.week.windows = windows; }
+            Err(e) => {
+                self.week.days = vec![vec![]; 7];
+                self.week.windows.clear();
+                self.notify(format!("Could not read calendar: {e}"), cx);
+            }
         }
     }
 
@@ -157,7 +170,8 @@ impl MainWindow {
                 .child(button(&t, "‹", None).debug_selector(|| "previous-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(-1, cx))))
                 .child(button(&t, "Today", None).on_click(cx.listener(|this, _, _, cx| this.move_week(0, cx))))
                 .child(button(&t, "›", None).debug_selector(|| "next-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(1, cx)))));
-        if !allowed { return page.child(self.agenda_view(cx)); }
+        page = page.child(self.calendar_controls(cx));
+        if !allowed { return page; }
         let mut headers = div().flex().flex_shrink_0().pl(px(48.));
         let mut all_day = div().id("week-all-day").debug_selector(|| "week-all-day".into()).flex().flex_shrink_0().min_h(px(32.)).max_h(px(150.)).overflow_y_scroll()
             .child(mono("All day", t.ink2).w(px(48.)).flex_shrink_0());
@@ -168,36 +182,35 @@ impl MainWindow {
         let mut grid = div().flex().h(px(24. * HOUR)).child(hours);
         for day in 0..7 {
             let date = start + chrono::Duration::days(day as i64);
-            let synced = synced_day(date, today);
+            let synced = synced_day(date, &self.week.windows);
             headers = headers.child(div().flex_1().min_w(px(0.)).text_color(if date == today { t.accent } else { t.ink })
                 .font_weight(FontWeight::MEDIUM).child(date.format("%a %-d").to_string()));
             let entries = &self.week.days[day];
             all_day = all_day.child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).px(px(2.))
-                .when(synced, |d| d.children(entries.iter().enumerate().filter(|(_, e)| e.event.all_day)
-                    .map(|(ix, e)| self.event_block(e, day, ix, cx).min_h(px(26.))))));
+                .children(entries.iter().enumerate().filter(|(_, e)| e.event.all_day)
+                    .map(|(ix, e)| self.event_block(e, day, ix, cx).min_h(px(26.)))));
             let mut column = div().relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_color(t.line);
             if !synced {
                 column = column.child(mono("Not synced this far", t.ink2).p(px(8.)).debug_selector(move || format!("unsynced-day-{day}")));
-            } else {
-                for hour in 0..24 {
-                    column = column.child(div().absolute().top(px(hour as f32 * HOUR)).w_full().h(px(1.)).bg(t.line));
-                }
-                for block in layout(entries, date, &chrono::Local) {
-                    column = column.child(self.event_block(&entries[block.event], day, block.event, cx).absolute()
-                        .top(px(block.start * HOUR / 60.)).h(px((block.end - block.start) * HOUR / 60.))
-                        .left(relative(block.lane as f32 / block.lanes as f32)).w(relative(1. / block.lanes as f32)));
-                }
-                if date == today {
-                    column = column.child(div().absolute().top(px((now.hour() as f32 + now.minute() as f32 / 60.) * HOUR))
-                        .w_full().h(px(2.)).bg(t.accent).debug_selector(|| "current-time".into()));
-                }
+            }
+            for hour in 0..24 {
+                column = column.child(div().absolute().top(px(hour as f32 * HOUR)).w_full().h(px(1.)).bg(t.line));
+            }
+            for block in layout(entries, date, &chrono::Local) {
+                column = column.child(self.event_block(&entries[block.event], day, block.event, cx).absolute()
+                    .top(px(block.start * HOUR / 60.)).h(px((block.end - block.start) * HOUR / 60.))
+                    .left(relative(block.lane as f32 / block.lanes as f32)).w(relative(1. / block.lanes as f32)));
+            }
+            if date == today {
+                column = column.child(div().absolute().top(px((now.hour() as f32 + now.minute() as f32 / 60.) * HOUR))
+                    .w_full().h(px(2.)).bg(t.accent).debug_selector(|| "current-time".into()));
             }
             grid = grid.child(column);
         }
         page = page.child(headers).child(all_day)
-            .when((0..7).any(|i| !synced_day(start + chrono::Duration::days(i), today)), |d|
+            .when((0..7).any(|i| !synced_day(start + chrono::Duration::days(i), &self.week.windows)), |d|
                 d.child(mono("Not synced this far", t.ink2).debug_selector(|| "week-unsynced".into())))
-            .when((0..7).any(|i| synced_day(start + chrono::Duration::days(i), today)), |d|
+            .when(self.week.days.iter().any(|d| !d.is_empty()) || (0..7).any(|i| synced_day(start + chrono::Duration::days(i), &self.week.windows)), |d|
                 d.child(div().id("week-grid").debug_selector(|| "week-grid".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.week.scroll).child(grid)))
             .child(mono("← → week · T today", t.ink2));
         if let Some(entry) = &self.week.detail {
@@ -257,11 +270,15 @@ mod tests {
     }
 
     #[test]
-    fn monday_and_cache_limits_cross_month_and_year_boundaries() {
+    fn monday_crosses_year_boundary_and_coverage_requires_full_days_for_every_account() {
         let day = NaiveDate::from_ymd_opt(2027, 1, 3).unwrap();
         assert_eq!(monday(day).to_string(), "2026-12-28");
-        for (offset, valid) in [(-8, false), (-7, true), (0, true), (60, true), (61, false)] {
-            assert_eq!(synced_day(day + chrono::Duration::days(offset), day), valid);
+        let start = agenda::day_start(day, &chrono::Local);
+        let end = agenda::day_start(day.succ_opt().unwrap(), &chrono::Local);
+        for (windows, valid) in [(vec![], false), (vec![None], false), (vec![Some((start, end))], true),
+            (vec![Some((start + 1, end))], false), (vec![Some((start, end - 1))], false),
+            (vec![Some((start, end)), None], false)] {
+            assert_eq!(synced_day(day, &windows), valid);
         }
     }
 
@@ -270,7 +287,10 @@ mod tests {
         cx.update(|cx| super::super::bind_keys(cx));
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         let start = view.read_with(cx, |v, _| v.week.start);
-        view.update(cx, |v, _| v.week.days[0] = vec![entry(start, 0, 1440, true), entry(start, 540, 600, false)]);
+        view.update(cx, |v, _| {
+            v.week.days[0] = vec![entry(start, 0, 1440, true), entry(start, 540, 600, false)];
+            v.week.windows = vec![Some((agenda::day_start(start, &chrono::Local), agenda::day_start(start + chrono::Duration::weeks(1), &chrono::Local)))];
+        });
         cx.simulate_keystrokes("secondary-3");
         cx.run_until_parked();
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
@@ -297,7 +317,7 @@ mod tests {
         view.update(cx, |v, cx| v.move_week(10, cx));
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         assert!(cx.debug_bounds("week-unsynced").is_some());
-        assert!(view.read_with(cx, |v, _| (0..7).all(|i| !synced_day(v.week.start + chrono::Duration::days(i), chrono::Local::now().date_naive()))));
+        assert!(view.read_with(cx, |v, _| (0..7).all(|i| !synced_day(v.week.start + chrono::Duration::days(i), &v.week.windows))));
     }
     #[test]
     fn all_day_detail_uses_inclusive_end_date() {
