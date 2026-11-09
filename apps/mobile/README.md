@@ -46,8 +46,8 @@ runtime credential access on signed hardware.
 
 Generate the project as above, then use Xcode to select a simulator **you own**
 or your development iPhone/iPad. For a physical device, select your development
-team under Signing & Capabilities and replace the placeholder `iq.lagom.app`
-bundle identifier before release. Build and Run is a manual acceptance step;
+team under Signing & Capabilities if you are not on the project's team
+(`com.alexkerber.lagom`, team 3KFU9JQ5LH). Build and Run is a manual acceptance step;
 the automated build commands neither launch the app nor install it anywhere.
 Never use, boot, reset, erase or install on somebody else's simulator.
 
@@ -120,3 +120,13 @@ local access during a stalled sync, Done on snoozed archived mail and the earlie
 snooze across accounts. These checks never use real accounts or keychains. Native
 layout, navigation, gestures, WKWebView behavior, Dynamic Type and signed-device
 Keychain/provider acceptance still require manual testing.
+
+## TestFlight
+
+`apps/mobile/apple/release.sh` builds the bindings, generates the project and
+archives a Release build for devices with automatic signing, using the Apple ID
+signed in to Xcode. The build number is the UTC time (`YYYYMMDDHHMM`), so every
+archive is newer than the last. Without arguments it exports an IPA to
+`apps/mobile/apple/build/export`; with `--upload` the export goes straight to
+App Store Connect through the same Xcode account (no API key). The app record
+for `com.alexkerber.lagom` must exist in App Store Connect first.
