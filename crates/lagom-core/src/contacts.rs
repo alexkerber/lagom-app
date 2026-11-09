@@ -9,6 +9,8 @@ pub struct Contact {
     pub name: String,
     pub address: String,
     pub score: f64,
+    /// The user sent mail to this address (Sent or Drafts). Others rank lower and are never auto-picked.
+    pub written: bool,
 }
 
 impl Contact {
@@ -74,7 +76,7 @@ pub struct Contacts {
 
 impl Contacts {
     pub fn new(mut entries: Vec<Contact>) -> Self {
-        entries.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.address.cmp(&b.address)));
+        entries.sort_by(|a, b| b.written.cmp(&a.written).then(b.score.total_cmp(&a.score)).then(a.address.cmp(&b.address)));
         let mut prefixes: HashMap<String, Vec<usize>> = HashMap::new();
         for (id, contact) in entries.iter().enumerate() {
             for value in [&contact.name, &contact.address] {
@@ -112,14 +114,15 @@ impl Store {
         }
         let mut entries: HashMap<String, (Contact, i64)> = HashMap::new();
         let mut messages = HashSet::new();
-        let mut stmt = self.db.prepare("SELECT from_name,from_address,to_addresses,cc,date,message_id FROM messages WHERE account=?1")?;
+        // Hostile mail lands in Junk and Trash, and a From header proves nothing: only Sent and Drafts hold the user's mail.
+        let mut stmt = self.db.prepare("SELECT m.from_name,m.from_address,m.to_addresses,m.cc,m.date,m.message_id,f.role IN ('sent','drafts') FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder) WHERE m.account=?1 AND f.role NOT IN ('junk','trash')")?;
         let mut rows = stmt.query([account])?;
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(5)?;
             // shortcut: copies without Message-ID count separately; deduplicate when a reliable provider identity is stored.
             let first_message = message_id.is_empty() || messages.insert(message_id);
             let from: String = row.get(1)?;
-            let sent = own.contains(&from.to_lowercase());
+            let sent = own.contains(&from.to_lowercase()) && row.get::<_, bool>(6)?;
             let date: i64 = row.get(4)?;
             let age = now.saturating_sub(date).max(0) as f64 / 86400.;
             let score = if sent { 4. } else { 1. } / (1. + age / 30.);
@@ -136,8 +139,9 @@ impl Store {
                 let name = mailbox.name.unwrap_or_default();
                 let named = !name.trim().is_empty() && !name.eq_ignore_ascii_case(&address);
                 let first = seen.insert(address.clone());
-                let (contact, named_at) = entries.entry(address.clone()).or_insert_with(|| (Contact { name: String::new(), address, score: 0. }, i64::MIN));
+                let (contact, named_at) = entries.entry(address.clone()).or_insert_with(|| (Contact { name: String::new(), address, score: 0., written: false }, i64::MIN));
                 if first && first_message { contact.score += score; }
+                contact.written |= sent;
                 if named && date >= *named_at {
                     contact.name = name;
                     *named_at = date;
@@ -299,6 +303,26 @@ mod tests {
         assert_eq!(results[0].score, 4.);
         assert_eq!(results[1].score, 2.);
         assert_eq!(store.contacts(&other.id, now).unwrap().suggest("rank")[0].address, "rank-other@example.com");
+    }
+
+    #[test]
+    fn junk_trash_and_spoofed_from_cannot_outrank_a_written_address() {
+        let (_temp, store, account, inbox, sent) = fixture();
+        let junk = store.save_folder(&account.id, "Junk", None, FolderRole::Junk).unwrap();
+        let trash = store.save_folder(&account.id, "Trash", None, FolderRole::Trash).unwrap();
+        let save = |uid, folder, from: &str, to: &str| store.save_message(&Message { summary: MessageSummary { account: account.id.clone(), folder, uid, from_address: from.into(), to: to.into(), date: 10, ..Default::default() }, ..Default::default() }).unwrap();
+        save(1, sent, "self@gmail.com", "Anna Berg <anna.berg@corp.example>");
+        for uid in 2..=6 {
+            save(uid, junk, "self@gmail.com", "Anna Berg <anna.berg@junk.example>");
+            save(uid, trash, "self@gmail.com", "Anna Berg <anna.berg@trash.example>");
+            // The user's own From, but outside Sent and Drafts: received weight, not written.
+            save(uid, inbox, "self@gmail.com", "Anna Berg <anna.berg@spoof.example>");
+            save(uid + 10, inbox, "anna.berg@lookalike.example", "self@gmail.com");
+        }
+        let results = store.contacts(&account.id, 10).unwrap().suggest("anna");
+        assert_eq!(results.iter().map(|c| (c.address.as_str(), c.written)).collect::<Vec<_>>(),
+            [("anna.berg@corp.example", true), ("anna.berg@lookalike.example", false), ("anna.berg@spoof.example", false)]);
+        assert_eq!((results[0].score, results[1].score, results[2].score), (4., 5., 5.));
     }
 
     #[test]

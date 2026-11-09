@@ -34,7 +34,7 @@ impl MainWindow {
         self.week.suggestion = 0;
         self.week.contact_load = None;
         if self.demo {
-            self.week.contacts = Contacts::new(vec![Contact { name: "Planning team".into(), address: "planning@example.com".into(), score: 1. }]);
+            self.week.contacts = Contacts::new(vec![Contact { name: "Planning team".into(), address: "planning@example.com".into(), score: 1., written: true }]);
         } else if let (Some(live), Some(account)) = (&self.live, account) {
             let path = live.store.path().to_owned();
             let load = cx.background_executor().spawn(async move { Store::open(path)?.contacts(&account, chrono::Utc::now().timestamp()) });
