@@ -39,14 +39,14 @@ impl MainWindow {
         let multiple = accounts.len() > 1;
         let active = matches!(self.page, Page::Mail) && self.inbox.open_kind() == kind;
         let expanded = self.mailbox_expanded[slot];
-        let count = if slot == 0 { self.inbox.count() } else { accounts.iter().map(|a| self.mailbox_unread(&a.id, slot)).sum() };
+        let count = if slot == 0 { self.inbox.count() } else { 0 };
         let row = pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active && self.inbox.account_filter.is_none())
             .debug_selector(move || format!("nav-{label}"))
             .flex().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
             .when(active && self.inbox.account_filter.is_none(), |d| d.bg(t.sel))
             .child(icon(path, if active && self.inbox.account_filter.is_none() { t.sel_icon } else { t.ink2 }, 16.))
             .child(div().flex_1().child(label))
-            .when(count > 0, |d| d.child(roll(mono(count.to_string(), t.ink2), format!("{label}-{count}"))))
+            .when(count > 0, |d| d.child(roll(mono(count.to_string(), t.ink2).debug_selector(move || format!("{label}-count")), format!("{label}-{count}"))))
             .when(multiple && slot != 0, |d| d.child(pressable(div().id(("disclosure", slot)), t, false)
                 .debug_selector(move || format!("disclosure-{label}"))
                 .group("mailbox-disclosure").w(px(20.)).h(px(24.)).flex().items_center().justify_center()
@@ -62,14 +62,14 @@ impl MainWindow {
         div().flex().flex_col().child(row)
             .when(multiple && expanded, |d| d.children(accounts.iter().enumerate().map(|(ix, account)| {
                 let selected = active && self.inbox.account_filter.as_deref() == Some(&account.id);
-                let unread = self.mailbox_unread(&account.id, slot);
+                let unread = if slot == 0 { self.mailbox_unread(&account.id, slot) } else { 0 };
                 pressable(div().id((SharedString::from(format!("{label}-account")), ix)), t, selected)
                     .debug_selector(move || format!("{label}-account-{ix}"))
                     .h(px(SIDEBAR_ROW)).pl(px(34.)).pr(px(10.)).flex().items_center().gap(px(8.))
                     .rounded(px(radius::CONTROL)).when(selected, |d| d.bg(t.sel))
                     .child(div().size(px(7.)).rounded_full().bg(self.account_accent(ix)).flex_shrink_0())
                     .child(div().flex_1().min_w(px(0.)).one_line().child(live::short_name(account)))
-                    .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("{label}-{ix}-{unread}"))))
+                    .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2).debug_selector(move || format!("{label}-account-{ix}-count")), format!("{label}-{ix}-{unread}"))))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_mailbox(kind, Some(ix), cx)))
             })))
     }
@@ -331,13 +331,79 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |v, _| {
             assert!(v.live.is_none() && v.preferences_path.is_none());
-            assert_eq!(v.mailbox_expanded, [true, true, true]);
+            assert_eq!(v.mailbox_expanded, [true, false, false]);
             assert_eq!(v.accounts().iter().map(|a| a.display_name.as_str()).collect::<Vec<_>>(), ["Personal", "Work"]);
             assert!(!v.hints.visible && v.hints.timer.is_none());
         });
-        for label in ["Inbox-account-1", "Done-account-1", "Sent-account-1", "message-card"] {
+        for label in ["Inbox-account-1", "message-card"] {
             assert!(cx.debug_bounds(label).is_some());
         }
+    }
+
+    #[test]
+    fn review_mail_section_has_no_selection_fill() {
+        for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
+            for active in [false, true] {
+                let mut mail = sidebar_nav(&t, "icons/mail.svg", "Mail", None, active, true);
+                assert!(mail.style().background.is_none());
+                for label in ["Today", "Calendar", "Todo", "Later"] {
+                    let mut row = sidebar_nav(&t, "icons/later.svg", label, None, active, true);
+                    assert_eq!(row.style().background.is_some(), active);
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn review_sent_done_hide_counts_and_remember_disclosures(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        view.update(cx, |v, cx| {
+            for account in v.accounts() { v.inbox.account_unread.insert(account.id, [3, 4, 5]); }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for label in ["Done", "Sent"] {
+            assert!(cx.debug_bounds(format!("{label}-account-0").leak()).is_none());
+            assert!(cx.debug_bounds(format!("{label}-count").leak()).is_none());
+            let at = cx.debug_bounds(format!("disclosure-{label}").leak()).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(format!("{label}-account-0").leak()).is_some());
+            assert!(cx.debug_bounds(format!("{label}-account-0-count").leak()).is_none());
+        }
+        for section in [0, 2, 3, 1] {
+            view.update_in(cx, |v, window, cx| v.show_section(section, window, cx));
+        }
+        view.read_with(cx, |v, _| assert_eq!(v.mailbox_expanded, [true; 3]));
+        cx.run_until_parked();
+        for label in ["Done", "Sent"] {
+            let at = cx.debug_bounds(format!("disclosure-{label}").leak()).unwrap().center();
+            cx.simulate_click(at, Default::default());
+        }
+        view.update_in(cx, |v, window, cx| { v.show_section(0, window, cx); v.show_section(1, window, cx); });
+        view.read_with(cx, |v, _| assert_eq!(v.mailbox_expanded, [true, false, false]));
+    }
+
+    #[gpui::test]
+    fn review_reply_field_spans_the_reading_pane_and_opens_compose(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
+            view.update(cx, |v, cx| { v.theme = t; v.inbox.mail[0].from = "Sender".into(); cx.notify(); });
+            cx.run_until_parked();
+            let card = cx.debug_bounds("message-card").unwrap();
+            let reply = cx.debug_bounds("reply-box").unwrap();
+            assert_eq!(reply.left(), card.left());
+            assert_eq!(reply.size.width, card.size.width);
+            let label = cx.debug_bounds("Reply to Sender").expect("reply placeholder");
+            assert!(label.left() > reply.left() + px(16.) && label.right() <= reply.right());
+        }
+        let at = cx.debug_bounds("reply-box").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, cx| {
+            let outgoing = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+            assert_eq!(outgoing.to, vec![v.inbox.mail[0].address.clone()]);
+            assert_eq!(outgoing.subject, mail::reply_subject(&v.inbox.mail[0].subject));
+        });
     }
 
     #[gpui::test]

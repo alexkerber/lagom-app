@@ -450,7 +450,6 @@ impl MainWindow {
             }
         }
         match screen {
-            "unified" => { this.mailbox_expanded = [true, true, true]; }
             "home" => this.show_section(0, window, cx),
             "calendar" => this.show_section(2, window, cx),
             "todo" => this.show_section(3, window, cx),
@@ -1335,25 +1334,8 @@ impl MainWindow {
                 .text_color(t.ink2)
                 .child(div().flex_1().child(label))
         };
-        // A sidebar keeps a grey selection; the active row's icon takes the accent while the
-        // window is active, as in Finder and Mail. Weight never changes, so labels never shift.
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
-        let nav = |path: &'static str, label: &'static str, count: Option<usize>, active: bool| {
-            pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
-                .debug_selector(move || format!("nav-{label}"))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .h(px(SIDEBAR_ROW))
-                .px(px(10.))
-                .rounded(px(radius::CONTROL))
-                .text_color(t.ink)
-                .when(active, |d| d.bg(t.sel))
-                .child(icon(path, if active { active_icon } else { t.ink2 }, 16.))
-                .child(div().flex_1().child(label))
-                // A zero count is calm: no number at all.
-                .when_some(count.filter(|&c| c > 0), |d, c| d.child(roll(mono(c.to_string(), t.ink2), format!("{label}-{c}"))))
-        };
+        let nav = |path, label, count, active| sidebar_nav(t, path, label, count, active, self.window_active);
         let account = |ix: usize, name: SharedString, address: SharedString, active: bool| {
             pressable(div().id(("account", ix)), t, false)
                 .flex()
@@ -2046,6 +2028,25 @@ impl Render for Tip {
     }
 }
 
+fn sidebar_nav(t: &Theme, path: &'static str, label: &'static str, count: Option<usize>, active: bool, window_active: bool) -> Stateful<Div> {
+    let active_icon = if window_active { t.sel_icon } else { t.ink2 };
+    let selected = active && label != "Mail";
+    pressable(div().id(SharedString::from(format!("nav-{label}"))), t, selected)
+        .debug_selector(move || format!("nav-{label}"))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .h(px(SIDEBAR_ROW))
+        .px(px(10.))
+        .rounded(px(radius::CONTROL))
+        .text_color(t.ink)
+        .when(selected, |d| d.bg(t.sel))
+        .child(icon(path, if active { active_icon } else { t.ink2 }, 16.))
+        .child(div().flex_1().child(label))
+        // A zero count is calm: no number at all.
+        .when_some(count.filter(|&c| c > 0), |d, c| d.child(roll(mono(c.to_string(), t.ink2), format!("{label}-{c}"))))
+}
+
 fn attachment_size(bytes: u32) -> String {
     match bytes {
         0..1024 => format!("{bytes} B"),
@@ -2106,7 +2107,7 @@ fn reading_view(
                         .child(address.clone()).tooltip(move |_, cx| cx.new(|_| Tip(theme, address.clone())).into()))
                     .child(div().flex().gap(px(3.)).text_size(px(size::SMALL)).text_color(t.ink2)
                         .child("to").child(div().min_w(px(0.)).one_line().child(to))))
-                .child(div().text_size(px(size::SMALL)).text_color(t.ink2).child(mail::full_date(m.date)))
+                .child(div().text_size(px(size::SMALL)).text_color(t.ink2).child(mail::reading_date(m.date, chrono::Local::now())))
                 .child(menu))
             .child(div().flex().flex_col().gap(px(12.)).text_size(px(size::BODY)).line_height(relative(READING_LEADING))
                 .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
@@ -2115,8 +2116,14 @@ fn reading_view(
                     div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
             .children(attachment()))
         .when(!web, |d| d.child(div().flex_1()))
-        .child(div().flex().flex_shrink_0().h(px(36.))
-            .child(icon_button(t, "reply-box", "icons/reply.svg", "Reply · R").on_click(on_reply)))
+        .child(pressable(div().id("reply-box"), t, false).debug_selector(|| "reply-box".into())
+            .flex().flex_shrink_0().items_center().gap(px(8.)).w_full().h(px(36.)).px(px(12.))
+            .rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).text_color(t.ink2)
+            .tooltip(move |_, cx| cx.new(|_| Tip(theme, "Reply · R".into())).into()).on_click(on_reply)
+            .child(icon("icons/reply.svg", t.ink2, 16.))
+            .child(div().min_w(px(0.)).one_line()
+                .debug_selector({ let from = m.from.clone(); move || format!("Reply to {from}") })
+                .child(format!("Reply to {}", m.from))))
 }
 
 impl Render for MainWindow {

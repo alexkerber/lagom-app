@@ -105,6 +105,17 @@ pub fn date_group(unix: i64, today: chrono::NaiveDate) -> String {
     }
 }
 
+pub fn reading_date(unix: i64, now: DateTime<Local>) -> String {
+    let Some(t) = Local.timestamp_opt(unix, 0).single() else { return String::new() };
+    let days = (now.date_naive() - t.date_naive()).num_days();
+    match days {
+        0 => format!("Today {}", t.format("%H:%M")),
+        1..=6 => format!("{} {}", when(unix, now), t.format("%H:%M")),
+        _ if t.year() == now.year() => t.format("%-d %b, %H:%M").to_string(),
+        _ => t.format("%-d %b %Y, %H:%M").to_string(),
+    }
+}
+
 pub fn full_date(unix: i64) -> String {
     Local.timestamp_opt(unix, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
@@ -645,6 +656,24 @@ mod tests {
         assert!(!load(4, None, vec![], true).more);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn review_reading_dates_keep_relative_days_and_time() {
+        let now = at(2026, 11, 9, 12, 0);
+        for (date, expected) in [
+            (at(2026, 11, 9, 9, 42), "Today 09:42"),
+            (at(2026, 11, 8, 16, 10), "Yesterday 16:10"),
+            (at(2026, 11, 7, 8, 5), "Sat 08:05"),
+            (at(2026, 11, 3, 8, 5), "Tue 08:05"),
+            (at(2026, 11, 2, 8, 5), "2 Nov, 08:05"),
+            (at(2026, 10, 26, 14, 2), "26 Oct, 14:02"),
+            (at(2025, 10, 26, 14, 2), "26 Oct 2025, 14:02"),
+            (at(2026, 11, 10, 14, 2), "10 Nov, 14:02"),
+        ] { assert_eq!(reading_date(date.timestamp(), now), expected); }
+        assert_eq!(reading_date(at(2025, 12, 31, 23, 0).timestamp(), at(2026, 1, 1, 1, 0)), "Yesterday 23:00");
+        assert_eq!(reading_date(at(2028, 2, 29, 8, 0).timestamp(), at(2028, 3, 1, 8, 0)), "Yesterday 08:00");
+        assert_eq!(reading_date(i64::MAX, now), "");
     }
 
     #[test]
