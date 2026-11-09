@@ -1437,8 +1437,13 @@ impl MainWindow {
                     .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
                         let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
-                        nav(path, label, (ix == 1).then_some(unread), active).debug_selector(move || format!("section-{ix}"))
-                            .when(ix != 1 || unread == 0, |d| d.child(mono(shortcut, t.ink2)))
+                        // Unread mail is a filled badge, so it never reads as a shortcut; every row keeps its ⌘ key.
+                        nav(path, label, None, active).debug_selector(move || format!("section-{ix}"))
+                            .when(ix == 1 && unread > 0, |d| d.child(
+                                div().debug_selector(|| "mail-unread-badge".into()).h(px(16.)).min_w(px(16.)).px(px(5.)).rounded_full()
+                                    .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
+                                    .text_size(px(size::SMALL)).font_weight(FontWeight::SEMIBOLD).child(unread.to_string())))
+                            .child(mono(shortcut, t.ink2))
                             .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix])).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     })))
@@ -2225,13 +2230,10 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        // The sidebar shows the blurred window background through a frosted tint: a step lighter
-        // than the page in dark mode, so it reads as frost, not a hole. At 0.96 only the
-        // desktop's colour comes through, not its shapes.
-        // shortcut: the blur radius is AppKit's fixed NSVisualEffectView one; a stronger blur needs
-        // native code (see spike/liquid-glass).
+        // The sidebar is a solid step lighter than the page in dark mode (darker in light mode).
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
-        let tint = Rgba { a: 0.96, ..frost };
+        // Opaque: on macOS 27 the blur did not apply and text behind the window showed through.
+        let tint = Rgba { a: 1.0, ..frost };
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
