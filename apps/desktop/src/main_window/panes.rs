@@ -17,6 +17,16 @@ pub(super) const READING_MIN: f32 = 440.;
 // The panel's right margin and its two borders.
 pub(super) const PANEL_INSET: f32 = 10.;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(super) enum StartPage {
+    Home,
+    Calendar,
+    Todo,
+    #[default]
+    #[serde(other)]
+    Mail,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub(super) struct Panes {
     pub sidebar: f32,
@@ -26,6 +36,8 @@ pub(super) struct Panes {
     pub group_conversations: bool,
     #[serde(default = "notifications_default")]
     pub notifications: bool,
+    #[serde(default)]
+    pub start_page: StartPage,
 }
 
 fn group_default() -> bool { true }
@@ -39,6 +51,7 @@ impl Panes {
             sidebar_hidden: false,
             group_conversations: true,
             notifications: true,
+            start_page: StartPage::Mail,
         }
     }
 
@@ -190,6 +203,7 @@ mod tests {
             sidebar_hidden: false,
             group_conversations: true,
             notifications: true,
+            start_page: StartPage::Mail,
         };
         assert_eq!(panes.fit(1440.), (320., 560.));
         assert_eq!(panes.fit(1100.), (320., 330.));
@@ -244,6 +258,7 @@ mod tests {
                             sidebar_hidden,
                             group_conversations: true,
                             notifications: true,
+                            start_page: StartPage::Mail,
                         };
                         let (sidebar, list) = panes.fit(viewport);
                         assert!(sidebar == 0. || (180. ..=320.).contains(&sidebar));
@@ -266,7 +281,7 @@ mod tests {
             for i in 0..8 {
                 let path = &path;
                 scope.spawn(move || {
-                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true, notifications: true };
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true, notifications: true, start_page: StartPage::Mail };
                     for _ in 0..100 {
                         panes.save(path).unwrap();
                         let saved = Panes::load(path, 1440.).unwrap();

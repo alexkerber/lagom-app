@@ -490,7 +490,7 @@ impl MainWindow {
                 }
                 Event::Added(result) | Event::SignedIn(result) => match result {
                     Ok(id) => {
-                        self.page = Page::Mail;
+                        self.set_page(Page::Mail, cx);
                         if let Some(live) = &mut self.live {
                             live.accounts = live.store.accounts().unwrap_or_default();
                             live.current = live.accounts.iter().position(|a| a.id == id).unwrap_or(0);
@@ -613,7 +613,7 @@ impl MainWindow {
         live.limit = PAGE;
         live.pin = None;
         live.want = None;
-        self.page = Page::Mail;
+        self.set_page(Page::Mail, cx);
         self.palette = None;
         // Preserve an unfinished compose sheet as a draft while revealing the clicked mail.
         if let Some(compose) = self.compose.take() {
@@ -932,7 +932,7 @@ impl MainWindow {
         self.reading_thread = None;
         self.close_popouts(None, cx);
         self.clear_motion();
-        self.page = Page::Mail;
+        self.set_page(Page::Mail, cx);
         self.reload(cx);
     }
 
@@ -1118,13 +1118,13 @@ impl MainWindow {
         })
         .detach();
         cx.subscribe_in(&add, window, |this, _, _: &gpui::DismissEvent, window, cx| {
-            this.page = Page::Mail;
+            this.set_page(Page::Mail, cx);
             window.focus(&this.focus);
             cx.notify();
         })
         .detach();
         test_hook(&add, window, cx);
-        self.page = Page::AddAccount(add);
+        self.set_page(Page::AddAccount(add), cx);
         cx.notify();
     }
 
@@ -1156,12 +1156,12 @@ impl MainWindow {
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.confirm_empty_trash = false;
-        self.page = Page::Settings(None);
+        self.set_page(Page::Settings(None), cx);
         cx.notify();
     }
 
     pub(crate) fn confirm_remove(&mut self, id: Option<String>, cx: &mut Context<Self>) {
-        self.page = Page::Settings(id);
+        self.set_page(Page::Settings(id), cx);
         cx.notify();
     }
 
@@ -1177,7 +1177,7 @@ impl MainWindow {
         self.reading_thread = None;
         self.close_popouts(None, cx);
         self.clear_motion();
-        self.page = Page::Settings(None);
+        self.set_page(Page::Settings(None), cx);
         cx.notify();
     }
 

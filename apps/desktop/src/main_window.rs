@@ -123,7 +123,7 @@ pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 mod polish;
 pub(crate) use polish::action_icon;
 mod panes;
-use panes::{default_list, Panes, SIDEBAR_DEFAULT};
+use panes::{default_list, Panes, StartPage, SIDEBAR_DEFAULT};
 
 #[derive(Clone, Copy)]
 enum Divider { Sidebar, List }
@@ -402,7 +402,7 @@ impl MainWindow {
             sending: Vec::new(),
             live,
             demo,
-            page: if demo && !screen.is_empty() { Page::Mail } else { Page::Home },
+            page: Page::restore(panes.start_page),
             today: tasks::Today::default(),
             week: week::Week::default(),
             task_undo: None,
@@ -474,7 +474,7 @@ impl MainWindow {
                 let first = folders::tree(&this.inbox.folders, false).first().map(|r| r.0);
                 this.open_box(first, cx);
             }
-            "settings" => this.page = Page::Settings(None),
+            "settings" => this.set_page(Page::Settings(None), cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
@@ -846,7 +846,7 @@ impl MainWindow {
     fn open_box(&mut self, f: Option<usize>, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.clear_motion();
-        self.page = Page::Mail;
+        self.set_page(Page::Mail, cx);
         self.inbox.open(f);
         self.reading_thread = None;
         if let Some(live) = &mut self.live {
@@ -1264,7 +1264,7 @@ impl MainWindow {
         let Some(resize) = self.resize.as_mut() else { return };
         if x == resize.start_x && !resize.moved { return; }
         resize.moved = true;
-        self.panes = resize.start_panes;
+        self.panes = Panes { start_page: self.panes.start_page, ..resize.start_panes };
         let width = resize.start_width + f32::from(x - resize.start_x);
         let viewport = f32::from(window.viewport_size().width);
         match resize.divider {
@@ -3818,7 +3818,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true, start_page: StartPage::Mail };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();

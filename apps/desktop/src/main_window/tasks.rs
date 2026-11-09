@@ -161,7 +161,7 @@ impl MainWindow {
     pub(super) fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.clear_motion();
-        self.page = Page::Home;
+        self.set_page(Page::Home, cx);
         self.reset_task_focus();
         self.reload_tasks(cx);
         window.focus(&self.focus);
