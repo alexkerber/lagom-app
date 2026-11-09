@@ -14,7 +14,7 @@ enum Op {
 }
 
 pub struct Live {
-    bridge: Bridge,
+    pub(super) bridge: Bridge,
     pub(super) store: Rc<Store>,
     pub(super) accounts: Vec<Account>,
     pub(super) current: usize,
@@ -231,6 +231,7 @@ impl MainWindow {
     /// Reads the store for the account and list on screen. Waits while moves are in flight, so
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
         live.stale = true;
         let Ok(accounts) = live.store.accounts() else {
@@ -313,6 +314,7 @@ impl MainWindow {
         let mut new_mail = Vec::new();
         for event in events {
             match event {
+                Event::TaskChanged(result) => self.task_changed(result, cx),
                 Event::OpenUrl(url) => cx.open_url(&url),
                 Event::Downloaded(result) => match result {
                     Ok(path) => cx.reveal_path(&path),
@@ -959,6 +961,202 @@ mod tests {
         }));
         view.update(cx, |v, _| v.live = Some(fixture_live(store, bridge)));
         (view, cx, rx)
+    }
+
+    fn finish_tasks(view: &Entity<MainWindow>, cx: &mut VisualTestContext, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Cmd>) -> Vec<i64> {
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let mut events = Vec::new();
+        let mut created = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                Cmd::Task(change) => {
+                    let result = change.apply(&store).map_err(|e| e.to_string());
+                    if let Ok(Some(id)) = result { created.push(id); }
+                    events.push(Event::TaskChanged(result));
+                    events.push(Event::Changed);
+                }
+                Cmd::MarkSeen(_) => {}
+                _ => panic!("tasks must not queue network operations"),
+            }
+        }
+        view.update_in(cx, |v, window, cx| v.on_events(events, window, cx));
+        created
+    }
+
+    #[gpui::test]
+    fn task_key_creates_link_in_selected_default_and_undo_works_from_today(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let (store, mail, default) = view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut mail = incoming(v, 1);
+            mail.subject = "Follow up".into();
+            mail.message_id = "<task@test>".into();
+            store.save_message(&lagom_core::store::Message { summary: mail.clone(), ..Default::default() }).unwrap();
+            let default = store.task_lists().unwrap()[1].id;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.send_task(crate::sync::TaskChange::DefaultList(default), cx);
+            (store, mail, default)
+        });
+        finish_tasks(&view, cx, &mut rx);
+        cx.simulate_keystrokes("t");
+        let ids = finish_tasks(&view, cx, &mut rx);
+        assert_eq!(ids.len(), 1);
+        let tasks = store.tasks(default, false).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Follow up");
+        assert_eq!(tasks[0].mail_message_id.as_deref(), Some("<task@test>"));
+        assert_eq!(tasks[0].mail_account.as_deref(), Some(mail.account.as_str()));
+        assert!(view.read_with(cx, |v, _| v.toast.as_ref().is_some_and(|t| t.1)));
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.simulate_keystrokes("secondary-z");
+        finish_tasks(&view, cx, &mut rx);
+        assert!(store.tasks(default, true).unwrap().is_empty());
+        assert!(store.tasks_for_mail(&mail.account, &mail.message_id).unwrap().is_empty());
+    }
+
+    #[gpui::test]
+    fn task_link_finds_moved_mail_in_another_account_and_reports_missing_mail(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let (store, task, moved) = view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut original = incoming(v, 1);
+            original.message_id = "<linked@test>".into();
+            original.subject = "Linked message".into();
+            store.save_message(&lagom_core::store::Message { summary: original.clone(), ..Default::default() }).unwrap();
+            let task = store.task_from_mail(store.default_task_list().unwrap(), &original).unwrap();
+            store.delete_message(original.id).unwrap();
+            original.folder = store.save_folder(&original.account, "Archive", Some("/"), lagom_core::store::FolderRole::Archive).unwrap();
+            let moved = store.save_message(&lagom_core::store::Message { summary: original.clone(), ..Default::default() }).unwrap();
+            let mut other = v.live.as_ref().unwrap().accounts[0].clone();
+            other.id = "other-task-account".into();
+            other.email = "other@lagom.test".into();
+            store.save_account(&other).unwrap();
+            original.account = other.id.clone();
+            original.folder = store.save_folder(&other.id, "INBOX", None, lagom_core::store::FolderRole::Inbox).unwrap();
+            store.save_message(&lagom_core::store::Message { summary: original, ..Default::default() }).unwrap();
+            v.reload(cx);
+            v.switch_account(1, cx);
+            (store, task, moved)
+        });
+        view.update_in(cx, |v, window, cx| {
+            v.show_today(window, cx);
+            v.open_task_mail(task.id, cx);
+            assert!(matches!(v.page, Page::Mail));
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(moved));
+            assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, task.mail_account.as_deref().unwrap());
+            assert_eq!(v.inbox.open_kind(), Some(Kind::Done));
+        });
+        store.delete_message(moved).unwrap();
+        view.update(cx, |v, cx| v.open_task_mail(task.id, cx));
+        assert!(toast(&view, cx).contains("no longer available locally"));
+        assert_eq!(store.tasks(task.list, true).unwrap(), [task]);
+    }
+
+    #[gpui::test]
+    fn today_without_accounts_inline_add_rename_reorder_complete_and_palette(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let store = view.update_in(cx, |v, window, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            store.delete_account(&v.live.as_ref().unwrap().accounts[0].id).unwrap();
+            v.reload(cx);
+            v.show_today(window, cx);
+            store
+        });
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input("New task");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("First task");
+        cx.simulate_keystrokes("enter");
+        let first = finish_tasks(&view, cx, &mut rx)[0];
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Second task");
+        cx.simulate_keystrokes("enter");
+        let second = finish_tasks(&view, cx, &mut rx)[0];
+        let list = store.default_task_list().unwrap();
+        assert_eq!(store.tasks(list, false).unwrap().len(), 2);
+        cx.simulate_keystrokes("alt-down");
+        finish_tasks(&view, cx, &mut rx);
+        assert_eq!(store.tasks(list, false).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [second, first]);
+        cx.simulate_keystrokes("enter secondary-a");
+        cx.simulate_input("Renamed task");
+        cx.simulate_keystrokes("enter");
+        finish_tasks(&view, cx, &mut rx);
+        assert_eq!(store.tasks(list, false).unwrap()[1].title, "Renamed task");
+        cx.simulate_keystrokes("up space");
+        finish_tasks(&view, cx, &mut rx);
+        assert_eq!(store.tasks(list, false).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [first]);
+        cx.simulate_keystrokes("t");
+        cx.simulate_input("Not saved");
+        cx.simulate_keystrokes("escape");
+        assert!(finish_tasks(&view, cx, &mut rx).is_empty());
+        assert_eq!(store.tasks(list, true).unwrap().len(), 2);
+    }
+
+    #[gpui::test]
+    fn task_from_html_reading_and_text_fields_do_not_trigger_mail_shortcut(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let store = view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut mail = incoming(v, 1);
+            mail.message_id = "<html-task@test>".into();
+            mail.subject = "HTML task".into();
+            store.save_message(&lagom_core::store::Message { summary: mail, body_html: Some("<p>Message</p>".into()), ..Default::default() }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            store
+        });
+        view.update(cx, |v, cx| html::WebHost::new_task(v, cx));
+        assert_eq!(finish_tasks(&view, cx, &mut rx).len(), 1);
+        assert_eq!(store.tasks(store.default_task_list().unwrap(), false).unwrap()[0].title, "HTML task");
+        view.update_in(cx, |v, window, cx| v.open_palette("", window, cx));
+        cx.simulate_input("t");
+        assert!(finish_tasks(&view, cx, &mut rx).is_empty());
+        assert_eq!(view.read_with(cx, |v, cx| v.palette.as_ref().unwrap().read(cx).query(cx)), "t");
+    }
+
+    #[gpui::test]
+    fn task_list_controls_and_default_setting_move_tasks_on_delete(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let at = cx.debug_bounds("Add list").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.simulate_input("Custom list");
+        cx.simulate_keystrokes("enter");
+        finish_tasks(&view, cx, &mut rx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let list = store.task_lists().unwrap().last().unwrap().id;
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let at = cx.debug_bounds(format!("rename-list-{list}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("Renamed list");
+        cx.simulate_keystrokes("enter");
+        finish_tasks(&view, cx, &mut rx);
+        assert_eq!(store.task_lists().unwrap().last().unwrap().name, "Renamed list");
+        let task = store.add_task(list, "Keep when deleting", "", None).unwrap();
+        cx.simulate_keystrokes("secondary-,");
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let default = store.task_lists().unwrap()[1].id;
+        let at = cx.debug_bounds(format!("default-task-list-{default}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        finish_tasks(&view, cx, &mut rx);
+        assert_eq!(store.default_task_list().unwrap(), default);
+        view.update_in(cx, |v, window, cx| v.show_today(window, cx));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert_eq!(view.read_with(cx, |v, _| v.today.default), Some(default));
+        let at = cx.debug_bounds(format!("delete-list-{list}").leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        finish_tasks(&view, cx, &mut rx);
+        assert!(!store.task_lists().unwrap().iter().any(|l| l.id == list));
+        assert_eq!(store.tasks(default, false).unwrap()[0].id, task.id);
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let at = cx.debug_bounds(format!("complete-task-{}", task.id).leak()).unwrap().center();
+        cx.simulate_click(at, Default::default());
+        finish_tasks(&view, cx, &mut rx);
+        assert!(store.tasks(default, false).unwrap().is_empty());
     }
 
     fn fixture_live(store: Rc<Store>, bridge: Bridge) -> Live {

@@ -81,13 +81,14 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last section.
 
 - [ ] Agenda next to the inbox: Google and Microsoft calendars.
-- [ ] Create a meeting from the app with Google Meet or Zoom attached, without opening Gmail or Google Calendar.
+- [ ] Create a meeting from the app with Google Meet or Teams attached, without opening Gmail or Outlook. Zoom is outside v1 (2026-11-09).
 
 ## Tasks
 
 - [x] Core: local task lists and tasks, mail link, CLI (feat/tasks-core)
-- [ ] Task list on the start screen. Lists "Work" and "Private", plus custom lists.
-- [ ] Turn a mail into a task in one key press. The task links back to the mail.
+- [x] Local Today view at the top of the sidebar, including without an account: open undated, overdue and today tasks grouped by list, completion checkbox, inline add/rename, keyboard selection and reorder. Add/rename/delete lists; deletion moves every task to the persisted default list, which Settings selects and deletion protects. Schema v9 preserves existing task data and lists.
+- [x] `t` in the message list and reading pane and ⌘K "New task" create a task in the default list with an Undo toast. Links resolve by account + Message-ID across folder moves; missing mail gives a toast. Store fixtures and headless dispatch tests cover creation/undo, linked mail, list deletion, settings, migration and Today editing.
+- [ ] Tasks: native keyboard/focus, HTML bridge and layout acceptance on macOS/Windows/Linux; headless tests only. Today currently lays out every open task; virtualize if large lists require it.
 - [ ] Sync tasks with the mail account (for example Google Tasks, Microsoft To Do).
 
 ## Mail core

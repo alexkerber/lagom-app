@@ -24,19 +24,21 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow]);
+actions!(main_window, [SelectNext, SelectPrev, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask]);
 
 pub fn bind_keys(cx: &mut App) {
+    tasks::bind_keys(cx);
     let ctx = Some("MainWindow");
     // Plain keys type into a focused text field instead. The cmd keys stay: the overlay guard
     // hands them on, and a field handles ⌘Z itself because it sits deeper in the dispatch path.
-    let keys = Some("MainWindow && !TextInput");
+    let keys = Some("MainWindow && !TextInput && !Today");
     cx.bind_keys([
         KeyBinding::new("j", SelectNext, keys),
         KeyBinding::new("down", SelectNext, keys),
         KeyBinding::new("k", SelectPrev, keys),
         KeyBinding::new("up", SelectPrev, keys),
         KeyBinding::new("e", Done, keys),
+        KeyBinding::new("t", NewTask, keys),
         // Arrows mirror the swipe directions: right is Done, left is Later.
         KeyBinding::new("right", Done, keys),
         KeyBinding::new("l", Later, keys),
@@ -61,6 +63,7 @@ pub fn bind_keys(cx: &mut App) {
     let message = Some("MessageWindow && !TextInput");
     cx.bind_keys([
         KeyBinding::new("e", Done, message),
+        KeyBinding::new("t", NewTask, message),
         KeyBinding::new("l", Later, message),
         KeyBinding::new("secondary-backspace", DeleteMessage, message),
         KeyBinding::new("backspace", DeleteMessage, message),
@@ -156,6 +159,7 @@ fn row_y(ix: usize) -> f32 {
 mod html;
 mod conversation;
 mod live;
+mod tasks;
 mod popout;
 pub use live::Live;
 pub(crate) use live::notify_without_window;
@@ -164,6 +168,7 @@ use popout::MessageWindow;
 /// What fills the main panel.
 enum Page {
     Mail,
+    Today,
     AddAccount(Entity<AddAccount>),
     /// Settings, with the account whose removal waits for a confirm.
     Settings(Option<String>),
@@ -247,6 +252,8 @@ pub struct MainWindow {
     // The store and the mail worker. `None` in demo mode.
     live: Option<live::Live>,
     page: Page,
+    today: tasks::Today,
+    task_undo: Option<i64>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     confirm_empty_trash: bool,
@@ -346,7 +353,9 @@ impl MainWindow {
             drafts: Vec::new(),
             sending: Vec::new(),
             live,
-            page: Page::Mail,
+            page: if demo { Page::Mail } else { Page::Today },
+            today: tasks::Today::default(),
+            task_undo: None,
             all_folders: false,
             confirm_empty_trash: false,
             folder_name: None,
@@ -380,7 +389,7 @@ impl MainWindow {
         if this.live.is_some() {
             this.reload(cx);
             this.restore_drafts(window, cx);
-            if this.live.as_ref().is_some_and(|l| l.accounts.is_empty()) || screen.starts_with("add-account") {
+            if screen.starts_with("add-account") {
                 this.add_account(window, cx);
             }
         }
@@ -449,6 +458,7 @@ impl MainWindow {
 
     /// A toast without Undo, for 5 s.
     fn notify(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.task_undo = None;
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(crate::compose::UNDO_WINDOW).await;
             this.update(cx, |this, cx| {
@@ -468,15 +478,16 @@ impl MainWindow {
         self.toast = None;
         self.folder_name = None;
         // The open folder stays listed, so its name never offers "New folder". Moving there is a no-op.
+        let on_mail = matches!(self.page, Page::Mail);
         let targets = folders::tree(&self.inbox.folders, true)
             .into_iter()
-            .filter(|(f, _)| self.inbox.folders[*f].kind == Kind::Custom)
+            .filter(|(f, _)| on_mail && self.inbox.folders[*f].kind == Kind::Custom)
             .map(|(f, _)| (f, folders::path(&self.inbox.folders, f)))
             .collect();
-        let subject = self.inbox.current().map(|id| self.inbox.mail[id].subject.clone());
-        let search = self.live.as_ref().and_then(|l| l.search());
+        let subject = self.inbox.current().filter(|_| on_mail).map(|id| self.inbox.mail[id].subject.clone());
+        let search = self.live.as_ref().filter(|_| on_mail).and_then(|l| l.search());
         let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
-        let palette = cx.new(|cx| CommandPalette::new(query, composing, targets, subject, search, window, cx));
+        let palette = cx.new(|cx| CommandPalette::new(query, composing, on_mail, targets, subject, search, window, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| this.close_palette(window, cx)).detach();
         cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
             let f = match target {
@@ -519,6 +530,7 @@ impl MainWindow {
 
     fn run(&mut self, run: Run, window: &mut Window, cx: &mut Context<Self>) {
         match run {
+            Run::NewTask => self.new_task(window, cx),
             Run::Done => self.act(Move::Done, cx),
             Run::Later(when) => self.act_with(self.inbox.selected, Move::Later, 0., when, cx),
             Run::Delete => self.act(Move::Delete, cx),
@@ -697,6 +709,13 @@ impl MainWindow {
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.toast.as_ref().is_some_and(|t| t.1) {
+            if let Some(id) = self.task_undo.take() {
+                self.send_task(crate::sync::TaskChange::Delete(id), cx);
+                self.toast = None;
+                return;
+            }
+        }
         if self.emptying_trash() { return; }
         let open = self.inbox.open;
         let members = self.inbox.batches.last().cloned().unwrap_or_default();
@@ -1248,6 +1267,8 @@ impl MainWindow {
                     .flex_col()
                     .gap(px(2.))
                     .flex_shrink_0()
+                    .child(nav("icons/done.svg", "Today", None, matches!(self.page, Page::Today))
+                        .on_click(cx.listener(|this, _, window, cx| this.show_today(window, cx))))
                     .child(
                         nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.open_box(None, cx))),
@@ -1958,18 +1979,19 @@ impl Render for MainWindow {
         if !self.ghosts.is_empty() || !self.entering.is_empty() || self.spring.is_some() {
             window.request_animation_frame();
         }
-        self.open_current(window.is_window_active(), cx);
+        if matches!(self.page, Page::Mail) { self.open_current(window.is_window_active(), cx); }
         self.window_active = window.is_window_active();
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
         self.web_frame(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
-        let welcome = self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
+        let welcome = matches!(self.page, Page::AddAccount(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
+            Page::Today => "Today".into(),
             Page::Settings(_) => "Settings".into(),
             Page::AddAccount(_) => "Add Account".into(),
         };
@@ -1980,10 +2002,11 @@ impl Render for MainWindow {
         let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none();
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         let panel = match &self.page {
+            Page::Today => self.tasks_view(cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
-                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, cx)
+                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Home · synced 10:12".into())),
@@ -2013,7 +2036,8 @@ impl Render for MainWindow {
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
         let tint = Rgba { a: 0.96, ..frost };
         div()
-            .key_context("MainWindow")
+            .key_context(if matches!(self.page, Page::Today) { "MainWindow Today" } else { "MainWindow" })
+            .map(|d| Self::task_keys(d, cx))
             // Mouse swipe: the root sees every move inside the window; `on_mouse_up_out` catches a
             // release outside it. shortcut: moves outside the window are not followed (the row waits
             // at the edge); a window-level listener via `window.on_mouse_event` would follow them.
@@ -2023,6 +2047,7 @@ impl Render for MainWindow {
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Today) { this.new_task(window, cx); }))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
             .on_action(cx.listener(|this, _: &Done, _, cx| if !this.overlay_open(cx) { this.act(Move::Done, cx) }))
@@ -2030,9 +2055,11 @@ impl Render for MainWindow {
             // The guard hands ⌫ to the palette, where it edits the query.
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| if !this.overlay_open(cx) { this.act(Move::Delete, cx) }))
             .on_action(cx.listener(|this, _: &Undo, window, cx| {
-                if this.overlay_open(cx) {
+                if this.palette.is_some() || this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) || matches!(this.page, Page::AddAccount(_) | Page::Settings(_)) {
+                    cx.propagate();
                     return;
                 }
+                if matches!(this.page, Page::Today) && !this.toast.as_ref().is_some_and(|t| t.1) { return; }
                 // The newest send in its Undo window goes first: its toast is the one on top.
                 let sent = this.sending.iter().rev().find(|c| c.read(cx).undoable()).cloned();
                 if !sent.is_some_and(|c| c.update(cx, |c, cx| c.undo(window, cx))) {
@@ -2040,7 +2067,7 @@ impl Render for MainWindow {
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
-                if this.palette.is_none() && matches!(this.page, Page::Mail) { this.open_palette("", window, cx); }
+                if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Today) { this.open_palette("", window, cx); }
             }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
@@ -3081,6 +3108,18 @@ mod dispatch {
         });
         frame(cx);
         assert!(children(&view, cx) < 15);
+    }
+
+    #[gpui::test]
+    fn today_does_not_undo_hidden_mail_without_a_toast(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update_in(cx, |v, window, cx| {
+            v.act(Move::Done, cx);
+            v.show_today(window, cx);
+        });
+        let count = inbox_len(&view, cx);
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(inbox_len(&view, cx), count);
     }
 
     #[gpui::test]

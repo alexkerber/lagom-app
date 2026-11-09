@@ -7,7 +7,7 @@ Based on `feat/oauth` at 0309143. Anything I could not check against live docs i
    - Google: once accounts hold different scope sets, sending scopes the user never granted may break the refresh (**not verified**). Fix: drop `scope` from Google refreshes, which keeps what was granted.
    - Microsoft: a token covers one resource. The IMAP token (`outlook.office.com`) cannot call Graph. Fix: `access_token(account, Resource::{Mail, Graph}, rejected)`, with the cache keyed by `(id, resource)`. Microsoft's refresh token can usually be exchanged for a Graph token after consent (**not verified** for personal accounts).
 2. **A mail→task link cannot use `messages.id`.** A move deletes the row and inserts a new one, and Done is a move. Link by `(account, Message-ID)`, which is what the worker already uses to follow moved mail (`sync.rs:422-440`). Also keep a copy of the subject, so the link still makes sense once the mail is gone. Mail with an empty Message-ID gets a task with no link.
-3. **Key `t` is free** in `main_window.rs:34-55`.
+3. **Key `t` creates a local task** in slice a, in both the message list and reading pane.
 
 ## 1. Provider APIs and scopes
 | | Calendar | Tasks |
@@ -21,7 +21,7 @@ Based on `feat/oauth` at 0309143. Anything I could not check against live docs i
 - `https://mail.google.com/` is a restricted scope, so production already needs verification plus a CASA assessment.
 - The Calendar and Tasks scopes are only sensitive. They add a justification and a demo video, not another CASA.
 - While the app is in Testing mode, refresh tokens expire after 7 days and there is a cap of 100 test users (**not verified** for 2026).
-- Users who are already signed in have none of these scopes. Use incremental authorization: when someone first opens the agenda or turns on task sync, run the existing loopback flow for the new scopes only, with `include_granted_scopes=true&login_hint=<email>`. Reject the result if the ID-token email does not match the account.
+- Users who are already signed in have none of these scopes. Use incremental authorization: when someone first opens the agenda or turns on task sync, run the existing loopback flow for all calendar and tasks scopes together (decided in section 6), with `include_granted_scopes=true&login_hint=<email>`. Reject the result if the ID-token email does not match the account.
 - Google shows granular consent checkboxes, so read the `scope` field in the token response and store what was actually granted.
 
 **Microsoft:** these are delegated scopes a user can consent to alone. Some tenants block user consent (**not verified** per tenant).
@@ -30,8 +30,10 @@ Based on `feat/oauth` at 0309143. Anything I could not check against live docs i
 
 **Quotas: not verified.** Rough figures: Calendar about 1M requests/day per project, Tasks about 50k/day, Graph throttling around 10k requests per 10 min per mailbox.
 
-## 2. Store: `schema_v4.sql`
-Same style as `schema_v3.sql`: change the guard in `Store::open` to `version > 4`, add `if version < 4`, and add a v3→v4 test like `store.rs:163`.
+## 2. Store
+Slice a reuses the task tables shipped in `schema_v4.sql`. Main's latest schema was v8 when checked on 2026-11-09; `schema_v9.sql` adds task creation timestamps and the persisted default-list setting. Existing tasks keep their data, with `created` initialized from `updated`. Existing lists are kept as they are; Work and Private are seeded only when no lists exist. The settings row references the default list, and list deletion moves all tasks to it in one transaction.
+
+The original combined calendar/tasks schema below is the plan for the later network slices; calendar tables and account scopes are not part of slice a.
 ```sql
 ALTER TABLE accounts ADD COLUMN scopes TEXT NOT NULL DEFAULT '';
 CREATE TABLE calendars(id INTEGER PRIMARY KEY, account TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -78,7 +80,7 @@ Each slice ships on its own. New `Cmd`s go in `apps/desktop/src/sync.rs`, the UI
 | b. Google agenda, read-only | Incremental-consent flow, `Resource` in `oauth.rs`, `google.rs` window fetch, `agenda.rs` column next to the inbox. Then Google Tasks sync. | M |
 | c. Microsoft | Graph token, `graph.rs` calendarView and To Do. | M |
 | d. Create/edit events | Form with `conferenceData.createRequest{requestId, conferenceSolutionKey:{type:"hangoutsMeet"}}`. On Graph, `isOnlineMeeting` (Teams only for work accounts, **not verified** for personal). | L |
-| d′. Zoom | Needs its own OAuth app in the Zoom Marketplace, its own review, and possibly a client secret in a desktop app (**not verified**; PKCE support **not verified**). The join URL goes into location/description. | L, separate |
+| d′. Zoom (after v1) | Excluded from v1; would need a separate OAuth integration and review. | L, separate |
 
 ## 5. Tests (no real accounts)
 - Fake HTTP server on a loopback `TcpListener`, the way `oauth/tests.rs` does it.
@@ -91,23 +93,30 @@ Each slice ships on its own. New `Cmd`s go in `apps/desktop/src/sync.rs`, the UI
   - cancelled instances of recurring events
   - retry after a timeout does not duplicate
   - dirty push survives a failed pull
-  - v3→v4 migration seeds Work/Private
+  - v3→current migration seeds Work/Private; v8→v9 preserves existing lists, tasks and timestamps
   - removing an account keeps local tasks
 - Desktop: a `TestAppContext` test where `t` creates a task (same pattern as `main_window.rs:2372`).
 
-## 6. Decisions for the maintainer
-1. **What is the "start screen"?** The empty-inbox view, the sidebar, or a new home view?
-2. **Work/Private vs the provider's lists.** Should they map onto them (e.g. Google "My Tasks" = Private), or should remote lists appear as their own lists under the account?
-3. **Which list `t` uses**, and whether it asks first.
-4. **When to ask for scopes.** All scopes once at slice b (one re-consent) or one feature at a time (several prompts)?
-5. **Google verification.** When to submit for sensitive-scope verification. In Testing mode the 7-day expiry means beta users sign in again every week.
-6. **Zoom in v1:** yes or no.
-7. **Time zones and RRULE editing.** Editing "this event vs the whole series" is part of the L size in slice d.
+## 6. Maintainer decisions
+
+Decided on **2026-11-09**:
+1. **Start screen:** a Today entry at the top of the sidebar opens Today with today's tasks. Today's events join it in slice b. Inbox stays as it is.
+2. **Lists:** provider lists appear unchanged under each account in slice b. Locally, create Work and Private only when no lists exist.
+3. **Mail → task:** `t` on a mail creates a task immediately in the default list, with title = subject and a link by account + Message-ID. Show an Undo toast. Choose the default list in Settings. A mail without Message-ID creates an unlinked task.
+4. **Deleting a list:** move its tasks to the default list. Delete an empty list immediately. The default list cannot be deleted.
+5. **Scopes:** request all calendar and tasks scopes once in slice b.
+6. **Zoom:** not in v1.
+
+Slice a behavior: Today shows open tasks due today or earlier, plus undated tasks, grouped by list. Future-dated, completed and deleted tasks stay out of Today. It works without a mail account. Enter renames the selected task, Space completes it, and Alt+Up/Down reorders it within its list. The palette's New task command creates a linked task when a mail is selected; otherwise it opens the inline task field. Task creation Undo lasts for the existing toast window. All task writes run on the worker and make no network requests. Notes and optional due dates are stored by the core; this slice's inline editor changes titles only.
+
+Still open for later slices: Google sensitive-scope verification timing; accepting the sync conflict rule; time zones and editing one recurring event versus the series.
 
 ### Critical files
 - crates/lagom-core/src/oauth.rs
 - crates/lagom-core/src/store.rs
-- crates/lagom-core/src/schema_v3.sql (pattern for the new schema_v4.sql)
+- crates/lagom-core/src/schema_v9.sql
+- crates/lagom-core/src/tasks.rs
+- apps/desktop/src/main_window/tasks.rs
 - apps/desktop/src/sync.rs
 - apps/desktop/src/main_window.rs
 

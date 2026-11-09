@@ -104,6 +104,7 @@ pub(super) enum Msg {
     Loaded,
     Open(String),
     Escape,
+    NewTask,
 }
 
 /// Runs in every document before the mail, as an app script: the CSP and the page-script switch
@@ -115,7 +116,12 @@ addEventListener('click', e => {
   const a = e.composedPath().find(n => (n.tagName === 'A' || n.tagName === 'AREA') && typeof n.href === 'string' && n.href);
   if (a) { e.preventDefault(); if (e.isTrusted) window.ipc.postMessage('open ' + a.href); }
 }, true);
-addEventListener('keydown', e => { if (e.key === 'Escape') window.ipc.postMessage('escape'); }, true);
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') window.ipc.postMessage('escape');
+  if (e.isTrusted && e.key === 't' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.target.closest?.('input,textarea,[contenteditable]')) {
+    e.preventDefault(); window.ipc.postMessage('task');
+  }
+}, true);
 "#;
 
 fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
@@ -150,13 +156,17 @@ pub(super) struct Web {
 }
 
 /// A window with a mail web view: the main window and each message window.
-pub(super) trait WebHost: 'static {
+pub(super) trait WebHost: 'static + Sized {
     fn web(&mut self) -> &mut Web;
     /// Where the keys go when Esc leaves the web view.
     fn keys(&self) -> FocusHandle;
+    fn new_task(&mut self, cx: &mut Context<Self>);
 }
 
 impl WebHost for MainWindow {
+    fn new_task(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.inbox.current() { self.task_from_mail(id, cx); }
+    }
     fn web(&mut self) -> &mut Web {
         &mut self.web
     }
@@ -172,7 +182,7 @@ impl MainWindow {
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
         let want = self.inbox.current().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
-        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
+        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty() || self.toast.is_some();
         self.web.frame(want, &self.theme, overlay, window, cx);
         let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());
         for body in self.expanded.values() {
@@ -290,6 +300,11 @@ impl Web {
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     fn event<T: WebHost>(host: &mut T, msg: Msg, window: &mut Window, cx: &mut Context<T>) {
         match msg {
+            Msg::NewTask => {
+                host.web().unfocus();
+                window.focus(&host.keys());
+                host.new_task(cx);
+            }
             Msg::Loaded => host.web().ready = true,
             Msg::Open(url) if link_allowed(&url) => cx.open_url(&url),
             Msg::Open(_) => {}
@@ -331,6 +346,7 @@ impl Web {
                 let msg = match body.split_once(' ') {
                     Some(("open", url)) => Msg::Open(url.to_string()),
                     _ if body == "escape" => Msg::Escape,
+                    _ if body == "task" => Msg::NewTask,
                     _ => return,
                 };
                 let _ = ipc_tx.send(msg);
