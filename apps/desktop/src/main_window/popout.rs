@@ -16,6 +16,13 @@ pub struct MessageWindow {
 }
 
 impl html::WebHost for MessageWindow {
+    fn mail_action(&mut self, action: Run, _: &mut Window, cx: &mut Context<Self>) {
+        let id = self.id;
+        self.main.update(cx, |main, window, cx| {
+            window.activate_window();
+            main.mail_action_on(id, action, window, cx);
+        }).ok();
+    }
     fn new_task(&mut self, cx: &mut Context<Self>) { self.task(cx); }
     fn web(&mut self) -> &mut html::Web {
         &mut self.web
@@ -58,12 +65,16 @@ impl MessageWindow {
 
     /// The reply sheet opens in the main window, which owns drafts and sending.
     fn reply(&mut self, cx: &mut App) {
+        self.compose(ComposeKind::Reply, cx);
+    }
+
+    fn compose(&mut self, kind: ComposeKind, cx: &mut App) {
         let id = self.id;
         self.main
             .update(cx, |main, window, cx| {
                 window.activate_window();
                 if main.palette.is_none() && !main.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) {
-                    main.compose_for(Some(id), window, cx);
+                    main.compose_kind(Some(id), kind, window, cx);
                 }
             })
             .ok();
@@ -100,6 +111,12 @@ impl Render for MessageWindow {
             .on_action(cx.listener(|this, _: &Done, _, cx| this.act(Move::Done, cx)))
             .on_action(cx.listener(|this, _: &Later, _, cx| this.act(Move::Later, cx)))
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| this.act(Move::Delete, cx)))
+            .on_action(cx.listener(|this, _: &Forward, _, cx| this.compose(ComposeKind::Forward, cx)))
+            .on_action(cx.listener(|this, _: &ReplyAll, _, cx| this.compose(ComposeKind::ReplyAll, cx)))
+            .on_action(cx.listener(|this, _: &ToggleRead, _, cx| {
+                let id = this.id;
+                this.main.update(cx, |main, window, cx| main.toggle_read_on(id, window, cx)).ok();
+            }))
             .on_action(cx.listener(|this, _: &Reply, _, cx| this.reply(cx)))
             .map(|d| quit_through_main(d, cx))
             .size_full()
@@ -116,9 +133,10 @@ impl Render for MessageWindow {
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
+                    .child(icon_button(&t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
+                    .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
-                        .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
-                        .child(button(&t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx)))))
+                        .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
                     .when(web && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.main.update(cx, |main, _, cx| {

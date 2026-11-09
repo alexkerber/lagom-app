@@ -13,6 +13,11 @@ pub struct Draft {
     pub subject: String,
     pub text: String,
     pub reply: Option<(Option<String>, Vec<String>)>,
+    // shortcut: attachment bytes share draft JSON; use blob references when large drafts make autosave costly.
+    #[serde(default)]
+    pub attachments: Vec<crate::smtp::OutgoingAttachment>,
+    #[serde(default)]
+    pub forward_source: Option<i64>,
 }
 
 pub struct Pending {

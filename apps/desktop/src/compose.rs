@@ -39,6 +39,8 @@ enum Phase {
 
 pub struct Compose {
     store: Option<(Rc<Store>, Account)>,
+    attachments: Vec<lagom_core::smtp::OutgoingAttachment>,
+    forward_source: Option<i64>,
     _save_delay: Option<Task<()>>,
     _save: Option<Task<()>>,
     save_again: bool,
@@ -77,6 +79,7 @@ pub struct Compose {
 pub enum ComposeEvent {
     /// Send was pressed: the sheet is no longer a modal, the Undo window runs.
     Sending,
+    LoadForward(String, i64),
     /// Undo in the window: the sheet is a modal again.
     Restored,
     /// The Undo window ended: send this now.
@@ -102,6 +105,8 @@ impl Compose {
         window.focus(&first.focus_handle(cx));
         Self {
             store: None,
+            attachments: Vec::new(),
+            forward_source: None,
             _save_delay: None,
             _save: None,
             save_again: false,
@@ -130,6 +135,32 @@ impl Compose {
         }
     }
 
+    pub fn initialize(&mut self, cc: &str, body: &str, forward_source: Option<i64>, cx: &mut Context<Self>) {
+        self.cc.update(cx, |input, cx| input.set_text(cc, cx));
+        self.body.update(cx, |input, cx| { input.set_text(body, cx); input.select(0..0, cx); });
+        self.show_cc = !cc.is_empty();
+        self.forward_source = forward_source;
+        self.count(cx);
+    }
+
+    pub fn load_forward(&self, cx: &mut Context<Self>) {
+        if let Some(id) = self.forward_source { cx.emit(ComposeEvent::LoadForward(self.message_id.clone(), id)); }
+    }
+
+    pub fn forwarded(&mut self, draft: &str, result: &Result<Vec<lagom_core::smtp::OutgoingAttachment>, String>, cx: &mut Context<Self>) {
+        if self.message_id != draft || self.forward_source.is_none() { return; }
+        match result {
+            Ok(parts) => {
+                self.attachments = parts.clone();
+                self.forward_source = None;
+                self.problem = None;
+                self.autosave(cx);
+            }
+            Err(_) => self.problem = Some("Could not load attachments. Press Send to retry."),
+        }
+        cx.notify();
+    }
+
     pub fn persist(&mut self, store: Rc<Store>, account: Account, cx: &mut Context<Self>) {
         self.store = Some((store, account));
         self.save(cx);
@@ -138,6 +169,8 @@ impl Compose {
     pub fn restore(draft: Draft, account: Account, store: Rc<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::new(&account.email, &draft.to, &draft.subject, draft.reply, window, cx);
         this.message_id = draft.id;
+        this.attachments = draft.attachments;
+        this.forward_source = draft.forward_source;
         this.cc.update(cx, |input, cx| input.set_text(&draft.cc, cx));
         this.body.update(cx, |input, cx| input.set_text(&draft.text, cx));
         this.show_cc = !draft.cc.is_empty();
@@ -154,6 +187,8 @@ impl Compose {
             to: self.to.read(cx).text().into(), cc: self.cc.read(cx).text().into(),
             subject: self.subject.read(cx).text().into(), text: self.body.read(cx).text().into(),
             reply: self.reply.clone(),
+            attachments: self.attachments.clone(),
+            forward_source: self.forward_source,
         }
     }
 
@@ -319,6 +354,7 @@ impl Compose {
     /// Esc kept the draft: the sheet comes back as it was, focus where it was.
     pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keep = false;
+        self.load_forward(cx);
         self.set(Phase::Open, cx);
         let focus = self.refocus.take().unwrap_or_else(|| self.body.focus_handle(cx));
         window.focus(&focus);
@@ -360,6 +396,7 @@ impl Compose {
             in_reply_to,
             references,
             message_id: Some(self.message_id.clone()),
+            attachments: self.attachments.clone(),
             ..Default::default()
         }
     }
@@ -367,6 +404,12 @@ impl Compose {
     /// Nothing leaves before the Undo window ends: the timer sends, Undo drops the timer.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.phase == Phase::Sent || self.phase == Phase::Gone {
+            return;
+        }
+        if self.forward_source.is_some() {
+            self.problem = Some("Loading attachments. Send when they are ready.");
+            self.load_forward(cx);
+            cx.notify();
             return;
         }
         let mail = self.outgoing(cx);
@@ -591,6 +634,11 @@ impl Compose {
                     .when(self.show_cc, |d| d.child(field("Cc").child(grow(&self.cc))))
                     .child(field("Subject").child(grow(&self.subject).font_weight(FontWeight::SEMIBOLD))),
             )
+            .when(self.forward_source.is_some() || !self.attachments.is_empty(), |d| d.child(
+                div().px(px(16.)).py(px(6.)).text_size(px(size::SMALL)).child(
+                    if self.forward_source.is_some() { "Loading attachments…".to_string() }
+                    else { self.attachments.iter().map(|a| a.filename.as_str()).collect::<Vec<_>>().join(", ") }
+                )))
             .child(
                 div()
                     .flex_1()

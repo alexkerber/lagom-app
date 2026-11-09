@@ -504,7 +504,9 @@ impl ImapSync {
         if bytes.len() != part.size as usize {
             return Err(Error::Network("attachment size changed or download incomplete"));
         }
-        attachment::decode(bytes, &part.encoding)
+        let data = attachment::decode(bytes, &part.encoding)?;
+        store.cache_attachment(id, section, &data)?;
+        Ok(data)
     }
     pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
         let message = store.message(id)?.summary;

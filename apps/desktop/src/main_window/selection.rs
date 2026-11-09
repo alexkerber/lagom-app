@@ -186,7 +186,7 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn review_thread_read_label_matches_aggregate_action(cx: &mut TestAppContext) {
+    fn review_thread_read_shortcut_matches_aggregate_action(cx: &mut TestAppContext) {
         let (view, cx) = super::super::dispatch::open(cx);
         view.update(cx, |v, cx| {
             v.inbox.mail[0].thread_id = "thread".into();
@@ -203,8 +203,8 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_resize(gpui::size(px(MIN_WINDOW.0), px(MIN_WINDOW.1)));
         cx.run_until_parked();
-        let at = cx.debug_bounds("Mark read").expect("an unread thread must offer Mark read").center();
-        cx.simulate_click(at, Default::default());
+        assert!(cx.debug_bounds("Mark read").is_none());
+        cx.simulate_keystrokes("shift-u");
         assert!(view.read_with(cx, |v, _| v.inbox.selected_members().iter().all(|&id| !v.inbox.mail[id].unread)));
     }
 

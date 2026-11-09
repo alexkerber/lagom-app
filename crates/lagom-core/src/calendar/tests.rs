@@ -40,7 +40,7 @@ fn calendar_migrates_v9_without_changing_mail_or_tasks() {
     store.set_account_scopes(&account.id, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
     store.save_account(&account).unwrap();
     assert!(crate::oauth::calendar_allowed(&store.account_scopes(&account.id).unwrap()));
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 11);
 }
 
 #[test]
