@@ -79,3 +79,58 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
         std::fs::remove_file(path).unwrap();
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn review_two_rejected_toggles_keep_last_confirmed_flags() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        let server = tokio::spawn(async move {
+            for (seen, status) in [(false, "NO"), (true, "BAD")] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                    let data = match command {
+                        "LOGIN \"fixture\" \"fixture\"" => "",
+                        "CAPABILITY" => "* CAPABILITY IMAP4rev1\r\n",
+                        "SELECT \"INBOX\"" => "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n",
+                        _ => {
+                            assert_eq!(command, format!("UID STORE 1 {}FLAGS.SILENT (\\Seen)", if seen { "+" } else { "-" }));
+                            socket.get_mut().write_all(format!("{tag} {status} refused\r\n").as_bytes()).await.unwrap();
+                            break;
+                        }
+                    };
+                    socket.get_mut().write_all(format!("{data}{tag} OK fixture\r\n").as_bytes()).await.unwrap();
+                }
+            }
+        });
+        let path = std::env::temp_dir().join(format!("lagom-queued-read-{}.db", account.id));
+        let mut store = Store::open(&path).unwrap();
+        store.save_account(&account).unwrap();
+        let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        store.reset_uidvalidity(folder, 7).unwrap();
+        let id = store.save_message(&Message { summary: MessageSummary { account: account.id.clone(), folder, uid: 1, seen: true, flagged: true, ..Default::default() }, ..Default::default() }).unwrap();
+        let (me, mut queue) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        me.send(Cmd::Op { op: 1, id, act: Act::Read(false) }).unwrap();
+        me.send(Cmd::Op { op: 2, id, act: Act::Read(true) }).unwrap();
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), reauth_required: HashSet::new(), discovery: None, me, events };
+        for expected in [1, 2] {
+            let session = ImapSync::login(&account, "fixture").await.unwrap();
+            worker.sessions.insert(account.id.clone(), session);
+            worker.quick(queue.recv().await.unwrap()).await;
+            assert!(matches!(out.recv().await, Some(Event::Op { op, error: Some(_) }) if op == expected));
+            assert!(matches!(out.recv().await, Some(Event::Changed)));
+            let m = worker.store.message_summary(id).unwrap();
+            assert!(m.seen && m.flagged, "neither failure can replace confirmed flags with optimistic flags");
+        }
+        drop(worker);
+        server.await.unwrap();
+        std::fs::remove_file(path).unwrap();
+    }).await.unwrap();
+}

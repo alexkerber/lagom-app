@@ -589,19 +589,20 @@ impl MainWindow {
         match action {
             Run::Forward => self.compose_kind(Some(id), ComposeKind::Forward, window, cx),
             Run::ReplyAll => self.compose_kind(Some(id), ComposeKind::ReplyAll, window, cx),
-            Run::ToggleRead => self.toggle_read_on(id, cx),
+            Run::ToggleRead => self.toggle_read_on(id, window, cx),
             _ => {}
         }
     }
 
     fn compose_selected(&mut self, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.inbox.current() { self.compose_kind(Some(id), kind, window, cx); }
+        if let Some(id) = self.inbox.single() { self.compose_kind(Some(id), kind, window, cx); }
     }
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.toast = None;
-        let compose = match self.drafts.pop() {
+        let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
+        let compose = match saved {
             Some(compose) => {
                 compose.update(cx, |c, cx| c.reopen(window, cx));
                 compose

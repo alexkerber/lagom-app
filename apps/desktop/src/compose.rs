@@ -154,7 +154,7 @@ impl Compose {
                 self.attachments = parts.clone();
                 self.forward_source = None;
                 self.problem = None;
-                self.save(cx);
+                self.autosave(cx);
             }
             Err(_) => self.problem = Some("Could not load attachments. Press Send to retry."),
         }

@@ -7,7 +7,7 @@ use super::*;
 enum Op {
     /// A move of this row (id in `Inbox::mail`). On failure the row comes back.
     Move(usize),
-    Read(usize),
+    Read { account: String, store: i64 },
     /// Undo of a move: on failure only a message.
     Undo(usize),
     EmptyTrash(String),
@@ -397,8 +397,10 @@ impl MainWindow {
                             self.folder_failed(&account, &name);
                             self.notify(format!("Could not create folder: {e}"), cx);
                         }
-                        (Op::Read(id), Some(e)) => {
-                            self.inbox.revert(id, Some(op));
+                        (Op::Read { account, store }, Some(e)) => {
+                            if let Some(id) = self.inbox.by_store.get(&store).copied().filter(|&id| self.inbox.mail[id].account == account) {
+                                self.inbox.revert(id, Some(op));
+                            }
                             self.notify(format!("Could not change read status: {e}"), cx);
                         }
                         (Op::Move(id), Some(e)) => {
@@ -543,7 +545,11 @@ impl MainWindow {
                         self.come_back(what, id, ix, false, cx);
                     }
                 }
-                Op::Read(id) => { self.inbox.revert(id, Some(op)); }
+                Op::Read { account, store } => {
+                    if let Some(id) = self.inbox.by_store.get(&store).copied().filter(|&id| self.inbox.mail[id].account == account) {
+                        self.inbox.revert(id, Some(op));
+                    }
+                }
                 Op::Undo(_) | Op::EmptyTrash(_) => {}
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
@@ -557,7 +563,7 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return true };
         if let Move::Read(seen) = what {
             live.seen.remove(&store);
-            let op = live.op(Op::Read(id));
+            let op = live.op(Op::Read { account: self.inbox.mail[id].account.clone(), store });
             if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
             let sent = live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) });
             if !sent { self.worker_gone(cx); }
@@ -601,7 +607,7 @@ impl MainWindow {
             let seen = !self.inbox.mail[id].unread;
             let live = self.live.as_mut().unwrap();
             live.seen.remove(&store);
-            let op = live.op(Op::Undo(id));
+            let op = live.op(Op::Read { account: self.inbox.mail[id].account.clone(), store });
             if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Read(seen) }) { self.worker_gone(cx); }
             return;
         }
@@ -629,11 +635,9 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn toggle_read_on(&mut self, id: usize, cx: &mut Context<Self>) {
+    pub(super) fn toggle_read_on(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let seen = self.inbox.members(id).iter().any(|&id| self.inbox.mail[id].unread);
-        if let Some(ix) = self.inbox.list().iter().position(|&row| self.inbox.members(row).contains(&id)) {
-            self.act_with(ix, Move::Read(seen), 0., LaterWhen::Tomorrow, cx);
-        }
+        self.act_on(id, Move::Read(seen), window, cx);
     }
 
     pub(super) fn download_attachment(&mut self, id: usize, section: String, cx: &mut Context<Self>) {
@@ -1074,6 +1078,216 @@ mod tests {
         }));
         view.update(cx, |v, _| v.live = Some(fixture_live(store, bridge)));
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn review_shortcuts_share_batch_reads_and_require_one_compose_target(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=2 {
+                let m = incoming(v, uid);
+                v.live.as_ref().unwrap().store.set_flags(m.folder, m.uid, true, false).unwrap();
+            }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+        });
+        cx.simulate_keystrokes("f shift-r");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none()));
+        cx.simulate_keystrokes("shift-u");
+        let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|c| matches!(c, Cmd::Op { act: Act::Read(false), .. })));
+        view.read_with(cx, |v, _| assert_eq!(v.inbox.batches.last().unwrap().len(), 2));
+    }
+
+    #[gpui::test]
+    fn review_popout_toggle_reaches_a_filtered_message(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let target = view.update_in(cx, |v, window, cx| {
+            let m = incoming(v, 1);
+            v.live.as_ref().unwrap().store.set_flags(m.folder, m.uid, true, false).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.open_popout(window, cx);
+            v.filter_unread(true, cx);
+            assert!(v.inbox.list().is_empty());
+            m.id
+        });
+        while rx.try_recv().is_ok() {}
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        cx.update_window(popout.into(), |_, window, cx| {
+            window.draw(cx).clear();
+            window.dispatch_action(Box::new(ToggleRead), cx);
+        }).unwrap();
+        cx.run_until_parked();
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Op { id, act: Act::Read(false), .. }) if id == target));
+        view.read_with(cx, |v, _| assert_eq!(v.inbox.batches.last().unwrap().len(), 1));
+    }
+
+    #[gpui::test]
+    fn review_read_callbacks_and_undo_survive_account_switch(cx: &mut TestAppContext) {
+        for (completion, before_switch) in [(None, false), (Some(false), false), (Some(true), false), (Some(true), true)] {
+            let (view, cx, mut rx) = window(cx);
+            let (source, other) = view.update(cx, |v, cx| {
+                let source = incoming(v, 1);
+                let live = v.live.as_ref().unwrap();
+                live.store.set_flags(source.folder, source.uid, true, true).unwrap();
+                let mut other = live.accounts[0].clone();
+                other.id = "other-read-account".into();
+                other.email = "other@example.com".into();
+                live.store.save_account(&other).unwrap();
+                let folder = live.store.save_folder(&other.id, "INBOX", None, lagom_core::store::FolderRole::Inbox).unwrap();
+                let other = live.store.save_message(&lagom_core::store::Message {
+                    summary: lagom_core::store::MessageSummary { account: other.id, folder, uid: 1, seen: true, ..Default::default() },
+                    ..Default::default()
+                }).unwrap();
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.toggle_read(cx);
+                (source, other)
+            });
+            let Cmd::Op { op, id, act: Act::Read(false) } = rx.try_recv().unwrap() else { panic!("missing unread command") };
+            assert_eq!(id, source.id);
+            view.update_in(cx, |v, window, cx| {
+                if completion == Some(true) && before_switch {
+                    v.live.as_ref().unwrap().store.set_flags(source.folder, source.uid, false, true).unwrap();
+                    v.on_events(vec![Event::Op { op, error: None }], window, cx);
+                }
+                v.switch_account(1, cx);
+                if completion.is_some() && !before_switch {
+                    if completion == Some(true) {
+                        v.live.as_ref().unwrap().store.set_flags(source.folder, source.uid, false, true).unwrap();
+                    }
+                    v.on_events(vec![Event::Op { op, error: (completion == Some(false)).then(|| "fixture refusal".into()) }], window, cx);
+                } else if completion.is_none() {
+                    v.worker_gone(cx);
+                    v.reload(cx);
+                }
+                v.undo(cx);
+                assert!(v.inbox.history.is_empty());
+                assert!(v.inbox.batches.is_empty());
+                assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(other));
+                assert!(!v.inbox.mail[v.inbox.current().unwrap()].unread);
+                let store = &v.live.as_ref().unwrap().store;
+                assert!(store.message_summary(other).unwrap().seen);
+                assert_eq!(store.message_summary(source.id).unwrap().seen, completion != Some(true));
+            });
+            assert!(rx.try_recv().is_err(), "Undo after switching accounts must not queue a read change");
+        }
+    }
+
+    #[gpui::test]
+    fn review_two_failed_toggles_preserve_confirmed_read_state_after_navigation(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let source = view.update(cx, |v, cx| {
+            let source = incoming(v, 1);
+            let store = &v.live.as_ref().unwrap().store;
+            store.set_flags(source.folder, source.uid, true, true).unwrap();
+            store.save_folder(&source.account, "Archive", None, lagom_core::store::FolderRole::Archive).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.toggle_read(cx);
+            v.toggle_read(cx);
+            v.open_kind(Kind::Done, cx);
+            source
+        });
+        for seen in [false, true] {
+            let Cmd::Op { op, id, act: Act::Read(value) } = rx.try_recv().unwrap() else { panic!("missing read command") };
+            assert_eq!((id, value), (source.id, seen));
+            view.update_in(cx, |v, window, cx| {
+                v.on_events(vec![Event::Op { op, error: Some("fixture refusal".into()) }, Event::Changed], window, cx);
+                let m = v.live.as_ref().unwrap().store.message_summary(source.id).unwrap();
+                assert!(m.seen && m.flagged, "failed requests must retain the last server-confirmed flags");
+            });
+        }
+        view.update(cx, |v, cx| {
+            v.open_box(None, cx);
+            assert!(!v.inbox.mail[v.inbox.current().unwrap()].unread);
+            assert!(v.inbox.history.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn review_explicit_composition_preserves_saved_reply(cx: &mut TestAppContext) {
+        for keys in ["f", "shift-r"] {
+            let (view, cx, mut rx) = window(cx);
+            let source = view.update(cx, |v, cx| {
+                let first = incoming(v, 1);
+                let source = incoming(v, 2);
+                let store = &v.live.as_ref().unwrap().store;
+                let mut message = store.message(source.id).unwrap();
+                message.summary.subject = "Selected message".into();
+                message.summary.from_address = "sender@example.com".into();
+                message.summary.to = "me@lagom.test, team@example.com".into();
+                message.summary.cc = "copy@example.com".into();
+                message.body_text = "Selected body".into();
+                store.save_message(&message).unwrap();
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.select_found(first.id, cx);
+                source.id
+            });
+            cx.simulate_keystrokes("r");
+            cx.simulate_input("Saved reply");
+            cx.simulate_keystrokes("escape");
+            let saved = view.read_with(cx, |v, cx| v.drafts[0].read(cx).outgoing(cx));
+            view.update(cx, |v, cx| v.select_found(source, cx));
+            while rx.try_recv().is_ok() {}
+            cx.simulate_keystrokes(keys);
+            view.read_with(cx, |v, cx| {
+                assert_eq!(v.drafts.len(), 1, "an explicit composition must leave the saved reply intact");
+                assert_eq!(v.drafts[0].read(cx).outgoing(cx), saved);
+                let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+                assert_ne!(mail.message_id, saved.message_id);
+                assert!(mail.text.contains("Selected body"));
+                if keys == "f" {
+                    assert_eq!(mail.subject, "Fwd: Selected message");
+                    assert!(mail.to.is_empty() && mail.cc.is_empty());
+                    assert!(mail.in_reply_to.is_none());
+                } else {
+                    assert_eq!(mail.subject, "Re: Selected message");
+                    assert_eq!(mail.to, ["sender@example.com", "team@example.com"]);
+                    assert_eq!(mail.cc, ["copy@example.com"]);
+                }
+            });
+            if keys == "f" {
+                let Cmd::ForwardAttachments { draft, id } = rx.try_recv().unwrap() else { panic!("missing forward download") };
+                assert_eq!(id, source);
+                view.update_in(cx, |v, window, cx| {
+                    let parts = vec![lagom_core::smtp::OutgoingAttachment { filename: "selected.bin".into(), mime_type: "application/octet-stream".into(), data: vec![1, 2] }];
+                    v.on_events(vec![Event::ForwardAttachments { draft, result: Ok(parts) }], window, cx);
+                    assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx).attachments[0].data, [1, 2]);
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn review_forward_completion_saves_in_background_under_write_lock(cx: &mut TestAppContext) {
+        for closed in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            view.update(cx, |v, cx| { incoming(v, 1); v.inbox = Inbox::live(); v.reload(cx); });
+            cx.simulate_keystrokes("f");
+            let draft = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|cmd| match cmd {
+                Cmd::ForwardAttachments { draft, .. } => Some(draft), _ => None,
+            }).unwrap();
+            if closed { cx.simulate_keystrokes("escape"); }
+            let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+            let lock = rusqlite::Connection::open(store.path()).unwrap();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let data = vec![127; 2 * 1024 * 1024];
+            let parts = vec![lagom_core::smtp::OutgoingAttachment { filename: "large.bin".into(), mime_type: "application/octet-stream".into(), data: data.clone() }];
+            let started = Instant::now();
+            view.update_in(cx, |v, window, cx| v.on_events(vec![Event::ForwardAttachments { draft: draft.clone(), result: Ok(parts) }], window, cx));
+            let elapsed = started.elapsed();
+            lock.execute_batch("ROLLBACK").unwrap();
+            assert!(elapsed < Duration::from_secs(1), "completion blocked on a SQLite writer for {elapsed:?}");
+            cx.run_until_parked();
+            let saved = store.drafts().unwrap().into_iter().find(|d| d.id == draft).unwrap();
+            assert!(saved.forward_source.is_none());
+            assert_eq!(saved.attachments[0].data, data);
+        }
     }
 
     #[gpui::test]

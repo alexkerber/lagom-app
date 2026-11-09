@@ -115,7 +115,7 @@ impl Render for MessageWindow {
             .on_action(cx.listener(|this, _: &ReplyAll, _, cx| this.compose(ComposeKind::ReplyAll, cx)))
             .on_action(cx.listener(|this, _: &ToggleRead, _, cx| {
                 let id = this.id;
-                this.main.update(cx, |main, _, cx| main.toggle_read_on(id, cx)).ok();
+                this.main.update(cx, |main, window, cx| main.toggle_read_on(id, window, cx)).ok();
             }))
             .on_action(cx.listener(|this, _: &Reply, _, cx| this.reply(cx)))
             .map(|d| quit_through_main(d, cx))
