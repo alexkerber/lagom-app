@@ -744,7 +744,7 @@ fn attachment_filename(common: &async_imap::imap_proto::BodyContentCommon<'_>) -
     let disposition = common.disposition.as_ref().map(|d| params(&d.params)).unwrap_or_default();
     let header = format!("Content-Type: application/octet-stream{}\r\nContent-Disposition: attachment{disposition}\r\n\r\nx", params(&common.ty.params));
     let message = mail_parser::MessageParser::default().parse(header.as_bytes())?;
-    let name = message.attachments().next()?.attachment_name().filter(|s| !s.is_empty()).map(str::to_owned);
+    let name = message.attachments().next()?.attachment_name().map(attachment::strip_bidi).filter(|s| !s.is_empty());
     name
 }
 type TextPart = (Vec<u32>, bool, u32, String);
@@ -834,6 +834,8 @@ mod tests {
         let (text, parts) = parsed_parts(r#"("APPLICATION" "PDF" NIL NIL NIL "BASE64" 8 NIL ("ATTACHMENT" ("FILENAME" "=?UTF-8?Q?r=C3=A4ksm=C3=B6rg=C3=A5s.pdf?=")))"#);
         assert!(text.is_empty());
         assert_eq!((&*parts[0].section, &*parts[0].filename), ("1", "räksmörgås.pdf"));
+        let (_, parts) = parsed_parts("(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"invoice\u{202E}fdp.exe\") NIL NIL \"BASE64\" 8)");
+        assert_eq!(parts[0].filename, "invoicefdp.exe");
         let (text, parts) = parsed_parts(r#"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1) "MIXED" NIL ("ATTACHMENT" ("FILENAME" "bundle")))"#);
         assert!(text.is_empty());
         assert_eq!(parts[0].section, "1");

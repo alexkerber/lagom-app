@@ -25,6 +25,11 @@ pub(crate) fn decode(bytes: &[u8], encoding: &str) -> Result<Vec<u8>> {
     Ok(bytes.into_owned())
 }
 
+/// Bidi and format controls let `invoice\u{202E}fdp.exe` display as `invoiceexe.pdf`.
+pub(crate) fn strip_bidi(name: &str) -> String {
+    name.chars().filter(|c| !matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')).collect()
+}
+
 /// Call on a worker: the destination is created exclusively, never overwritten.
 pub fn save_download(filename: &str, bytes: &[u8]) -> Result<PathBuf> {
     let dir = dirs::download_dir().ok_or(Error::Invalid("Downloads folder unavailable"))?;
@@ -34,7 +39,7 @@ pub fn save_download(filename: &str, bytes: &[u8]) -> Result<PathBuf> {
 
 fn save_in(dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf> {
     // Mail filenames are untrusted, including separators from other platforms.
-    let name: String = filename.rsplit(['/', '\\']).next().unwrap_or_default().chars()
+    let name: String = strip_bidi(filename.rsplit(['/', '\\']).next().unwrap_or_default()).chars()
         .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c }).collect();
     let name = name.trim_matches(['.', ' ']);
     let name = if name.is_empty() { "attachment" } else { name };
@@ -96,6 +101,15 @@ mod tests {
         for (bytes, encoding) in [(b"!!!!".as_slice(), "base64"), (b"=ZZ", "quoted-printable"), (b"x", "unknown")] {
             assert!(decode(bytes, encoding).is_err());
         }
+    }
+
+    #[test]
+    fn bidi_and_format_controls_are_stripped() {
+        assert_eq!(strip_bidi("invoice\u{202E}fdp.exe"), "invoicefdp.exe");
+        assert_eq!(strip_bidi("\u{FEFF}a\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}b\u{2066}\u{2067}\u{2068}\u{2069}\u{061C}.pdf"), "ab.pdf");
+        assert_eq!(strip_bidi("räksmörgås שלום.pdf"), "räksmörgås שלום.pdf");
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(save_in(dir.path(), "invoice\u{202E}fdp.exe", b"").unwrap(), dir.path().join("invoicefdp.exe"));
     }
 
     #[test]
