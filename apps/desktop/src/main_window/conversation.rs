@@ -11,6 +11,9 @@ pub(super) struct MessageBody {
 }
 
 impl html::WebHost for MessageBody {
+    fn hints(&mut self, over: bool, command: bool, shift: bool, cx: &mut Context<Self>) {
+        self.main.update(cx, |main, cx| main.update_hints(over, gpui::Modifiers { platform: command, shift, ..Default::default() }, cx)).ok();
+    }
     fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.id;
         self.main.update(cx, |main, cx| main.mail_action_on(id, action, window, cx)).ok();
@@ -39,6 +42,11 @@ impl Render for MessageBody {
         let id = self.id;
         let download = self.main.clone();
         let reply = self.main.clone();
+        let main = self.main.clone();
+        let open = main.upgrade().is_some_and(|main| main.read(cx).message_menu == Some(id));
+        let menu = polish::reading_menu(&theme, id, open, move |action, window, cx| {
+            main.update(cx, |main, cx| main.message_action(id, *action, window, cx)).ok();
+        });
         let remote = self.web.has_remote && !self.mail.remote;
         // shortcut: expanded bodies have their own scroll area; use measured HTML heights when continuous body scrolling is needed.
         div().h(px(480.)).flex_shrink_0().flex().flex_col()
@@ -47,7 +55,7 @@ impl Render for MessageBody {
                 this.mail.remote = true;
                 cx.notify();
             }))))
-            .child(reading_view(&theme, (id, &self.mail), overlay || !html::SUPPORTED || self.mail.html.is_none(), self.web.slot(), 0,
+            .child(reading_view(&theme, (id, &self.mail), overlay || !html::SUPPORTED || self.mail.html.is_none(), self.web.slot(), 0, menu,
                 move |section, _, cx| { download.update(cx, |main, cx| main.download_attachment(id, section, cx)).ok(); },
                 move |_, window, cx| { reply.update(cx, |main, cx| main.compose_for(Some(id), window, cx)).ok(); }))
     }

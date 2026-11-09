@@ -16,6 +16,9 @@ pub struct MessageWindow {
 }
 
 impl html::WebHost for MessageWindow {
+    fn hints(&mut self, over: bool, command: bool, shift: bool, cx: &mut Context<Self>) {
+        self.main.update(cx, |main, _, cx| main.update_hints(over, gpui::Modifiers { platform: command, shift, ..Default::default() }, cx)).ok();
+    }
     fn mail_action(&mut self, action: Run, _: &mut Window, cx: &mut Context<Self>) {
         let id = self.id;
         self.main.update(cx, |main, window, cx| {
@@ -93,13 +96,20 @@ impl Render for MessageWindow {
         } else {
             main.inbox.trash.contains(&id)
         };
-        self.web.frame(Some((id, &m)), &t, false, window, cx);
+        let menu_open = main.message_menu == Some(id);
+        self.web.frame(Some((id, &m)), &t, menu_open, window, cx);
         let web = html::SUPPORTED && m.html.is_some();
         let this = cx.entity().downgrade();
         let on_reply = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
             this.update(cx, |this, cx| this.reply(cx)).ok();
         };
         let main_window = self.main;
+        let menu = polish::reading_menu(&t, id, menu_open, move |action, _, cx| {
+            main_window.update(cx, |main, window, cx| {
+                if matches!(action, polish::MessageAction::ReplyAll | polish::MessageAction::Forward | polish::MessageAction::Move) { window.activate_window(); }
+                main.message_action(id, *action, window, cx);
+            }).ok();
+        });
         let on_download = move |section, _: &mut Window, cx: &mut App| {
             main_window.update(cx, |main, _, cx| main.download_attachment(id, section, cx)).ok();
         };
@@ -151,7 +161,7 @@ impl Render for MessageWindow {
                     .child(button(&t, if in_trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
                         .on_click(cx.listener(move |this, _, _, cx| this.act(if in_trash { Move::Inbox } else { Move::Done }, cx)))),
             )
-            .child(reading_view(&t, (id, &m), !web, self.web.slot(), 0, on_download, on_reply))
+            .child(reading_view(&t, (id, &m), !web || menu_open, self.web.slot(), 0, menu, on_download, on_reply))
     }
 }
 
@@ -216,6 +226,11 @@ impl MainWindow {
         if self.palette.is_some() {
             self.close_palette(window, cx);
         }
+        let store = self.inbox.mail[id].store;
+        if self.inbox.account_filter.as_ref().is_some_and(|a| *a != self.inbox.mail[id].account) {
+            self.inbox.account_filter = None;
+            self.inbox.regroup();
+        }
         if !self.inbox.raw_list().contains(&id) {
             match (self.inbox.mail[id].store.filter(|_| self.live.is_some()), self.inbox.items.contains(&id)) {
                 // Real mail: find and pin it by store id, as ⌘K does. A folder's cached rows may
@@ -230,6 +245,13 @@ impl MainWindow {
                 }
             }
         }
+        let id = match store {
+            Some(store) => match self.inbox.by_store.get(&store) {
+                Some(&id) => id,
+                None => { self.notify("That message is no longer available locally", cx); return; }
+            },
+            None => id,
+        };
         if self.inbox.unread_only { self.filter_unread(false, cx); }
         match self.inbox.list().iter().position(|&rep| self.inbox.members(rep).contains(&id)) {
             Some(ix) => self.act_at(ix, what, 0., cx),
