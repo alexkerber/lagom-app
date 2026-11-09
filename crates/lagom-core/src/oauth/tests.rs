@@ -332,7 +332,7 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
         server.await.unwrap();
     }
 }
-/// Sign-in on a local fake provider; the browser callback goes to `host`, after one stray request with a wrong state.
+/// Sign-in on a local fake provider: one stray wrong-state request on 127.0.0.1, then the real callback on `host`.
 async fn sign_in_after_a_stray_request(provider: Provider, host: &'static str, email: &'static str) {
     memory();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -345,8 +345,8 @@ async fn sign_in_after_a_stray_request(provider: Provider, host: &'static str, e
         let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
         respond(&mut socket, "200 OK", "{}").await;
         let port = Url::parse(&params["redirect_uri"]).unwrap().port().unwrap();
-        for (state, status) in [("wrong", "400 Bad Request"), (params["state"].as_str(), "200 OK")] {
-            let mut callback = tokio::net::TcpStream::connect((host, port)).await.unwrap();
+        for (to, state, status) in [("127.0.0.1", "wrong", "400 Bad Request"), (host, params["state"].as_str(), "200 OK")] {
+            let mut callback = tokio::net::TcpStream::connect((to, port)).await.unwrap();
             callback.write_all(format!("GET /?code=test-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
             let mut response = String::new();
             callback.read_to_string(&mut response).await.unwrap();
@@ -370,6 +370,12 @@ async fn sign_in_after_a_stray_request(provider: Provider, host: &'static str, e
 #[tokio::test]
 async fn a_wrong_state_request_does_not_end_sign_in() {
     sign_in_after_a_stray_request(Provider::Google, "127.0.0.1", "stray-google@example.com").await;
+}
+#[tokio::test]
+async fn microsoft_localhost_callback_is_accepted_on_ipv6_loopback() {
+    // Without IPv6 loopback on this machine, sign-in runs on IPv4 alone.
+    let host = if std::net::TcpListener::bind("[::1]:0").is_ok() { "::1" } else { "127.0.0.1" };
+    sign_in_after_a_stray_request(Provider::Microsoft, host, "stray-microsoft@example.com").await;
 }
 #[tokio::test]
 async fn dropping_sign_in_closes_the_listener() {
