@@ -9,9 +9,11 @@ Native apps on `lagom-core`, with no mail business logic in Swift.
 
 The first Apple slice uses `crates/lagom-ffi`, with [UniFFI 0.32.2](https://docs.rs/uniffi/0.32.2/uniffi/)
 pinned and proc-macro-generated Swift bindings. One serialized Rust worker owns
-SQLite writes, IMAP actions, discovery, credentials and the durable outbox.
+IMAP actions, discovery and credentials. A separate SQLite WAL connection keeps
+cached reads and durable enqueue available during network waits.
 Swift owns navigation, form state and presentation. Mailbox reads include all
-accounts, order by date then ID descending, and page in batches of 100.
+accounts, order by date then ID descending, and page in batches of 100. Refreshes
+retain the loaded range until the account or mailbox changes.
 
 ## Build
 
@@ -58,7 +60,8 @@ The compact layout opens a message from its list. Regular width and height
 show accounts/mailboxes, list and message in three columns, including phones
 that report those size classes. Done archives on the server; Delete moves to
 server Trash. Later is local and hides mail until tomorrow at 08:00 in the
-system time zone. Pull to refresh, launch and foreground entry sync all accounts.
+system time zone. A local foreground timer reloads at the next snooze deadline.
+Pull to refresh, launch and foreground entry sync all accounts.
 
 Send commits Markdown mail to the outbox before dismissing compose. Sync
 attempts delivery and retries temporary failures on subsequent syncs, preserving
@@ -101,9 +104,19 @@ xcrun swiftc apps/mobile/apple/Generated/LagomCore.swift \
   -L target/debug -llagom_ffi -framework Security -framework SystemConfiguration \
   -lresolv -liconv -o target/mobile-swift-smoke
 target/mobile-swift-smoke
+xcrun swiftc apps/mobile/apple/Generated/LagomCore.swift \
+  apps/mobile/apple/Sources/MailModel.swift crates/lagom-ffi/tests/mobile-model.swift \
+  -I apps/mobile/apple/Generated/LagomFFI.xcframework/ios-arm64/Headers \
+  -L target/debug -llagom_ffi -framework Security -framework SystemConfiguration \
+  -lresolv -liconv -o target/mobile-model-tests
+target/mobile-model-tests
+target/mobile-model-tests --wake
 ```
 
 This checks seven fixture-only FFI contracts, including the Swift/Tokio async
-bridge and readable errors. It accesses neither network nor keychain. Native
+bridge and readable errors, plus two MailModel regressions for retained pages
+and foreground snooze deadlines using a fake core. Rust fixtures also verify
+local access during a stalled sync, Done on snoozed archived mail and the earliest
+snooze across accounts. These checks never use real accounts or keychains. Native
 layout, navigation, gestures, WKWebView behavior, Dynamic Type and signed-device
 Keychain/provider acceptance still require manual testing.

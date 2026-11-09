@@ -21,9 +21,10 @@
 - [x] Build and start on macOS (2026-11-06).
 - [ ] Build on Linux and Windows (CI).
 - [x] First native iPhone/iPad mail slice in `apps/mobile/apple`: SwiftUI size-class split navigation, unified/account Inbox/Later/Done/Sent, server Done/Delete/read actions, local Later, replies and Markdown outbox, email-first/manual account setup, shared HTML privacy policy, desktop theme colours and platform icons. XcodeGen, arm64 device/simulator XCFramework builder and a separate macOS CI job. No background fetch, push, mobile OAuth, attachment transfer or draft restoration yet.
+- [x] Mobile review: cached reads and durable enqueue stay available during network waits; refreshes retain loaded pages; Done clears snooze on already archived mail; a foreground timer reloads at the earliest snooze deadline. Rust fixtures and headless Swift model regressions cover all four fixes.
 - [ ] Mobile acceptance: run the four compiled XCTest mapping tests on an owned device; verify native layout/gestures (including regular-size phones), accessibility, WKWebView privacy and signed-device Keychain/provider behavior. Generic simulator builds and a headless Swift FFI smoke check do not establish runtime iOS acceptance.
 - [ ] Native Android phone and tablet app (Jetpack Compose) in `apps/mobile/android`. Planned for the night run 2026-11-06.
-- [x] `lagom-ffi` on `lagom-core`, pinned UniFFI 0.32.2 proc macros and generated Swift bindings. Stable records/errors, serialized background store/network work, native Apple keyring and existing HTTP stack cross-compile unchanged. Rust loopback IMAP/SMTP and temporary-store fixtures cover the boundary; Android/Kotlin bindings remain with the Android slice.
+- [x] `lagom-ffi` on `lagom-core`, pinned UniFFI 0.32.2 proc macros and generated Swift bindings. Stable records/errors, serialized network work with independent local WAL access, native Apple keyring and existing HTTP stack cross-compile unchanged. Rust loopback IMAP/SMTP and temporary-store fixtures cover the boundary; Android/Kotlin bindings remain with the Android slice.
 
 ## Mail (v1)
 - [x] All/Unread filters loaded message rows; multi-select supports Shift+arrows, Shift-click, Cmd-click, Cmd+A and batch actions. Integrated with Google Calendar/Today, Dusk (accent Done last, 140 ms glide) and Settings switches, retaining both branches' regression tests.

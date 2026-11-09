@@ -1,4 +1,4 @@
-//! The mobile boundary owns one serial mail worker; records never expose core storage types.
+//! The mobile boundary separates local access from serial network work; records hide core storage types.
 use lagom_core::{account::{Account, Security, ServerConfig}, imap_sync::{ImapSync, DEFAULT_LIMIT},
     smtp::{self, Outgoing}, store::{FolderRole, MessageSummary, Store}};
 use std::{future::Future, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
@@ -67,14 +67,21 @@ pub struct ReplyDraft { pub account: String, pub to: String, pub subject: String
 pub struct SendFailure { pub id: String, pub subject: String, pub message: String }
 
 #[derive(uniffi::Object)]
-pub struct LagomCore { store: Arc<Mutex<Store>> }
+pub struct LagomCore { stores: Arc<Stores> }
+struct Stores { local: Mutex<Store>, network: Mutex<Store> }
 
 impl LagomCore {
     async fn run<T: Send + 'static>(&self, action: impl FnOnce(&mut Store) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
-        let store = self.store.clone();
-        // Core futures borrow SQLite across awaits, so keep them together on a blocking worker.
+        self.run_on(false, action).await
+    }
+    async fn run_network<T: Send + 'static>(&self, action: impl FnOnce(&mut Store) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
+        self.run_on(true, action).await
+    }
+    async fn run_on<T: Send + 'static>(&self, network: bool, action: impl FnOnce(&mut Store) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
+        let stores = self.stores.clone();
+        // Network futures borrow SQLite across awaits; a separate WAL connection keeps local work available.
         tokio::task::spawn_blocking(move || {
-            let mut store = store.lock().map_err(|_| failure("mail worker stopped; reopen the app"))?;
+            let mut store = (if network { &stores.network } else { &stores.local }).lock().map_err(|_| failure("mail worker stopped; reopen the app"))?;
             action(&mut store).map_err(MailError::from)
         }).await.map_err(|_| failure("mail worker stopped unexpectedly"))?
     }
@@ -114,15 +121,16 @@ impl LagomCore {
     #[uniffi::constructor]
     pub fn open(data_dir: String) -> Result<Arc<Self>> {
         // Reopening the same worker must not recover a send still owned by this process.
-        static OPEN: std::sync::OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Mutex<Store>>>>> = std::sync::OnceLock::new();
+        static OPEN: std::sync::OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Stores>>>> = std::sync::OnceLock::new();
         std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
         let dir = std::fs::canonicalize(data_dir).map_err(lagom_core::Error::from)?;
         let mut open = OPEN.get_or_init(Default::default).lock().map_err(|_| failure("mail registry unavailable"))?;
-        if let Some(store) = open.get(&dir).and_then(std::sync::Weak::upgrade) { return Ok(Arc::new(Self { store })); }
+        if let Some(stores) = open.get(&dir).and_then(std::sync::Weak::upgrade) { return Ok(Arc::new(Self { stores })); }
         let store = Store::open(dir.join("lagom.sqlite3"))?;
         store.recover_outbox()?;
-        let core = Arc::new(Self { store: Arc::new(Mutex::new(store)) });
-        open.insert(dir, Arc::downgrade(&core.store));
+        let local = Store::open(dir.join("lagom.sqlite3"))?;
+        let core = Arc::new(Self { stores: Arc::new(Stores { local: Mutex::new(local), network: Mutex::new(store) }) });
+        open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
     pub async fn accounts(&self) -> Result<Vec<MailAccount>> {
@@ -130,7 +138,7 @@ impl LagomCore {
     }
     pub async fn add_account(&self, email: String, password: String) -> Result<MailAccount> {
         let password = Zeroizing::new(password);
-        self.run(move |s| network(async {
+        self.run_network(move |s| network(async {
             let servers = match lagom_core::discover(&email).await {
                 lagom_core::Discovery::Password { preset, .. } => (preset.imap, preset.smtp),
                 lagom_core::Discovery::OAuth(provider) => {
@@ -146,16 +154,16 @@ impl LagomCore {
     }
     pub async fn add_account_manual(&self, email: String, password: String, imap: MailServer, smtp: MailServer) -> Result<MailAccount> {
         let password = Zeroizing::new(password);
-        self.run(move |s| network(add(s, Account::new(email, imap.into(), smtp.into())?, password))).await
+        self.run_network(move |s| network(add(s, Account::new(email, imap.into(), smtp.into())?, password))).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
-        self.run(move |s| { account(s, &id)?.delete_password()?; s.delete_account(&id) }).await
+        self.run_network(move |s| { account(s, &id)?.delete_password()?; s.delete_account(&id) }).await
     }
     pub async fn sync(&self, account_id: String) -> Result<()> {
-        self.run(move |s| { let a = account(s, &account_id)?; network(sync_account(s, &a)) }).await
+        self.run_network(move |s| { let a = account(s, &account_id)?; network(sync_account(s, &a)) }).await
     }
     pub async fn sync_all(&self) -> Result<()> {
-        self.run(|s| network(async {
+        self.run_network(|s| network(async {
             let mut first_error = None;
             for a in s.accounts()? {
                 if let Err(error) = sync_account(s, &a).await {
@@ -164,6 +172,18 @@ impl LagomCore {
             }
             match first_error { Some(error) => Err(error), None => Ok(()) }
         })).await
+    }
+    pub async fn next_snooze(&self) -> Result<Option<i64>> {
+        self.run(|s| {
+            let now = now();
+            let mut next = None;
+            for a in s.accounts()? {
+                if let Some(due) = s.next_snooze(&a.id, now)? {
+                    next = Some(next.map_or(due, |old: i64| old.min(due)));
+                }
+            }
+            Ok(next)
+        }).await
     }
     pub async fn inbox(&self, limit: u32, offset: u32) -> Result<Vec<MailRow>> {
         self.mailbox(None, Mailbox::Inbox, limit, offset).await
@@ -193,7 +213,7 @@ impl LagomCore {
     pub async fn done(&self, ids: Vec<i64>) -> Result<()> { self.move_messages(ids, false).await }
     pub async fn delete(&self, ids: Vec<i64>) -> Result<()> { self.move_messages(ids, true).await }
     pub async fn mark_read(&self, id: i64, read: bool) -> Result<()> {
-        self.run(move |s| network(async {
+        self.run_network(move |s| network(async {
             let a = account(s, &s.message_summary(id)?.account)?;
             let mut session = ImapSync::login(&a, &a.password()?).await?;
             session.mark_seen(s, id, read).await?;
@@ -237,11 +257,18 @@ impl LagomCore {
 }
 impl LagomCore {
     async fn move_messages(&self, ids: Vec<i64>, trash: bool) -> Result<()> {
-        self.run(move |s| network(async {
+        self.run_network(move |s| network(async {
             for id in ids {
                 let a = account(s, &s.message_summary(id)?.account)?;
                 let mut session = ImapSync::login(&a, &a.password()?).await?;
-                if trash { session.trash(s, id).await?; } else { session.archive(s, id).await?; }
+                if trash { session.trash(s, id).await?; } else {
+                    session.archive(s, id).await?;
+                    // A real move replaces the row; an already archived message keeps its snooze.
+                    match s.snooze(id, None) {
+                        Ok(()) | Err(lagom_core::Error::NotFound) => {},
+                        Err(error) => return Err(error),
+                    }
+                }
                 let _ = session.logout().await;
             }
             Ok(())

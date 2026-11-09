@@ -60,3 +60,10 @@ jobs:
             -L target/debug -llagom_ffi -framework Security -framework SystemConfiguration \
             -lresolv -liconv -o target/mobile-swift-smoke
           target/mobile-swift-smoke
+          xcrun swiftc apps/mobile/apple/Generated/LagomCore.swift \
+            apps/mobile/apple/Sources/MailModel.swift crates/lagom-ffi/tests/mobile-model.swift \
+            -I apps/mobile/apple/Generated/LagomFFI.xcframework/ios-arm64/Headers \
+            -L target/debug -llagom_ffi -framework Security -framework SystemConfiguration \
+            -lresolv -liconv -o target/mobile-model-tests
+          target/mobile-model-tests
+          target/mobile-model-tests --wake

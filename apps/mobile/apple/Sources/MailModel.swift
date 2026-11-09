@@ -39,6 +39,10 @@ final class MailModel {
     var hasMore = false
     private var revision = 0
     private var syncAgain = false
+    private var foreground = true
+    @ObservationIgnored private var wakeTask: Task<Void, Never>?
+
+    deinit { wakeTask?.cancel() }
 
     func start() async {
         guard core == nil else { return }
@@ -59,15 +63,46 @@ final class MailModel {
         let account = accountID
         let mailbox = mailbox.mailbox
         do {
+            let due = try await core.nextSnooze()
             let accounts = try await core.accounts()
-            let page = try await core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: offset)
+            var page: [MailRow] = []
+            let count = more ? 100 : max(100, rows.count)
+            var hasMore = false
+            repeat {
+                let batch = try await core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: offset + UInt32(page.count))
+                page += batch
+                hasMore = batch.count == 100
+            } while hasMore && page.count < count
             let failures = try await core.sendFailures()
             guard request == revision else { return }
             self.accounts = accounts
             self.failures = failures
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
-            hasMore = page.count == 100
+            self.hasMore = hasMore
+            wake(at: due)
         } catch { if request == revision { self.error = error.localizedDescription } }
+    }
+
+    private func wake(at due: Int64?) {
+        wakeTask?.cancel()
+        wakeTask = nil
+        guard foreground, let due else { return }
+        wakeTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, Double(due) - Date().timeIntervalSince1970))) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            await self?.reload()
+        }
+    }
+
+    func setForeground(_ active: Bool) async {
+        foreground = active
+        wakeTask?.cancel()
+        wakeTask = nil
+        if active {
+            await reload()
+            await sync()
+        }
     }
 
     func changeScope() async {

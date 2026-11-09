@@ -12,7 +12,7 @@ struct LagomApp: App {
                 .task { await model.start() }
                 .onChange(of: phase) { _, phase in
                     // shortcut: foreground/local sync only in v1; add BGAppRefreshTask before background fetch or push.
-                    if phase == .active { Task { await model.sync() } }
+                    Task { await model.setForeground(phase == .active) }
                 }
         }
     }
