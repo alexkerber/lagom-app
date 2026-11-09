@@ -12,7 +12,8 @@ fn nodes(m: &MessageSummary) -> Vec<String> {
             subject = rest.trim().to_string();
         }
         let participants: BTreeSet<_> = [&m.from_address, &m.to, &m.cc].into_iter()
-            .flat_map(|s| s.split([',', ';'])).map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+            .flat_map(|s| crate::contacts::split_recipients(s))
+            .map(|s| s.parse::<lettre::message::Mailbox>().map_or(s.to_lowercase(), |m| m.email.to_string().to_lowercase())).collect();
         if !subject.is_empty() && !participants.is_empty() {
             ids.insert(format!("subject:{}", serde_json::to_string(&(subject, participants)).unwrap()));
         } else {
@@ -272,6 +273,10 @@ mod tests {
         std::mem::swap(&mut fallback.summary.from_address, &mut fallback.summary.to);
         let two = s.save_message(&fallback).unwrap();
         assert_eq!(s.message(one).unwrap().summary.thread_id, s.message(two).unwrap().summary.thread_id);
+        fallback.summary.uid = 8;
+        fallback.summary.to = "\"Team, West\" <sender@example.com>".into();
+        let named = s.save_message(&fallback).unwrap();
+        assert_eq!(s.message(named).unwrap().summary.thread_id, s.message(one).unwrap().summary.thread_id);
         fallback.summary.uid = 7; fallback.summary.from_address = "different@example.com".into();
         let three = s.save_message(&fallback).unwrap();
         assert_ne!(s.message(one).unwrap().summary.thread_id, s.message(three).unwrap().summary.thread_id);

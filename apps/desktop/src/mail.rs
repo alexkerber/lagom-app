@@ -206,7 +206,7 @@ pub fn reply_headers(message_id: &str, thread_key: &str) -> (Option<String>, Vec
 
 /// Comma-separated recipients, empty parts dropped.
 pub fn recipients(field: &str) -> Vec<String> {
-    field.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+    lagom_core::contacts::split_recipients(field)
 }
 
 /// The list the UI shows, as the store has it now.
