@@ -72,13 +72,16 @@ impl Contacts {
         entries.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.address.cmp(&b.address)));
         let mut prefixes: HashMap<String, Vec<usize>> = HashMap::new();
         for (id, contact) in entries.iter().enumerate() {
-            let text = folded(&format!("{} {}", contact.name, contact.address));
-            // Index word starts, retaining punctuation in the suffix so full addresses match too.
-            for (at, _) in text.char_indices().filter(|(at, c)| c.is_alphanumeric() && (*at == 0 || !text[..*at].chars().next_back().unwrap().is_alphanumeric())) {
-                for (end, c) in text[at..].char_indices() {
-                    if c.is_whitespace() { break; }
-                    let ids = prefixes.entry(text[at..at + end + c.len_utf8()].to_owned()).or_default();
-                    if ids.len() < 6 && ids.last() != Some(&id) { ids.push(id); }
+            for value in [&contact.name, &contact.address] {
+                // shortcut: index only the first 256 folded characters per field to bound untrusted headers; use a compact index if longer matches are needed.
+                let text: String = folded(value).chars().take(256).collect();
+                // Index word starts, retaining punctuation in the suffix so full addresses match too.
+                for (at, _) in text.char_indices().filter(|(at, c)| c.is_alphanumeric() && (*at == 0 || !text[..*at].chars().next_back().unwrap().is_alphanumeric())) {
+                    for (end, c) in text[at..].char_indices() {
+                        if c.is_whitespace() { break; }
+                        let ids = prefixes.entry(text[at..at + end + c.len_utf8()].to_owned()).or_default();
+                        if ids.len() < 6 && ids.last() != Some(&id) { ids.push(id); }
+                    }
                 }
             }
         }
@@ -91,20 +94,25 @@ impl Contacts {
 }
 
 impl Store {
-    /// Snapshot of known correspondents, including aliases observed as senders in Sent.
+    /// Snapshot of known correspondents, excluding the configured account address.
+    // shortcut: aliases are not inferred from mail; include them when explicit send-as identities are supported.
     // shortcut: old cached To/Cc have no names; learn them from From or subsequent sync.
     // shortcut: refreshed when compose opens; refresh an open sheet on sync if live suggestions are needed.
     pub fn contacts(&self, account: &str, now: i64) -> Result<Contacts> {
         let tx = self.db.unchecked_transaction()?;
         let mut own = HashSet::new();
-        let mut stmt = self.db.prepare("SELECT email FROM accounts WHERE id=?1 UNION SELECT m.from_address FROM messages m JOIN folders f ON f.id=m.folder WHERE m.account=?1 AND f.role='sent'")?;
+        let mut stmt = self.db.prepare("SELECT email FROM accounts WHERE id=?1")?;
         for row in stmt.query_map([account], |r| r.get::<_, String>(0))? {
             own.insert(row?.to_lowercase());
         }
         let mut entries: HashMap<String, (Contact, i64)> = HashMap::new();
-        let mut stmt = self.db.prepare("SELECT from_name,from_address,to_addresses,cc,date FROM messages WHERE account=?1")?;
+        let mut messages = HashSet::new();
+        let mut stmt = self.db.prepare("SELECT from_name,from_address,to_addresses,cc,date,message_id FROM messages WHERE account=?1")?;
         let mut rows = stmt.query([account])?;
         while let Some(row) = rows.next()? {
+            let message_id: String = row.get(5)?;
+            // shortcut: copies without Message-ID count separately; deduplicate when a reliable provider identity is stored.
+            if !message_id.is_empty() && !messages.insert(message_id) { continue; }
             let from: String = row.get(1)?;
             let sent = own.contains(&from.to_lowercase());
             let date: i64 = row.get(4)?;
@@ -153,12 +161,74 @@ mod tests {
     }
 
     #[test]
+    fn long_headers_have_bounded_prefix_storage() {
+        let (_temp, store, account, inbox, _) = fixture();
+        for name in ["x".repeat(1024), "x".repeat(200_000), "Ö-".repeat(100_000)] {
+            store.save_message(&Message { summary: MessageSummary {
+                account: account.id.clone(), folder: inbox, uid: 1,
+                from_name: name.clone(), from_address: "long@example.com".into(),
+                ..Default::default()
+            }, ..Default::default() }).unwrap();
+            let index = store.contacts(&account.id, 0).unwrap();
+            assert!(index.prefixes.keys().all(|key| key.chars().count() <= 256));
+            assert!(index.prefixes.keys().map(String::len).sum::<usize>() < 4 * 1024 * 1024);
+            assert_eq!(index.suggest("long@example.com")[0].name, name);
+            assert_eq!(index.suggest(&name.chars().next().unwrap().to_string()).len(), 1);
+        }
+    }
+
+    #[test]
+    fn folder_copies_do_not_change_rankings() {
+        let (_temp, store, account, inbox, sent) = fixture();
+        let mut received = Message { summary: MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, date: 10,
+            message_id: "received@example.com".into(), from_address: "received@example.com".into(),
+            to: account.email.clone(), ..Default::default()
+        }, ..Default::default() };
+        store.save_message(&received).unwrap();
+        store.save_message(&Message { summary: MessageSummary {
+            account: account.id.clone(), folder: sent, uid: 1, date: 10,
+            message_id: "sent@example.com".into(), from_address: account.email.clone(),
+            to: "sent@example.com".into(), ..Default::default()
+        }, ..Default::default() }).unwrap();
+        let before = store.contacts(&account.id, 10).unwrap().suggest("example");
+        for n in 1..=4 {
+            received.summary.folder = store.save_folder(&account.id, &format!("Copy {n}"), None, FolderRole::Other).unwrap();
+            store.save_message(&received).unwrap();
+        }
+        assert_eq!(store.contacts(&account.id, 10).unwrap().suggest("example"), before);
+        received.summary.uid = 2;
+        received.summary.message_id = "another@example.com".into();
+        store.save_message(&received).unwrap();
+        assert_eq!(store.contacts(&account.id, 10).unwrap().suggest("received")[0].score, 2.);
+    }
+
+    #[test]
+    fn sent_placement_does_not_establish_address_ownership() {
+        let (_temp, store, account, inbox, sent) = fixture();
+        let mut received = Message { summary: MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, date: 10,
+            from_address: "received@example.com".into(), to: account.email.clone(),
+            cc: "team@example.com".into(), message_id: "received@example.com".into(), ..Default::default()
+        }, ..Default::default() };
+        let id = store.save_message(&received).unwrap();
+        let before = store.contacts(&account.id, 10).unwrap().suggest("example");
+        received.summary.folder = sent;
+        store.save_message(&received).unwrap();
+        assert_eq!(store.contacts(&account.id, 10).unwrap().suggest("example"), before);
+        store.delete_message(id).unwrap();
+        assert_eq!(store.contacts(&account.id, 10).unwrap().suggest("example"), before);
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().all(|contact| contact.score == 1.));
+    }
+
+    #[test]
     fn ranking_names_exclusions_and_account_isolation() {
         let (_temp, store, account, inbox, sent) = fixture();
         let now = 1_800_000_000;
         for (uid, folder, from, to, name, date) in [
             (1, inbox, "received@example.com", "self@gmail.com", "Équipe Ångström Öst", now),
-            (2, sent, "alias@example.com", "Sent Team <sent@example.com>", "", now),
+            (2, sent, "SELF@gmail.com", "Sent Team <sent@example.com>", "", now),
             (3, inbox, "old@example.com", "self@gmail.com", "", now - 86400 * 365),
             (4, inbox, "no-reply@example.com", "noreply@example.com, donotreply@example.com, mailer-daemon@example.com", "", now),
             (5, inbox, "received@example.com", "self@gmail.com", "", now + 1),
@@ -173,7 +243,6 @@ mod tests {
         assert!(index.suggest("ngstrom").is_empty());
         assert!(store.contacts("other", now).unwrap().suggest("example").is_empty());
         assert!(index.suggest("self").is_empty());
-        assert!(index.suggest("alias").is_empty());
         assert!(index.suggest("noreply").is_empty());
     }
 
