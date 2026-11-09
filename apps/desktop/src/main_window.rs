@@ -1217,7 +1217,9 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
             underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
         }))))
-        .tooltip(move |_, cx| cx.new(|_| Tip(theme, label.into())).into());
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, if matches!(label, "Send" | "Connect") {
+            format!("{label} · {}", crate::shortcuts::submit().hint).into()
+        } else { label.into() })).into());
     match fill {
         // A translucent tint would replace the fill, so a filled button dims a little instead.
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
@@ -3905,11 +3907,35 @@ mod dispatch {
     }
 
     #[gpui::test]
+    fn inline_and_popout_replies_use_the_submit_shortcut(cx: &mut TestAppContext) {
+        for popout in [false, true] {
+            let (view, cx) = open(cx);
+            if popout {
+                cx.simulate_keystrokes("secondary-o");
+                let window = view.read_with(cx, |v, _| v.popouts[0].1);
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear();
+                    window.dispatch_action(Box::new(Reply), cx);
+                }).unwrap();
+            } else {
+                frame(cx);
+                let at = cx.debug_bounds("reply-box").unwrap().center();
+                cx.simulate_click(at, Default::default());
+            }
+            cx.run_until_parked();
+            assert!(view.read_with(cx, |v, _| v.compose.is_some()));
+            cx.simulate_input("Reply body");
+            cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
+            assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.sending.len() == 1));
+        }
+    }
+
+    #[gpui::test]
     fn quit_does_not_wait_for_a_send_in_its_undo_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         cx.simulate_keystrokes("c");
         cx.simulate_input("recipient@example.com");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         let sheet = view.read_with(cx, |v, _| v.sending[0].clone());
         assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
         assert!(sheet.read_with(cx, |c, _| c.undoable()));
@@ -3943,7 +3969,7 @@ mod dispatch {
         let n = inbox_len(&view, cx);
         cx.simulate_keystrokes("c");
         cx.simulate_input("ana@example.com");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.sending.len() == 1));
         // The inbox has the keys during the Undo window.
         cx.simulate_keystrokes("e");
@@ -4112,12 +4138,24 @@ mod dispatch {
         assert!(cx.debug_bounds("default-task-lists").is_none());
         view.update(cx, |v, cx| {
             v.today.lists.push(lagom_core::tasks::TaskList { id: 1, account: None, remote_id: None, name: "Tasks".into(), position: 0, google_default: false });
+            v.today.lists.push(lagom_core::tasks::TaskList { id: 2, account: None, remote_id: None, name: "Other tasks".into(), position: 1, google_default: false });
             v.today.default = Some(1);
             cx.notify();
         });
         frame(cx);
         assert!(cx.debug_bounds("default-task-lists").is_some());
-        assert!(cx.debug_bounds("default-task-list-1").is_some());
+        for (id, path) in [(1, "complete-task"), (2, "open-task")] {
+            let button = cx.debug_bounds(format!("default-task-list-{id}").leak()).unwrap();
+            let icon = cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
+            assert_eq!(icon.size, gpui::size(px(16.), px(16.)));
+            assert!(button.contains(&icon.center()));
+        }
+        let at = cx.debug_bounds("default-task-list-2").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        frame(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.today.default), Some(2));
+        let selected = cx.debug_bounds("default-task-list-2").unwrap();
+        assert!(selected.contains(&cx.debug_bounds("icon-icons/complete-task.svg").unwrap().center()));
     }
 
     #[gpui::test]

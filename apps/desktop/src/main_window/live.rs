@@ -1735,7 +1735,7 @@ mod tests {
             Cmd::ForwardAttachments { draft, id } => { assert_eq!(id, source); Some(draft) }, _ => None,
         }).unwrap();
         cx.simulate_input("recipient@example.com");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.compose.is_some()), "pending attachments block Send");
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::ForwardAttachments { draft: draft.clone(), result: Err("fixture failure".into()) }], window, cx);
@@ -1756,7 +1756,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| { v.drafts.clear(); v.restore_drafts(window, cx); });
         cx.simulate_keystrokes("c");
         assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         view.read_with(cx, |v, _| assert_eq!(v.live.as_ref().unwrap().store.pending(&draft).unwrap().mail, original));
     }
 
@@ -4206,7 +4206,7 @@ mod tests {
     fn send_one(cx: &mut VisualTestContext) {
         cx.simulate_keystrokes("c");
         cx.simulate_input("ana@example.com");
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
     }
 
     fn toast(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> String {

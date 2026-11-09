@@ -31,6 +31,27 @@ impl Element for PaintCheck {
 
 struct GlyphButton { action: bool, theme: Theme, fill: Option<Rgba>, path: &'static str, ink: Rc<Cell<Option<gpui::Hsla>>> }
 
+struct ActionButton(&'static str);
+
+impl Render for ActionButton {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(button(&Theme::light(DEFAULT_ACCENT), self.0, None))
+    }
+}
+
+#[gpui::test]
+fn action_buttons_render_their_own_icons(cx: &mut TestAppContext) {
+    for label in ["Connect", "Connecting", "TLS", "STARTTLS", "None", "Add account", "Remove", "Keep", "Send", "Save event", "Saving…"] {
+        let (_, cx) = cx.add_window_view(|_, _| ActionButton(label));
+        cx.run_until_parked();
+        let control = cx.debug_bounds(label).unwrap();
+        let path = action_icon(label).expect("action has an icon");
+        let glyph = cx.debug_bounds(format!("icon-{path}").leak()).expect("button renders its icon");
+        assert_eq!(glyph.size, gpui::size(px(16.), px(16.)));
+        assert!(control.contains(&glyph.center()), "{label}");
+    }
+}
+
 impl Render for GlyphButton {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let control = if self.action { button(&self.theme, "Rename", self.fill) }

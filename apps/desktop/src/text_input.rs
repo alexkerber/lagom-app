@@ -33,10 +33,13 @@ gpui::actions!(
 
 /// macOS keys. Undo (⌘Z) comes from the main window's binding: a focused field handles it first.
 /// shortcut: ⌘⌫ (delete to line start) is not bound, as Compose and the inbox use ⌘⌫; bind it in
-/// a context that excludes Compose once a form needs it. Linux and Windows word keys (ctrl-arrows)
-/// are not bound yet; add them with the first non-macOS build.
+/// a context that excludes Compose once a form needs it. Linux and Windows Ctrl+Backspace deletes
+/// a word; bind the remaining Ctrl word keys with the first non-macOS build.
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("TextInput");
+    if !cfg!(target_os = "macos") {
+        cx.bind_keys([KeyBinding::new("ctrl-backspace", DeleteWordLeft, ctx)]);
+    }
     // Single-line fields leave ↑ and ↓ to their parent, so the palette can move its selection.
     let multi = Some("TextInput && multiline");
     let markdown = Some("TextInput && markdown");

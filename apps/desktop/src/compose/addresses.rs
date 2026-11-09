@@ -270,12 +270,13 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         assert!(cx.debug_bounds("recipient-0-3-invalid").is_some());
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem == Some("A recipient is not an email address")));
         click(cx, "recipient-0-3-invalid");
         cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("fixed@example.com");
-        cx.simulate_keystrokes("tab cmd-enter");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.undoable()));
         assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).to.last().cloned()), Some("fixed@example.com".into()));
     }
@@ -309,7 +310,7 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).to), ["Team West <west@example.com>"]);
             assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).cc), ["\"Team, East\" <east@example.com>", "invalid"]);
-            cx.simulate_keystrokes("cmd-enter");
+            cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
             assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem.is_some()));
         }
         view.update(cx, |v, _| { v.store = None; v._save_delay = None; v._contacts = None; });
@@ -337,7 +338,7 @@ mod tests {
             }
             paste_unbalanced_tokens(cx);
             assert_eq!(view.read_with(cx, |v, _| v.addresses.tokens[field].clone()), ["\"Team", "alice@example.com", "West\" <west@example.com>"]);
-            cx.simulate_keystrokes("cmd-enter");
+            cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
             assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem == Some("A recipient is not an email address")));
             let mail = view.read_with(cx, |v, cx| v.outgoing(cx));
             assert_eq!(if field == 0 { mail.to } else { mail.cc }, ["\"Team", "alice@example.com", "West\" <west@example.com>"]);
@@ -365,14 +366,14 @@ mod tests {
         let mail = view.read_with(cx, |v, cx| v.outgoing(cx));
         assert_eq!(mail.to, expected.into_iter().chain(["pending@example.com"]).collect::<Vec<_>>());
         assert_eq!(mail.cc, expected);
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.is_modal() && v.problem == Some("A recipient is not an email address")));
         let account = view.read_with(cx, |v, _| v.account_id().unwrap().to_owned());
         assert!(store.due_outbox(&account, i64::MAX).unwrap().is_empty());
         view.update(cx, |v, _| {
             for tokens in &mut v.addresses.tokens { tokens.retain(|token| valid_recipient(token)); }
         });
-        cx.simulate_keystrokes("cmd-enter");
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
         assert!(view.read_with(cx, |v, _| v.undoable()));
         let queued = store.due_outbox(&account, i64::MAX).unwrap();
         assert_eq!(queued.len(), 1);
