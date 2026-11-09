@@ -561,13 +561,13 @@ impl Compose {
         cx.notify();
     }
 
-    /// Keys a field leaves alone bubble up here: ⌘↵, ⌘⌫, ⌘⇧C, and Esc while no field has focus.
+    /// Submit and draft commands bubble up from the focused field.
     fn on_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &e.keystroke;
         let (cmd, shift) = (k.modifiers.platform, k.modifiers.shift);
         match k.key.as_str() {
             "escape" => self.close(window, cx),
-            "enter" if cmd => self.send(window, cx),
+            "enter" if crate::shortcuts::submit().matches(k) => self.send(window, cx),
             "backspace" if cmd => self.discard(cx),
             "c" if cmd && shift => self.add_cc(window, cx),
             _ => return,
@@ -802,6 +802,19 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn word_delete_keeps_the_draft_and_submit_sends(cx: &mut TestAppContext) {
+        let (view, cx) = open_active(cx);
+        cx.simulate_input("keep remove");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "alt-backspace" } else { "ctrl-backspace" });
+        assert!(view.read_with(cx, |v, _| v.is_modal()));
+        assert_eq!(view.read_with(cx, |v, cx| v.body_text(cx)), "keep ");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "ctrl-enter" } else { "cmd-enter" });
+        assert!(view.read_with(cx, |v, _| v.is_modal() && !v.undoable()));
+        cx.simulate_keystrokes(crate::shortcuts::submit().keystroke);
+        assert!(view.read_with(cx, |v, _| v.undoable()));
     }
 
     #[gpui::test]
