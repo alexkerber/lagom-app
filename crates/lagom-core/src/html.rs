@@ -1,9 +1,10 @@
 //! Shared privacy policy for native mail web views.
 
 /// The CSP for a mail document. `base-uri` and `form-action` do not fall back to `default-src`.
-pub fn csp(remote: bool) -> String {
+/// `local` is the origin that serves the message's own inline parts (desktop: the lagom-cid protocol).
+pub fn csp(remote: bool, local: &str) -> String {
     let remote = if remote { " https: http:" } else { "" };
-    format!("default-src 'none'; img-src data: cid:{remote}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+    format!("default-src 'none'; img-src data: {local}{remote}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
 }
 
 /// Links open outside only for these schemes.

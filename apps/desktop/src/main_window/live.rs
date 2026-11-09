@@ -406,6 +406,20 @@ impl MainWindow {
                     self.today.calendar_sync.insert(account, state);
                     read = true;
                 }
+                Event::Inline { id: store, error } => {
+                    if let Some(mail) = self.inbox.mail.iter_mut().find(|m| m.store == Some(store)) {
+                        mail.inline_pending = false;
+                        mail.inline_retry_after = error.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_secs(60));
+                    }
+                    if let Some(error) = error { self.notify(format!("Could not load inline images: {error}"), cx); }
+                    else if let Some(id) = self.inbox.mail.iter().position(|m| m.store == Some(store)) {
+                        self.inbox.mail[id].body.clear();
+                        self.open_message(id, false, cx);
+                        if let Some(body) = self.expanded.get(&id) {
+                            body.update(cx, |body, cx| body.refresh(&self.inbox.mail[id], cx));
+                        }
+                    }
+                }
                 Event::Changed => read = true,
                 Event::NewMail(messages) => new_mail.extend(messages),
                 Event::Seen(id) => {
@@ -622,6 +636,7 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
         live.move_target = None;
+        let rollback = live.store.with_short_lock_wait(Store::recover_moves);
         let mut ops: Vec<_> = live.ops.drain().collect();
         ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
@@ -644,7 +659,9 @@ impl MainWindow {
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
-        self.notify("Mail stopped working. Restart Lagom; pending sends are saved in the outbox.", cx);
+        let mut error = "Mail stopped working. Restart Lagom; pending sends are saved in the outbox.".to_string();
+        if let Err(rollback) = rollback { error.push_str(&format!(" Local rollback failed: {rollback}")); }
+        self.notify(error, cx);
     }
 
     /// The worker half of an optimistic move.
@@ -811,14 +828,21 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         let Some(store) = self.inbox.mail[id].store else { return };
         if self.inbox.mail[id].body.is_empty() {
-            self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?))) {
-                Ok((m, parts)) => {
+            self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?, live.store.inline_parts(store)?))) {
+                Ok((m, parts, inline)) => {
+                    self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
                     mail::paragraphs(&m.body_text)
                 }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
+        }
+        if !self.inbox.mail[id].inline_pending
+            && self.inbox.mail[id].inline_retry_after.is_none_or(|after| std::time::Instant::now() >= after)
+            && live.store.inline_loaded(store).is_ok_and(|loaded| !loaded)
+            && self.inbox.mail[id].html.as_deref().is_some_and(|h| !lagom_core::inline::referenced_ids(h).is_empty()) {
+            self.inbox.mail[id].inline_pending = live.bridge.send(Cmd::Inline(store));
         }
         // Reading a filtered list must not consume the next unread row on every reload.
         if mark_read && !self.inbox.unread_only && !self.inbox.keep_unread.contains(&id) && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
@@ -1213,6 +1237,58 @@ mod tests {
         }));
         view.update(cx, |v, cx| { v.live = Some(fixture_live(store, bridge)); v.page = Page::Mail; cx.notify(); });
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn legacy_inline_failure_waits_before_retry_and_completion_survives_summary_reload(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let mut summary = incoming(v, 1);
+            summary.has_attachments = true;
+            let id = summary.id;
+            store.save_message(&lagom_core::store::Message {
+                summary, body_text: "Inline fixture".into(), body_html: Some("<img src='cid:logo@test'>".into()),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.single().unwrap();
+            v.open_message(selected, false, cx);
+            v.reload(cx);
+            v.open_message(selected, false, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
+            assert!(rx.try_recv().is_err());
+            v.on_events(vec![Event::Inline { id, error: Some("offline".into()) }], window, cx);
+            assert!(!v.inbox.mail[selected].body.is_empty());
+            assert!(!v.inbox.mail[selected].inline_pending);
+            assert!(rx.try_recv().is_err());
+        });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(rx.try_recv().is_err(), "render must not retry a failed inline load");
+        view.update_in(cx, |v, window, cx| {
+            let selected = v.inbox.single().unwrap();
+            let store = v.live.as_ref().unwrap().store.clone();
+            let id = v.inbox.mail[selected].store.unwrap();
+            v.reload(cx);
+            v.open_current(false, cx);
+            assert!(rx.try_recv().is_err(), "summary reload must retain the retry gate");
+            assert!(v.inbox.mail[selected].inline_retry_after.unwrap() > std::time::Instant::now());
+            v.inbox.mail[selected].inline_retry_after = Some(std::time::Instant::now());
+            v.open_current(false, cx);
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
+            v.open_message(selected, false, cx);
+            assert!(rx.try_recv().is_err());
+            let db = rusqlite::Connection::open(store.path()).unwrap();
+            db.execute("INSERT INTO inline_parts VALUES (?1,'logo@test','image/png',x'00ff')", [id]).unwrap();
+            db.execute("UPDATE messages SET inline_loaded=1 WHERE id=?1", [id]).unwrap();
+            v.on_events(vec![Event::Inline { id, error: None }], window, cx);
+            assert!(v.inbox.mail[selected].inline_retry_after.is_none());
+            assert_eq!(v.inbox.mail[selected].inline[0].data, [0, 255]);
+            v.reload(cx);
+            assert_eq!(v.inbox.mail[selected].inline[0].data, [0, 255]);
+            assert!(rx.try_recv().is_err());
+        });
     }
 
     #[gpui::test]
@@ -3648,6 +3724,112 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[gpui::test]
+    fn review_custom_folder_batch_does_not_wait_for_a_writer(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=12 { incoming(v, uid); }
+            let live = v.live.as_ref().unwrap();
+            let target = live.store.save_folder(&live.accounts[0].id, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            let lock = rusqlite::Connection::open(live.store.path()).unwrap();
+            v.panes.group_conversations = false;
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let started = std::time::Instant::now();
+            v.act(Move::Folder(folder), cx);
+            let elapsed = started.elapsed();
+            lock.execute_batch("ROLLBACK").unwrap();
+            assert!(elapsed < Duration::from_millis(750), "batch blocked on a writer for {elapsed:?}");
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(commands.len(), 12);
+            assert!(commands.iter().all(|cmd| matches!(cmd, Cmd::Op { act: Act::Move(id), .. } if *id == target)));
+            assert!(v.inbox.list().is_empty());
+            v.reload(cx);
+            assert!(v.inbox.list().is_empty(), "reload must preserve queued moves");
+            let events = commands.into_iter().map(|cmd| match cmd {
+                Cmd::Op { op, .. } => Event::Op { op, error: Some("fixture refused".into()) },
+                _ => unreachable!(),
+            }).collect();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let started = std::time::Instant::now();
+            v.on_events(events, window, cx);
+            let elapsed = started.elapsed();
+            lock.execute_batch("ROLLBACK").unwrap();
+            assert!(elapsed < Duration::from_millis(750), "batch rollback blocked on a writer for {elapsed:?}");
+            assert_eq!(v.inbox.list().len(), 12);
+        });
+    }
+
+    #[gpui::test]
+    fn review_custom_folder_move_queues_old_id_while_undo_is_pending(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let mut original = incoming(v, 1);
+            original.message_id = "queued@example.test".into();
+            let live = v.live.as_ref().unwrap();
+            let store = live.store.clone();
+            store.save_message(&lagom_core::store::Message { summary: original.clone(), ..Default::default() }).unwrap();
+            let target = store.save_folder(&original.account, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            let next = store.save_folder(&original.account, "Next", None, lagom_core::store::FolderRole::Other).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            let Cmd::Op { op, id, act: Act::Move(destination) } = rx.try_recv().unwrap() else { panic!("expected move") };
+            assert_eq!((id, destination), (original.id, target));
+            let mut moved = store.message(id).unwrap();
+            moved.summary.folder = target;
+            let replacement = store.save_message(&moved).unwrap();
+            store.delete_message(id).unwrap();
+            assert_ne!(replacement, id);
+            v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            v.undo(cx);
+            assert!(v.prepare_move(cx));
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(next)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::Op { id, act: Act::Move(folder), .. } if id == original.id && folder == original.folder));
+            assert!(matches!(rx.try_recv().expect("new move must reach worker alias resolution"), Cmd::Op { id, act: Act::Move(folder), .. } if id == original.id && folder == next));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[gpui::test]
+    fn custom_folder_batch_queues_persistence_and_restores_refused_messages(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let messages: Vec<_> = (1..=2).map(|uid| incoming(v, uid)).collect();
+            let live = v.live.as_ref().unwrap();
+            let target = live.store.save_folder(&live.accounts[0].id, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(commands.len(), 2);
+            let store = v.live.as_ref().unwrap().store.clone();
+            assert!(store.list_messages(target, now(), 10, 0).unwrap().is_empty());
+            for message in &messages {
+                assert_eq!(store.message(message.id).unwrap().summary.folder, message.folder);
+            }
+            for command in commands {
+                let Cmd::Op { op, id, act: Act::Move(destination) } = command else { panic!("expected move") };
+                assert_eq!(destination, target);
+                store.begin_move(id, destination).unwrap();
+                assert_eq!(store.message_summary(id).unwrap().folder, target);
+                store.cancel_move(id).unwrap();
+                v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+                assert_ne!(v.live.as_ref().unwrap().store.message_summary(id).unwrap().folder, target);
+            }
+            assert!(v.live.as_ref().unwrap().store.list_messages(target, now(), 10, 0).unwrap().is_empty());
+            assert_eq!(v.inbox.list().len(), 2);
+            assert!(v.toast.as_ref().unwrap().0.contains("Not moved: fixture refused"));
+        });
     }
 
     #[gpui::test]

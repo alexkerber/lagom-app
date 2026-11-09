@@ -314,5 +314,6 @@ pub fn mail_document(html: String, dark: bool) -> String {
         else { ("#FFFFFF", "#111110", "#2A5BB8", "light") };
     let look = if styled(&html) { "body{background:#fff;color:#000;padding:16px}".to_owned() }
         else { format!("body{{color:{ink}}}a{{color:{accent}}}") };
-    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 -apple-system;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(false), inert_links(&html))
+    // shortcut: mobile does not serve inline cid: parts yet (desktop uses lagom-cid); add a WKURLSchemeHandler when it does.
+    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 -apple-system;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(false, "cid:"), inert_links(&html))
 }
