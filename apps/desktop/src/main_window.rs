@@ -2701,7 +2701,8 @@ mod tests {
             let lag = (row_y(n as usize) - glide.y(now)) / ROW_H;
             assert!(lag < 0.5, "press {n}: highlight {lag:.2} rows behind");
             glide = Glide::new(Some(glide), row_y(n as usize), row_y(n as usize + 1), now, n as usize);
-            assert_eq!(glide.dur, GLIDE_REPEAT);
+            // The first glide lands before the key starts repeating, so the first repeat takes the full curve.
+            assert_eq!(glide.dur, if n == 1 { GLIDE } else { GLIDE_REPEAT });
         }
         // Once it lands, the next single press takes the full curve again.
         let later = t0 + delay + step * 20 + GLIDE;
