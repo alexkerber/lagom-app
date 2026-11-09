@@ -206,7 +206,7 @@ pub fn reply_headers(message_id: &str, thread_key: &str) -> (Option<String>, Vec
 
 /// Comma-separated recipients, empty parts dropped.
 pub fn recipients(field: &str) -> Vec<String> {
-    field.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+    lagom_core::contacts::split_recipients(field)
 }
 
 /// The list the UI shows, as the store has it now.
@@ -351,7 +351,7 @@ const SAMPLE: &[Sample] = &[
 pub fn demo_accounts() -> Vec<lagom_core::account::Account> {
     use lagom_core::account::{Account, Auth, Security, ServerConfig};
     let server = |host: &str, port, user: &str| ServerConfig { host: host.into(), port, security: Security::Tls, username: user.into() };
-    [("Home", "you@home.example", "home.example"), ("Work", "you@work.example", "work.example")]
+    [("Personal", "you@home.example", "home.example"), ("Work", "you@work.example", "work.example")]
         .into_iter()
         .map(|(name, email, domain)| Account {
             id: name.to_lowercase(),

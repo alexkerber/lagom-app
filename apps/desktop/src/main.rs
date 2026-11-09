@@ -32,6 +32,10 @@ struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
+            "icons/home.svg" => include_bytes!("../assets/icons/home.svg"),
+            "icons/mail.svg" => include_bytes!("../assets/icons/mail.svg"),
+            "icons/calendar.svg" => include_bytes!("../assets/icons/calendar.svg"),
+            "icons/todo.svg" => include_bytes!("../assets/icons/todo.svg"),
             "icons/inbox.svg" => include_bytes!("../assets/icons/inbox.svg"),
             "icons/later.svg" => include_bytes!("../assets/icons/later.svg"),
             "icons/sent.svg" => include_bytes!("../assets/icons/sent.svg"),

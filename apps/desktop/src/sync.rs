@@ -1066,7 +1066,7 @@ mod tests {
         worker.store.save_authorized_account(&account, oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
         let snapshot = vec![(Calendar { remote_id: "fixture".into(), name: "Fixture".into(), color: None, shown: true, writable: true },
             vec![CalendarEvent { remote_id: "fixture".into(), title: "Fixture".into(), start: "2026-11-09".into(), end: "2026-11-10".into(),
-                start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None }])];
+                start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None, html_link: None }])];
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(snapshot.clone())));
         worker.start_calendar(account.clone(), 0, 3, async { panic!("duplicate fetch") });
         assert_eq!(worker.calendars.len(), 1);
@@ -1075,12 +1075,18 @@ mod tests {
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(snapshot)));
         worker.calendar_finished(stale);
         assert!(worker.store.today_events("2026-11-09", 0, 3).unwrap().is_empty());
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), None);
         assert!(out.try_recv().is_err());
         assert_eq!(worker.calendar_tasks.len(), 1);
         let fresh = worker.calendars.join_next_with_id().await.unwrap();
         worker.calendar_finished(fresh);
         assert_eq!(worker.store.today_events("2026-11-09", 0, 3).unwrap().len(), 1);
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((0, 3)));
         assert!(worker.calendar_tasks.is_empty());
+        worker.start_calendar(account.clone(), 400, 500, std::future::ready(Err(Error::Network("offline"))));
+        let failed = worker.calendars.join_next_with_id().await.unwrap();
+        worker.calendar_finished(failed);
+        assert_eq!(worker.store.calendar_window(&account.id).unwrap(), Some((0, 3)));
         while out.try_recv().is_ok() {}
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Err(Error::CalendarConsent)));
         let stale = worker.calendars.join_next_with_id().await.unwrap();
@@ -1331,7 +1337,7 @@ mod tests {
             remote_id: "fixture".into(), name: "Fixture".into(), color: None, shown: true, writable: true,
         }, vec![lagom_core::calendar::Event {
             remote_id: "fixture".into(), title: "Fixture".into(), start: "2026-11-09".into(), end: "2026-11-10".into(),
-            start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None,
+            start_utc: 1, end_utc: 2, all_day: true, location: None, join_url: None, html_link: None,
         }])]).unwrap();
         worker.calendar_synced(&account, Err(Error::Network("offline")));
         assert_eq!(worker.store.account_scopes(&account.id).unwrap(), scopes);

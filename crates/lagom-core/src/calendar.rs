@@ -1,5 +1,5 @@
 use crate::{account::Account, store::Store, Error, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Calendar {
@@ -21,6 +21,7 @@ pub struct Event {
     pub all_day: bool,
     pub location: Option<String>,
     pub join_url: Option<String>,
+    pub html_link: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +51,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn calendar_window(&self, account: &str) -> Result<Option<(i64, i64)>> {
+        Ok(self.db.query_row("SELECT start_utc,end_utc FROM calendar_windows WHERE account=?1", [account],
+            |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
     /// Publish a complete window only after every page and calendar has arrived.
     pub fn replace_calendar_window(&self, account: &str, start: i64, end: i64, calendars: &[(Calendar, Vec<Event>)]) -> Result<()> {
         if start >= end { return Err(Error::Invalid("invalid calendar window")); }
@@ -67,26 +73,29 @@ impl Store {
                 if event.remote_id.is_empty() || event.end_utc <= event.start_utc {
                     return Err(Error::Invalid("invalid calendar event"));
                 }
-                self.db.execute("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,location,join_url) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                self.db.execute("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,location,join_url,html_link) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
                     ON CONFLICT(calendar,remote_id) DO UPDATE SET title=excluded.title,start=excluded.start,end=excluded.end,
-                    start_utc=excluded.start_utc,end_utc=excluded.end_utc,all_day=excluded.all_day,location=excluded.location,join_url=excluded.join_url",
-                    params![id, event.remote_id, event.title, event.start, event.end, event.start_utc, event.end_utc, event.all_day, event.location, event.join_url])?;
+                    start_utc=excluded.start_utc,end_utc=excluded.end_utc,all_day=excluded.all_day,location=excluded.location,join_url=excluded.join_url,html_link=excluded.html_link",
+                    params![id, event.remote_id, event.title, event.start, event.end, event.start_utc, event.end_utc, event.all_day, event.location, event.join_url, event.html_link])?;
             }
         }
+        // shortcut: coverage tracks the latest complete fetch; retain disjoint windows when arbitrary week fetching lands.
+        self.db.execute("INSERT INTO calendar_windows(account,start_utc,end_utc) VALUES(?1,?2,?3)
+            ON CONFLICT(account) DO UPDATE SET start_utc=excluded.start_utc,end_utc=excluded.end_utc", params![account, start, end])?;
         tx.commit()?;
         Ok(())
     }
 
     /// Timed events overlap the local day's UTC bounds; all-day dates stay date-only.
     pub fn today_events(&self, day: &str, start: i64, end: i64) -> Result<Vec<AgendaEvent>> {
-        let mut query = self.db.prepare("SELECT c.account,c.name,e.remote_id,e.title,e.start,e.end,e.start_utc,e.end_utc,e.all_day,e.location,e.join_url
+        let mut query = self.db.prepare("SELECT c.account,c.name,e.remote_id,e.title,e.start,e.end,e.start_utc,e.end_utc,e.all_day,e.location,e.join_url,e.html_link
             FROM events e JOIN calendars c ON c.id=e.calendar WHERE c.shown=1 AND
             ((e.all_day=1 AND e.start<=?1 AND e.end>?1) OR (e.all_day=0 AND e.start_utc<?3 AND e.end_utc>?2))
             ORDER BY e.all_day DESC,e.start_utc,c.account,c.name,e.remote_id")?;
         let rows = query.query_map(params![day, start, end], |r| Ok(AgendaEvent {
             account: r.get(0)?, calendar: r.get(1)?, event: Event {
                 remote_id: r.get(2)?, title: r.get(3)?, start: r.get(4)?, end: r.get(5)?,
-                start_utc: r.get(6)?, end_utc: r.get(7)?, all_day: r.get(8)?, location: r.get(9)?, join_url: r.get(10)?,
+                start_utc: r.get(6)?, end_utc: r.get(7)?, all_day: r.get(8)?, location: r.get(9)?, join_url: r.get(10)?, html_link: r.get(11)?,
             },
         }))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

@@ -395,6 +395,7 @@ mod tests {
         for action in [Run::Forward, Run::ReplyAll, Run::ToggleRead] {
             let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
             view.update_in(cx, |v, window, cx| {
+                v.open_box(None, cx);
                 let id = v.inbox.current().unwrap();
                 let unread = v.inbox.mail[id].unread;
                 Web::event(v, Msg::MailAction(action), window, cx);
@@ -409,6 +410,7 @@ mod tests {
         if !SUPPORTED { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
+            v.open_box(None, cx);
             v.inbox.group = false;
             v.inbox.select(0);
             let id = v.inbox.current().unwrap();
@@ -428,6 +430,7 @@ mod tests {
         if !SUPPORTED { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
+            v.open_box(None, cx);
             let id = v.inbox.current().unwrap();
             v.inbox.mail[id].html = Some("<p>Still visible</p>".into());
             v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark));

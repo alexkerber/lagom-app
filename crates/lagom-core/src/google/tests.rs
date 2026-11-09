@@ -44,11 +44,12 @@ async fn fetch_pages_refresh_once_expand_recurrences_and_parse_join_links() {
     assert!(events[0].all_day);
     assert_eq!(events[1].start_utc, mail_parser::DateTime::parse_rfc3339("2026-11-09T08:00:00Z").unwrap().to_timestamp());
     assert_eq!(events[1].join_url.as_deref(), Some("https://meet.example.test/fixture"));
+    assert_eq!(events[1].html_link.as_deref(), Some("https://www.google.com/calendar/event?eid=fixture"));
     let requests = server.await.unwrap();
     assert!(requests[1].contains("Bearer fresh"));
     assert!(requests[2].contains("pageToken=calendar-page-2"));
     assert!(requests[3].contains("calendars/fixture%2Fcalendar@example.test/events?"));
-    for key in ["singleEvents=true", "showDeleted=false", "timeZone=UTC", "timeMin=", "timeMax=", "maxResults=50", "fields=nextPageToken"] { assert!(requests[3].contains(key), "{key}"); }
+    for key in ["singleEvents=true", "showDeleted=false", "timeZone=UTC", "timeMin=", "timeMax=", "maxResults=50", "fields=nextPageToken", "htmlLink"] { assert!(requests[3].contains(key), "{key}"); }
     assert!(requests[4].contains("pageToken=event-page-2"));
 }
 
@@ -132,4 +133,10 @@ fn invalid_dates_and_unsafe_meeting_urls_are_rejected() {
     assert!(event_time(EventTime { date: None, date_time: Some("2026-11-09T10:00:00.123-07:00".into()) }).is_ok());
     for url in ["javascript:alert(1)", "https://user:pass@example.test", "http://example.test"] { assert!(!safe_join_url(url)); }
     assert!(safe_join_url("https://meet.example.test/fixture"));
+}
+
+#[test]
+fn calendar_links_allow_only_google_calendar_https_without_credentials() {
+    for url in ["https://www.google.com/calendar/event?eid=fixture", "https://calendar.google.com/calendar/u/0/r/eventedit/fixture"] { assert!(safe_calendar_url(url)); }
+    for url in ["http://www.google.com/calendar/event", "https://www.google.com.evil.test/calendar/", "https://user@calendar.google.com/calendar/", "javascript:alert(1)", "https://www.google.com/search"] { assert!(!safe_calendar_url(url)); }
 }

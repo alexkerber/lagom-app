@@ -4,7 +4,10 @@ use lagom_core::{account::Auth, oauth::{self, Provider}};
 
 impl MainWindow {
     pub(super) fn reload_agenda(&mut self, cx: &mut Context<Self>) {
-        let Some(live) = &self.live else { return };
+        let Some(live) = &self.live else {
+            if self.demo { self.today.events = demo_events(chrono::Local::now().date_naive()); }
+            return;
+        };
         let result = (|| -> lagom_core::Result<_> {
             let day = chrono::Local::now().date_naive();
             let events = live.store.today_events(&day.to_string(), day_start(day, &chrono::Local), day_start(day.succ_opt().unwrap(), &chrono::Local))?;
@@ -23,17 +26,18 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn agenda_view(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn calendar_controls(&self, cx: &mut Context<Self>) -> Div {
+        if self.demo && self.live.is_none() { return div(); }
         let t = self.theme;
-        let has_calendar = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || !self.today.events.is_empty();
-        let mut agenda = div().id("today-agenda").w_full().flex_shrink_0().max_h(px(280.)).overflow_y_scroll()
-            .flex().flex_col().gap(px(12.))
-            .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
+        let mut controls = div().id("calendar-accounts").flex_shrink_0().max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
+        if self.today.calendar_accounts.is_empty() && self.today.events.is_empty() {
+            controls = controls.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
+        }
         for (ix, (account, allowed)) in self.today.calendar_accounts.iter().enumerate() {
             let id = account.id.clone();
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
-            agenda = agenda.child(div().flex().items_center().gap(px(8.))
+            controls = controls.child(div().flex().items_center().gap(px(8.))
                 .child(mono(account.email.clone(), t.ink2))
                 .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))
@@ -49,6 +53,16 @@ impl MainWindow {
                 .when_some(state.and_then(|s| match s { SyncState::Failed(e) => Some(e.clone()), _ => None }),
                     |d, error| d.child(mono(error, t.ink2))));
         }
+        div().flex_shrink_0().child(controls)
+    }
+
+    pub(super) fn agenda_view(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let has_calendar = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || !self.today.events.is_empty();
+        let mut agenda = div().id("today-agenda").w_full().flex_shrink_0().max_h(px(280.)).overflow_y_scroll()
+            .flex().flex_col().gap(px(12.))
+            .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
+        agenda = agenda.child(self.calendar_controls(cx));
         if has_calendar && self.today.events.is_empty() {
             agenda = agenda.child(mono("No cached events for today", t.ink2));
         }
@@ -68,6 +82,20 @@ impl MainWindow {
         }
         div().w_full().flex_shrink_0().child(agenda)
     }
+}
+
+pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::AgendaEvent> {
+    [(9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
+        let start = day.and_hms_opt(hour, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
+        let end = start + chrono::Duration::minutes(45);
+        Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(),
+            event: lagom_core::calendar::Event {
+                remote_id: format!("demo-{hour}"), title: title.into(), start: start.to_rfc3339(), end: end.to_rfc3339(),
+                start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: false,
+                location: None, join_url: None, html_link: None,
+            },
+        })
+    }).collect()
 }
 
 pub(super) fn day_start<T: chrono::TimeZone>(date: chrono::NaiveDate, zone: &T) -> i64 {
@@ -128,7 +156,7 @@ mod tests {
             remote_id: id.into(), title: id.into(), start: start.into(), end: end.into(),
             start_utc: chrono::DateTime::parse_from_rfc3339(start).unwrap().timestamp(),
             end_utc: chrono::DateTime::parse_from_rfc3339(end).unwrap().timestamp(),
-            all_day: false, location: None, join_url: None,
+            all_day: false, location: None, join_url: None, html_link: None,
         }).collect();
         store.replace_calendar_window(&account.id, i64::MIN, i64::MAX, &[(lagom_core::calendar::Calendar {
             remote_id: "primary".into(), name: "Fixture".into(), color: None, shown: true, writable: true,

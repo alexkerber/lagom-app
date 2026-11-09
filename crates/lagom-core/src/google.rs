@@ -45,6 +45,7 @@ struct RemoteEvent {
     end: Option<EventTime>,
     location: Option<String>,
     hangout_link: Option<String>,
+    html_link: Option<String>,
     conference_data: Option<Conference>,
 }
 #[derive(Deserialize)]
@@ -77,7 +78,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
         // shortcut: no RRULE, add when CalDAV lands.
         url.query_pairs_mut().extend_pairs([
             ("singleEvents", "true"), ("showDeleted", "false"), ("maxResults", "50"), ("timeZone", "UTC"),
-            ("fields", "nextPageToken,items(id,status,summary,start,end,location,hangoutLink,conferenceData/entryPoints(entryPointType,uri))"),
+            ("fields", "nextPageToken,items(id,status,summary,start,end,location,hangoutLink,htmlLink,conferenceData/entryPoints(entryPointType,uri))"),
             ("timeMin", &mail_parser::DateTime::from_timestamp(start).to_rfc3339()),
             ("timeMax", &mail_parser::DateTime::from_timestamp(end).to_rfc3339()),
         ]);
@@ -132,6 +133,11 @@ pub fn safe_join_url(value: &str) -> bool {
         && url.username().is_empty() && url.password().is_none())
 }
 
+pub fn safe_calendar_url(value: &str) -> bool {
+    safe_join_url(value) && Url::parse(value).is_ok_and(|url|
+        matches!(url.host_str(), Some("calendar.google.com" | "www.google.com")) && url.path().starts_with("/calendar/"))
+}
+
 fn event(remote: RemoteEvent) -> Result<Event> {
     let (start, start_utc, all_day) = event_time(remote.start.ok_or(Error::Network("event start missing"))?)?;
     let (end, end_utc, end_all_day) = event_time(remote.end.ok_or(Error::Network("event end missing"))?)?;
@@ -141,7 +147,7 @@ fn event(remote: RemoteEvent) -> Result<Event> {
     let join_url = remote.hangout_link.filter(|s| safe_join_url(s)).or_else(|| remote.conference_data.and_then(|c|
         c.entry_points.into_iter().find(|e| e.entry_point_type == "video" && safe_join_url(&e.uri)).map(|e| e.uri)));
     Ok(Event { remote_id: remote.id, title: remote.summary.filter(|s| !s.is_empty()).unwrap_or_else(|| "Untitled event".into()),
-        start, end, start_utc, end_utc, all_day, location: remote.location, join_url })
+        start, end, start_utc, end_utc, all_day, location: remote.location, join_url, html_link: remote.html_link.filter(|s| safe_calendar_url(s)) })
 }
 
 fn event_time(time: EventTime) -> Result<(String, i64, bool)> {

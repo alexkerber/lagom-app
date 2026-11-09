@@ -260,7 +260,7 @@ fn v10_migration_keeps_local_data_and_marks_lists_for_sync() {
     assert_eq!((task.title.as_str(), task.notes.as_str(), task.updated, task.created), ("Keep", "Notes", 42, 41));
     assert_eq!(store.task_lists().unwrap().len(), 2);
     assert_eq!(store.db.query_row("SELECT count(*) FROM task_lists WHERE dirty=1 AND deleted=0", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 13);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 14);
     assert_eq!(store.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none(), true);
 }
 
@@ -466,11 +466,11 @@ async fn review_rejected_list_deletion_restores_visibility_and_continues_sync() 
 }
 
 #[test]
-fn review_v12_migration_keeps_unowned_lists_local_and_new_lists_mappable() {
+fn review_v13_migration_keeps_unowned_lists_local_and_new_lists_mappable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
     let db = rusqlite::Connection::open(&path).unwrap();
-    for schema in [include_str!("../../schema_v1.sql"), include_str!("../../schema_v2.sql"), include_str!("../../schema_v3.sql"), include_str!("../../schema_v4.sql"), include_str!("../../schema_v5.sql"), include_str!("../../schema_v6.sql"), include_str!("../../schema_v7.sql"), include_str!("../../schema_v8.sql"), include_str!("../../schema_v9.sql"), include_str!("../../schema_v10.sql"), include_str!("../../schema_v11.sql"), include_str!("../../schema_v12.sql")] { db.execute_batch(schema).unwrap(); }
+    for schema in [include_str!("../../schema_v1.sql"), include_str!("../../schema_v2.sql"), include_str!("../../schema_v3.sql"), include_str!("../../schema_v4.sql"), include_str!("../../schema_v5.sql"), include_str!("../../schema_v6.sql"), include_str!("../../schema_v7.sql"), include_str!("../../schema_v8.sql"), include_str!("../../schema_v9.sql"), include_str!("../../schema_v10.sql"), include_str!("../../schema_v11.sql"), include_str!("../../schema_v12.sql"), include_str!("../../schema_v13.sql")] { db.execute_batch(schema).unwrap(); }
     db.execute_batch("INSERT INTO tasks(list,title,notes,updated,created,dirty) SELECT list,'Keep','Private notes',42,41,1 FROM task_settings;").unwrap();
     drop(db);
     let store = Store::open(&path).unwrap();
