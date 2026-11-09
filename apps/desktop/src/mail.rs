@@ -290,7 +290,7 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
             loaded.extend(list[start..].iter().map(|m| m.id));
         }
     }
-    let next_due = store.later(account, now, 1, 0)?.first().and_then(|m| m.snoozed_until);
+    let next_due = store.next_snooze(account, now)?;
     Ok(Snapshot { inbox, inbox_total: counts.inbox, later_total: counts.later, folders, open, next_due, account_unread: Default::default(), more: false })
 }
 

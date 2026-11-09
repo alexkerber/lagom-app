@@ -38,6 +38,7 @@ impl MainWindow {
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
             controls = controls.child(div().flex().items_center().gap(px(8.))
+                .children(state.map(|state| icon(polish::sync_icon(state), t.ink2, 16.)))
                 .child(mono(account.email.clone(), t.ink2))
                 .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))
@@ -64,7 +65,7 @@ impl MainWindow {
             .when(has_calendar, |d| d.child(div().debug_selector(|| "calendar-heading".into()).font_weight(FontWeight::SEMIBOLD).child("Calendar")));
         agenda = agenda.child(self.calendar_controls(cx));
         if has_calendar && self.today.events.is_empty() {
-            agenda = agenda.child(mono("No cached events for today", t.ink2));
+            agenda = agenda.child(div().flex().flex_col().gap(px(8.)).child(icon("icons/calendar.svg", t.ink2, 32.)).child(mono("No cached events for today", t.ink2)));
         }
         // shortcut: Today lays out every event, virtualize when large agendas need bounded layout.
         for (ix, entry) in self.today.events.iter().enumerate() {
@@ -74,11 +75,13 @@ impl MainWindow {
             };
             agenda = agenda.child(div().id(("agenda-event", ix)).debug_selector(move || format!("agenda-event-{ix}"))
                 .flex().flex_col().gap(px(4.)).p(px(10.)).rounded(px(radius::CONTROL)).bg(t.subtle)
-                .child(mono(format!("{when} · {}", entry.calendar), t.ink2))
+                .child(div().flex().items_center().gap(px(6.))
+                    .when(event.all_day, |d| d.child(icon("icons/sun.svg", t.ink2, 16.)))
+                    .child(mono(format!("{when} · {}", entry.calendar), t.ink2)))
                 .child(event.title.clone())
                 .children(event.location.clone().map(|location| mono(location, t.ink2)))
                 .children(event.join_url.clone().filter(|url| lagom_core::google::safe_join_url(url)).map(|url|
-                    button(&t, "Join meeting", None).on_click(move |_, _, cx| cx.open_url(&url)))));
+                    icon_button(&t, "Join meeting", "icons/camera.svg", "Join meeting").on_click(move |_, _, cx| cx.open_url(&url)))));
         }
         div().w_full().flex_shrink_0().child(agenda)
     }

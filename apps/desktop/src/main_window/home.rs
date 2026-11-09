@@ -39,7 +39,7 @@ impl MainWindow {
         let t = self.theme;
         div().id("home-unread").debug_selector(|| "home-unread".into()).flex().flex_col().flex_shrink_0().gap(px(4.))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Unread mail"))
-            .when(self.today.unread.is_empty(), |d| d.child(mono("All caught up", t.ink2)))
+            .when(self.today.unread.is_empty(), |d| d.child(div().flex().flex_col().gap(px(8.)).child(icon("icons/inbox.svg", t.ink2, 32.)).child(mono("All caught up", t.ink2))))
             .children(self.today.unread.iter().enumerate().map(|(ix, mail)| {
                 let mail = mail.clone();
                 pressable(div().id(("home-unread", ix)), &t, false).debug_selector(move || format!("unread-mail-{ix}"))

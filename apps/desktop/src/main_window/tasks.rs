@@ -295,6 +295,7 @@ impl MainWindow {
         let empty = matches!(self.page, Page::Todo) && self.today.lists.is_empty();
         if empty {
             groups = groups.items_center().justify_center().gap(px(12.))
+                .child(icon("icons/todo.svg", t.ink2, 32.))
                 .child(div().debug_selector(|| "No lists yet".into()).text_color(t.ink2).child("No lists yet"))
                 .child(button(&t, "Add list", None).on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))));
         }
@@ -306,14 +307,16 @@ impl MainWindow {
                         .map(|d| match self.task_input(Edit::RenameList(list_id)) {
                             Some(input) => d.child(input), None => d.child(list.name.clone()),
                         }))
-                    .child(button(&t, "Add task", None).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
-                    .child(button(&t, "Rename", None).debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
-                    .when(self.today.default != Some(list_id) && !list.google_default, |d| d.child(button(&t, "Delete list", None).debug_selector(move || format!("delete-list-{list_id}"))
+                    .child(icon_button(&t, "Add task", "icons/new-task.svg", "New task").on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::Add(list_id), window, cx))))
+                    .child(icon_button(&t, "Rename", "icons/rename.svg", "Rename list").debug_selector(move || format!("rename-list-{list_id}")).on_click(cx.listener(move |this, _, window, cx| this.edit_task(Edit::RenameList(list_id), window, cx))))
+                    .when(self.today.default != Some(list_id) && !list.google_default, |d| d.child(icon_button(&t, "Delete list", "icons/delete-list.svg", "Delete list").debug_selector(move || format!("delete-list-{list_id}"))
                         .on_click(cx.listener(move |this, _, _, cx| { this.save_task(TaskChange::DeleteList(list_id), cx); })))));
             group = group.children(self.task_input(Edit::Add(list_id)).map(|input| div().child(input)));
             let tasks: Vec<_> = self.today.tasks.iter().filter(|task| task.list == list_id).collect();
             groups = groups.child(group);
-            if tasks.is_empty() { groups = groups.child(mono(if matches!(self.page, Page::Todo) { "No open tasks" } else { "No open tasks for today" }, t.ink2).py(px(8.))); }
+            if tasks.is_empty() { groups = groups.child(div().flex().flex_col().gap(px(8.)).py(px(8.))
+                .child(icon("icons/todo.svg", t.ink2, 32.))
+                .child(mono(if matches!(self.page, Page::Todo) { "No open tasks" } else { "No open tasks for today" }, t.ink2))); }
             for task in tasks {
                 let id = task.id;
                 let selected = self.today.selected == Some(id);
@@ -321,19 +324,17 @@ impl MainWindow {
                     .flex().flex_shrink_0().items_center().gap(px(10.)).min_h(px(40.)).px(px(8.)).rounded(px(radius::CONTROL))
                     .when(selected, |d| d.bg(t.sel))
                     .on_click(cx.listener(move |this, _, window, cx| { this.today.selected = Some(id); if this.today.editor.is_none() { window.focus(&this.focus); } cx.notify(); }))
-                    .child(pressable(div().id("complete-task"), &t, false).debug_selector(move || format!("complete-task-{id}"))
-                        .size(px(20.)).border_1().border_color(t.ink2).rounded(px(radius::KEY))
-                        .when(task.done_at.is_some(), |d| d.child(icon("icons/done.svg", t.ink2, 16.)))
+                    .child(icon_button(&t, "complete-task", if task.done_at.is_some() { "icons/complete-task.svg" } else { "icons/open-task.svg" }, "Complete task · Space")
+                        .debug_selector(move || format!("complete-task-{id}"))
                         .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.save_task(TaskChange::Complete(id), cx); })))
                     .child(div().flex_1().min_w(px(0.)).one_line()
                         .map(|d| match self.task_input(Edit::Rename(id)) {
                             Some(input) => d.child(input), None => d.child(task.title.clone()),
                         }))
                     .when_some(task.due.clone(), |d, due| d.child(mono(due, t.ink2)))
-                    .when(task.mail_message_id.is_some(), |d| d.child(button(&t, "Open mail", None)
-                        .child(icon("icons/link.svg", t.ink2, 14.))
+                    .when(task.mail_message_id.is_some(), |d| d.child(icon_button(&t, "Open mail", "icons/linked-mail.svg", "Open mail")
                         .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
-                    .child(button(&t, "Rename", None).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(icon_button(&t, "Rename", "icons/rename.svg", "Rename task · Enter").on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation(); this.edit_task(Edit::Rename(id), window, cx);
                     }))));
             }
@@ -352,6 +353,7 @@ impl MainWindow {
                     let signing_in = self.today.calendar_sync.get(&id) == Some(&crate::sync::SyncState::SigningIn);
                     let allowed = self.today.task_access.contains(&id);
                     Some(div().flex().items_center().gap(px(8.)).debug_selector({ let id = id.clone(); move || format!("tasks-sync-{id}") })
+                        .children(state.map(|state| icon(polish::sync_icon(state), t.ink2, 16.)))
                         .child(mono(account.email.clone(), t.ink2))
                         .when(allowed, |d| d.child(mono(text.to_owned(), t.ink2)))
                         .when(!allowed, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Allow Google Tasks access" }, None)
@@ -411,6 +413,9 @@ mod tests {
         });
         cx.run_until_parked();
         let empty = cx.debug_bounds("No lists yet").expect("empty state");
+        let icon = cx.debug_bounds("icon-icons/todo.svg").unwrap();
+        assert_eq!(icon.size, gpui::size(px(32.), px(32.)));
+        assert!(icon.bottom() <= empty.top());
         let groups = cx.debug_bounds("today-groups").unwrap();
         assert!((empty.center().x - groups.center().x).abs() < px(1.));
         assert!((empty.center().y - groups.center().y).abs() < px(30.));

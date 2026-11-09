@@ -569,9 +569,13 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MessageSummary>> {
-        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.account=?1 AND m.snoozed_until>?2 ORDER BY m.snoozed_until,m.id LIMIT ?3 OFFSET ?4"))?;
+        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m INDEXED BY messages_later_date WHERE m.account=?1 AND m.snoozed_until>?2 ORDER BY m.date DESC,m.id DESC LIMIT ?3 OFFSET ?4"))?;
         let rows = stmt.query_map(params![account, now, limit, offset], summary_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn next_snooze(&self, account: &str, now: i64) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT min(snoozed_until) FROM messages WHERE account=?1 AND snoozed_until>?2",
+            params![account, now], |r| r.get(0))?)
     }
     pub fn counts(&self, account: &str, now: i64) -> Result<Counts> {
         Ok(self.db.query_row("SELECT count(CASE WHEN f.role='inbox' AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) THEN 1 END),count(CASE WHEN m.snoozed_until>?2 THEN 1 END) FROM messages m JOIN folders f ON f.id=m.folder WHERE m.account=?1",params![account,now],|r|Ok(Counts { inbox:r.get(0)?,later:r.get(1)? }))?)
@@ -874,6 +878,26 @@ mod mail_tests {
         assert!(rows[1].seen);
         assert_eq!(rows[1].snoozed_until, Some(1000));
         assert!(s.messages_since(inbox, 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn later_pages_by_date_and_id_but_wakes_by_deadline() {
+        let (_temp, store, account, folder) = setup();
+        let mut ids = Vec::new();
+        for (uid, date, due) in [(1, 10, Some(150)), (2, 20, Some(300)), (3, 20, Some(200)),
+            (4, 30, Some(100)), (5, 40, None)] {
+            let id = store.save_message(&Message { summary: MessageSummary {
+                account: account.id.clone(), folder, uid, date, ..Default::default()
+            }, ..Default::default() }).unwrap();
+            store.snooze(id, due).unwrap();
+            ids.push(id);
+        }
+        assert_eq!(store.later(&account.id, 100, 2, 0).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), [ids[2], ids[1]]);
+        assert_eq!(store.later(&account.id, 100, 2, 2).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), [ids[0]]);
+        assert_eq!(store.next_snooze(&account.id, 100).unwrap(), Some(150));
+        assert_eq!(store.next_snooze(&account.id, 150).unwrap(), Some(200));
+        assert_eq!(store.next_snooze(&account.id, 300).unwrap(), None);
+        assert_eq!(store.next_snooze("other", 100).unwrap(), None);
     }
 
     #[test]

@@ -915,11 +915,7 @@ impl MainWindow {
 
     pub(super) fn sync_icon(&self) -> &'static str {
         let Some(live) = &self.live else { return "icons/cloud-synced.svg" };
-        match live.account().and_then(|a| live.sync.get(&a.id)) {
-            Some(SyncState::Synced(_)) => "icons/cloud-synced.svg",
-            Some(SyncState::Failed(_) | SyncState::ReauthRequired) => "icons/cloud-failed.svg",
-            _ => "icons/cloud-syncing.svg",
-        }
+        live.account().and_then(|a| live.sync.get(&a.id)).map_or("icons/cloud-syncing.svg", polish::sync_icon)
     }
 
     /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
@@ -949,11 +945,9 @@ impl MainWindow {
         };
         let id = account.id.clone();
         let t = &self.theme;
-        Some(pressable(div().id((slot, ix)), t, false)
+        Some(icon_button(t, slot, if signing_in { "icons/cancel.svg" } else { "icons/access.svg" },
+            if signing_in { "Cancel sign-in" } else { "Sign in again" }).id((slot, ix))
             .debug_selector(move || format!("{slot}-{ix}"))
-            .px(px(10.)).py(px(4.)).rounded(px(radius::CONTROL))
-            .text_size(px(size::SMALL)).text_color(t.ink2)
-            .child(if signing_in { "Signing in… Cancel" } else { "Sign in again" })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.reauthenticate(&id, cx);
@@ -3943,6 +3937,42 @@ mod tests {
                 if ix > 0 { cx.simulate_keystrokes("j"); }
                 view.read_with(cx, |v, _| {
                     assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(*id), "row {ix}, grouped={group}");
+                });
+            }
+            assert!(!view.read_with(cx, |v, _| v.has_more()));
+        }
+    }
+
+    #[gpui::test]
+    fn review_later_navigation_visits_every_message_in_date_order(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        for group in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            let expected = view.update(cx, |v, cx| {
+                let live = v.live.as_ref().unwrap();
+                let account = &live.accounts[0];
+                live.store.save_account(account).unwrap();
+                let folder = live.store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+                let mut ids = Vec::new();
+                let now = chrono::Local::now().timestamp();
+                for uid in 1..=400 {
+                    let summary = MessageSummary { account: account.id.clone(), folder, uid,
+                        date: uid as i64 / 2, seen: true, ..Default::default() };
+                    let id = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
+                    live.store.snooze(id, Some(now + 3600 + uid as i64)).unwrap();
+                    ids.push(id);
+                }
+                ids.reverse();
+                v.panes.group_conversations = group;
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.open_box(v.inbox.find_kind(Kind::Later), cx);
+                ids
+            });
+            for (ix, id) in expected.iter().enumerate() {
+                if ix > 0 { cx.simulate_keystrokes("j"); }
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(*id), "Later row {ix}, grouped={group}");
                 });
             }
             assert!(!view.read_with(cx, |v, _| v.has_more()));

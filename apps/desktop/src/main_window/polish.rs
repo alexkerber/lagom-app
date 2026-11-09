@@ -44,12 +44,15 @@ impl MainWindow {
             .debug_selector(move || format!("nav-{label}"))
             .flex().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
             .when(active && self.inbox.account_filter.is_none(), |d| d.bg(t.sel))
-            .child(icon(path, if active { t.sel_icon } else { t.ink2 }, 16.))
+            .child(icon(path, if active && self.inbox.account_filter.is_none() { t.sel_icon } else { t.ink2 }, 16.))
             .child(div().flex_1().child(label))
             .when(count > 0, |d| d.child(roll(mono(count.to_string(), t.ink2), format!("{label}-{count}"))))
             .when(multiple && slot != 0, |d| d.child(pressable(div().id(("disclosure", slot)), t, false)
                 .debug_selector(move || format!("disclosure-{label}"))
-                .w(px(20.)).h(px(24.)).flex().items_center().justify_center().child(if expanded { "⌄" } else { "›" })
+                .group("mailbox-disclosure").w(px(20.)).h(px(24.)).flex().items_center().justify_center()
+                .child(icon(if expanded { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 16.)
+                    .group_hover("mailbox-disclosure", { let ink = t.ink; move |s| s.text_color(ink) }))
+                .tooltip({ let theme = *t; move |_, cx| cx.new(|_| Tip(theme, format!("{} {label} accounts", if expanded { "Hide" } else { "Show" }).into())).into() })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.mailbox_expanded[slot] = !this.mailbox_expanded[slot];
@@ -155,9 +158,18 @@ pub(super) fn reading_menu(t: &Theme, id: usize, open: bool,
                     pressable(div().id(label).group(label), t, false).debug_selector(move || format!("menu-{label}"))
                         .h(px(28.)).px(px(8.)).flex().items_center().gap(px(8.)).rounded(px(radius::KEY))
                         .child(icon(action_icon(label).unwrap(), t.ink2, 16.).group_hover(label, |s| s.text_color(theme.ink)))
-                        .child(label).tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
+                        .child(label).tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
                         .on_click(move |_, window, cx| action(&run, window, cx))
                 }))).priority(1)))
+}
+
+pub(super) fn sync_icon(state: &crate::sync::SyncState) -> &'static str {
+    use crate::sync::SyncState;
+    match state {
+        SyncState::Synced(_) => "icons/cloud-synced.svg",
+        SyncState::Failed(_) | SyncState::ReauthRequired => "icons/cloud-failed.svg",
+        _ => "icons/cloud-syncing.svg",
+    }
 }
 
 pub(super) fn action_icon(label: &str) -> Option<&'static str> {
@@ -168,6 +180,15 @@ pub(super) fn action_icon(label: &str) -> Option<&'static str> {
         "Copy address" => "icons/copy.svg", "Load remote images" => "icons/image.svg", "Load more" => "icons/load-more.svg",
         "Delete" => "icons/trash.svg", "Empty Trash" | "Delete all" => "icons/empty-trash.svg", "Cancel" => "icons/cancel.svg",
         "Undo" => "icons/undo.svg", "Send again" => "icons/retry-send.svg", "Edit draft" => "icons/edit-draft.svg",
+        "New task" | "Add task" => "icons/new-task.svg", "Add list" => "icons/new-list.svg",
+        "Rename" => "icons/rename.svg", "Delete list" => "icons/delete-list.svg", "Open mail" => "icons/linked-mail.svg",
+        "Today" => "icons/calendar.svg", "Join" | "Join meeting" => "icons/camera.svg",
+        "Open in Google Calendar" => "icons/external.svg", "Close" => "icons/close.svg",
+        "Add account" => "icons/account-add.svg", "Remove" => "icons/account-remove.svg", "Keep" | "Cancel sign-in" => "icons/cancel.svg",
+        "Show your Google Calendar" | "Allow Google Tasks access" => "icons/access.svg",
+        "Send" => "icons/send.svg", "New message" => "icons/compose.svg", "Insert file…" => "icons/insert-file.svg",
+        "Sync now" => "icons/cloud-syncing.svg", "Settings" => "icons/settings.svg", "Connect" => "icons/connect.svg",
+        "Connecting" => "icons/cloud-syncing.svg",
         _ => return None,
     })
 }
@@ -198,7 +219,9 @@ mod tests {
         let mut paths = HashSet::new();
         let mut drawings = HashSet::new();
         for label in ["Reply", "Reply all", "Forward", "Later", "Done", "Move to Inbox", "Move", "Mark unread", "Mark read",
-            "Copy address", "Load remote images", "Load more", "Delete", "Empty Trash", "Cancel", "Undo", "Send again", "Edit draft"] {
+            "Copy address", "Load remote images", "Load more", "Delete", "Empty Trash", "Cancel", "Undo", "Send again", "Edit draft",
+            "New task", "Add list", "Rename", "Delete list", "Open mail", "Today", "Join", "Open in Google Calendar", "Close",
+            "Add account", "Remove", "Show your Google Calendar", "Send", "New message", "Insert file…", "Sync now", "Settings", "Connect"] {
             let path = action_icon(label).unwrap();
             assert!(paths.insert(path), "{label} must have its own meaning");
             let bytes = crate::Assets.load(path).unwrap().unwrap();
@@ -209,6 +232,73 @@ mod tests {
         for path in ["icons/more.svg", "icons/attachment.svg"] {
             assert!(crate::Assets.load(path).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn stroke_icons_set_their_own_ink_in_both_themes() {
+        for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
+            let mut glyph = icon("icons/linked-mail.svg", t.ink2, 16.);
+            assert_eq!(glyph.style().text.as_ref().unwrap().color, Some(t.ink2.into()));
+        }
+    }
+
+    #[test]
+    fn sync_states_have_distinct_icons_without_relying_on_color() {
+        use crate::sync::SyncState;
+        assert_eq!(sync_icon(&SyncState::Synced(1)), "icons/cloud-synced.svg");
+        assert_eq!(sync_icon(&SyncState::Failed("fixture".into())), "icons/cloud-failed.svg");
+        assert_eq!(sync_icon(&SyncState::ReauthRequired), "icons/cloud-failed.svg");
+        assert_eq!(sync_icon(&SyncState::Syncing), "icons/cloud-syncing.svg");
+        assert_eq!(sync_icon(&SyncState::SigningIn), "icons/cloud-syncing.svg");
+    }
+
+    #[gpui::test]
+    fn review_task_and_palette_actions_show_sixteen_pixel_icons(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
+        cx.run_until_parked();
+        for path in ["new-task", "new-list", "rename", "delete-list", "linked-mail", "open-task", "settings"] {
+            let bounds = cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
+            assert_eq!(bounds.size, gpui::size(px(16.), px(16.)), "{path}");
+        }
+        view.update_in(cx, |v, window, cx| v.open_palette("New task", window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("icon-icons/new-task.svg").is_some());
+    }
+
+    #[gpui::test]
+    fn review_sender_address_is_visible_in_main_popout_and_expanded_message(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        view.update(cx, |v, cx| {
+            v.inbox.mail[0].from = "Bank".into();
+            v.inbox.mail[0].address = "attacker@example.test".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let address = cx.debug_bounds("sender-address-attacker@example.test").expect("show the actual sender below the display name");
+        assert!(address.size.width > px(0.) && address.size.height > px(0.));
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        let mut popup = gpui::VisualTestContext::from_window(popout.into(), cx);
+        popup.simulate_resize(gpui::size(px(420.), px(800.)));
+        popup.run_until_parked();
+        let address = popup.debug_bounds("sender-address-attacker@example.test").unwrap();
+        assert!(address.left() >= px(0.) && address.right() <= px(420.));
+        view.update(cx, |v, cx| {
+            v.inbox.mail[0].thread_id = "fixture-thread".into();
+            v.inbox.mail[1].thread_id = "fixture-thread".into();
+            v.inbox.mail[1].from = "Bank".into();
+            v.inbox.mail[1].address = "other@example.test".into();
+            v.inbox.regroup();
+            v.reading_thread = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            if !v.expanded.contains_key(&1) { v.toggle_message(1, true, cx); }
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sender-address-other@example.test").is_some(), "expanded messages retain their own address");
     }
 
     #[gpui::test]

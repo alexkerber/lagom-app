@@ -10,7 +10,7 @@ use gpui::{
 use lagom_core::account::{Account, Security, ServerConfig};
 use zeroize::Zeroizing;
 
-use crate::main_window::{button, icon, mono, pressable};
+use crate::main_window::{button, icon, icon_button, mono, pressable};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT};
 
@@ -326,6 +326,7 @@ impl AddAccount {
                     .px(px(12.))
                     .rounded(px(radius::CONTROL))
                     .on_click(cx.listener(move |this, _, window, cx| this.pick(p, window, cx)))
+                    .child(icon("icons/account-add.svg", t.ink2, 16.))
                     .child(div().flex_1().text_size(px(size::BODY)).font_weight(FontWeight::MEDIUM).child(p.name()))
                     .child(mono(p.host_hint(), t.ink2))
                     .child(mono((i + 1).to_string(), t.ink2).px(px(6.)).border_1().border_color(t.line).rounded(px(radius::KEY))),
@@ -388,18 +389,8 @@ impl AddAccount {
             .flex_col()
             .gap(px(20.))
             .child(
-                pressable(div().id("back"), t, false)
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .ml(px(-8.))
-                    .rounded(px(radius::CONTROL))
-                    .text_color(t.ink2)
-                    .on_click(cx.listener(|this, _, window, cx| this.back(window, cx)))
-                    .child("← Providers")
-                    .child(mono("esc", t.ink2)),
+                icon_button(t, "back", "icons/previous.svg", "Back to providers · Esc")
+                    .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
             )
             .child(headline(p.name()))
             .child(
@@ -431,7 +422,7 @@ impl AddAccount {
                                         .cursor_pointer()
                                         .hover(|s| s.underline())
                                         .on_click(move |_, _, cx| cx.open_url(url))
-                                        .child("How to create one ↗"),
+                                        .gap(px(6.)).child(icon("icons/external.svg", t.ink2, 16.)).child("How to create one"),
                                 )
                             }),
                     ),
@@ -450,7 +441,7 @@ impl AddAccount {
                         this.advanced ^= true;
                         cx.notify();
                     }))
-                    .child(icon(if self.advanced { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 12.))
+                    .child(icon(if self.advanced { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 16.))
                     .child("Server settings"),
             )
             .when(self.advanced, |d| {

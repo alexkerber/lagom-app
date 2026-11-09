@@ -1453,7 +1453,7 @@ impl MainWindow {
                 .child(self.folder_group(heading("Folders"), cx).flex_shrink_0().max_h(px(200.)))
                 .child(account_rows))
             .child(
-                pressable(div().id("settings"), t, in_settings)
+                pressable(div().id("settings").group("settings"), t, in_settings)
                     .flex()
                     .flex_shrink_0()
                     .debug_selector(|| "settings".into())
@@ -1464,6 +1464,8 @@ impl MainWindow {
                     .text_color(t.ink)
                     .when(in_settings, |d| d.bg(t.sel))
                     .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
+                    .gap(px(8.)).child(icon("icons/settings.svg", if in_settings { active_icon } else { t.ink2 }, 16.)
+                        .when(!in_settings, |icon| icon.group_hover("settings", { let ink = t.ink; move |s| s.text_color(ink) })))
                     .child("Settings"),
             )
     }
@@ -1501,8 +1503,7 @@ impl MainWindow {
         let row = |id: ElementId, active: bool| {
             pressable(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
-        let add = pressable(div().id("add-folder"), t, false).size(px(20.)).flex().items_center().justify_center().rounded(px(radius::KEY))
-            .child(icon("icons/plus.svg", t.ink2, 14.))
+        let add = icon_button(t, "add-folder", "icons/plus.svg", "New folder")
             .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
         #[cfg(test)]
         let add = add.debug_selector(|| "add-folder".into());
@@ -1519,7 +1520,7 @@ impl MainWindow {
         let nested = all.iter().any(|f| f.parent.is_some() && f.listed());
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
-        let slot = || div().size(px(12.)).flex_shrink_0();
+        let slot = || div().size(px(16.)).flex_shrink_0();
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
@@ -1530,7 +1531,7 @@ impl MainWindow {
             let folder_icon = if active { active_icon } else { color };
             let chevron = folders::has_children(all, f).then(|| {
                 let path = if all[f].open { "icons/chevron.svg" } else { "icons/chevron-right.svg" };
-                pressable(slot().id(("chevron", f)), t, false).rounded(px(radius::KEY)).child(icon(path, t.ink2, 12.)).on_click(cx.listener(move |this, _, _, cx| {
+                icon_button(t, "folder-disclosure", path, if all[f].open { "Collapse folder" } else { "Expand folder" }).id(("chevron", f)).size(px(16.)).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.inbox.folders[f].open ^= true;
                     cx.notify();
@@ -1807,8 +1808,10 @@ impl MainWindow {
             .flex().p(px(2.)).rounded(px(radius::CONTROL)).bg(t.subtle)
             .border_1().border_color(t.line).text_size(px(size::SMALL))
             .children([("All", false, "filter-all"), ("Unread", true, "filter-unread")].into_iter().map(|(label, unread, id)| {
-                let control = pressable(div().id(id), t, false)
-                    .h(px(22.)).px(px(10.)).flex().items_center().rounded(px(6.))
+                let control = pressable(div().id(id).group(id), t, false)
+                    .h(px(22.)).px(px(10.)).flex().items_center().gap(px(6.)).rounded(px(6.))
+                    .child(icon(if unread { "icons/unread.svg" } else { "icons/filter-all.svg" }, if self.inbox.unread_only == unread { t.ink } else { t.ink2 }, 16.)
+                        .group_hover(id, { let ink = t.ink; move |s| s.text_color(ink) }))
                     .when(self.inbox.unread_only == unread, |d| d.bg(t.raised))
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| this.filter_unread(unread, cx)));
@@ -1985,7 +1988,7 @@ fn toolbar(t: &Theme) -> Div {
 }
 
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
-fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
+pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
     pressable(div().id(id).group(id), t, false)
         .debug_selector(move || id.into())
@@ -1995,10 +1998,10 @@ fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static st
         .size(px(28.))
         .rounded(px(radius::CONTROL))
         .child(icon(path, t.ink2, 16.).group_hover(id, move |s| s.text_color(theme.ink)))
-        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
 }
 
-struct Tip(Theme, &'static str);
+pub(crate) struct Tip(pub(crate) Theme, pub(crate) SharedString);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2014,7 +2017,7 @@ impl Render for Tip {
             .text_size(px(size::SMALL))
             .font_family(font::ui())
             .shadow_md()
-            .child(self.1)
+            .child(self.1.clone())
     }
 }
 
@@ -2039,6 +2042,8 @@ fn reading_view(
     on_download: impl Fn(String, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let theme = *t;
+    let address: SharedString = m.address.clone().into();
     let web = html::SUPPORTED && m.html.is_some();
     let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
     let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
@@ -2071,8 +2076,11 @@ fn reading_view(
                     .font_weight(FontWeight::SEMIBOLD).child(initials.to_uppercase()))
                 .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).one_line().child(m.from.clone()))
+                    .child(div().id(("sender-address", id)).text_size(px(size::SMALL)).text_color(t.ink2).one_line()
+                        .debug_selector({ let address = address.clone(); move || format!("sender-address-{address}") })
+                        .child(address.clone()).tooltip(move |_, cx| cx.new(|_| Tip(theme, address.clone())).into()))
                     .child(div().flex().gap(px(3.)).text_size(px(size::SMALL)).text_color(t.ink2)
-                        .child("to").child(div().min_w(px(0.)).one_line().text_color(t.accent).child(to))))
+                        .child("to").child(div().min_w(px(0.)).one_line().child(to))))
                 .child(div().text_size(px(size::SMALL)).text_color(t.ink2).child(mail::full_date(m.date)))
                 .child(menu))
             .child(div().flex().flex_col().gap(px(12.)).text_size(px(size::BODY)).line_height(relative(READING_LEADING))

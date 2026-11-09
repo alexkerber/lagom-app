@@ -84,7 +84,7 @@ impl MainWindow {
                     .child(pressable(div().id(("message-header", id)), &t, false)
                         .flex().flex_col().gap(px(4.)).px(px(24.)).py(px(12.)).cursor_pointer()
                         .child(div().flex().gap(px(8.)).items_center()
-                            .child(div().child(if expanded { "⌄" } else { "›" }))
+                            .child(icon(if expanded { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 16.))
                             .child(div().flex_1().min_w(px(0.)).one_line().font_weight(if m.unread { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM }).child(m.from.clone()))
                             .child(mono(mail::full_date(m.date), t.ink2).flex_shrink_0()))
                         .child(div().one_line().text_color(t.ink2).child(m.snippet.clone()))
