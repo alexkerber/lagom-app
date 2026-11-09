@@ -6,7 +6,7 @@ use std::time::Duration;
 use gpui::{div, point, prelude::*, px, Animation, AnimationExt, BoxShadow, Context, Div, FontWeight, Rgba, SharedString, Stateful};
 use lagom_core::account::Account;
 
-use crate::main_window::{button, mono, MainWindow, OneLine};
+use crate::main_window::{button, icon, icon_button, mono, MainWindow, OneLine};
 use crate::motion::spring;
 use crate::theme::{radius, size, Theme};
 
@@ -37,7 +37,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
                 .child(button(t, "Remove", Some(t.danger)).on_click(cx.listener(move |this, _, _, cx| this.remove_account(id.clone(), cx))))
                 .child(button(t, "Keep", None).on_click(cx.listener(|this, _, _, cx| this.confirm_remove(None, cx))))
         } else {
-            row.child(button(t, "Remove", None).on_click(cx.listener(move |this, _, _, cx| this.confirm_remove(Some(id.clone()), cx))))
+            row.child(icon_button(t, "Remove", "icons/account-remove.svg", "Remove account").on_click(cx.listener(move |this, _, _, cx| this.confirm_remove(Some(id.clone()), cx))))
         };
         list = list.child(row).children(signatures.get(&a.id).map(|input|
             div().debug_selector({ let id = a.id.clone(); move || format!("signature-{id}") })
@@ -53,6 +53,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         .gap(px(16.))
         // A window-title-sized heading, as in System Settings panes.
         .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
+        .when(accounts.is_empty(), |d| d.child(icon("icons/account-add.svg", t.ink2, 32.)))
         .child(div().text_color(t.ink2).child(SharedString::from(match accounts.len() {
             0 => "No accounts.".to_string(),
             1 => "One account.".to_string(),

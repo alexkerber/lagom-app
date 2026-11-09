@@ -1093,9 +1093,10 @@ impl TextInput {
     /// action as its shortcut to the field, which keeps focus.
     fn format_bar(&self, t: &Theme) -> impl IntoElement {
         let hover = Rgba { a: if t.dark { 0.1 } else { 0.06 }, ..t.ink };
-        let button = |id: &'static str, on: bool, action: Box<dyn Action>| {
+        let button = |id: &'static str, tip: &'static str, path: &'static str, on: bool, action: Box<dyn Action>| {
+            let theme = *t;
             div()
-                .id(id)
+                .id(id).group(id)
                 .debug_selector(move || format!("format-{id}"))
                 .flex()
                 .items_center()
@@ -1103,8 +1104,9 @@ impl TextInput {
                 .w(px(BAR_BUTTON))
                 .h(px(BAR_BUTTON_H))
                 .rounded(px(5.))
-                .text_color(if on { t.accent } else { t.ink })
-                .when(on, |d| d.bg(Rgba { a: 0.14, ..t.accent }))
+                .child(icon(path, if on { t.ink } else { t.ink2 }, 16.).group_hover(id, move |s| s.text_color(theme.ink)))
+                .tooltip(move |_, cx| cx.new(|_| crate::main_window::Tip(theme, tip.into())).into())
+                .when(on, |d| d.bg(t.subtle))
                 .when(!on, |d| d.hover(move |s| s.bg(hover)))
                 .active(move |s| s.bg(t.press))
                 // Keep focus and the selection in the field: no focus change, no caret move.
@@ -1115,7 +1117,6 @@ impl TextInput {
                 .on_mouse_up(MouseButton::Left, move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
         };
         let separator = || div().w(px(1.)).h(px(16.)).mx(px((BAR_SEPARATOR - 1.) / 2.)).bg(t.line);
-        let ink = t.ink;
         div()
             .id("format-bar")
             .occlude()
@@ -1136,13 +1137,13 @@ impl TextInput {
                 spread_radius: px(0.),
             }])
             .text_size(px(crate::theme::size::BASE))
-            .child(button("bold", self.buffer.wrapping("**").is_some(), Box::new(Bold)).font_weight(FontWeight::BOLD).child("B"))
-            .child(button("italic", self.buffer.wrapping("_").is_some(), Box::new(Italic)).italic().child("I"))
+            .child(button("bold", "Bold · ⌘B", "icons/bold.svg", self.buffer.wrapping("**").is_some(), Box::new(Bold)))
+            .child(button("italic", "Italic · ⌘I", "icons/italic.svg", self.buffer.wrapping("_").is_some(), Box::new(Italic)))
             .child(separator())
-            .child(button("link", false, Box::new(Link)).child(icon("icons/link.svg", ink, 15.)))
+            .child(button("link", "Insert link", "icons/link.svg", false, Box::new(Link)))
             .child(separator())
-            .child(button("bullets", false, Box::new(Bullets)).child(icon("icons/list-bullets.svg", ink, 15.)))
-            .child(button("numbers", false, Box::new(Numbers)).child(icon("icons/list-numbers.svg", ink, 15.)))
+            .child(button("bullets", "Bulleted list · ⌘⇧8", "icons/list-bullets.svg", false, Box::new(Bullets)))
+            .child(button("numbers", "Numbered list · ⌘⇧7", "icons/list-numbers.svg", false, Box::new(Numbers)))
     }
 }
 

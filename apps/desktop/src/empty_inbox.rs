@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use gpui::{div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, Div, FontWeight, SharedString};
 
-use crate::main_window::mono;
+use crate::main_window::{icon, mono};
 use crate::theme::{font, size, Theme};
 
 /// `status`: the account and its sync state for the footer.
-pub fn view(t: &Theme, status: SharedString) -> Div {
+pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
     let content = div()
         .w_full()
         .max_w(px(560.))
@@ -31,6 +31,7 @@ pub fn view(t: &Theme, status: SharedString) -> Div {
                 })
                 .child(mono("Fig. 1 — Inbox. Contents: none.", t.ink2)),
         )
+        .child(icon("icons/inbox.svg", t.ink2, 32.))
         .child(
             div()
                 .text_size(px(size::DISPLAY))
@@ -104,7 +105,7 @@ pub fn view(t: &Theme, status: SharedString) -> Div {
                 .py(px(12.))
                 .border_t_1()
                 .border_color(t.line)
-                .child(mono(status, t.ink2))
+                .child(div().flex().items_center().gap(px(6.)).child(icon(status_icon, t.ink2, 16.)).child(mono(status, t.ink2)))
                 .child(mono("0 left", t.ink2)),
         )
 }

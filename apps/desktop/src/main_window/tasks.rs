@@ -406,7 +406,7 @@ impl MainWindow {
         pressable(row, &t, false).debug_selector(move || if home { "new-task".into() } else { format!("add-task-{}", list.unwrap_or(0)) })
             .rounded(px(radius::CONTROL)).text_color(t.ink2)
             .child(icon("icons/plus.svg", t.ink2, 16.)).child(if home { "New task" } else { "Add task" })
-            .tooltip(move |_, cx| cx.new(|_| Tip(t, "New task · T")).into())
+            .tooltip(move |_, cx| cx.new(|_| Tip(t, "New task · T".into())).into())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(list) = list { this.edit_task(Edit::Add(list), window, cx); }
                 else { this.edit_task(Edit::AddList, window, cx); }
@@ -431,7 +431,7 @@ impl MainWindow {
             .child(pressable(div().id("complete-task"), &t, false).debug_selector(move || format!("complete-task-{id}"))
                 .size(px(18.)).flex_shrink_0().flex().items_center().justify_center().border_1().border_color(t.ink2).rounded_full()
                 .when(done, |d| d.child(icon("icons/done.svg", t.ink2, 16.)))
-                .tooltip(move |_, cx| cx.new(|_| Tip(t, "Complete task · Space")).into())
+                .tooltip(move |_, cx| cx.new(|_| Tip(t, "Complete task · Space".into())).into())
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.complete_task(id, cx); })))
             .child(div().debug_selector(move || format!("task-title-{id}")).flex_1().min_w(px(0.)).map(|d| match self.task_input(Edit::Rename(id)) {
                 Some(input) => d.child(input), None => d.one_line().when(done, |d| d.text_color(t.ink2).line_through()).child(task.title.clone()),
@@ -1062,6 +1062,9 @@ mod tests {
         });
         cx.run_until_parked();
         let empty = cx.debug_bounds("No lists yet").expect("empty state");
+        let icon = cx.debug_bounds("icon-icons/todo.svg").unwrap();
+        assert_eq!(icon.size, gpui::size(px(32.), px(32.)));
+        assert!(icon.bottom() <= empty.top());
         let groups = cx.debug_bounds("today-groups").unwrap();
         assert!((empty.center().x - groups.center().x).abs() < px(1.));
         assert!((empty.center().y - groups.center().y).abs() < px(30.));

@@ -86,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-r", ReplyAll, message),
         KeyBinding::new("f", Forward, message),
         KeyBinding::new("shift-u", ToggleRead, message),
+        KeyBinding::new("m", OpenMovePalette, message),
     ]);
 }
 
@@ -119,6 +120,8 @@ const HEADER_H: f32 = 52.;
 /// Compact windows scroll the sidebar groups beneath Search.
 pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 
+mod polish;
+use polish::action_icon;
 mod panes;
 use panes::{default_list, Panes, SIDEBAR_DEFAULT};
 
@@ -226,17 +229,18 @@ fn row_scale(p: f32) -> f32 {
 
 struct RowLayout {
     len: usize,
+    headers: Vec<usize>,
     // Height changes after each index: exiting ghosts add space, entering rows subtract it.
     changes: Vec<(usize, f32)>,
 }
 
 impl RowLayout {
     fn y(&self, ix: usize) -> f32 {
-        row_y(ix) + self.changes.iter().filter(|&&(i, _)| i < ix).map(|&(_, h)| h).sum::<f32>()
+        row_y(ix) + self.headers.partition_point(|&i| i <= ix) as f32 * polish::GROUP_H + self.changes.iter().filter(|&&(i, _)| i < ix).map(|&(_, h)| h).sum::<f32>()
     }
 
     fn bottom(&self) -> f32 {
-        row_y(self.len) + self.changes.iter().map(|&(_, h)| h).sum::<f32>()
+        row_y(self.len) + self.headers.len() as f32 * polish::GROUP_H + self.changes.iter().map(|&(_, h)| h).sum::<f32>()
     }
 
     fn index_at(&self, y: f32) -> usize {
@@ -287,6 +291,9 @@ pub struct MainWindow {
     week: week::Week,
     task_undo: Option<i64>,
     signatures: HashMap<String, Entity<TextInput>>,
+    mailbox_expanded: [bool; 3],
+    hints: polish::Hints,
+    message_menu: Option<usize>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     confirm_empty_trash: bool,
@@ -399,6 +406,9 @@ impl MainWindow {
             week: week::Week::default(),
             task_undo: None,
             signatures: HashMap::new(),
+            mailbox_expanded: [true, false, false],
+            hints: polish::Hints::default(),
+            message_menu: None,
             all_folders: false,
             confirm_empty_trash: false,
             folder_name: None,
@@ -527,6 +537,7 @@ impl MainWindow {
     }
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::command_palette::move_query(query).is_some() && !self.prepare_move(cx) { return; }
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
         // The overlay takes ⌘Z, so the toast's Undo would not work while it is open.
@@ -544,10 +555,15 @@ impl MainWindow {
         let composing = self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal());
         let palette = cx.new(|cx| CommandPalette::new(query, composing, on_mail, targets, subject, search, window, cx));
         cx.subscribe_in(&palette, window, |this, _, _: &gpui::DismissEvent, window, cx| this.close_palette(window, cx)).detach();
+        cx.subscribe_in(&palette, window, |this, _, query: &crate::command_palette::PrepareMove, window, cx| {
+            this.close_palette(window, cx);
+            this.open_palette(&query.0, window, cx);
+        }).detach();
         cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
             let f = match target {
                 MoveTo::Folder(f) => *f,
                 MoveTo::New(name) => {
+                    if !this.prepare_move(cx) { return; }
                     let name = name.trim();
                     if let Err(e) = this.validate_folder_name(name) {
                         this.notify(e, cx);
@@ -634,6 +650,7 @@ impl MainWindow {
     }
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.release(false, cx);
         self.toast = None;
         let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
@@ -777,8 +794,9 @@ impl MainWindow {
         let Some((id, ix)) = self.inbox.act_at(ix, what) else { return };
         let members = self.inbox.batches.last().cloned().unwrap_or_default();
         if matches!(what, Move::Read(_)) {
+            let mut destinations = HashMap::new();
             let mut sent = true;
-            for member in members { sent &= self.server(what, member, when, cx); }
+            for member in members { sent &= self.server(what, member, when, &mut destinations, cx); }
             self.clear_motion();
             if !sent { return; }
             self.notify(if what == Move::Read(true) { "Marked read" } else { "Marked unread" }, cx);
@@ -796,9 +814,10 @@ impl MainWindow {
         self.entering.retain(|g| g.id != id);
         self.spring = self.spring.filter(|s| s.0 != id);
         self.ghosts.push(Ghost { id, ix, what, at: Instant::now(), dx });
+        let mut destinations = HashMap::new();
         let mut sent = true;
         for member in members {
-            sent &= self.server(what, member, when, cx);
+            sent &= self.server(what, member, when, &mut destinations, cx);
             self.close_popouts(Some(member), cx);
         }
         if !sent { return; }
@@ -832,6 +851,7 @@ impl MainWindow {
 
     // Ghosts and springs sit at indices in the list on screen, so they go when the list changes.
     fn clear_motion(&mut self) {
+        self.message_menu = None;
         self.confirm_empty_trash = false;
         self.glide = None;
         self.ghosts.clear();
@@ -1005,7 +1025,7 @@ impl MainWindow {
                 changes.push((ix, ROW_H * (row_scale(1. - g.progress(now)) - 1.)));
             }
         }
-        RowLayout { len: self.inbox.list().len(), changes }
+        RowLayout { len: self.inbox.list().len(), headers: self.inbox.date_headers.iter().map(|h| h.0).collect(), changes }
     }
 
     fn reveal_row(&self, ix: usize) {
@@ -1034,7 +1054,7 @@ impl MainWindow {
         // While rows leave or come back, the rows paint the selection; a glide would start late.
         self.glide = (self.ghosts.is_empty() && self.entering.is_empty()).then(|| {
             self.seq += 1;
-            Glide::new(self.glide, row_y(before), row_y(ix), Instant::now(), self.seq)
+            Glide::new(self.glide, self.row_layout(Instant::now()).y(before), self.row_layout(Instant::now()).y(ix), Instant::now(), self.seq)
         });
         self.reveal_row(ix);
         self.near_end(cx);
@@ -1131,8 +1151,11 @@ pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     el
 }
 
-pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> impl IntoElement {
-    svg().path(path).size(px(s)).flex_shrink_0().text_color(color)
+pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> gpui::Svg {
+    let icon = svg().path(path).size(px(s)).flex_shrink_0().text_color(color);
+    #[cfg(test)]
+    let icon = icon.debug_selector(move || format!("icon-{path}"));
+    icon
 }
 
 fn app_mark() -> gpui::Img {
@@ -1165,9 +1188,13 @@ pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Statefu
 /// A push button. `fill`: the colour of a primary button; `None` is a bordered one. Shortcuts
 /// live in the menus and the command palette, not on the button.
 pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
-    let theme = *t;
+    button_label(t, label, fill, None)
+}
+
+fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Option<usize>) -> Stateful<Div> {
+    let ink = t.ink;
     let base = div()
-        .id(label).group("action-button")
+        .id(label).group(label)
         .debug_selector(move || label.into())
         .flex()
         .items_center()
@@ -1177,34 +1204,17 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
         .text_size(px(size::BASE))
         .font_weight(FontWeight::MEDIUM)
         .gap(px(6.))
-        .children(action_icon(label).map(|path| div().flex().text_color(if fill.is_some() { t.accent_ink } else { t.ink2 })
-            .group_hover("action-button", move |s| s.text_color(if fill.is_some() { theme.accent_ink } else { theme.ink }))
-            .child(svg().path(path).size(px(16.)).flex_shrink_0())))
-        .child(label);
+        .when_some(action_icon(label), |d, path| d.child(
+            icon(path, if fill.is_some() { t.accent_ink } else { t.ink2 }, 16.)
+                .when(fill.is_none(), |icon| icon.group_hover(label, move |s| s.text_color(ink)))))
+        .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
+            underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
+        }))));
     match fill {
         // A translucent tint would replace the fill, so a filled button dims a little instead.
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.border_1().border_color(t.line).bg(t.bg).text_color(t.ink), t, false),
     }
-}
-
-fn action_icon(label: &str) -> Option<&'static str> {
-    Some(match label {
-        "Reply" => "icons/reply.svg", "Forward" => "icons/forward.svg", "Later" => "icons/later.svg",
-        "Done" | "Keep" => "icons/done.svg", "Move to Inbox" => "icons/inbox.svg",
-        "Delete" | "Delete all" | "Delete list" | "Empty Trash" | "Remove" => "icons/trash.svg",
-        "Cancel" | "Close" | "Cancel sign-in" => "icons/close.svg",
-        "New task" | "Add task" => "icons/plus.svg", "New list" | "Add list" => "icons/new-list.svg",
-        "New event" => "icons/new-event.svg", "Rename" | "Edit draft" => "icons/rename.svg",
-        "Join" | "Join meeting" => "icons/video.svg", "Today" => "icons/sun.svg",
-        "Show your Google Calendar" | "Open in Google Calendar" => "icons/calendar.svg",
-        "Allow Google Tasks access" => "icons/todo.svg", "Add account" => "icons/add-account.svg",
-        "Connect" | "Connecting" => "icons/connect.svg", "Send" | "Send again" => "icons/sent.svg",
-        "Load remote images" => "icons/image.svg", "Load more" => "icons/download.svg",
-        "Undo" => "icons/undo.svg", "Move" => "icons/move.svg",
-        "Mark read" => "icons/read.svg", "Mark unread" => "icons/unread.svg",
-        _ => return None,
-    })
 }
 
 impl MainWindow {
@@ -1324,25 +1334,8 @@ impl MainWindow {
                 .text_color(t.ink2)
                 .child(div().flex_1().child(label))
         };
-        // A sidebar keeps a grey selection; the active row's icon takes the accent while the
-        // window is active, as in Finder and Mail. Weight never changes, so labels never shift.
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
-        let nav = |path: &'static str, label: &'static str, count: Option<usize>, active: bool| {
-            pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active)
-                .debug_selector(move || format!("nav-{label}"))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .h(px(SIDEBAR_ROW))
-                .px(px(10.))
-                .rounded(px(radius::CONTROL))
-                .text_color(t.ink)
-                .when(active, |d| d.bg(t.sel))
-                .child(icon(path, if active { active_icon } else { t.ink2 }, 16.))
-                .child(div().flex_1().child(label))
-                // A zero count is calm: no number at all.
-                .when_some(count.filter(|&c| c > 0), |d, c| d.child(roll(mono(c.to_string(), t.ink2), format!("{label}-{c}"))))
-        };
+        let nav = |path, label, count, active| sidebar_nav(t, path, label, count, active, self.window_active);
         let account = |ix: usize, name: SharedString, address: SharedString, active: bool| {
             pressable(div().id(("account", ix)), t, false)
                 .flex()
@@ -1444,28 +1437,23 @@ impl MainWindow {
                                     .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
                                     .text_size(px(size::SMALL)).font_weight(FontWeight::SEMIBOLD).child(unread.to_string())))
                             .child(mono(shortcut, t.ink2))
-                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix])).into())
+                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix].into())).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     })))
                 .when(show_mail, |d| d.child(div().id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
                     .flex().flex_col().gap(px(2.)).opacity(if on_mail { fade } else { 1. - fade })
                     .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
                     .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
-                    .child(
-                        nav("icons/inbox.svg", "Inbox", Some(self.inbox.count()), on_mail && self.inbox.open.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_box(None, cx); })),
-                    )
-                    .child(
-                        nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
-                            .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Later, cx); })),
-                    )
-                    .child(nav("icons/sent.svg", "Sent", None, open_kind(Kind::Sent)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Sent, cx); })))
-                    .child(nav("icons/done.svg", "Done", None, open_kind(Kind::Done)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Done, cx); })))
+                    .child(self.mailbox_row(0, cx))
+                    .child(nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
+                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Later, cx); })))
+                    .child(self.mailbox_row(2, cx))
+                    .child(self.mailbox_row(1, cx))
                     .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Trash, cx); })))
                 .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(200.)))
                 .child(account_rows.mt(px(18.))))))
             .child(
-                pressable(div().id("settings"), t, in_settings)
+                pressable(div().id("settings").group("settings"), t, in_settings)
                     .flex()
                     .flex_shrink_0()
                     .debug_selector(|| "settings".into())
@@ -1476,7 +1464,9 @@ impl MainWindow {
                     .text_color(t.ink)
                     .when(in_settings, |d| d.bg(t.sel))
                     .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
-                    .gap(px(8.)).child(icon("icons/settings.svg", t.ink2, 16.)).child("Settings"),
+                    .gap(px(8.)).child(icon("icons/settings.svg", if in_settings { active_icon } else { t.ink2 }, 16.)
+                        .when(!in_settings, |icon| icon.group_hover("settings", { let ink = t.ink; move |s| s.text_color(ink) })))
+                    .child("Settings"),
             )
     }
 
@@ -1530,7 +1520,7 @@ impl MainWindow {
         let nested = all.iter().any(|f| f.parent.is_some() && f.listed());
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
-        let slot = || div().size(px(12.)).flex_shrink_0();
+        let slot = || div().size(px(16.)).flex_shrink_0();
         let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
@@ -1541,7 +1531,7 @@ impl MainWindow {
             let folder_icon = if active { active_icon } else { color };
             let chevron = folders::has_children(all, f).then(|| {
                 let path = if all[f].open { "icons/chevron.svg" } else { "icons/chevron-right.svg" };
-                pressable(slot().id(("chevron", f)), t, false).rounded(px(radius::KEY)).child(icon(path, t.ink2, 12.)).on_click(cx.listener(move |this, _, _, cx| {
+                icon_button(t, "folder-disclosure", path, if all[f].open { "Collapse folder" } else { "Expand folder" }).id(("chevron", f)).size(px(16.)).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.inbox.folders[f].open ^= true;
                     cx.notify();
@@ -1591,6 +1581,7 @@ impl MainWindow {
         };
         // `bg`: paints the selection fill; `on_sel`: text colours for a row on the selection fill.
         // Unread is a dot and a semibold sender; the sender truncates, so nothing beside it moves.
+        let accounts = self.accounts();
         let row = |id: usize, bg: bool, on_sel: bool| {
             let m = &self.inbox.mail[id];
             let members = self.inbox.members(id);
@@ -1613,6 +1604,9 @@ impl MainWindow {
                         .items_center()
                         .gap(px(6.))
                         .child(div().size(px(7.)).flex_shrink_0().rounded_full().when(unread, |d| d.bg(if on_sel { dot } else { t.accent })))
+                        .when(accounts.len() > 1, |d| d.child(div().w(px(3.)).h(px(14.)).rounded(px(radius::KEY)).flex_shrink_0()
+                            .bg(self.account_accent(accounts.iter().position(|a| a.id == m.account).unwrap_or(0)))
+                            .debug_selector(move || format!("account-bar-{id}"))))
                         .child(
                             div()
                                 .flex_1()
@@ -1677,17 +1671,23 @@ impl MainWindow {
         let dragging = self.mouse_swiping();
         // White text waits for the gliding fill to arrive; until then its copies below show it.
         let spacer = |height| div().flex_shrink_0().h(px(height)).into_any_element();
-        rows.push(spacer(layout.y(visible.start) - LIST_PAD));
+        rows.push(spacer(layout.y(visible.start) - LIST_PAD - if layout.headers.contains(&visible.start) { polish::GROUP_H } else { 0. }));
         for i in visible.clone() {
             let id = self.inbox.list()[i];
+            if let Some((_, label)) = self.inbox.date_headers.iter().find(|h| h.0 == i) {
+                // shortcut: headers scroll with virtual rows; add sticky positioning when the virtualizer supports it directly.
+                rows.push(div().h(px(polish::GROUP_H)).flex_shrink_0().flex().items_center().px(px(10.))
+                    .text_size(px(size::SMALL)).text_color(t.ink2).child(label.clone())
+                    .debug_selector(move || format!("date-group-{i}")).into_any_element());
+            }
             rows.extend(ghosts_at(i));
             let selected = self.inbox.is_selected(id);
             // A row under the fingers or springing back paints its own fill and gets no copy.
             let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
             // Adjacent selected rows join into one block, as in Finder and Mail: only its outer corners round.
             let list = self.inbox.list();
-            let joined_above = selected && i > 0 && self.inbox.is_selected(list[i - 1]);
-            let joined_below = selected && list.get(i + 1).is_some_and(|&next| self.inbox.is_selected(next));
+            let joined_above = selected && !layout.headers.contains(&i) && i > 0 && self.inbox.is_selected(list[i - 1]);
+            let joined_below = selected && !layout.headers.contains(&(i + 1)) && list.get(i + 1).is_some_and(|&next| self.inbox.is_selected(next));
             let el = row(id, selected && gliding.is_none(), selected && (landed || moving))
                 .when(joined_above, |d| d.rounded_t(px(0.)))
                 .when(joined_below, |d| d.rounded_b(px(0.)))
@@ -1758,14 +1758,14 @@ impl MainWindow {
         if visible.end == layout.len {
             rows.extend(ghosts_at(layout.len));
         }
-        rows.push(spacer(if visible.end == layout.len { 0. } else { layout.bottom() - layout.y(visible.end) }));
+        rows.push(spacer(if visible.end == layout.len { 0. } else { layout.bottom() - layout.y(visible.end) + if layout.headers.contains(&visible.end) { polish::GROUP_H } else { 0. } }));
         // The eased fill reaches the selected row long before the glide ends, but row text turns
         // white only then, and the row it leaves turns dark at once. Until it lands, copies of the
         // rows it crosses, in selection colours, show through the fill, clipped to each row: text
         // keeps its contrast wherever the fill is. Only rows near the viewport, as above.
         if let Some(g) = gliding.filter(|_| !landed) {
             // The fill starts on one row, or across two after a glide was cut short.
-            let from = ((g.from - LIST_PAD) / ROW_H).floor() as isize;
+            let from = layout.index_at(g.from) as isize;
             let sel = self.inbox.selected as isize;
             let (lo, hi) = (from.min(sel).max(visible.start as isize), (from + 1).max(sel).min(visible.end as isize - 1));
             for ix in (lo..=hi).map(|i| i as usize) {
@@ -1774,7 +1774,7 @@ impl MainWindow {
                 if self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id) {
                     continue;
                 }
-                let y = row_y(ix);
+                let y = layout.y(ix);
                 let ink = row(id, false, true)
                     .absolute()
                     .left_0()
@@ -1808,8 +1808,10 @@ impl MainWindow {
             .flex().p(px(2.)).rounded(px(radius::CONTROL)).bg(t.subtle)
             .border_1().border_color(t.line).text_size(px(size::SMALL))
             .children([("All", false, "filter-all"), ("Unread", true, "filter-unread")].into_iter().map(|(label, unread, id)| {
-                let control = pressable(div().id(id), t, false)
-                    .h(px(22.)).px(px(10.)).flex().items_center().rounded(px(6.))
+                let control = pressable(div().id(id).group(id), t, false)
+                    .h(px(22.)).px(px(10.)).flex().items_center().gap(px(6.)).rounded(px(6.))
+                    .child(icon(if unread { "icons/unread.svg" } else { "icons/filter-all.svg" }, if self.inbox.unread_only == unread { t.ink } else { t.ink2 }, 16.)
+                        .group_hover(id, { let ink = t.ink; move |s| s.text_color(ink) }))
                     .when(self.inbox.unread_only == unread, |d| d.bg(t.raised))
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| this.filter_unread(unread, cx)));
@@ -1829,6 +1831,7 @@ impl MainWindow {
             }
         };
         div()
+            .relative()
             .w(px(self.list_w))
             .h_full()
             .flex_shrink_0()
@@ -1891,6 +1894,7 @@ impl MainWindow {
                     list
                 },
             )
+            .when(self.hints.visible, |d| d.child(self.hint_chip()))
     }
 
     fn list_header_height(&self) -> f32 {
@@ -1920,7 +1924,8 @@ impl MainWindow {
         let Some(id) = self.inbox.single() else {
             let more = self.has_more();
             return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
-                .child(icon("icons/mail.svg", t.ink2, 32.))
+                .child(icon("icons/inbox.svg", t.ink2, 32.))
+                .when(!self.inbox.unread_only, |d| d.child("No messages"))
                 .when(self.inbox.unread_only, |d| d
                     .child(if more { "No unread messages in loaded mail" } else { "No unread messages" })
                     .when(more, |d| d.child(button(t, "Load more", None)
@@ -1934,7 +1939,7 @@ impl MainWindow {
         };
         // HTML mail: the web view covers only the body. The text shows while an overlay hides it.
         let web = html::SUPPORTED && m.html.is_some();
-        let text = !web || self.palette.is_some() || self.compose.is_some();
+        let text = !web || self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some();
         // Toasts sit just above the reply field; the web view would cover them.
         let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count()
             + self.live.as_ref().map_or(0, |live| live.failed.len());
@@ -1948,11 +1953,11 @@ impl MainWindow {
                 toolbar(t)
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
-                    .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
-                    .child(icon_button(t, "reply-all", "icons/reply-all.svg", "Reply all · Shift R").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
-                    .child(button(t, "Forward", None).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
+                    .child(polish::shortcut_button(t, "Reply", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
+                    .child(icon_button(t, "reply-all", "icons/reply-all.svg", "Reply all · Shift+R").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
+                    .child(polish::shortcut_button(t, "Forward", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .when(!trash, |d| d.child(
-                        button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
+                        polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     ))
                     .when(web && self.web.has_remote && !m.remote, |d| {
                         d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
@@ -1963,17 +1968,17 @@ impl MainWindow {
                     .child(div().flex_1())
                     .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2).debug_selector(|| "message-counter".into()))
                     .child(
-                        icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
+                        icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window · ⌘O")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
                     )
                     .child(
                         // The step that finishes a message sits last, as a primary button does in macOS.
-                        button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
+                        polish::shortcut_button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent), self.hints.visible)
                             .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))),
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
-            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.slot(), toasts, on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.slot(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
     }
 }
 
@@ -1983,7 +1988,7 @@ fn toolbar(t: &Theme) -> Div {
 }
 
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
-fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
+pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
     pressable(div().id(id), t, false).group("icon-button")
         .debug_selector(move || id.into())
@@ -1995,16 +2000,15 @@ fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static st
         .rounded(px(radius::CONTROL))
         .text_color(t.ink2)
         .child(icon_button_glyph(t, path))
-        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip)).into())
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
 }
 
 fn icon_button_glyph(t: &Theme, path: &'static str) -> gpui::Svg {
     // GPUI's SVG paint path requires an explicit color on the SVG itself.
-    svg().path(path).size(px(16.)).flex_shrink_0()
-        .text_color(t.ink2).group_hover("icon-button", |s| s.text_color(t.ink))
+    icon(path, t.ink2, 16.).group_hover("icon-button", |s| s.text_color(t.ink))
 }
 
-struct Tip(Theme, &'static str);
+pub(crate) struct Tip(pub(crate) Theme, pub(crate) SharedString);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2020,8 +2024,27 @@ impl Render for Tip {
             .text_size(px(size::SMALL))
             .font_family(font::ui())
             .shadow_md()
-            .child(self.1)
+            .child(self.1.clone())
     }
+}
+
+fn sidebar_nav(t: &Theme, path: &'static str, label: &'static str, count: Option<usize>, active: bool, window_active: bool) -> Stateful<Div> {
+    let active_icon = if window_active { t.sel_icon } else { t.ink2 };
+    let selected = active && label != "Mail";
+    pressable(div().id(SharedString::from(format!("nav-{label}"))), t, selected)
+        .debug_selector(move || format!("nav-{label}"))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .h(px(SIDEBAR_ROW))
+        .px(px(10.))
+        .rounded(px(radius::CONTROL))
+        .text_color(t.ink)
+        .when(selected, |d| d.bg(t.sel))
+        .child(icon(path, if active { active_icon } else { t.ink2 }, 16.))
+        .child(div().flex_1().child(label))
+        // A zero count is calm: no number at all.
+        .when_some(count.filter(|&c| c > 0), |d, c| d.child(roll(mono(c.to_string(), t.ink2), format!("{label}-{c}"))))
 }
 
 fn attachment_size(bytes: u32) -> String {
@@ -2041,9 +2064,12 @@ fn reading_view(
     text: bool,
     slot: impl IntoElement,
     toasts: usize,
+    menu: impl IntoElement,
     on_download: impl Fn(String, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let theme = *t;
+    let address: SharedString = m.address.clone().into();
     let web = html::SUPPORTED && m.html.is_some();
     let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
     let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
@@ -2056,109 +2082,48 @@ fn reading_view(
             .px(px(14.)).py(px(10.)).rounded(px(radius::ATTACHMENT))
             .border_1().border_color(t.line).bg(t.subtle)
             .text_size(px(size::SNIPPET)).line_height(relative(LEADING))
-            .child(icon("icons/folder.svg", t.ink2, 16.))
+            .child(icon("icons/attachment.svg", t.ink2, 16.))
             .child(div().flex_1().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).child(part.filename.clone()))
             .child(mono(attachment_size(part.size), t.ink2))
             .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
     }).collect::<Vec<_>>();
-    div()
-        .id(("reading", id))
-        .flex_1()
-        .min_h(px(0.))
-        .overflow_y_scroll()
-        .max_w(px(760.))
-        .flex()
-        .flex_col()
-        .gap(px(20.))
-        .pt(px(24.))
-        .px(px(32.))
-        .pb(px(20.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .text_size(px(size::SUBJECT))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(m.subject.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .size(px(32.))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(t.subtle)
-                                .border_1()
-                                .border_color(t.line)
-                                .text_size(px(size::SMALL))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(initials.to_uppercase()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .min_w(px(0.))
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child(m.from.clone()))
-                                .child(
-                                    div()
-                                        .text_size(px(size::SMALL))
-                                        .text_color(t.ink2)
-                                        .one_line()
-                                        .child(format!("{} → {to}", m.address)),
-                                ),
-                        )
-                        .child(mono(m.time.clone(), t.ink2)),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .text_size(px(size::BODY))
-                .line_height(relative(READING_LEADING))
-                // Until the body loads (one store read), the snippet stands in.
+    div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().max_w(px(760.))
+        .flex().flex_col().gap(px(16.)).p(px(24.))
+        .child(div().flex_shrink_0().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
+            .debug_selector(|| "reading-subject".into()).child(m.subject.clone()))
+        .child(div().flex().flex_col().gap(px(20.)).p(px(20.))
+            .bg(t.raised).border_1().border_color(t.line).rounded(px(radius::CARD))
+            .debug_selector(|| "message-card".into())
+            .when(web, |d| d.flex_1().min_h(px(180.)))
+            .when(!web, |d| d.flex_shrink_0())
+            .child(div().flex().items_center().gap(px(12.)).flex_shrink_0()
+                .child(div().size(px(32.)).flex_shrink_0().rounded_full().flex().items_center().justify_center()
+                    .bg(t.subtle).border_1().border_color(t.line).text_size(px(size::SMALL))
+                    .font_weight(FontWeight::SEMIBOLD).child(initials.to_uppercase()))
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).one_line().child(m.from.clone()))
+                    .child(div().id(("sender-address", id)).text_size(px(size::SMALL)).text_color(t.ink2).one_line()
+                        .debug_selector({ let address = address.clone(); move || format!("sender-address-{address}") })
+                        .child(address.clone()).tooltip(move |_, cx| cx.new(|_| Tip(theme, address.clone())).into()))
+                    .child(div().flex().gap(px(3.)).text_size(px(size::SMALL)).text_color(t.ink2)
+                        .child("to").child(div().min_w(px(0.)).one_line().child(to))))
+                .child(div().text_size(px(size::SMALL)).text_color(t.ink2).child(mail::reading_date(m.date, chrono::Local::now())))
+                .child(menu))
+            .child(div().flex().flex_col().gap(px(12.)).text_size(px(size::BODY)).line_height(relative(READING_LEADING))
                 .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
                 .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
-                // The web view's place: the rest of the pane, less room for toasts.
-                .when(web, |d| {
-                    d.flex_1().min_h(px(0.)).relative().child(
-                        div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot),
-                    )
-                })
-                .when(!web, |d| d.children(attachment())),
-        )
-        .when(web, |d| d.children(attachment()))
+                .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
+                    div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
+            .children(attachment()))
         .when(!web, |d| d.child(div().flex_1()))
-        .child(
-            div()
-                .id("reply-box")
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_between()
-                .h(px(36.))
-                .px(px(12.))
-                .rounded(px(radius::CONTROL))
-                .border_1()
-                .border_color(t.line)
-                .bg(t.raised)
-                .text_color(t.ink2)
-                .on_click(on_reply)
-                .child(format!("Reply to {}", m.from)),
-        )
+        .child(pressable(div().id("reply-box"), t, false).debug_selector(|| "reply-box".into())
+            .flex().flex_shrink_0().items_center().gap(px(8.)).w_full().h(px(36.)).px(px(12.))
+            .rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).text_color(t.ink2)
+            .tooltip(move |_, cx| cx.new(|_| Tip(theme, "Reply · R".into())).into()).on_click(on_reply)
+            .child(icon("icons/reply.svg", t.ink2, 16.))
+            .child(div().min_w(px(0.)).one_line()
+                .debug_selector({ let from = m.from.clone(); move || format!("Reply to {from}") })
+                .child(format!("Reply to {}", m.from))))
 }
 
 impl Render for MainWindow {
@@ -2169,12 +2134,19 @@ impl Render for MainWindow {
             self.reveal_row(self.inbox.selected);
         }
         self.prune();
+        if self.message_menu.is_some_and(|id| self.inbox.single() != Some(id) && !self.expanded.contains_key(&id)
+            && !self.popouts.iter().any(|(open, _)| *open == id)) {
+            self.message_menu = None;
+        }
         // Off-screen motion must still advance and finish, even without an animated element.
         if !self.ghosts.is_empty() || !self.entering.is_empty() || self.spring.is_some() {
             window.request_animation_frame();
         }
         if matches!(self.page, Page::Mail) { self.open_current(window.is_window_active(), cx); }
         self.window_active = window.is_window_active();
+        if !self.window_active || !matches!(self.page, Page::Mail) || self.palette.is_some() || self.compose.is_some() {
+            self.hints.visible = false; self.hints.timer = None;
+        }
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
@@ -2195,7 +2167,7 @@ impl Render for MainWindow {
             window.set_window_title(&title);
             self.title = title;
         }
-        let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && !self.inbox.unread_only;
+        let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && self.inbox.account_filter.is_none() && !self.inbox.unread_only;
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
         let on_mail = matches!(self.page, Page::Mail);
@@ -2211,8 +2183,10 @@ impl Render for MainWindow {
                 crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, &self.signatures, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
-            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
-            Page::Mail => div().flex_1().min_w(px(0.)).flex().child(self.message_list(list_height, cx)).child(self.reading_pane(cx)),
+            Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_icon(), self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
+            Page::Mail => div().flex_1().min_w(px(0.)).flex().child(div().id("mail-content").flex_1().min_w(px(0.)).flex()
+                .on_hover(cx.listener(|this, over: &bool, window, cx| this.update_hints(*over, window.modifiers(), cx)))
+                .child(self.message_list(list_height, cx)).child(self.reading_pane(cx))),
         };
         // Toasts sit bottom-centre in the reading pane, above its reply field, so they never cover
         // the list or the divider. A spacer the list's width stands in for the list.
@@ -2245,6 +2219,7 @@ impl Render for MainWindow {
             // Mouse swipe: the root sees every move inside the window; `on_mouse_up_out` catches a
             // release outside it. shortcut: moves outside the window are not followed (the row waits
             // at the edge); a window-level listener via `window.on_mouse_event` would follow them.
+            .on_modifiers_changed(cx.listener(|this, e: &gpui::ModifiersChangedEvent, _, cx| this.update_hints(this.hints.over, e.modifiers, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag_to(e, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drop_drag(cx)))
@@ -2291,6 +2266,7 @@ impl Render for MainWindow {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) {
+                this.message_menu = None;
                 this.select(|inbox| inbox.select(inbox.selected), cx);
                 this.confirm_empty_trash = false;
                 this.finish_resize(cx);
@@ -2489,6 +2465,9 @@ struct Inbox {
     chosen: Option<HashSet<usize>>,
     anchor: Option<usize>,
     unread_only: bool,
+    account_filter: Option<String>,
+    account_unread: HashMap<String, [usize; 3]>,
+    date_headers: Vec<(usize, String)>,
     // Explicitly unread messages stay unread until the user selects again.
     keep_unread: HashSet<usize>,
     later: usize,
@@ -2504,12 +2483,32 @@ struct Inbox {
 
 impl Inbox {
     fn new(len: usize, later: usize) -> Self {
-        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, chosen: None, anchor: None, unread_only: false, keep_unread: HashSet::new(), later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new() }
+        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, chosen: None, anchor: None, unread_only: false, account_filter: None, account_unread: HashMap::new(), date_headers: Vec::new(), keep_unread: HashSet::new(), later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new() }
     }
 
     /// The sample inbox and folders, with their unread counts.
     fn demo(len: usize) -> Self {
         let mut inbox = Self { folders: folders::sample(), ..Self::new(len, LATER_SAMPLE) };
+        let today = chrono::Local::now().date_naive();
+        for (id, m) in inbox.mail.iter_mut().enumerate() {
+            m.account = if id == 2 || id == 6 { "work" } else { "personal" }.into();
+            m.to = format!("you@{}.example", if m.account == "work" { "work" } else { "home" });
+            let days = match id { 0..=2 => 0, 3..=4 => 1, 5 => 3, _ => 8 + id as i64 };
+            m.date = (today - chrono::Duration::days(days)).and_hms_opt(9, 42 - id as u32, 0).unwrap()
+                .and_local_timezone(chrono::Local).earliest().unwrap().timestamp();
+            m.time = mail::when(m.date, chrono::Local::now());
+        }
+        for (name, kind) in [("Done", Kind::Done), ("Sent", Kind::Sent)] {
+            let mut ids = Vec::new();
+            for account in ["personal", "work"] {
+                let mut m = inbox.mail[0].clone();
+                m.account = account.into();
+                m.subject = format!("{name} sample");
+                ids.push(inbox.mail.len());
+                inbox.mail.push(m);
+            }
+            inbox.folders.push(Folder { kind, ..Folder::new(name, None, &ids) });
+        }
         inbox.folders.push(Folder { kind: Kind::Trash, ..Folder::new("Trash", None, &[]) });
         for f in 0..inbox.folders.len() {
             inbox.folders[f].unread = inbox.folders[f].items.iter().filter(|&&id| inbox.mail[id].unread).count();
@@ -2524,7 +2523,7 @@ impl Inbox {
     }
 
     fn list(&self) -> &Vec<usize> {
-        if self.group || self.unread_only { &self.rows } else { self.raw_list() }
+        if self.group || self.unread_only || self.account_filter.is_some() { &self.rows } else { self.raw_list() }
     }
 
     fn members(&self, id: usize) -> Vec<usize> {
@@ -2555,13 +2554,21 @@ impl Inbox {
         if self.unread_only {
             rows.retain(|&id| self.members(id).iter().any(|&id| self.mail[id].unread));
         }
+        if let Some(account) = &self.account_filter { rows.retain(|&id| self.mail[id].account == *account); }
         self.rows = rows;
-        if self.group || self.unread_only {
+        if self.group || self.unread_only || self.account_filter.is_some() {
             self.selected = keep.and_then(|id| self.rows.iter().position(|&rep| self.members(rep).contains(&id)))
                 .unwrap_or(self.selected).min(self.rows.len().saturating_sub(1));
         }
         if let Some(chosen) = chosen {
             self.chosen = Some(self.list().iter().copied().filter(|&rep| self.members(rep).iter().any(|id| chosen.contains(id))).collect());
+        }
+        let today = chrono::Local::now().date_naive();
+        self.date_headers.clear();
+        let mut previous = String::new();
+        for (ix, id) in self.list().clone().into_iter().enumerate() {
+            let label = mail::date_group(self.mail[id].date, today);
+            if label != previous { self.date_headers.push((ix, label.clone())); previous = label; }
         }
     }
 
@@ -2585,7 +2592,7 @@ impl Inbox {
 
     /// The count for the list on screen.
     fn shown_count(&self) -> usize {
-        if self.group || self.unread_only { return self.rows.len(); }
+        if self.group || self.unread_only || self.account_filter.is_some() { return self.rows.len(); }
         match self.open {
             None => self.count(),
             Some(_) => self.list().len(),
@@ -2650,6 +2657,15 @@ impl Inbox {
     /// `what`, or comes `back`.
     fn recount(&mut self, id: usize, from: Option<usize>, what: Move, back: bool) {
         let unread = self.mail[id].unread as usize;
+        if unread > 0 {
+            self.adjust_account_unread(id, from.map(|f| self.folders[f].kind), back);
+            match what {
+                Move::Inbox => self.adjust_account_unread(id, None, !back),
+                Move::Done => self.adjust_account_unread(id, Some(Kind::Done), !back),
+                Move::Folder(f) => self.adjust_account_unread(id, Some(self.folders[f].kind), !back),
+                _ => {},
+            }
+        }
         let step = |n: &mut usize, k: usize, up: bool| if up { *n += k } else { *n = n.saturating_sub(k) };
         if let Some(f) = from {
             step(&mut self.folders[f].unread, unread, back);
@@ -2841,16 +2857,27 @@ impl Inbox {
     }
 
     /// Takes a store read. The selection stays on its message where it can.
-    fn apply(&mut self, snap: mail::Snapshot, seen: &HashSet<i64>, now: chrono::DateTime<chrono::Local>) {
+    fn apply(&mut self, mut snap: mail::Snapshot, seen: &HashSet<i64>, now: chrono::DateTime<chrono::Local>) {
+        for (rows, slot) in [(&snap.inbox, Some(0)), (&snap.open, match self.open_kind() {
+            Some(Kind::Done) => Some(1), Some(Kind::Sent) => Some(2), _ => None,
+        })] {
+            if let Some(slot) = slot {
+                for m in rows.iter().filter(|m| !m.seen && seen.contains(&m.id)) {
+                    if let Some(counts) = snap.account_unread.get_mut(&m.account) { counts[slot] = counts[slot].saturating_sub(1); }
+                }
+            }
+        }
+        self.account_unread = snap.account_unread;
         let keep = self.current().and_then(|id| self.mail[id].store);
         self.items = snap.inbox.iter().map(|m| self.intern(m, seen, now)).collect();
         self.extra = (snap.inbox_total as usize).saturating_sub(self.items.len());
         self.later = snap.later_total as usize;
         folders::merge(&mut self.folders, &snap.folders);
         if let Some(f) = self.open {
-            if self.folders[f].gone {
+            if self.folders[f].gone && !matches!(self.folders[f].kind, Kind::Done | Kind::Sent) {
                 self.open = None;
             } else {
+                if self.folders[f].gone { self.folders[f].gone = false; self.folders[f].store = None; }
                 *self.list_mut() = snap.open.iter().map(|m| self.intern(m, seen, now)).collect();
             }
         }
@@ -2869,6 +2896,7 @@ mod tests {
         for what in [Move::Done, Move::Later, Move::Delete, Move::Folder(0)] {
             let mut inbox = Inbox::demo(4);
             inbox.group = true;
+            for mail in &mut inbox.mail { mail.date = 0; }
             for id in [0, 1, 7] {
                 inbox.mail[id].thread_id = "conversation".into();
                 inbox.mail[id].date = id as i64;
@@ -2912,13 +2940,13 @@ mod tests {
 
     #[test]
     fn virtual_ranges_include_partial_rows_and_trailing_ghosts() {
-        let empty = RowLayout { len: 0, changes: Vec::new() };
+        let empty = RowLayout { len: 0, headers: Vec::new(), changes: Vec::new() };
         assert_eq!(empty.visible(0., 600.), 0..0);
         assert_eq!(empty.bottom(), LIST_PAD);
-        let layout = RowLayout { len: 10_000, changes: Vec::new() };
+        let layout = RowLayout { len: 10_000, headers: Vec::new(), changes: Vec::new() };
         assert_eq!(layout.visible(row_y(5000) + ROW_H / 2., 5. * ROW_H), 4998..5008);
         assert_eq!(layout.visible(row_y(9999), 5. * ROW_H), 9997..10_000);
-        let moving = RowLayout { len: 10, changes: vec![(0, -ROW_H), (1, ROW_H / 2.), (10, ROW_H / 4.)] };
+        let moving = RowLayout { len: 10, headers: Vec::new(), changes: vec![(0, -ROW_H), (1, ROW_H / 2.), (10, ROW_H / 4.)] };
         assert_eq!(moving.y(1), LIST_PAD);
         assert!((moving.y(2) - LIST_PAD - 1.5 * ROW_H).abs() < 0.001);
         assert!((moving.bottom() - LIST_PAD - 9.75 * ROW_H).abs() < 0.001);
@@ -3168,7 +3196,7 @@ mod tests {
     fn folder_counts_are_unread_only() {
         let mut inbox = with_folders();
         let counts: Vec<_> = (0..inbox.folders.len()).map(|f| inbox.unread(f)).collect();
-        assert_eq!(counts, [3, 0, 1, 0, 0, 0, 0, 1, 2, 0]);
+        assert_eq!(counts, [3, 0, 1, 0, 0, 0, 0, 1, 2, 2, 2, 0]);
         // A read message (Build bot) into Travel keeps Travel at zero; an unread one counts.
         inbox.act_at(2, Move::Folder(1));
         assert_eq!(inbox.unread(1), 0);
@@ -3324,7 +3352,7 @@ mod dispatch {
             assert_eq!(v.reading_members, [1, 0]);
             assert!(v.expanded.contains_key(&1));
         });
-        assert!(children(&view, cx) < 15);
+        assert!(children(&view, cx) <= 15);
         view.update(cx, |v, cx| {
             v.toggle_message(0, true, cx);
             assert_eq!(v.expanded.len(), 2);
@@ -3348,7 +3376,7 @@ mod dispatch {
             v.clear_motion();
         });
         frame(cx);
-        assert!(children(&view, cx) < 15);
+        assert!(children(&view, cx) <= 15);
     }
 
     #[gpui::test]
@@ -3432,7 +3460,8 @@ mod dispatch {
         let new = cx.debug_bounds("folder-101").unwrap();
         let settings = cx.debug_bounds("settings").unwrap();
         assert_eq!(new.size.height, px(SIDEBAR_ROW));
-        assert!(new.top() > add.y && new.bottom() <= settings.top());
+        let add = cx.debug_bounds("add-folder").unwrap();
+        assert!(new.top() >= add.bottom() && new.bottom() <= settings.top());
         assert!(settings.bottom() <= px(700.));
         cx.simulate_click(new.center(), Default::default());
         assert_eq!(view.read_with(cx, |v, _| v.inbox.open), Some(101));
@@ -3498,7 +3527,7 @@ mod dispatch {
             assert!(children(&view, cx) <= 15);
             view.read_with(cx, |v, _| {
                 let height = f32::from(v.scroll.bounds().size.height);
-                let expected = row_y(10_000) + LIST_PAD - height;
+                let expected = row_y(10_000) + polish::GROUP_H + LIST_PAD - height;
                 assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
             });
         }
@@ -3511,7 +3540,7 @@ mod dispatch {
             let height = f32::from(v.scroll.bounds().size.height);
             let visible = layout.visible(top, height);
             assert!(visible.contains(&v.inbox.selected));
-            let child = 2 + v.inbox.selected - visible.start;
+            let child = 2 + v.inbox.selected - visible.start + layout.headers.iter().filter(|&&i| i >= visible.start && i <= v.inbox.selected).count();
             let bounds = v.scroll.bounds_for_item(child).unwrap();
             let y = f32::from(bounds.top() - v.scroll.bounds().top()) - top;
             assert!(y >= -1. && y + ROW_H <= height + 1., "selected y {y}, height {height}");
@@ -3609,7 +3638,7 @@ mod dispatch {
             selected_in_view(&view, cx);
             view.read_with(cx, |v, _| {
                 let height = f32::from(v.scroll.bounds().size.height);
-                let expected = row_y(10_000) + LIST_PAD - height;
+                let expected = row_y(10_000) + polish::GROUP_H + LIST_PAD - height;
                 assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
             });
         }
@@ -3636,7 +3665,7 @@ mod dispatch {
             let visible = v.row_layout(Instant::now()).visible(-f32::from(v.scroll.offset().y), 600.);
             assert!(!visible.contains(&0));
         });
-        assert!(children(&view, cx) < 15);
+        assert!(children(&view, cx) <= 15);
         view.update(cx, |v, _| v.scroll.set_offset(Point::default()));
         frame(cx);
         let after = cx.debug_bounds("row-0").unwrap().left() - rest;
@@ -3665,20 +3694,20 @@ mod dispatch {
                 let at = now + SPRING.mul_f32(step);
                 let height = ROW_H * row_scale(spring(step));
                 let layout = v.row_layout(at);
-                assert!((layout.y(5000) - row_y(5000) - height).abs() < 0.05);
-                assert!((layout.bottom() - row_y(9999) - height).abs() < 0.1);
+                assert!((layout.y(5000) - row_y(5000) - polish::GROUP_H - height).abs() < 0.05);
+                assert!((layout.bottom() - row_y(9999) - polish::GROUP_H - height).abs() < 0.1);
             }
             v.undo(cx);
             v.entering[0].at = now;
             v.act_at(1, Move::Done, 0., cx);
             v.ghosts[0].at = now;
             let layout = v.row_layout(now);
-            assert!((layout.y(1) - LIST_PAD).abs() < 0.01);
-            assert!((layout.y(2) - row_y(2)).abs() < 0.01);
+            assert!((layout.y(1) - LIST_PAD - polish::GROUP_H).abs() < 0.01);
+            assert!((layout.y(2) - row_y(2) - polish::GROUP_H).abs() < 0.01);
             assert!(layout.visible(row_y(5000), 530.).len() <= 12);
             let settled = v.row_layout(now + SPRING);
-            assert_eq!(settled.y(5000), row_y(5000));
-            assert_eq!(settled.bottom(), row_y(9999));
+            assert_eq!(settled.y(5000), row_y(5000) + polish::GROUP_H);
+            assert_eq!(settled.bottom(), row_y(9999) + polish::GROUP_H);
             // A move above an entering row shifts its index; its id still locates it.
             v.clear_motion();
             v.act_at(1, Move::Done, 0., cx);
@@ -3687,7 +3716,7 @@ mod dispatch {
             v.act_at(0, Move::Done, 0., cx);
             v.ghosts[0].at = now;
             assert_eq!(v.entering[0].ix, 1);
-            assert!((v.row_layout(now).y(1) - row_y(1)).abs() < 0.01);
+            assert!((v.row_layout(now).y(1) - row_y(1) - polish::GROUP_H).abs() < 0.01);
         });
         view.update(cx, |v, cx| {
             v.clear_motion();
@@ -3699,7 +3728,7 @@ mod dispatch {
         frame(cx);
         view.read_with(cx, |v, _| {
             let height = f32::from(v.scroll.bounds().size.height);
-            let expected = row_y(v.inbox.list().len() + 1) + LIST_PAD - height;
+            let expected = row_y(v.inbox.list().len() + 1) + polish::GROUP_H + LIST_PAD - height;
             assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
         });
         assert!(children(&view, cx) <= 15);
@@ -3711,9 +3740,9 @@ mod dispatch {
         });
         frame(cx);
         view.read_with(cx, |v, _| {
-            assert_eq!(v.scroll.bounds_for_item(2).unwrap().size.height, px(0.));
+            assert_eq!(v.scroll.bounds_for_item(3).unwrap().size.height, px(0.));
             let height = f32::from(v.scroll.bounds().size.height);
-            let expected = row_y(v.inbox.list().len() - 1) + LIST_PAD - height;
+            let expected = row_y(v.inbox.list().len() - 1) + polish::GROUP_H + LIST_PAD - height;
             assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
         });
     }
@@ -3926,8 +3955,9 @@ mod dispatch {
 
     /// The middle of list row `ix`, below the window margin and the list header.
     fn row_at(view: &Entity<MainWindow>, ix: usize, cx: &mut VisualTestContext) -> gpui::Point<Pixels> {
-        let x = view.read_with(cx, |v, _| v.sidebar_w + v.list_w / 2.);
-        gpui::point(px(x), px(8. + 1. + HEADER_H + row_y(ix) + ROW_H / 2.))
+        frame(cx);
+        let id = view.read_with(cx, |v, _| v.inbox.list()[ix]);
+        cx.debug_bounds(format!("row-{id}").leak()).unwrap().center()
     }
 
     fn windows(cx: &mut VisualTestContext) -> usize {

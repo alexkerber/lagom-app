@@ -5,11 +5,11 @@ use super::*;
 
 /// What an in-flight worker command needs when it finishes.
 enum Op {
-    /// A move of this row (id in `Inbox::mail`). On failure the row comes back.
-    Move(usize),
+    /// Store identity survives account switches while the command is in flight.
+    Move(i64),
     Read { account: String, store: i64 },
     /// Undo of a move: on failure only a message.
-    Undo(usize),
+    Undo(i64),
     EmptyTrash(String),
     CreateFolder { account: String, name: String },
 }
@@ -27,12 +27,14 @@ pub struct Live {
     stale: bool,
     /// Rows per list read. Grows when the selection nears the end.
     limit: u32,
+    more: bool,
     /// The ⌘K hit on screen: loaded even past `limit`, until another list opens.
     pub(super) pin: Option<i64>,
     /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
     want: Option<i64>,
     notification_target: Option<crate::notifications::Target>,
     task_target: Option<i64>,
+    move_target: Option<i64>,
     /// Store ids marked read here, until the server confirms.
     seen: HashSet<i64>,
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
@@ -156,10 +158,12 @@ impl Live {
             pending: mail.pending.clone(),
             stale: false,
             limit: PAGE,
+            more: false,
             pin: None,
             want: None,
             notification_target: None,
             task_target: None,
+            move_target: None,
             seen: HashSet::new(),
             due: None,
         })
@@ -194,6 +198,37 @@ impl Live {
 }
 
 impl MainWindow {
+    pub(super) fn prepare_move(&mut self, cx: &mut Context<Self>) -> bool {
+        let members = self.inbox.selected_members();
+        let accounts: HashSet<_> = members.iter().map(|&id| self.inbox.mail[id].account.clone()).collect();
+        // shortcut: custom-folder moves use one account at a time, add per-account destinations for mixed selections.
+        if accounts.len() > 1 {
+            self.notify("Select messages from one account to move to a folder", cx);
+            return false;
+        }
+        let Some(live) = &self.live else { return true };
+        let Some(account) = accounts.iter().next() else { return true };
+        if live.account().is_some_and(|a| a.id == *account) { return true; }
+        let selected: HashSet<_> = members.iter().filter_map(|&id| self.inbox.mail[id].store).collect();
+        let Some(&first) = selected.iter().next() else { return false };
+        if !live.ops.is_empty() { self.notify("Wait for the pending operation before choosing a folder", cx); return false; }
+        let summaries = match selected.iter().map(|&id| live.store.message_summary(id)).collect::<lagom_core::Result<Vec<_>>>() {
+            Ok(summaries) => summaries,
+            Err(e) => { self.notify(format!("Could not read selection: {e}"), cx); return false; }
+        };
+        self.open_found(first, cx);
+        let Some(live) = &mut self.live else { return false };
+        // Selected rows can straddle a page after switching accounts.
+        for summary in summaries {
+            let id = self.inbox.intern(&summary, &live.seen, chrono::Local::now());
+            if !self.inbox.raw_list().contains(&id) { self.inbox.list_mut().push(id); }
+        }
+        self.inbox.regroup();
+        self.inbox.chosen = Some(self.inbox.list().iter().copied().filter(|&id|
+            self.inbox.members(id).iter().any(|&member| self.inbox.mail[member].store.is_some_and(|id| selected.contains(&id)))).collect());
+        true
+    }
+
     pub(super) fn validate_folder_name(&self, name: &str) -> Result<(), String> {
         let local = self.inbox.folders.iter().filter(|f| !f.gone).map(|f| f.full.as_str());
         if let Some(live) = &self.live {
@@ -243,6 +278,9 @@ impl MainWindow {
             return;
         };
         live.accounts = accounts;
+        if self.inbox.account_filter.as_ref().is_some_and(|id| !live.accounts.iter().any(|a| &a.id == id)) {
+            self.inbox.account_filter = None;
+        }
         live.failed = live.store.failed_outbox().unwrap_or_default();
         self.drafts.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
         self.sending.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
@@ -255,6 +293,7 @@ impl MainWindow {
         }
         live.current = live.current.min(live.accounts.len().saturating_sub(1));
         let Some(account) = live.account().map(|a| a.id.clone()) else {
+            live.more = false;
             self.inbox = Inbox::live();
             self.reading_thread = None;
             self.close_popouts(None, cx);
@@ -263,16 +302,20 @@ impl MainWindow {
         let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
             None => mail::View::Inbox,
             Some((Kind::Later, _)) => mail::View::Later,
+            Some((Kind::Done, _)) => mail::View::Role(lagom_core::store::FolderRole::Archive),
+            Some((Kind::Sent, _)) => mail::View::Role(lagom_core::store::FolderRole::Sent),
             Some((Kind::Trash, None)) => mail::View::Trash,
             Some((_, Some(id))) => mail::View::Folder(id),
             // A folder ⌘K just created: nothing on the server yet.
             Some((_, None)) => mail::View::Inbox,
         };
         self.inbox.group = self.panes.group_conversations;
-        let pins = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(live.pin);
-        match mail::load(&live.store, &account, view, live.limit, now(), pins, self.inbox.group) {
+        let pins = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(live.pin).collect();
+        let result = mail::load_accounts(&live.store, &live.accounts, &account, self.inbox.account_filter.as_deref(), view, live.limit, now(), pins, self.inbox.group);
+        match result {
             Ok(snap) => {
                 live.stale = false;
+                live.more = snap.more;
                 self.reading_dirty = true;
                 let due = snap.next_due;
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
@@ -383,8 +426,9 @@ impl MainWindow {
                             self.notify("Trash emptied", cx);
                         }
                         (Op::EmptyTrash(_), Some(e)) => self.notify(format!("Could not empty Trash: {e}"), cx),
-                        (Op::Undo(id), None) => {
-                            if let Some(mail) = self.inbox.mail.get_mut(id) {
+                        (Op::Undo(store), None) => {
+                            if let Some(&id) = self.inbox.by_store.get(&store) {
+                                let mail = &mut self.inbox.mail[id];
                                 if let (Some(old), mail::Place::Folder(folder)) = (mail.store, &mail.folder) {
                                     if matches!(live.store.message_summary(old), Err(lagom_core::Error::NotFound)) {
                                         if let Ok(Some(new)) = live.store.find_message(*folder, &mail.message_id) {
@@ -408,10 +452,12 @@ impl MainWindow {
                             }
                             self.notify(format!("Could not change read status: {e}"), cx);
                         }
-                        (Op::Move(id), Some(e)) => {
-                            self.inbox.back(id);
-                            if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
-                                self.come_back(what, id, ix, false, cx);
+                        (Op::Move(store), Some(e)) => {
+                            if let Some(&id) = self.inbox.by_store.get(&store) {
+                                self.inbox.back(id);
+                                if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
+                                    self.come_back(what, id, ix, false, cx);
+                                }
                             }
                             self.notify(format!("Not moved: {e}"), cx);
                         }
@@ -453,13 +499,16 @@ impl MainWindow {
         if let Some(id) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.task_target.take()) {
             self.open_task_mail(id, cx);
         }
+        if let Some(store) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.move_target.take()) {
+            self.move_message(store, window, cx);
+        }
         self.notify_mail(new_mail, window, cx);
         cx.notify();
     }
 
     pub(super) fn pending_moves(&self) -> HashSet<i64> {
         self.live.iter().flat_map(|live| live.ops.values()).filter_map(|op| match op {
-            Op::Move(id) => self.inbox.mail.get(*id).and_then(|m| m.store),
+            Op::Move(store) => Some(*store),
             _ => None,
         }).collect()
     }
@@ -561,15 +610,18 @@ impl MainWindow {
     pub(super) fn worker_gone(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
+        live.move_target = None;
         let mut ops: Vec<_> = live.ops.drain().collect();
         ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
         for (op, action) in ops {
             match action {
-                Op::Move(id) => {
-                    self.inbox.back(id);
-                    if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
-                        self.come_back(what, id, ix, false, cx);
+                Op::Move(store) => {
+                    if let Some(&id) = self.inbox.by_store.get(&store) {
+                        self.inbox.back(id);
+                        if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
+                            self.come_back(what, id, ix, false, cx);
+                        }
                     }
                 }
                 Op::Read { account, store } => {
@@ -585,7 +637,8 @@ impl MainWindow {
     }
 
     /// The worker half of an optimistic move.
-    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen, cx: &mut Context<Self>) -> bool {
+    pub(super) fn server(&mut self, what: Move, id: usize, when: LaterWhen,
+        destinations: &mut HashMap<String, Vec<lagom_core::store::Folder>>, cx: &mut Context<Self>) -> bool {
         let Some(store) = self.inbox.mail[id].store else { return true };
         let Some(live) = &mut self.live else { return true };
         if let Move::Read(seen) = what {
@@ -596,19 +649,34 @@ impl MainWindow {
             if !sent { self.worker_gone(cx); }
             return sent;
         }
-        let store_of = |kind| self.inbox.find_kind(kind).and_then(|f| self.inbox.folders[f].store).map(mail::Place::Folder);
+        let account = &self.inbox.mail[id].account;
+        if !destinations.contains_key(account) {
+            match live.store.folder_metadata(account) {
+                Ok(folders) => { destinations.insert(account.clone(), folders); }
+                Err(e) => {
+                    self.inbox.revert(id, None);
+                    self.notify(format!("Could not read destination: {e}"), cx);
+                    return false;
+                }
+            }
+        }
+        let folders = &destinations[account];
+        let store_of = |role| folders.iter().find(|f| f.role == role).map(|f| mail::Place::Folder(f.id));
         let (act, target) = match what {
             Move::Read(_) => unreachable!("handled above"),
             Move::Inbox => {
-                let inbox = live.account().and_then(|a| live.store.folders(&a.id, now()).ok())
-                    .and_then(|fs| fs.into_iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox));
-                (Act::Inbox, inbox.map(|f| mail::Place::Folder(f.id)))
+                (Act::Inbox, store_of(lagom_core::store::FolderRole::Inbox))
             }
-            Move::Done => (Act::Archive, store_of(Kind::Done)),
-            Move::Delete => (Act::Trash, store_of(Kind::Trash)),
+            Move::Done => (Act::Archive, store_of(lagom_core::store::FolderRole::Archive)),
+            Move::Delete => (Act::Trash, store_of(lagom_core::store::FolderRole::Trash)),
             Move::Later => (Act::Snooze(Some(when.at(chrono::Local::now()).timestamp())), None),
             Move::Folder(f) => match self.inbox.folders[f].store {
-                Some(folder) => (Act::Move(folder), Some(mail::Place::Folder(folder))),
+                Some(folder) if folders.iter().any(|f| f.id == folder) => (Act::Move(folder), Some(mail::Place::Folder(folder))),
+                Some(_) => {
+                    self.inbox.revert(id, None);
+                    self.notify("Choose a folder in the message's account", cx);
+                    return false;
+                }
                 None => {
                     let name = self.inbox.folders[f].full.clone();
                     (Act::NewFolder(name.clone()), Some(mail::Place::New(name)))
@@ -617,7 +685,7 @@ impl MainWindow {
         };
         self.inbox.left(id, target);
         self.inbox.mail[id].snoozed_until = match act { Act::Snooze(until) => until, _ => None };
-        let op = live.op(Op::Move(id));
+        let op = live.op(Op::Move(store));
         if let Some(history) = self.inbox.history.iter_mut().rev().find(|h| h.1 == id) { history.4 = Some(op); }
         let sent = live.bridge.send(Cmd::Op { op, id: store, act });
         if !sent { self.worker_gone(cx); }
@@ -649,14 +717,14 @@ impl MainWindow {
             },
         };
         let Some(live) = &mut self.live else { return };
-        let op = live.op(Op::Undo(id));
+        let op = live.op(Op::Undo(store));
         if !live.bridge.send(Cmd::Op { op, id: store, act }) {
             self.worker_gone(cx);
             return;
         }
         if what != Move::Later {
             if let Some(until) = self.inbox.mail[id].snoozed_until {
-                let op = live.op(Op::Undo(id));
+                let op = live.op(Op::Undo(store));
                 if !live.bridge.send(Cmd::Op { op, id: store, act: Act::Snooze(Some(until)) }) { self.worker_gone(cx); }
             }
         }
@@ -743,10 +811,7 @@ impl MainWindow {
         }
         // Reading a filtered list must not consume the next unread row on every reload.
         if mark_read && !self.inbox.unread_only && !self.inbox.keep_unread.contains(&id) && self.inbox.mail[id].unread && matches!(self.page, Page::Mail) {
-            self.inbox.mail[id].unread = false;
-            if let Some(f) = self.inbox.open.filter(|&f| self.inbox.folders[f].store == match self.inbox.mail[id].folder { mail::Place::Folder(id) => Some(id), _ => None }) {
-                self.inbox.folders[f].unread = self.inbox.folders[f].unread.saturating_sub(1);
-            }
+            self.inbox.set_unread(id, false);
             live.seen.insert(store);
             // A stopped worker shows up through the event channel; nothing waits on this.
             let _ = live.bridge.send(Cmd::MarkSeen(store));
@@ -755,8 +820,7 @@ impl MainWindow {
     }
 
     pub(super) fn has_more(&self) -> bool {
-        let loaded = if self.inbox.group { self.inbox.members.len() } else { self.inbox.raw_list().len() };
-        self.live.as_ref().is_some_and(|live| loaded as u32 >= live.limit)
+        self.live.as_ref().is_some_and(|live| live.more)
     }
 
     pub(super) fn load_more(&mut self, cx: &mut Context<Self>) {
@@ -813,16 +877,23 @@ impl MainWindow {
     }
 
     pub(super) fn switch_account(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(live) = &mut self.live else { return };
-        if ix >= live.accounts.len() {
+        if self.live.is_none() {
+            if let Some(account) = mail::demo_accounts().get(ix) {
+                self.inbox.account_filter = Some(account.id.clone());
+                self.open_box(None, cx);
+            }
             return;
         }
+        let live = self.live.as_mut().unwrap();
+        if ix >= live.accounts.len() { return; }
+        let account = live.accounts[ix].id.clone();
         live.current = ix;
         self.folder_name = None;
         live.limit = PAGE;
         live.pin = None;
         // Folder indices belong to one account; history does too.
         self.inbox = Inbox::live();
+        self.inbox.account_filter = Some(account);
         self.reading_thread = None;
         self.close_popouts(None, cx);
         self.clear_motion();
@@ -842,6 +913,11 @@ impl MainWindow {
         Some(format!("{} · {}", short_name(live.account()?), self.sync_state()?).into())
     }
 
+    pub(super) fn sync_icon(&self) -> &'static str {
+        let Some(live) = &self.live else { return "icons/cloud-synced.svg" };
+        live.account().and_then(|a| live.sync.get(&a.id)).map_or("icons/cloud-syncing.svg", polish::sync_icon)
+    }
+
     /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
     pub(super) fn sync_state(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
@@ -859,15 +935,6 @@ impl MainWindow {
         Some(state.into())
     }
 
-    pub(super) fn sync_icon(&self) -> &'static str {
-        let Some(live) = &self.live else { return "icons/cloud.svg" };
-        match live.account().and_then(|a| live.sync.get(&a.id)) {
-            Some(SyncState::Failed(_) | SyncState::ReauthRequired) => "icons/cloud-off.svg",
-            Some(SyncState::Synced(_)) => "icons/cloud.svg",
-            _ => "icons/sync.svg",
-        }
-    }
-
     pub(super) fn reauth_control(&self, ix: usize, slot: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let live = self.live.as_ref()?;
         let account = live.accounts.get(ix)?;
@@ -878,11 +945,9 @@ impl MainWindow {
         };
         let id = account.id.clone();
         let t = &self.theme;
-        Some(pressable(div().id((slot, ix)), t, false)
+        Some(icon_button(t, slot, if signing_in { "icons/cancel.svg" } else { "icons/access.svg" },
+            if signing_in { "Cancel sign-in" } else { "Sign in again" }).id((slot, ix))
             .debug_selector(move || format!("{slot}-{ix}"))
-            .px(px(10.)).py(px(4.)).rounded(px(radius::CONTROL))
-            .text_size(px(size::SMALL)).text_color(t.ink2)
-            .child(if signing_in { "Signing in… Cancel" } else { "Sign in again" })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.reauthenticate(&id, cx);
@@ -904,6 +969,10 @@ impl MainWindow {
     pub(super) fn open_found(&mut self, store: i64, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
         let Ok(m) = live.store.message(store) else { return self.notify("That message is gone", cx) };
+        if live.account().is_none_or(|a| a.id != m.summary.account) {
+            if let Some(ix) = live.accounts.iter().position(|a| a.id == m.summary.account) { self.switch_account(ix, cx); }
+        }
+        self.inbox.account_filter = Some(m.summary.account.clone());
         let list = if m.summary.snoozed_until.is_some_and(|t| t > now()) {
             self.inbox.find_kind(Kind::Later)
         } else {
@@ -916,6 +985,23 @@ impl MainWindow {
             (live.pin, live.want) = (Some(store), Some(store));
         }
         self.reload(cx);
+    }
+
+    pub(super) fn move_message(&mut self, store: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else { return };
+        if !live.ops.is_empty() {
+            live.move_target = Some(store);
+            return;
+        }
+        if live.store.message_summary(store).is_err() {
+            self.notify("That message is no longer available locally", cx);
+            return;
+        }
+        self.open_found(store, cx);
+        if self.live.as_ref().is_some_and(|l| !l.stale && l.want.is_none())
+            && self.inbox.single().is_some_and(|id| self.inbox.members(id).iter().any(|&id| self.inbox.mail[id].store == Some(store))) {
+            self.open_palette("move ", window, cx);
+        }
     }
 
     fn select_found(&mut self, store: i64, cx: &mut Context<Self>) {
@@ -1967,6 +2053,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mail_sync_status_has_distinct_embedded_icons(cx: &mut TestAppContext) {
+        use gpui::AssetSource;
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, _| {
+            assert_eq!(v.sync_icon(), "icons/cloud-syncing.svg");
+            for (state, path) in [(SyncState::Synced(0), "icons/cloud-synced.svg"),
+                (SyncState::Failed("fixture".into()), "icons/cloud-failed.svg"),
+                (SyncState::ReauthRequired, "icons/cloud-failed.svg"),
+                (SyncState::SigningIn, "icons/cloud-syncing.svg"), (SyncState::Syncing, "icons/cloud-syncing.svg")] {
+                let live = v.live.as_mut().unwrap();
+                live.sync.insert(live.accounts[0].id.clone(), state);
+                assert_eq!(v.sync_icon(), path);
+                assert!(crate::Assets.load(path).unwrap().is_some());
+            }
+        });
+    }
+
+    #[gpui::test]
     fn unread_pages_remain_reachable_after_filter_hides_loaded_rows(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         view.update(cx, |v, cx| {
@@ -2696,10 +2800,12 @@ mod tests {
             pending: Default::default(),
             stale: false,
             limit: PAGE,
+            more: false,
             pin: None,
             want: None,
             notification_target: None,
             task_target: None,
+            move_target: None,
             seen: HashSet::new(),
             failed: Vec::new(),
             due: None,
@@ -3257,7 +3363,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::ReauthRequired(account.clone()), Event::Sync(account.clone(), SyncState::Failed("expired".into()))], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "Sign in again");
-            assert_eq!(v.sync_icon(), "icons/cloud-off.svg");
+            assert_eq!(v.sync_icon(), "icons/cloud-failed.svg");
         });
         cx.run_until_parked();
         let at = cx.debug_bounds("account-reauth-0").unwrap().center();
@@ -3266,7 +3372,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::Sync(account.clone(), SyncState::SigningIn), Event::Sync(account.clone(), SyncState::Synced(0))], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "Signing in…");
-            assert_eq!(v.sync_icon(), "icons/sync.svg");
+            assert_eq!(v.sync_icon(), "icons/cloud-syncing.svg");
         });
         cx.run_until_parked();
         let at = cx.debug_bounds("account-reauth-0").unwrap().center();
@@ -3275,7 +3381,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.on_events(vec![Event::ReauthRequired(account.clone()), Event::Reauthenticated { account: account.clone(), result: Err("Sign in with the same email address as this account".into()) }], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "Sign in again");
-            assert_eq!(v.sync_icon(), "icons/cloud-off.svg");
+            assert_eq!(v.sync_icon(), "icons/cloud-failed.svg");
             assert!(v.toast.as_ref().unwrap().0.contains("same email address"));
         });
         cx.run_until_parked();
@@ -3852,6 +3958,76 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_unified_navigation_visits_every_message_in_date_order(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        for group in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            let expected = view.update(cx, |v, cx| {
+                let live = v.live.as_ref().unwrap();
+                let mut ids = Vec::new();
+                for (ix, account) in mail::demo_accounts().iter().enumerate() {
+                    live.store.save_account(account).unwrap();
+                    let folder = live.store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+                    let count = if ix == 0 { 400 } else { 200 };
+                    for uid in 1..=count {
+                        let summary = MessageSummary { account: account.id.clone(), folder, uid,
+                            date: if ix == 0 { 1000 + uid as i64 } else { uid as i64 }, seen: true, ..Default::default() };
+                        ids.push((summary.date, live.store.save_message(&Message { summary, ..Default::default() }).unwrap()));
+                    }
+                }
+                ids.sort_by_key(|row| std::cmp::Reverse(*row));
+                v.panes.group_conversations = group;
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                ids.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+            });
+            for (ix, id) in expected.iter().enumerate() {
+                if ix > 0 { cx.simulate_keystrokes("j"); }
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(*id), "row {ix}, grouped={group}");
+                });
+            }
+            assert!(!view.read_with(cx, |v, _| v.has_more()));
+        }
+    }
+
+    #[gpui::test]
+    fn review_later_navigation_visits_every_message_in_date_order(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        for group in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            let expected = view.update(cx, |v, cx| {
+                let live = v.live.as_ref().unwrap();
+                let account = &live.accounts[0];
+                live.store.save_account(account).unwrap();
+                let folder = live.store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+                let mut ids = Vec::new();
+                let now = chrono::Local::now().timestamp();
+                for uid in 1..=400 {
+                    let summary = MessageSummary { account: account.id.clone(), folder, uid,
+                        date: uid as i64 / 2, seen: true, ..Default::default() };
+                    let id = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
+                    live.store.snooze(id, Some(now + 3600 + uid as i64)).unwrap();
+                    ids.push(id);
+                }
+                ids.reverse();
+                v.panes.group_conversations = group;
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.open_box(v.inbox.find_kind(Kind::Later), cx);
+                ids
+            });
+            for (ix, id) in expected.iter().enumerate() {
+                if ix > 0 { cx.simulate_keystrokes("j"); }
+                view.read_with(cx, |v, _| {
+                    assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(*id), "Later row {ix}, grouped={group}");
+                });
+            }
+            assert!(!view.read_with(cx, |v, _| v.has_more()));
+        }
+    }
+
+    #[gpui::test]
     fn virtual_list_navigation_loads_the_next_page(cx: &mut TestAppContext) {
         use lagom_core::store::{FolderRole, Message, MessageSummary};
         let (view, cx, _rx) = window(cx);
@@ -4030,6 +4206,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_popout_menu_keeps_unsaved_and_failed_drafts(cx: &mut TestAppContext) {
+        for (action, failed_save) in [("Reply all", false), ("Forward", false), ("Reply all", true), ("Forward", true)] {
+            let (view, cx, _rx) = window(cx);
+            cx.simulate_keystrokes("secondary-o j r");
+            cx.simulate_input("Unsaved edits");
+            let (draft, outgoing, stored, popout) = view.read_with(cx, |v, cx| {
+                let draft = v.compose.as_ref().unwrap();
+                (draft.entity_id(), draft.read(cx).outgoing(cx), v.live.as_ref().unwrap().store.drafts().unwrap(), v.popouts[0].1)
+            });
+            assert_ne!(stored[0].text, outgoing.text);
+            let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+            let writer = rusqlite::Connection::open(store.path()).unwrap();
+            if failed_save {
+                writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+                view.update(cx, |v, cx| assert!(!store.with_short_lock_wait(|_| {
+                    Ok(v.compose.as_ref().unwrap().update(cx, |c, cx| c.save(cx)))
+                }).unwrap()));
+            }
+            let mut popup = VisualTestContext::from_window(popout.into(), cx);
+            popup.run_until_parked();
+            let at = popup.debug_bounds("message-menu-0").unwrap().center();
+            popup.simulate_click(at, Default::default());
+            popup.run_until_parked();
+            let at = popup.debug_bounds(format!("menu-{action}").leak()).unwrap().center();
+            popup.simulate_click(at, Default::default());
+            view.read_with(cx, |v, cx| {
+                let current = v.compose.as_ref().unwrap();
+                assert_eq!(current.entity_id(), draft, "{action} replaced the open composer");
+                assert_eq!(current.read(cx).outgoing(cx), outgoing);
+                assert_eq!(v.live.as_ref().unwrap().store.drafts().unwrap(), stored);
+            });
+            if failed_save {
+                writer.execute_batch("ROLLBACK").unwrap();
+                view.update(cx, |v, cx| assert!(v.compose.as_ref().unwrap().update(cx, |c, cx| c.save(cx))));
+            } else {
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+            }
+            assert_eq!(store.drafts().unwrap()[0].text, outgoing.text);
+        }
+    }
+
+    #[gpui::test]
     fn autosave_waits_for_a_pause_and_keeps_the_latest_edit(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         cx.simulate_keystrokes("r");
@@ -4101,4 +4320,265 @@ mod tests {
         }));
         assert!(!view.update(cx, |v, cx| v.hold_exit(cx)));
     }
+    fn review_accounts(v: &mut MainWindow, cx: &mut Context<MainWindow>) -> (i64, i64) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let first = incoming(v, 1).id;
+        incoming(v, 2);
+        incoming(v, 3);
+        let live = v.live.as_ref().unwrap();
+        live.store.save_folder(&live.accounts[0].id, "Personal files", None, FolderRole::Other).unwrap();
+        let mut other = live.accounts[0].clone();
+        other.id = "work-review".into();
+        other.email = "work@example.test".into();
+        live.store.save_account(&other).unwrap();
+        let folder = live.store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        live.store.save_folder(&other.id, "Work files", None, FolderRole::Other).unwrap();
+        let second = live.store.save_message(&Message { summary: MessageSummary {
+            account: other.id, folder, uid: 1, date: 10, ..Default::default()
+        }, ..Default::default() }).unwrap();
+        v.panes.group_conversations = false;
+        v.inbox = Inbox::live();
+        v.reload(cx);
+        (first, second)
+    }
+
+    #[gpui::test]
+    fn review_move_failure_after_account_switch_keeps_other_mail(cx: &mut TestAppContext) {
+        for worker_gone in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            let other = view.update(cx, |v, cx| {
+                let (first, other) = review_accounts(v, cx);
+                v.open_found(first, cx);
+                v.act(Move::Done, cx);
+                v.switch_account(1, cx);
+                other
+            });
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
+            view.update_in(cx, |v, window, cx| {
+                if worker_gone { v.worker_gone(cx); v.reload(cx); }
+                else { v.on_events(vec![Event::Op { op, error: Some("fixture refusal".into()) }], window, cx); }
+                assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(other));
+                assert!(v.inbox.history.is_empty());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn review_message_move_waits_for_the_requested_message(cx: &mut TestAppContext) {
+        for cross_account in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            let target = view.update_in(cx, |v, window, cx| {
+                let (first, other) = review_accounts(v, cx);
+                let target = if cross_account { other } else { first };
+                let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store != Some(target)
+                    && v.inbox.mail[id].account != "work-review").unwrap();
+                v.inbox.select(row);
+                v.act(Move::Done, cx);
+                let id = v.inbox.by_store[&target];
+                v.message_action(id, polish::MessageAction::Move, window, cx);
+                assert!(v.palette.is_none(), "Move must wait for its requested selection");
+                target
+            });
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
+            view.update_in(cx, |v, window, cx| {
+                v.on_events(vec![Event::Op { op, error: Some("fixture refusal".into()) }], window, cx);
+                assert!(v.palette.is_some());
+                assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(target));
+            });
+            cx.simulate_keystrokes("enter");
+            assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd|
+                matches!(cmd, Cmd::Op { id, act: Act::Move(_), .. } if id == target)));
+        }
+    }
+
+    #[gpui::test]
+    fn review_deferred_move_does_not_replace_a_missing_target(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let (target, _) = review_accounts(v, cx);
+            v.inbox.select(0);
+            v.act(Move::Done, cx);
+            let id = v.inbox.by_store[&target];
+            v.message_action(id, polish::MessageAction::Move, window, cx);
+            assert!(v.palette.is_none());
+            v.live.as_ref().unwrap().store.delete_message(target).unwrap();
+            let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
+            v.on_events(vec![Event::Op { op, error: None }], window, cx);
+            assert!(v.palette.is_none());
+            assert!(v.toast.as_ref().unwrap().0.contains("no longer available"));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[gpui::test]
+    fn review_generic_palette_prepares_move_on_entry(cx: &mut TestAppContext) {
+        for typed in [false, true] {
+            let (view, cx, mut rx) = window(cx);
+            let target = view.update_in(cx, |v, window, cx| {
+                let (_, target) = review_accounts(v, cx);
+                let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(target)).unwrap();
+                v.inbox.select(row);
+                v.open_palette("", window, cx);
+                target
+            });
+            if typed { cx.simulate_input("MOVE Work files"); }
+            else { cx.simulate_keystrokes("down down down down down enter"); }
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, "work-review");
+                assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(target));
+            });
+            cx.simulate_keystrokes("enter");
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            view.read_with(cx, |v, _| assert!(commands.iter().any(|cmd| match cmd {
+                Cmd::Op { id, act: Act::Move(folder), .. } => *id == target
+                    && v.live.as_ref().unwrap().store.folder(*folder).unwrap().account == "work-review",
+                _ => false,
+            })));
+        }
+    }
+
+    #[gpui::test]
+    fn review_bulk_destinations_do_not_read_messages(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            review_accounts(v, cx);
+            for uid in 4..=200 { incoming(v, uid); }
+            v.reload(cx);
+            v.load_more(cx);
+            let live = v.live.as_ref().unwrap();
+            for account in &live.accounts {
+                live.store.save_folder(&account.id, "Archive", None, lagom_core::store::FolderRole::Archive).unwrap();
+            }
+            let fixture = rusqlite::Connection::open(live.store.path()).unwrap();
+            // Destination routing must work without reading or counting any message rows.
+            fixture.execute_batch("ALTER TABLE messages RENAME TO fixture_messages;").unwrap();
+            v.inbox.select_all();
+            v.act(Move::Done, cx);
+            assert_eq!(v.live.as_ref().unwrap().ops.len(), 201);
+            for mail in &v.inbox.mail {
+                let mail::Place::Folder(folder) = mail.folder else { panic!("missing destination") };
+                let destination = v.live.as_ref().unwrap().store.folder(folder).unwrap();
+                assert_eq!(destination.account, mail.account);
+                assert_eq!(destination.role, lagom_core::store::FolderRole::Archive);
+            }
+        });
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|cmd| matches!(cmd, Cmd::Op { act: Act::Archive, .. })).count(), 201);
+    }
+
+    #[gpui::test]
+    fn unified_actions_keep_message_account_and_single_account_hides_controls(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, mut rx) = window(cx);
+        view.update(cx, |v, cx| {
+            incoming(v, 1);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+        });
+        let live = view.update(cx, |v, _| v.live.take().unwrap());
+        let (view, cx) = cx.cx.add_window_view(|window, cx| {
+            let mut v = MainWindow::with_screen(true, "inbox", window, cx);
+            v.live = Some(live);
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Inbox-account-0").is_none());
+        assert!(cx.debug_bounds("account-bar-0").is_none());
+        let (message, source, archive, account) = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let mut account = live.accounts[0].clone();
+            account.id = "work-fixture".into();
+            account.email = "work@example.com".into();
+            live.store.save_account(&account).unwrap();
+            let source = live.store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            let archive = live.store.save_folder(&account.id, "Archive", None, FolderRole::Archive).unwrap();
+            let message = live.store.save_message(&Message { summary: MessageSummary {
+                account: account.id.clone(), folder: source, uid: 1, date: 10, from_address: "sender@example.com".into(),
+                ..Default::default()
+            }, body_text: "Fixture".into(), body_html: None }).unwrap();
+            v.reload(cx);
+            assert_eq!(v.inbox.count(), 2);
+            assert_eq!(v.inbox.list().len(), 2);
+            let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(message)).unwrap();
+            v.inbox.select(row);
+            assert_ne!(v.live.as_ref().unwrap().account().unwrap().id, account.id);
+            (message, source, archive, account.id)
+        });
+        view.update(cx, |v, cx| {
+            let selected = v.inbox.single().unwrap();
+            v.act(Move::Done, cx);
+            assert_eq!(v.inbox.mail[selected].folder, mail::Place::Folder(archive));
+            assert_eq!(v.inbox.mail[selected].account, account);
+            v.undo(cx);
+            assert_eq!(v.inbox.mail[selected].folder, mail::Place::Folder(source));
+            assert_eq!(v.inbox.current(), Some(selected));
+        });
+        let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, act: Act::Archive, .. } if *id == message)));
+        assert!(commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, act: Act::Move(folder), .. } if *id == message && *folder == source)));
+    }
+
+    #[gpui::test]
+    fn unified_move_palette_uses_selected_account_and_rejects_mixed_selection(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            let mut other = live.accounts[0].clone();
+            other.id = "other-fixture".into();
+            other.email = "other@example.com".into();
+            live.store.save_account(&other).unwrap();
+            let folder = live.store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            live.store.save_folder(&other.id, "Work files", None, FolderRole::Other).unwrap();
+            let message = live.store.save_message(&Message { summary: MessageSummary {
+                account: other.id.clone(), folder, uid: 1, date: 10, ..Default::default()
+            }, body_text: "Fixture".into(), body_html: None }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            assert!(!v.prepare_move(cx));
+            assert!(v.palette.is_none());
+            let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(message)).unwrap();
+            v.inbox.select(row);
+            assert!(v.prepare_move(cx));
+            assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, other.id);
+            assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(message));
+            assert!(v.inbox.folders.iter().any(|f| f.full == "Work files" && !f.gone));
+        });
+    }
+
+    #[gpui::test]
+    fn unified_popout_action_rebinds_store_id_after_account_switch(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            incoming(v, 1);
+            let live = v.live.as_ref().unwrap();
+            let personal = live.accounts[0].id.clone();
+            let empty = live.store.save_folder(&personal, "Empty", None, FolderRole::Other).unwrap();
+            let mut other = live.accounts[0].clone();
+            other.id = "other-fixture".into();
+            live.store.save_account(&other).unwrap();
+            let inbox = live.store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            live.store.save_folder(&other.id, "Archive", None, FolderRole::Archive).unwrap();
+            let message = live.store.save_message(&Message { summary: MessageSummary {
+                account: other.id.clone(), folder: inbox, uid: 1, date: 10, ..Default::default()
+            }, body_text: "Fixture".into(), body_html: None }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            let id = v.inbox.by_store[&message];
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(empty)).unwrap();
+            v.open_box(Some(folder), cx);
+            assert!(!v.inbox.raw_list().contains(&id));
+            v.act_on(id, Move::Done, window, cx);
+            assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, other.id);
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert!(commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, act: Act::Archive, .. } if *id == message)));
+            assert!(!commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, .. } if *id != message)));
+        });
+    }
+
 }

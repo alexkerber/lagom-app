@@ -81,7 +81,7 @@ fn css(c: Rgba) -> String {
 /// sent. The mail's own `<html>`, `<head>` and `<body>` merge into this document, as in a
 /// browser; its CSS may restyle anything here, as nothing here is trusted UI.
 pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
-    let (bg, ink, accent) = (css(t.bg), css(t.ink), css(t.accent));
+    let (bg, ink, accent) = (css(t.raised), css(t.ink), css(t.accent));
     let scheme = if t.dark { "dark" } else { "light" };
     let base = format!("html{{background:{bg}}}body{{margin:0;font:14px/1.4 -apple-system,system-ui,\"Segoe UI\",sans-serif;overflow-wrap:break-word}}");
     // Mail that sets its own colours assumes white paper: in dark mode a rounded white card.
@@ -106,6 +106,17 @@ pub(super) enum Msg {
     Escape,
     NewTask,
     MailAction(Run),
+    Hints { over: bool, command: bool, shift: bool },
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn hint_event(state: &str) -> Option<Msg> {
+    match state.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [over @ ("0" | "1"), command @ ("0" | "1"), shift @ ("0" | "1")] => Some(Msg::Hints {
+            over: *over == "1", command: *command == "1", shift: *shift == "1",
+        }),
+        _ => None,
+    }
 }
 
 /// Runs in every document before the mail, as an app script: the CSP and the page-script switch
@@ -113,11 +124,20 @@ pub(super) enum Msg {
 /// so the link comes from the event path.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const BRIDGE: &str = r#"
+let overMail = false;
+const hints = e => {
+  if (e.isTrusted) window.ipc.postMessage(`hints ${Number(overMail)} ${Number(!!e.metaKey)} ${Number(!!e.shiftKey)}`);
+};
+addEventListener('mouseover', e => { overMail = true; hints(e); }, true);
+addEventListener('mouseout', e => { if (!e.relatedTarget) { overMail = false; hints(e); } }, true);
+addEventListener('keyup', hints, true);
+addEventListener('blur', e => { overMail = false; hints(e); });
 addEventListener('click', e => {
   const a = e.composedPath().find(n => (n.tagName === 'A' || n.tagName === 'AREA') && typeof n.href === 'string' && n.href);
   if (a) { e.preventDefault(); if (e.isTrusted) window.ipc.postMessage('open ' + a.href); }
 }, true);
 addEventListener('keydown', e => {
+  hints(e);
   if (e.key === 'Escape') window.ipc.postMessage('escape');
   if (!e.isTrusted || e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input,textarea,[contenteditable]')) return;
   const key = e.key.toLowerCase();
@@ -164,9 +184,13 @@ pub(super) trait WebHost: 'static + Sized {
     fn keys(&self) -> FocusHandle;
     fn new_task(&mut self, cx: &mut Context<Self>);
     fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>);
+    fn hints(&mut self, over: bool, command: bool, shift: bool, cx: &mut Context<Self>);
 }
 
 impl WebHost for MainWindow {
+    fn hints(&mut self, over: bool, command: bool, shift: bool, cx: &mut Context<Self>) {
+        self.update_hints(over, gpui::Modifiers { platform: command, shift, ..Default::default() }, cx);
+    }
     fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.inbox.current() { self.mail_action_on(id, action, window, cx); }
     }
@@ -188,7 +212,7 @@ impl MainWindow {
     pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
         let want = self.inbox.single().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
-        let overlay = self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
+        let overlay = self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
         self.web.frame(want, &self.theme, overlay, window, cx);
         let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());
         for body in self.expanded.values() {
@@ -306,6 +330,7 @@ impl Web {
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     fn event<T: WebHost>(host: &mut T, msg: Msg, window: &mut Window, cx: &mut Context<T>) {
         match msg {
+            Msg::Hints { over, command, shift } => host.hints(over, command, shift, cx),
             Msg::MailAction(action) => {
                 host.web().unfocus();
                 window.focus(&host.keys());
@@ -356,6 +381,7 @@ impl Web {
                 let body = req.body();
                 let msg = match body.split_once(' ') {
                     Some(("open", url)) => Msg::Open(url.to_string()),
+                    Some(("hints", state)) => match hint_event(state) { Some(msg) => msg, None => return },
                     _ if body == "escape" => Msg::Escape,
                     _ if body == "task" => Msg::NewTask,
                     _ if body == "forward" => Msg::MailAction(Run::Forward),
@@ -389,6 +415,27 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[gpui::test]
+    fn html_slot_stays_inside_the_reading_card(cx: &mut gpui::TestAppContext) {
+        if !SUPPORTED { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "html-simple", window, cx));
+        cx.run_until_parked();
+        let card = cx.debug_bounds("message-card").unwrap();
+        let subject = cx.debug_bounds("reading-subject").unwrap();
+        let bounds = view.read_with(cx, |v, _| v.web.place.get().unwrap().0);
+        assert!(subject.bottom() <= card.top());
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(bounds.left() > card.left() && bounds.right() < card.right());
+        assert!(bounds.top() > card.top() && bounds.bottom() < card.bottom());
+    }
+
+    #[test]
+    fn html_modifier_messages_are_bounded_flags() {
+        assert!(matches!(hint_event("1 1 0"), Some(Msg::Hints { over: true, command: true, shift: false })));
+        assert!(matches!(hint_event("0 0 0"), Some(Msg::Hints { over: false, command: false, shift: false })));
+        for invalid in ["", "1 0", "1 1 1 0", "1 NaN 0", "2 0 0", "1 true false"] { assert!(hint_event(invalid).is_none()); }
+    }
 
     #[gpui::test]
     fn html_mail_actions_use_compose_and_unread_paths(cx: &mut gpui::TestAppContext) {

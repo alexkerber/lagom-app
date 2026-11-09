@@ -198,7 +198,11 @@ mod tests {
         let screens = smoke.lines().find_map(|line| line.strip_prefix("screens='")).unwrap().trim_end_matches('\'');
         for screen in ["home", "inbox", "calendar", "todo"] {
             assert!(screens.split_whitespace().any(|s| s == screen));
-            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, screen, window, cx));
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                let mut view = MainWindow::with_screen(true, screen, window, cx);
+                view.mailbox_expanded = [true; 3];
+                view
+            });
             cx.run_until_parked();
             view.read_with(cx, |v, _| {
                 assert!(v.live.is_none() && v.preferences_path.is_none());
@@ -209,6 +213,12 @@ mod tests {
             assert!(cx.debug_bounds("Show your Google Calendar").is_none());
             assert_eq!(cx.debug_bounds("mail-sidebar").is_some(), screen == "inbox");
             assert_eq!(cx.debug_bounds("nav-Inbox").is_some(), screen == "inbox");
+            for mailbox in ["Inbox", "Sent", "Done"] {
+                for account in 0..2 {
+                    assert_eq!(cx.debug_bounds(format!("{mailbox}-account-{account}").leak()).is_some(), screen == "inbox");
+                }
+            }
+            assert!(cx.debug_bounds("mail-unread-badge").is_some());
         }
     }
 

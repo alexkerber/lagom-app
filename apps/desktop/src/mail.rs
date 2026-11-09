@@ -94,6 +94,28 @@ pub fn when(unix: i64, now: DateTime<Local>) -> String {
     }
 }
 
+pub fn date_group(unix: i64, today: chrono::NaiveDate) -> String {
+    let Some(date) = Local.timestamp_opt(unix, 0).single().map(|t| t.date_naive()) else { return "Earlier".into() };
+    let days = (today - date).num_days();
+    match days {
+        ..=0 => "Today".into(),
+        1 => "Yesterday".into(),
+        _ if days <= today.weekday().num_days_from_monday() as i64 => date.format("%A").to_string(),
+        _ => "Earlier".into(),
+    }
+}
+
+pub fn reading_date(unix: i64, now: DateTime<Local>) -> String {
+    let Some(t) = Local.timestamp_opt(unix, 0).single() else { return String::new() };
+    let days = (now.date_naive() - t.date_naive()).num_days();
+    match days {
+        0 => format!("Today {}", t.format("%H:%M")),
+        1..=6 => format!("{} {}", when(unix, now), t.format("%H:%M")),
+        _ if t.year() == now.year() => t.format("%-d %b, %H:%M").to_string(),
+        _ => t.format("%-d %b %Y, %H:%M").to_string(),
+    }
+}
+
 pub fn full_date(unix: i64) -> String {
     Local.timestamp_opt(unix, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
@@ -210,10 +232,12 @@ pub fn recipients(field: &str) -> Vec<String> {
 }
 
 /// The list the UI shows, as the store has it now.
+#[derive(Clone, Copy)]
 pub enum View {
     Inbox,
     Trash,
     Folder(i64),
+    Role(lagom_core::store::FolderRole),
     Later,
 }
 
@@ -228,6 +252,8 @@ pub struct Snapshot {
     pub open: Vec<MessageSummary>,
     /// When the next message on Later comes back.
     pub next_due: Option<i64>,
+    pub account_unread: std::collections::HashMap<String, [usize; 3]>,
+    pub more: bool,
 }
 
 /// Bounded queries on indexed columns: a few ms for a 100 000-message store. Runs when the
@@ -238,6 +264,7 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
     let counts = store.counts(account, now)?;
     let inbox_id = folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Inbox).map(|f| f.id);
     let view = match view {
+        View::Role(role) => folders.iter().find(|f| f.role == role).map_or(View::Role(role), |f| View::Folder(f.id)),
         View::Trash => folders.iter().find(|f| f.role == lagom_core::store::FolderRole::Trash).map_or(View::Trash, |f| View::Folder(f.id)),
         view => view,
     };
@@ -246,7 +273,7 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
         None => Vec::new(),
     };
     let mut open = match view {
-        View::Inbox | View::Trash => Vec::new(),
+        View::Inbox | View::Trash | View::Role(_) => Vec::new(),
         View::Folder(id) => if group { store.list_conversations(account, Some(id), now, limit)? } else { store.list_messages(id, now, limit, 0)? },
         View::Later => if group { store.list_conversations(account, None, now, limit)? } else { store.later(account, now, limit, 0)? },
     };
@@ -274,8 +301,61 @@ pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: 
             loaded.extend(list[start..].iter().map(|m| m.id));
         }
     }
-    let next_due = store.later(account, now, 1, 0)?.first().and_then(|m| m.snoozed_until);
-    Ok(Snapshot { inbox, inbox_total: counts.inbox, later_total: counts.later, folders, open, next_due })
+    let next_due = store.next_snooze(account, now)?;
+    Ok(Snapshot { inbox, inbox_total: counts.inbox, later_total: counts.later, folders, open, next_due, account_unread: Default::default(), more: false })
+}
+
+/// System mailboxes merge bounded pages; custom folders stay with the current account.
+pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::account::Account], current: &str, filter: Option<&str>,
+    view: View, limit: u32, now: i64, pins: Vec<i64>, group: bool) -> lagom_core::Result<Snapshot> {
+    use lagom_core::store::FolderRole;
+    let mut result = load(store, current, view, limit.saturating_add(1), now, pins.iter().copied(), group)?;
+    let role = match view {
+        View::Inbox => Some(FolderRole::Inbox),
+        View::Role(role) => Some(role),
+        View::Folder(id) => result.folders.iter().find(|f| f.id == id)
+            .map(|f| f.role).filter(|r| matches!(r, FolderRole::Archive | FolderRole::Sent)),
+        _ => None,
+    };
+    for account in accounts {
+        let folders = store.folders(&account.id, now)?;
+        let unread = [FolderRole::Inbox, FolderRole::Archive, FolderRole::Sent].map(|role|
+            folders.iter().filter(|f| f.role == role).map(|f| f.unread as usize).sum());
+        result.account_unread.insert(account.id.clone(), unread);
+        if account.id == current { continue; }
+        let other_view = match role {
+            Some(FolderRole::Inbox) => View::Inbox,
+            Some(role) => View::Role(role),
+            None => View::Inbox,
+        };
+        let other = load(store, &account.id, other_view, limit.saturating_add(1), now, pins.iter().copied(), group)?;
+        result.next_due = result.next_due.into_iter().chain(other.next_due).min();
+        result.inbox.extend(other.inbox);
+        result.inbox_total += other.inbox_total;
+        if role.is_some() { result.open.extend(other.open); }
+    }
+    let inbox_more = page(&mut result.inbox, limit, filter, &pins, group);
+    let open_more = page(&mut result.open, limit, filter, &pins, group);
+    result.more = if matches!(view, View::Inbox) { inbox_more } else { open_more };
+    Ok(result)
+}
+
+fn page(rows: &mut Vec<MessageSummary>, limit: u32, filter: Option<&str>, pins: &[i64], group: bool) -> bool {
+    rows.retain(|m| filter.is_none_or(|account| m.account == account));
+    rows.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
+    let key = |m: &MessageSummary| (m.account.clone(), m.folder,
+        if group && !m.thread_id.is_empty() { m.thread_id.clone() } else { m.id.to_string() });
+    let mut seen = std::collections::HashSet::new();
+    let mut keep = std::collections::HashSet::new();
+    for m in rows.iter() {
+        let key = key(m);
+        if seen.insert(key.clone()) && seen.len() <= limit as usize { keep.insert(key); }
+    }
+    let more = seen.len() > limit as usize;
+    // A pinned member retains its entire conversation, even beyond the global page.
+    keep.extend(rows.iter().filter(|m| pins.contains(&m.id)).map(key));
+    rows.retain(|m| keep.contains(&key(m)));
+    more
 }
 
 struct Sample {
@@ -455,6 +535,145 @@ mod tests {
         for w in [LaterWhen::Evening, LaterWhen::Tomorrow, LaterWhen::NextWeek] {
             assert!(w.at(now) > now);
         }
+    }
+
+    #[test]
+    fn date_groups_follow_calendar_week_and_year_boundaries() {
+        let today = at(2026, 11, 6, 10, 0).date_naive();
+        for (date, label) in [(at(2026, 11, 7, 1, 0), "Today"), (at(2026, 11, 6, 1, 0), "Today"),
+            (at(2026, 11, 5, 1, 0), "Yesterday"), (at(2026, 11, 4, 1, 0), "Wednesday"),
+            (at(2026, 11, 2, 1, 0), "Monday"), (at(2026, 11, 1, 1, 0), "Earlier")] {
+            assert_eq!(date_group(date.timestamp(), today), label);
+        }
+        assert_eq!(date_group(at(2026, 12, 31, 23, 59).timestamp(), at(2027, 1, 1, 0, 1).date_naive()), "Yesterday");
+        assert_eq!(date_group(i64::MAX, today), "Earlier");
+    }
+
+    #[test]
+    fn review_unified_snooze_wakes_for_the_earliest_account() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-due-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("mail.sqlite3")).unwrap();
+        let accounts = demo_accounts();
+        let mut ids = Vec::new();
+        for account in &accounts {
+            store.save_account(account).unwrap();
+            let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            ids.push(store.save_message(&Message { summary: MessageSummary {
+                account: account.id.clone(), folder, uid: 1, ..Default::default()
+            }, ..Default::default() }).unwrap());
+        }
+        for personal_due in [None, Some(150), Some(250)] {
+            store.snooze(ids[0], personal_due).unwrap();
+            store.snooze(ids[1], Some(200)).unwrap();
+            let snap = load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 100, vec![], false).unwrap();
+            assert_eq!(snap.next_due, Some(personal_due.unwrap_or(200).min(200)));
+            assert!(!snap.inbox.iter().any(|m| m.id == ids[1]));
+            let awake = load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 200, vec![], false).unwrap();
+            assert!(awake.inbox.iter().any(|m| m.id == ids[1]));
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unified_pages_keep_account_identity_counts_roles_and_pins() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-unified-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("mail.sqlite3")).unwrap();
+        let accounts = demo_accounts();
+        let mut ids = Vec::new();
+        for (ix, account) in accounts.iter().enumerate() {
+            store.save_account(account).unwrap();
+            for (name, role) in [("INBOX", FolderRole::Inbox), ("Archive", FolderRole::Archive), ("Sent", FolderRole::Sent)] {
+                // Personal has no Sent folder; the unified role must still show Work's.
+                if ix == 0 && role == FolderRole::Sent { continue; }
+                let folder = store.save_folder(&account.id, name, Some("/"), role).unwrap();
+                for uid in 1..=4 {
+                    let summary = MessageSummary { account: account.id.clone(), folder, uid, date: uid as i64 * 10 + ix as i64,
+                        thread_id: format!("thread-{uid}"), seen: uid == 4, ..Default::default() };
+                    let id = store.save_message(&Message { summary, body_text: "Fixture".into(), body_html: None }).unwrap();
+                    if role == FolderRole::Inbox { ids.push(id); }
+                }
+            }
+        }
+        for group in [false, true] {
+            let snap = load_accounts(&store, &accounts, "personal", None, View::Inbox, 2, 100, vec![ids[0], ids[4]], group).unwrap();
+            assert_eq!(snap.inbox_total, 8);
+            assert_eq!(snap.account_unread["personal"], [3, 3, 0]);
+            assert_eq!(snap.account_unread["work"], [3, 3, 3]);
+            assert_eq!(snap.inbox.len(), 4);
+            assert!(snap.more);
+            assert!(snap.inbox.windows(2).all(|w| w[0].date >= w[1].date));
+            assert!(snap.inbox.iter().any(|m| m.id == ids[0]) && snap.inbox.iter().any(|m| m.id == ids[4]));
+            for (role, len) in [(FolderRole::Archive, 2), (FolderRole::Sent, 2)] {
+                let snap = load_accounts(&store, &accounts, "personal", None, View::Role(role), 2, 100, vec![], group).unwrap();
+                assert_eq!(snap.open.len(), len);
+                assert!(snap.open.iter().all(|m| store.folder(m.folder).unwrap().role == role));
+            }
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unified_page_boundary_keeps_threads_ties_pins_and_account_filters() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-page-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("mail.sqlite3")).unwrap();
+        let accounts = demo_accounts();
+        let mut ids = Vec::new();
+        for account in &accounts {
+            store.save_account(account).unwrap();
+            let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            for (uid, date, thread) in [(1, 100, "new@test"), (2, 1, "new@test"), (3, 90, "old@test"), (4, 0, "old@test")] {
+                let summary = MessageSummary { account: account.id.clone(), folder, uid, date,
+                    message_id: format!("{uid}@test"), thread_refs: thread.into(), ..Default::default() };
+                ids.push(store.save_message(&Message { summary, ..Default::default() }).unwrap());
+            }
+        }
+        let load = |limit, filter, pins, group| load_accounts(&store, &accounts, "personal", filter, View::Inbox, limit, 200, pins, group).unwrap();
+        let row_ids = |snap: &Snapshot| snap.inbox.iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(row_ids(&load(1, None, vec![], false)), [ids[4]]);
+        let first = load(1, None, vec![], true);
+        assert_eq!(row_ids(&first), [ids[4], ids[5]]);
+        assert!(first.more);
+        let pinned = load(1, None, vec![ids[3]], true);
+        assert_eq!(row_ids(&pinned), [ids[4], ids[2], ids[5], ids[3]]);
+        assert!(pinned.more);
+        for (account, start) in [("personal", 0), ("work", 4)] {
+            let first = load(1, Some(account), vec![], true);
+            assert_eq!(row_ids(&first), [ids[start], ids[start + 1]]);
+            assert!(first.more);
+            let all = load(2, Some(account), vec![], true);
+            assert_eq!(all.inbox.len(), 4);
+            assert!(!all.more);
+        }
+        assert_eq!(load(4, None, vec![], true).inbox.len(), 8);
+        assert!(!load(4, None, vec![], true).more);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn review_reading_dates_keep_relative_days_and_time() {
+        let now = at(2026, 11, 9, 12, 0);
+        for (date, expected) in [
+            (at(2026, 11, 9, 9, 42), "Today 09:42"),
+            (at(2026, 11, 8, 16, 10), "Yesterday 16:10"),
+            (at(2026, 11, 7, 8, 5), "Sat 08:05"),
+            (at(2026, 11, 3, 8, 5), "Tue 08:05"),
+            (at(2026, 11, 2, 8, 5), "2 Nov, 08:05"),
+            (at(2026, 10, 26, 14, 2), "26 Oct, 14:02"),
+            (at(2025, 10, 26, 14, 2), "26 Oct 2025, 14:02"),
+            (at(2026, 11, 10, 14, 2), "10 Nov, 14:02"),
+        ] { assert_eq!(reading_date(date.timestamp(), now), expected); }
+        assert_eq!(reading_date(at(2025, 12, 31, 23, 0).timestamp(), at(2026, 1, 1, 1, 0)), "Yesterday 23:00");
+        assert_eq!(reading_date(at(2028, 2, 29, 8, 0).timestamp(), at(2028, 3, 1, 8, 0)), "Yesterday 08:00");
+        assert_eq!(reading_date(i64::MAX, now), "");
     }
 
     #[test]

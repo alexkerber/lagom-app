@@ -11,7 +11,7 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent, PathPromptOptions, Rgba, Subscription, Task, Window,
 };
 
-use crate::main_window::{button, mono, pressable};
+use crate::main_window::{button, icon_button, mono, pressable};
 use crate::motion::spring;
 use crate::mail::recipients;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -618,16 +618,8 @@ impl Compose {
                     .border_color(t.line)
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(if self.reply.is_some() { "Reply" } else { "New message" }))
                     .child(
-                        pressable(div().id("discard"), t, false)
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .h(px(30.))
-                            .px(px(10.))
-                            .rounded(px(radius::CONTROL))
-                            .text_color(t.ink2)
-                            .on_click(cx.listener(|this, _, _, cx| this.discard(cx)))
-                            .child("Discard"),
+                        icon_button(t, "discard", "icons/trash.svg", "Discard draft · ⌘⌫")
+                            .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
                     ),
             )
             .child(
@@ -638,16 +630,8 @@ impl Compose {
                     .child(field("From").child(self.from.clone()))
                     .child(field("To").child(self.address_field(0, window, cx)).when(!self.show_cc, |d| {
                         d.child(
-                            pressable(div().id("add-cc"), t, false)
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .h(px(30.))
-                                .px(px(10.))
-                                .rounded(px(radius::CONTROL))
-                                .text_color(t.ink2)
-                                .on_click(cx.listener(|this, _, window, cx| this.add_cc(window, cx)))
-                                .child("Cc"),
+                            icon_button(t, "add-cc", "icons/cc.svg", "Add Cc")
+                                .on_click(cx.listener(|this, _, window, cx| this.add_cc(window, cx))),
                         )
                     }))
                     .when(self.show_cc, |d| d.child(field("Cc").child(self.address_field(1, window, cx))))
