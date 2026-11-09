@@ -462,7 +462,12 @@ impl MainWindow {
                             }
                             self.notify(format!("Could not change read status: {e}"), cx);
                         }
-                        (Op::Move(store), Some(e)) => {
+                        (Op::Move(store), Some(mut e)) => {
+                            if let Some(live) = &self.live {
+                                if let Err(error) = live.store.with_short_lock_wait(|s| s.cancel_move(store)) {
+                                    e.push_str(&format!("; local rollback failed: {error}"));
+                                }
+                            }
                             if let Some(&id) = self.inbox.by_store.get(&store) {
                                 self.inbox.back(id);
                                 if let Some((what, id, ix)) = self.inbox.revert(id, Some(op)) {
@@ -622,6 +627,7 @@ impl MainWindow {
         let Some(live) = &mut self.live else { return };
         live.pending.borrow_mut().clear();
         live.move_target = None;
+        let rollback = live.store.with_short_lock_wait(Store::recover_moves);
         let mut ops: Vec<_> = live.ops.drain().collect();
         ops.sort_by_key(|(op, _)| std::cmp::Reverse(*op));
         live.stale = true;
@@ -644,7 +650,9 @@ impl MainWindow {
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
-        self.notify("Mail stopped working. Restart Lagom; pending sends are saved in the outbox.", cx);
+        let mut error = "Mail stopped working. Restart Lagom; pending sends are saved in the outbox.".to_string();
+        if let Err(rollback) = rollback { error.push_str(&format!(" Local rollback failed: {rollback}")); }
+        self.notify(error, cx);
     }
 
     /// The worker half of an optimistic move.
@@ -694,6 +702,13 @@ impl MainWindow {
                 }
             },
         };
+        if let Act::Move(folder) = &act {
+            if let Err(error) = live.store.with_short_lock_wait(|s| s.begin_move(store, *folder)) {
+                self.inbox.revert(id, None);
+                self.notify(format!("Not moved: {error}"), cx);
+                return false;
+            }
+        }
         self.inbox.left(id, target);
         self.inbox.mail[id].snoozed_until = match act { Act::Snooze(until) => until, _ => None };
         let op = live.op(Op::Move(store));
@@ -3648,6 +3663,37 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[gpui::test]
+    fn custom_folder_batch_updates_store_before_network_and_restores_refused_messages(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let messages: Vec<_> = (1..=2).map(|uid| incoming(v, uid)).collect();
+            let live = v.live.as_ref().unwrap();
+            let target = live.store.save_folder(&live.accounts[0].id, "Projects", None, lagom_core::store::FolderRole::Other).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select_all();
+            let folder = v.inbox.folders.iter().position(|f| f.store == Some(target)).unwrap();
+            v.act(Move::Folder(folder), cx);
+            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(commands.len(), 2);
+            let store = &v.live.as_ref().unwrap().store;
+            assert_eq!(store.list_messages(target, now(), 10, 0).unwrap().len(), 2);
+            for message in &messages {
+                assert_eq!(store.message(message.id).unwrap().summary.folder, message.folder);
+            }
+            for command in commands {
+                let Cmd::Op { op, id, act: Act::Move(destination) } = command else { panic!("expected move") };
+                assert_eq!(destination, target);
+                v.on_events(vec![Event::Op { op, error: Some("fixture refused".into()) }], window, cx);
+                assert_ne!(v.live.as_ref().unwrap().store.message_summary(id).unwrap().folder, target);
+            }
+            assert!(v.live.as_ref().unwrap().store.list_messages(target, now(), 10, 0).unwrap().is_empty());
+            assert_eq!(v.inbox.list().len(), 2);
+            assert!(v.toast.as_ref().unwrap().0.contains("Not moved: fixture refused"));
+        });
     }
 
     #[gpui::test]

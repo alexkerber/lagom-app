@@ -1,6 +1,10 @@
 //! async-imap provides CONDSTORE and cancellable IDLE without a dedicated polling
 //! thread; Tokio/rustls also shares the desktop's existing runtime dependencies.
 mod guard;
+mod mailbox;
+use mailbox::{decode as decode_mailbox, encode as encode_mailbox};
+#[cfg(test)]
+mod folder_tests;
 use guard::Guarded;
 use crate::{
     account::{Account, Auth, Security, ServerConfig},
@@ -127,6 +131,7 @@ pub struct ImapSync {
     account: Account,
     session: Session<Bounded<Wire>>,
     capabilities: Capabilities,
+    refresh_error: Option<Error>,
 }
 impl ImapSync {
     pub async fn login(account: &Account, password: &str) -> Result<Self> {
@@ -149,70 +154,42 @@ impl ImapSync {
             account: account.clone(),
             session,
             capabilities,
+            refresh_error: None,
         })
+    }
+    /// A confirmed move can succeed while its subsequent refresh fails.
+    pub fn take_refresh_error(&mut self) -> Option<Error> {
+        self.refresh_error.take()
     }
     pub async fn logout(mut self) -> Result<()> {
         net(self.session.logout()).await
     }
     pub async fn list_folders(&mut self, store: &Store) -> Result<Vec<Folder>> {
-        let mut rows = Vec::new();
-        if self.capabilities.has_str("SPECIAL-USE") {
-            let tag = net(self
-                .session
-                .run_command("LIST \"\" \"*\" RETURN (SPECIAL-USE)"))
-            .await?;
+        // async-imap's LIST stream can end without checking the tagged status.
+        let command = if self.capabilities.has_str("SPECIAL-USE") {
+            "LIST \"\" \"*\" RETURN (SPECIAL-USE)"
+        } else { "LIST \"\" \"*\"" };
+        let rows = tokio::time::timeout(TIMEOUT, async {
+            let mut rows = Vec::new();
+            let tag = net(self.session.run_command(command)).await?;
             loop {
-                let response = net(self.session.read_response())
-                    .await?
+                let response = net(self.session.read_response()).await?
                     .ok_or(Error::Network("IMAP folder listing interrupted"))?;
                 use async_imap::imap_proto::{MailboxDatum, Response, Status};
                 match response.parsed() {
-                    Response::MailboxData(MailboxDatum::List(data)) => {
-                        if selectable(&data.name_attributes) {
-                            rows.push((
-                                data.name.to_string(),
-                                data.delimiter.as_deref().map(str::to_owned),
-                                role(&data.name, &data.name_attributes),
-                            ));
-                        }
+                    Response::MailboxData(MailboxDatum::List(data)) if listed(&data.name, &data.name_attributes) => {
+                        let name = decode_mailbox(&data.name)?;
+                        let role = role(&name, &data.name_attributes);
+                        rows.push((name, data.delimiter.as_deref().map(str::to_owned), role));
                     }
-                    Response::Done {
-                        tag: done, status, ..
-                    } if *done == tag => {
-                        if *status != Status::Ok {
-                            return Err(Error::Network("IMAP folder listing failed"));
-                        }
-                        break;
+                    Response::Done { tag: done, status, .. } if *done == tag => {
+                        return if *status == Status::Ok { Ok(rows) } else { Err(Error::Network("IMAP folder listing failed")) };
                     }
                     _ => {}
                 }
             }
-        } else {
-            let names = net(async {
-                self.session
-                    .list(Some(""), Some("*"))
-                    .await?
-                    .try_collect::<Vec<_>>()
-                    .await
-            })
-            .await?;
-            for name in &names {
-                if !selectable(name.attributes()) {
-                    continue;
-                }
-                rows.push((
-                    name.name().to_owned(),
-                    name.delimiter().map(str::to_owned),
-                    role(name.name(), name.attributes()),
-                ));
-            }
-        }
-        let mut ids = Vec::new();
-        for (name, delimiter, role) in rows {
-            ids.push(store.save_folder(&self.account.id, &name, delimiter.as_deref(), role)?);
-        }
-        store.retain_folders(&self.account.id, &ids)?;
-        ids.into_iter().map(|id| store.folder(id)).collect()
+        }).await.map_err(|_| Error::Network("IMAP folder listing timed out"))??;
+        store.replace_folders(&self.account.id, &rows)
     }
     pub async fn sync(&mut self, store: &mut Store, limit: usize) -> Result<()> {
         if limit == 0 {
@@ -237,9 +214,9 @@ impl ImapSync {
             return Err(Error::Invalid("folder belongs to another account"));
         }
         let mailbox = if self.capabilities.has_str("CONDSTORE") {
-            net(self.session.select_condstore(&folder.name)).await?
+            net(self.session.select_condstore(&encode_mailbox(&folder.name))).await?
         } else {
-            net(self.session.select(&folder.name)).await?
+            net(self.session.select(&encode_mailbox(&folder.name))).await?
         };
         let validity = mailbox
             .uid_validity
@@ -526,7 +503,7 @@ impl ImapSync {
     }
     pub async fn create_folder(&mut self, store: &Store, name: &str) -> Result<i64> {
         validate_folder(name)?;
-        net(self.session.create(name)).await?;
+        net(self.session.create(&encode_mailbox(name))).await?;
         self.list_folders(store).await?;
         store
             .folders(&self.account.id, 0)?
@@ -536,14 +513,20 @@ impl ImapSync {
             .ok_or(Error::NotFound)
     }
     pub async fn move_message(&mut self, store: &mut Store, id: i64, target: i64) -> Result<()> {
+        let result = self.move_on_server(store, id, target).await;
+        if result.is_err() { store.cancel_move(id)?; }
+        result
+    }
+    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64) -> Result<()> {
         let message = store.message(id)?.summary;
         let destination = store.folder(target)?;
         if message.account != self.account.id || destination.account != self.account.id {
             return Err(Error::Invalid("cross-account moves unsupported"));
         }
         if message.folder == target {
-            return Ok(());
+            return store.cancel_move(id);
         }
+        store.begin_move(id, target)?;
         let before = store.folder(message.folder)?.uidvalidity;
         let (source, _) = self.select(store, message.folder).await?;
         if before != source.uidvalidity {
@@ -556,22 +539,29 @@ impl ImapSync {
         if self.capabilities.has_str("MOVE") {
             net(self
                 .session
-                .uid_mv(message.uid.to_string(), &destination.name))
+                .uid_mv(message.uid.to_string(), &encode_mailbox(&destination.name)))
             .await?;
         } else {
-            if !self.capabilities.has_str("UIDPLUS") {
-                return Err(Error::Network("safe move requires MOVE or UIDPLUS"));
-            }
+            // shortcut: COPY can leave a destination copy if deletion fails; reconcile duplicates when resumable moves are added.
             net(self
                 .session
-                .uid_copy(message.uid.to_string(), &destination.name))
+                .uid_copy(message.uid.to_string(), &encode_mailbox(&destination.name)))
             .await?;
-            self.delete_uids(&message.uid.to_string()).await?;
+            self.delete_uids(&message.uid.to_string(), true).await?;
         }
-        // Destination UIDs are assigned by the server. Resync before removing the old local row.
-        self.sync_folder(store, target, DEFAULT_LIMIT).await?;
-        store.delete_message(id)?;
-        self.sync_folder(store, message.folder, DEFAULT_LIMIT).await
+        // A confirmed move must not be rolled back because a subsequent refresh failed.
+        if let Err(error) = store.delete_message(id) {
+            self.refresh_error = Some(error);
+            return Ok(());
+        }
+        if let Err(error) = self.sync_folder(store, target, DEFAULT_LIMIT).await {
+            self.refresh_error = Some(error);
+            return Ok(());
+        }
+        if let Err(error) = self.sync_folder(store, message.folder, DEFAULT_LIMIT).await {
+            self.refresh_error = Some(error);
+        }
+        Ok(())
     }
     pub(crate) async fn ensure_role(
         &mut self,
@@ -606,10 +596,18 @@ impl ImapSync {
         let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
         self.move_message(store, id, target).await
     }
-    async fn delete_uids(&mut self, set: &str) -> Result<()> {
+    async fn delete_uids(&mut self, set: &str, restore_on_refusal: bool) -> Result<()> {
         // async-imap's STORE/EXPUNGE streams discard tagged NO/BAD replies.
         net(self.session.run_command_and_check_ok(format!("UID STORE {set} +FLAGS.SILENT (\\Deleted)"))).await?;
-        net(self.session.run_command_and_check_ok(format!("UID EXPUNGE {set}"))).await
+        // shortcut: without UIDPLUS, EXPUNGE also removes other deleted mail; use UID EXPUNGE whenever advertised.
+        let command = if self.capabilities.has_str("UIDPLUS") { format!("UID EXPUNGE {set}") } else { "EXPUNGE".into() };
+        let result = tokio::time::timeout(TIMEOUT, self.session.run_command_and_check_ok(command)).await
+            .map_err(|_| Error::Network("IMAP operation timed out"))?;
+        if restore_on_refusal && matches!(&result, Err(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_))) {
+            // A refused move must not leave the original waiting for another client's EXPUNGE.
+            net(self.session.run_command_and_check_ok(format!("UID STORE {set} -FLAGS.SILENT (\\Deleted)"))).await?;
+        }
+        result.map_err(|_| Error::Network("IMAP expunge failed"))
     }
     pub async fn empty_trash(&mut self, store: &mut Store, id: i64) -> Result<()> {
         let folder = store.folder(id)?;
@@ -627,7 +625,7 @@ impl ImapSync {
         uids.sort_unstable();
         // Exact UIDs keep mail arriving during the operation out of the expunge.
         for chunk in uids.chunks(100) {
-            self.delete_uids(&uid_set(chunk)).await?;
+            self.delete_uids(&uid_set(chunk), false).await?;
         }
         self.sync_folder(store, id, DEFAULT_LIMIT).await
     }
@@ -636,7 +634,7 @@ impl ImapSync {
         let folder = store.folder(target)?;
         net(self
             .session
-            .append(&folder.name, Some("(\\Seen)"), None, raw))
+            .append(&encode_mailbox(&folder.name), Some("(\\Seen)"), None, raw))
         .await?;
         Ok(target)
     }
@@ -912,7 +910,7 @@ mod protocol_tests {
         let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None };
         let start = tokio::time::Instant::now();
         let result = imap.all_uids().await;
         assert!(matches!(result, Err(Error::Network("IMAP operation timed out"))), "{result:?}");
@@ -956,7 +954,7 @@ mod protocol_tests {
         let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None };
         let result = tokio::time::timeout(Duration::from_secs(2), imap.fetch_attachment(&mut store, id, "1")).await;
         drop(imap);
         server.await.unwrap();
@@ -1057,6 +1055,15 @@ mod protocol_tests {
         server.await.unwrap();
         assert!(log::STATIC_MAX_LEVEL < log::LevelFilter::Trace);
     }
+}
+
+fn listed(name: &str, attrs: &[NameAttribute]) -> bool {
+    selectable(attrs) && !attrs.iter().any(|a| match a {
+        NameAttribute::Flagged => true,
+        NameAttribute::Extension(x) => x.eq_ignore_ascii_case("\\Important"),
+        _ => false,
+    }) && !matches!(name.to_ascii_lowercase().as_str(),
+        "[gmail]/important" | "[gmail]/starred" | "[googlemail]/important" | "[googlemail]/starred")
 }
 
 /// RFC 5258: `\NonExistent` implies `\Noselect`; Gmail sends it for `[Gmail]`.

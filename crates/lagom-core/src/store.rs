@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 14 {
+        if version > 15 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -109,6 +109,9 @@ impl Store {
             if version < 13 {
                 store.db.execute("UPDATE task_lists SET detached=0", [])?;
             }
+        }
+        if version < 15 {
+            store.db.execute_batch(include_str!("schema_v15.sql"))?;
         }
         Ok(store)
     }
@@ -279,7 +282,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -388,6 +391,7 @@ pub struct Counts {
 }
 
 pub(crate) const SUMMARY_COLUMNS: &str = "m.id,m.account,m.folder,m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to_addresses,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,m.snoozed_until,m.thread_id,m.thread_refs";
+pub(crate) const VISIBLE_SUMMARY_COLUMNS: &str = "m.id,m.account,coalesce(m.move_target,m.folder),m.uid,m.message_id,m.thread_key,m.from_name,m.from_address,m.to_addresses,m.cc,m.subject,m.date,m.snippet,m.seen,m.flagged,m.has_attachments,m.size,m.snoozed_until,m.thread_id,m.thread_refs";
 pub(crate) fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     Ok(MessageSummary {
         id: r.get(0)?,
@@ -440,22 +444,24 @@ impl Store {
         }
         Ok(self.db.query_row("INSERT INTO folders(account,name,delimiter,role) VALUES(?1,?2,?3,?4) ON CONFLICT(account,name) DO UPDATE SET delimiter=excluded.delimiter,role=excluded.role RETURNING id",params![account,name,delimiter,role.as_str()],|r|r.get(0))?)
     }
-    pub(crate) fn retain_folders(&self, account: &str, present: &[i64]) -> Result<()> {
-        let known = self.folders(account, 0)?;
+    pub(crate) fn replace_folders(&self, account: &str, rows: &[(String, Option<String>, FolderRole)]) -> Result<Vec<Folder>> {
         let tx = self.db.unchecked_transaction()?;
-        for folder in known {
-            if !present.contains(&folder.id) {
-                tx.execute(
-                    "DELETE FROM folders WHERE id=?1 AND account=?2",
-                    params![folder.id, account],
-                )?;
-            }
+        let mut ids = Vec::new();
+        for (name, delimiter, role) in rows {
+            ids.push(self.save_folder(account, name, delimiter.as_deref(), *role)?);
         }
+        self.retain_folders(account, &ids)?;
+        let folders = ids.into_iter().map(|id| self.folder(id)).collect::<Result<_>>()?;
         tx.commit()?;
+        Ok(folders)
+    }
+    pub(crate) fn retain_folders(&self, account: &str, present: &[i64]) -> Result<()> {
+        self.db.execute("DELETE FROM folders WHERE account=?1 AND id NOT IN (SELECT value FROM json_each(?2))",
+            params![account, serde_json::to_string(present).expect("integer IDs serialize")])?;
         Ok(())
     }
     pub fn folders(&self, account: &str, now: i64) -> Result<Vec<Folder>> {
-        let mut stmt = self.db.prepare("SELECT f.id,f.account,f.name,f.delimiter,f.role,f.uidvalidity,f.uidnext,f.last_uid,f.highest_modseq,(SELECT count(*) FROM messages m WHERE m.folder=f.id AND NOT m.seen AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2)) FROM folders f WHERE f.account=?1 ORDER BY f.name")?;
+        let mut stmt = self.db.prepare("SELECT f.id,f.account,f.name,f.delimiter,f.role,f.uidvalidity,f.uidnext,f.last_uid,f.highest_modseq,(SELECT count(*) FROM messages m WHERE coalesce(m.move_target,m.folder)=f.id AND NOT m.seen AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2)) FROM folders f WHERE f.account=?1 ORDER BY f.name")?;
         let rows = stmt.query_map(params![account, now], folder_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -511,21 +517,21 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub fn message_summary(&self, id: i64) -> Result<MessageSummary> {
-        self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.id=?1"), [id], summary_row).optional()?.ok_or(Error::NotFound)
+        self.db.query_row(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages m WHERE m.id=?1"), [id], summary_row).optional()?.ok_or(Error::NotFound)
     }
     pub fn message(&self, id: i64) -> Result<Message> {
         self.db.query_row(&format!("SELECT {SUMMARY_COLUMNS},m.body_text,m.body_html FROM messages m WHERE m.id=?1"),[id],|r| Ok(Message { summary:summary_row(r)?,body_text:r.get(20)?,body_html:r.get(21)? })).optional()?.ok_or(Error::NotFound)
     }
     /// Count unread Inbox mail across accounts, excluding snoozed mail and pending moves.
     pub fn unread_inbox_count(&self, now: i64, pending: &[i64]) -> Result<usize> {
-        Ok(self.db.query_row("SELECT count(*) FROM messages m JOIN folders f ON f.id=m.folder
+        Ok(self.db.query_row("SELECT count(*) FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder)
             WHERE f.role='inbox' AND m.seen=0 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?1)
             AND m.id NOT IN (SELECT value FROM json_each(?2))", params![now, serde_json::to_string(pending).expect("integer IDs serialize")], |r| r.get(0))?)
     }
 
     /// The newest unread Inbox mail across accounts, excluding mail still snoozed.
     pub fn unread_mail(&self, now: i64, limit: u32) -> Result<Vec<MessageSummary>> {
-        let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m JOIN folders f ON f.id=m.folder
+        let mut stmt = self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder)
             WHERE f.role='inbox' AND m.seen=0 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?1)
             ORDER BY m.date DESC,m.id DESC LIMIT ?2"))?;
         let rows = stmt.query_map(params![now, limit], summary_row)?;
@@ -539,7 +545,7 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MessageSummary>> {
-        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.folder=?1 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) ORDER BY m.date DESC,m.id DESC LIMIT ?3 OFFSET ?4"))?;
+        let mut stmt=self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages m WHERE coalesce(m.move_target,m.folder)=?1 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) ORDER BY m.date DESC,m.id DESC LIMIT ?3 OFFSET ?4"))?;
         let rows = stmt.query_map(params![folder, now, limit, offset], summary_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -555,7 +561,7 @@ impl Store {
             return Err(Error::Invalid("search query too long"));
         }
         // shortcut: index order avoids ranking every hit, add bounded relevance ranking when needed.
-        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND m.account=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY messages_fts.rowid LIMIT ?4 OFFSET ?5"))?;
+        let mut stmt=self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND m.account=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY messages_fts.rowid LIMIT ?4 OFFSET ?5"))?;
         let rows = stmt.query_map(params![query, account, now, limit, offset], summary_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -576,7 +582,7 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MessageSummary>> {
-        let mut stmt=self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m INDEXED BY messages_later_date WHERE m.account=?1 AND m.snoozed_until>?2 ORDER BY m.date DESC,m.id DESC LIMIT ?3 OFFSET ?4"))?;
+        let mut stmt=self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages m INDEXED BY messages_later_date WHERE m.account=?1 AND m.snoozed_until>?2 ORDER BY m.date DESC,m.id DESC LIMIT ?3 OFFSET ?4"))?;
         let rows = stmt.query_map(params![account, now, limit, offset], summary_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -585,7 +591,23 @@ impl Store {
             params![account, now], |r| r.get(0))?)
     }
     pub fn counts(&self, account: &str, now: i64) -> Result<Counts> {
-        Ok(self.db.query_row("SELECT count(CASE WHEN f.role='inbox' AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) THEN 1 END),count(CASE WHEN m.snoozed_until>?2 THEN 1 END) FROM messages m JOIN folders f ON f.id=m.folder WHERE m.account=?1",params![account,now],|r|Ok(Counts { inbox:r.get(0)?,later:r.get(1)? }))?)
+        Ok(self.db.query_row("SELECT count(CASE WHEN f.role='inbox' AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2) THEN 1 END),count(CASE WHEN m.snoozed_until>?2 THEN 1 END) FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder) WHERE m.account=?1",params![account,now],|r|Ok(Counts { inbox:r.get(0)?,later:r.get(1)? }))?)
+    }
+    /// Keeps the server folder/UID intact until the move is acknowledged.
+    pub fn begin_move(&self, id: i64, target: i64) -> Result<()> {
+        if self.db.execute("UPDATE messages SET move_target=?2 WHERE id=?1 AND account=(SELECT account FROM folders WHERE id=?2)", params![id, target])? == 0 {
+            return Err(Error::Invalid("move destination must belong to the message's account"));
+        }
+        Ok(())
+    }
+    pub fn cancel_move(&self, id: i64) -> Result<()> {
+        self.db.execute("UPDATE messages SET move_target=NULL WHERE id=?1", [id])?;
+        Ok(())
+    }
+    pub fn recover_moves(&self) -> Result<()> {
+        // A crash leaves the outcome unknown; the next sync reconciles server membership.
+        self.db.execute("UPDATE messages SET move_target=NULL WHERE move_target IS NOT NULL", [])?;
+        Ok(())
     }
     pub fn set_flags(&self, folder: i64, uid: u32, seen: bool, flagged: bool) -> Result<()> {
         self.db.execute(
@@ -676,6 +698,47 @@ mod mail_tests {
         (temp, store, a, f)
     }
     #[test]
+    fn folder_listing_is_atomic_and_account_scoped() {
+        let (_temp, s, a, inbox) = setup();
+        let old = s.save_folder(&a.id, "Old", None, FolderRole::Other).unwrap();
+        let before = s.folders(&a.id, 0).unwrap();
+        assert!(s.replace_folders(&a.id, &[("New".into(), None, FolderRole::Other), ("bad\nname".into(), None, FolderRole::Other)]).is_err());
+        assert_eq!(s.folders(&a.id, 0).unwrap(), before);
+        let rows = s.replace_folders(&a.id, &[("INBOX".into(), Some(".".into()), FolderRole::Inbox), ("New".into(), None, FolderRole::Other)]).unwrap();
+        assert_eq!(rows[0].id, inbox);
+        assert_eq!(rows[0].delimiter.as_deref(), Some("."));
+        assert!(s.folder(old).is_err());
+    }
+
+    #[test]
+    fn optimistic_move_preserves_server_identity_and_rolls_back_across_connections() {
+        let (_temp, s, a, inbox) = setup();
+        let target = s.save_folder(&a.id, "Projects", None, FolderRole::Other).unwrap();
+        let id = s.save_message(&mail(&a, inbox, 1)).unwrap();
+        let original = s.message(id).unwrap();
+        let reader = Store::open(s.path()).unwrap();
+        s.begin_move(id, target).unwrap();
+        assert_eq!(reader.message(id).unwrap(), original);
+        assert_eq!(reader.message_summary(id).unwrap().folder, target);
+        assert!(reader.list_messages(inbox, 100, 10, 0).unwrap().is_empty());
+        assert!(reader.list_conversations(&a.id, Some(inbox), 100, 10).unwrap().is_empty());
+        assert_eq!(reader.list_conversations(&a.id, Some(target), 100, 10).unwrap()[0].id, id);
+        assert_eq!(reader.counts(&a.id, 100).unwrap().inbox, 0);
+        assert_eq!(reader.folders(&a.id, 100).unwrap().iter().find(|f| f.id == target).unwrap().unread, 1);
+        s.cancel_move(id).unwrap();
+        assert_eq!(reader.list_messages(inbox, 100, 10, 0).unwrap(), [original.summary.clone()]);
+        assert!(reader.list_messages(target, 100, 10, 0).unwrap().is_empty());
+        assert_eq!(reader.message(id).unwrap(), original);
+        let other = Account::new("other@example.com".into(), a.imap.clone(), a.smtp.clone()).unwrap();
+        s.save_account(&other).unwrap();
+        let foreign = s.save_folder(&other.id, "Projects", None, FolderRole::Other).unwrap();
+        assert!(s.begin_move(id, foreign).is_err());
+        s.begin_move(id, target).unwrap();
+        s.recover_moves().unwrap();
+        assert_eq!(reader.message_summary(id).unwrap(), original.summary);
+    }
+
+    #[test]
     fn home_unread_is_bounded_newest_first_and_excludes_read_snoozed_and_non_inbox() {
         let (_temp, store, account, inbox) = setup();
         let mut second = account.clone();
@@ -745,7 +808,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -826,7 +889,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -980,7 +1043,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1052,7 +1115,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1122,7 +1185,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1151,7 +1214,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 15);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));
