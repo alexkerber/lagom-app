@@ -34,7 +34,7 @@
     .display { font-weight: 800; letter-spacing: -0.045em; }
     .mono { font-family: "Geist Mono", ui-monospace, monospace; }
     /* clip, not hidden: iOS Safari still pans sideways to the icon that runs off the edge when only html and body hide overflow. */
-    .page { overflow-x: clip; }
+    .page { overflow-x: hidden; overflow-x: clip; }
     .wrap { max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 56px); }
 
     nav { position: relative; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 88px; }
