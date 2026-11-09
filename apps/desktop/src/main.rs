@@ -164,7 +164,7 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
                 appears_transparent: cfg!(target_os = "macos"),
                 traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(18.))),
             }),
-            window_background: WindowBackgroundAppearance::Blurred,
+            window_background: if cfg!(target_os = "macos") { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Blurred },
             ..Default::default()
         },
         // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
