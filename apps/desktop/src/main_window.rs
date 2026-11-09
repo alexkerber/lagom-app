@@ -1764,11 +1764,6 @@ impl MainWindow {
             .child(
                 toolbar(t)
                     .px(px(16.))
-                    .child(
-                        // Pine green, like the Done swipe.
-                        button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.swipe_done))
-                            .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))),
-                    )
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
                     .when(!trash, |d| d.child(
                         button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
@@ -1785,6 +1780,11 @@ impl MainWindow {
                     .child(
                         icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
+                    )
+                    .child(
+                        // The step that finishes a message sits last, as a primary button does in macOS.
+                        button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))),
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
