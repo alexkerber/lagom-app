@@ -97,6 +97,8 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
         summary: MessageSummary {
             message_id,
             thread_key,
+            thread_refs: parsed.references().into_iter().flat_map(|ids| ids.iter())
+                .chain(parsed.in_reply_to().into_iter().flat_map(|ids| ids.iter())).collect::<Vec<_>>().join(" "),
             from_name: from.and_then(|m| m.name()).unwrap_or_default().into(),
             from_address: from.and_then(|m| m.address()).unwrap_or_default().into(),
             to: addresses(parsed.to()),
