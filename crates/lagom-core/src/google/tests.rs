@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::Store;
 use tokio::{net::TcpListener, io::{AsyncReadExt, AsyncWriteExt}};
 
 async fn server(replies: Vec<(&'static str, &'static str)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
@@ -78,12 +79,12 @@ async fn failed_later_page_and_repeated_page_never_publish_partial_cache() {
     let remote: Page<RemoteEvent> = serde_json::from_str(EVENTS).unwrap();
     let kept = event(remote.items.into_iter().next().unwrap()).unwrap();
     let calendar = Calendar { remote_id: "fixture".into(), name: "Fixture".into(), color: None, shown: true, writable: true };
-    store.replace_calendar_window(&account.id, &[(calendar, vec![kept.clone()])]).unwrap();
+    store.replace_calendar_window(&account.id, i64::MIN, i64::MAX, &[(calendar, vec![kept.clone()])]).unwrap();
     for replies in [vec![("200 OK", LIST), ("500 Error", "{}")], vec![("200 OK", LIST), ("200 OK", LIST)],
         vec![("200 OK", LIST), ("200 OK", EMPTY), ("200 OK", EVENTS), ("500 Error", "{}")]] {
         let (url, server) = server(replies).await;
         let result = fetch_with(&url, 1, 2, |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await;
-        if let Ok(snapshot) = &result { store.replace_calendar_window(&account.id, snapshot).unwrap(); }
+        if let Ok(snapshot) = &result { store.replace_calendar_window(&account.id, i64::MIN, i64::MAX, snapshot).unwrap(); }
         assert!(result.is_err());
         assert_eq!(store.today_events("2026-11-09", 0, 1).unwrap()[0].event, kept);
         server.await.unwrap();

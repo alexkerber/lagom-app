@@ -21,7 +21,7 @@ Based on `feat/oauth` at 0309143. Anything I could not check against live docs i
 - `https://mail.google.com/` is a restricted scope, so production already needs verification plus a CASA assessment.
 - The Calendar and Tasks scopes are only sensitive. They add a justification and a demo video, not another CASA.
 - While the app is in Testing mode, refresh tokens expire after 7 days and there is a cap of 100 test users (**not verified** for 2026).
-- Users who are already signed in have none of these scopes. Offer an explicit "Allow calendar access" button in Today. Google [does not support incremental authorization for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app) (checked 2026-11-09). Run a new loopback consent with the full mail/identity/calendar/tasks scope set and `login_hint=<email>`; preserve already granted scopes on later sign-ins. Reject the result if the ID-token email does not match the account.
+- Users who are already signed in have none of these scopes. Offer a quiet "Show your Google Calendar" row in Today, with events above tasks after consent. Google [does not support incremental authorization for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app) (checked 2026-11-09). Run a new loopback consent with the full mail/identity/calendar/tasks scope set and `login_hint=<email>`; preserve already granted scopes on later sign-ins. Reject the result if the ID-token email does not match the account.
 - Google shows granular consent checkboxes, so read the `scope` field in the token response and store what was actually granted.
 
 **Microsoft:** these are delegated scopes a user can consent to alone. Some tenants block user consent (**not verified** per tenant).
@@ -121,4 +121,4 @@ Still open for later slices: Google sensitive-scope verification timing; accepti
 - apps/desktop/src/sync.rs
 - apps/desktop/src/main_window.rs
 
-For b1, the Google desktop OAuth, CalendarList and events.list documentation was checked on 2026-11-09. Live provider consent remains untested. Quotas, Testing-mode limits and Microsoft cross-resource refresh remain unverified. Microsoft Graph still needs a resource-keyed token cache in slice c; b1 does not call Graph. The read-only calendar cache stores the fetched window atomically and discards older windows; local/pending events must be preserved when editing lands.
+For b1, the Google desktop OAuth, CalendarList and events.list documentation was checked on 2026-11-09. Live provider consent remains untested. Quotas, Testing-mode limits and Microsoft cross-resource refresh remain unverified. Microsoft Graph still needs a resource-keyed token cache in slice c; b1 does not call Graph. The read-only calendar cache replaces overlapping events in fetched calendars atomically, preserving other windows and calendars. Fetches run independently of mail commands; local/pending events must also be preserved when editing lands.

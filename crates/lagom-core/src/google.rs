@@ -1,19 +1,15 @@
-use crate::{account::{Account, Auth}, calendar::{Calendar, Event}, oauth::{self, Provider}, store::Store, Error, Result};
+use crate::{account::Account, calendar::{Calendar, Event}, oauth, Error, Result};
 use serde::Deserialize;
 use std::{collections::HashSet, future::Future, time::Duration};
 use url::Url;
 use zeroize::Zeroizing;
 
-pub async fn sync_calendar(store: &Store, account: &Account, start: i64, end: i64) -> Result<()> {
-    if account.auth != Auth::OAuth(Provider::Google) || !oauth::calendar_allowed(&store.account_scopes(&account.id)?) {
-        return Ok(());
-    }
+pub async fn fetch_calendar(account: &Account, start: i64, end: i64) -> Result<Vec<(Calendar, Vec<Event>)>> {
     // shortcut: refetch window, move to syncToken/delta when request counts matter.
-    let calendars = tokio::time::timeout(Duration::from_secs(90), fetch_with(
+    tokio::time::timeout(Duration::from_secs(90), fetch_with(
         "https://www.googleapis.com/calendar/v3/", start, end,
         |rejected| async move { oauth::access_token(account, rejected.as_deref()).await },
-    )).await.map_err(|_| Error::Network("calendar sync timed out"))??;
-    store.replace_calendar_window(&account.id, &calendars)
+    )).await.map_err(|_| Error::Network("calendar sync timed out"))?
 }
 
 #[derive(Deserialize)]
@@ -61,7 +57,7 @@ struct Conference { #[serde(default)] entry_points: Vec<EntryPoint> }
 #[serde(rename_all = "camelCase")]
 struct EntryPoint { entry_point_type: String, uri: String }
 
-async fn fetch_with<F, Fut>(base: &str, start: i64, end: i64, mut token: F) -> Result<Vec<(Calendar, Vec<Event>)>>
+pub async fn fetch_with<F, Fut>(base: &str, start: i64, end: i64, mut token: F) -> Result<Vec<(Calendar, Vec<Event>)>>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
     if start >= end { return Err(Error::Invalid("invalid calendar window")); }
     let client = oauth::http(Duration::from_secs(30))?;

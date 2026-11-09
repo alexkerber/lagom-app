@@ -51,20 +51,24 @@ impl Store {
     }
 
     /// Publish a complete window only after every page and calendar has arrived.
-    pub fn replace_calendar_window(&self, account: &str, calendars: &[(Calendar, Vec<Event>)]) -> Result<()> {
+    pub fn replace_calendar_window(&self, account: &str, start: i64, end: i64, calendars: &[(Calendar, Vec<Event>)]) -> Result<()> {
+        if start >= end { return Err(Error::Invalid("invalid calendar window")); }
         let tx = self.db.unchecked_transaction()?;
-        // shortcut: only the fetched window is cached, preserve local/pending events when editing lands.
-        self.db.execute("DELETE FROM calendars WHERE account=?1", [account])?;
         for (calendar, events) in calendars {
             if calendar.remote_id.is_empty() { return Err(Error::Invalid("calendar ID missing")); }
-            self.db.execute("INSERT INTO calendars(account,remote_id,name,color,shown,writable) VALUES(?1,?2,?3,?4,?5,?6)",
+            self.db.execute("INSERT INTO calendars(account,remote_id,name,color,shown,writable) VALUES(?1,?2,?3,?4,?5,?6)
+                ON CONFLICT(account,remote_id) DO UPDATE SET name=excluded.name,color=excluded.color,shown=excluded.shown,writable=excluded.writable",
                 params![account, calendar.remote_id, calendar.name, calendar.color, calendar.shown, calendar.writable])?;
-            let id = self.db.last_insert_rowid();
+            let id: i64 = self.db.query_row("SELECT id FROM calendars WHERE account=?1 AND remote_id=?2",
+                params![account, calendar.remote_id], |r| r.get(0))?;
+            self.db.execute("DELETE FROM events WHERE calendar=?1 AND start_utc<?3 AND end_utc>?2", params![id, start, end])?;
             for event in events {
                 if event.remote_id.is_empty() || event.end_utc <= event.start_utc {
                     return Err(Error::Invalid("invalid calendar event"));
                 }
-                self.db.execute("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,location,join_url) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                self.db.execute("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,location,join_url) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                    ON CONFLICT(calendar,remote_id) DO UPDATE SET title=excluded.title,start=excluded.start,end=excluded.end,
+                    start_utc=excluded.start_utc,end_utc=excluded.end_utc,all_day=excluded.all_day,location=excluded.location,join_url=excluded.join_url",
                     params![id, event.remote_id, event.title, event.start, event.end, event.start_utc, event.end_utc, event.all_day, event.location, event.join_url])?;
             }
         }
