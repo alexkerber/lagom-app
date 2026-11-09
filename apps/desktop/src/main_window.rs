@@ -402,6 +402,12 @@ impl MainWindow {
         }
         match screen.as_str() {
             "palette" => this.open_palette("done", window, cx),
+            // Three adjacent rows and one apart: the joined selection block and a separate one.
+            "multi" => {
+                this.inbox.click(0, false, false);
+                this.inbox.click(2, true, false);
+                this.inbox.click(4, false, true);
+            }
             "later" => this.open_palette("later", window, cx),
             "folders" => {
                 let first = folders::tree(&this.inbox.folders, false).first().map(|r| r.0);
@@ -1534,7 +1540,13 @@ impl MainWindow {
             let selected = self.inbox.is_selected(id);
             // A row under the fingers or springing back paints its own fill and gets no copy.
             let moving = self.swipe.offset(id).is_some() || self.spring.is_some_and(|s| s.0 == id);
+            // Adjacent selected rows join into one block, as in Finder and Mail: only its outer corners round.
+            let list = self.inbox.list();
+            let joined_above = selected && i > 0 && self.inbox.is_selected(list[i - 1]);
+            let joined_below = selected && list.get(i + 1).is_some_and(|&next| self.inbox.is_selected(next));
             let el = row(id, selected && gliding.is_none(), selected && (landed || moving))
+                .when(joined_above, |d| d.rounded_t(px(0.)))
+                .when(joined_below, |d| d.rounded_b(px(0.)))
                 .id(("row", id))
                 // Arrow at rest, as in native lists.
                 // Every row, not only the dragged one: the topmost hovered row's cursor wins.

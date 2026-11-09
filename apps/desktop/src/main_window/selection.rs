@@ -138,8 +138,31 @@ impl MainWindow {
         let members = self.inbox.selected_members();
         let seen = self.inbox.selection_unread();
         let trash = self.inbox.open_kind() == Some(Kind::Trash);
-        let summary = div().id("selection-summary").flex_1().flex().items_center().justify_center().text_color(t.ink2)
-            .child(format!("{} messages selected", members.len()));
+        // A small stack of cards, one per selected row up to three: the front card names the first message.
+        let rows = self.inbox.selected_rows();
+        let depth = rows.len().clamp(1, 3);
+        let mut stack = div().relative().w(px(300.)).h(px(84. + 12. * (depth - 1) as f32));
+        for d in (0..depth).rev() {
+            let inset = 18. * d as f32;
+            let mut card = div().absolute().top(px(12. * (depth - 1 - d) as f32)).left(px(inset)).right(px(inset)).h(px(84.))
+                .rounded(px(radius::CARD)).border_1().border_color(t.line).bg(t.raised).shadow_md();
+            if d == 0 {
+                if let Some(m) = rows.first().map(|&id| &self.inbox.mail[id]) {
+                    card = card.flex().flex_col().justify_center().gap(px(2.)).px(px(16.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(t.ink).one_line().child(m.from.clone()))
+                        .child(div().text_color(t.ink2).one_line().child(m.subject.clone()));
+                }
+            } else {
+                card = card.opacity(1. - 0.25 * d as f32);
+            }
+            stack = stack.child(card);
+        }
+        let summary = div().id("selection-summary").flex_1().flex().flex_col().items_center().justify_center().gap(px(16.))
+            .child(stack.with_animation(("selection-stack", depth), Animation::new(Duration::from_millis(180)), |el, v| {
+                el.top(px(6. * (1. - spring(v))))
+            }))
+            .child(div().font_weight(FontWeight::MEDIUM).text_color(t.ink).child(format!("{} messages selected", members.len())))
+            .child(mono("E done  ·  L later  ·  ⌫ delete", t.ink2));
         #[cfg(test)]
         let summary = summary.debug_selector(move || format!("{} messages selected", members.len()));
         div().flex_1().min_w(px(0.)).h_full().flex().flex_col()
