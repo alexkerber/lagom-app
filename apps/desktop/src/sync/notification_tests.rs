@@ -90,13 +90,20 @@ async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
             worker.quick(Cmd::Op { op: 1, id, act }).await;
         }
         let mut messages = Vec::new();
+        let mut refresh_failed = false;
         while let Ok(event) = out.try_recv() {
             match event {
                 Event::NewMail(mail) => messages.extend(mail),
-                Event::Op { error, .. } => assert_eq!(error.is_some(), fail_source),
+                Event::Op { error, .. } => assert!(error.is_none(), "confirmed moves survive refresh failures"),
+                Event::Sync(_, SyncState::Failed(error)) => {
+                    assert!(error.starts_with("Mail moved; refresh failed:"));
+                    refresh_failed = true;
+                }
                 _ => {},
             }
         }
+        assert_eq!(refresh_failed, fail_source);
+        if fail_source { assert!(!worker.sessions.contains_key(&account.id)); }
         assert_eq!(worker.store.folder(inbox).unwrap().last_uid, 2);
         assert_eq!(messages.len(), 1, "internal Inbox sync must emit new mail");
         assert_eq!(messages[0].subject, "Incoming");
