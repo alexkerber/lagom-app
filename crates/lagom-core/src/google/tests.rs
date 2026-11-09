@@ -169,6 +169,8 @@ async fn insert_meet_refreshes_once_preserves_dst_offsets_and_immediately_caches
     }).await.unwrap();
     create_with(&base, "fixture/calendar@example.test", &draft(), |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
     assert_eq!(tokens, [None, Some("cached".into())]);
+    assert!(!event.conference_pending);
+    let event = event.event;
     assert_eq!(event.end_utc - event.start_utc, 3600);
     assert_eq!(event.join_url.as_deref(), Some("https://meet.example.test/new"));
     let requests = server.await.unwrap();
@@ -214,6 +216,8 @@ async fn insert_all_day_end_is_exclusive_and_no_guests_or_meet_are_omitted() {
     draft.attendees.clear();
     draft.description = None;
     let event = create_with(&base, "primary", &draft, |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(!event.conference_pending);
+    let event = event.event;
     assert!(event.all_day);
     assert_eq!(event.end, "2026-03-30");
     let requests = server.await.unwrap();
@@ -261,4 +265,65 @@ async fn invalid_insert_does_not_get_a_token_or_make_a_request() {
             #[allow(unreachable_code)] std::future::ready(Ok(Zeroizing::new(String::new())))
         }).await.is_err());
     }
+}
+
+#[tokio::test]
+async fn pending_meet_is_followed_by_id_outside_the_fetch_window() {
+    const PENDING: &str = r#"{"id":"future/id","start":{"dateTime":"2027-05-09T09:00:00Z"},"end":{"dateTime":"2027-05-09T10:00:00Z"},"conferenceData":{"createRequest":{"status":{"statusCode":"pending"}}}}"#;
+    const READY: &str = r#"{"id":"future/id","start":{"dateTime":"2027-05-09T09:00:00Z"},"end":{"dateTime":"2027-05-09T10:00:00Z"},"conferenceData":{"createRequest":{"status":{"statusCode":"success"}},"entryPoints":[{"entryPointType":"video","uri":"https://meet.example.test/future"}]}}"#;
+    let (base, server) = server(vec![("200 OK", PENDING), ("200 OK", PENDING), ("200 OK", READY)]).await;
+    let mut draft = draft();
+    draft.start = "2027-05-09T09:00:00Z".into();
+    draft.end = "2027-05-09T10:00:00Z".into();
+    let event = create_with(&base, "fixture/calendar", &draft, |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(event.conference_pending);
+    assert!(event.event.join_url.is_none());
+    let pending = fetch_created_with(&base, "fixture/calendar", &event.event.remote_id,
+        |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(pending.conference_pending);
+    let ready = fetch_created_with(&base, "fixture/calendar", &pending.event.remote_id,
+        |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(!ready.conference_pending);
+    assert_eq!(ready.event.join_url.as_deref(), Some("https://meet.example.test/future"));
+    let requests = server.await.unwrap();
+    assert_eq!(requests.iter().filter(|r| r.starts_with("POST ")).count(), 1);
+    for request in &requests[1..] {
+        assert!(request.starts_with("GET /calendars/fixture%2Fcalendar/events/future%2Fid "));
+        assert!(!request.contains("timeMin") && !request.contains("timeMax"));
+    }
+}
+
+#[tokio::test]
+async fn conference_followup_refreshes_once_and_terminal_failure_stops_polling() {
+    const FAILED: &str = r#"{"id":"created","start":{"date":"2027-05-09"},"end":{"date":"2027-05-10"},"conferenceData":{"createRequest":{"status":{"statusCode":"failure"}}}}"#;
+    let (base, server) = server(vec![("401 Unauthorized", "{}"), ("200 OK", CREATED), ("200 OK", FAILED), ("503 Unavailable", "{}")]).await;
+    let mut tokens = Vec::new();
+    let ready = fetch_created_with(&base, "primary", "created", |rejected| {
+        let access = if rejected.is_some() { "fresh" } else { "cached" };
+        tokens.push(rejected);
+        std::future::ready(Ok(Zeroizing::new(access.into())))
+    }).await.unwrap();
+    assert_eq!(tokens, [None, Some("cached".into())]);
+    assert_eq!(ready.event.join_url.as_deref(), Some("https://meet.example.test/new"));
+    assert!(!ready.conference_pending);
+    let failed = fetch_created_with(&base, "primary", "created", |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.unwrap();
+    assert!(!failed.conference_pending);
+    assert!(failed.event.join_url.is_none());
+    assert!(fetch_created_with(&base, "primary", "created", |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.is_err());
+    let requests = server.await.unwrap();
+    assert!(requests.iter().all(|r| r.starts_with("GET /calendars/primary/events/created ")));
+    assert!(requests[1].contains("Bearer fresh"));
+}
+
+#[tokio::test]
+async fn conference_followup_recognizes_deleted_events_and_rejects_other_ids() {
+    let (base, server) = server(vec![("404 Not Found", "{}"), ("410 Gone", "{}"),
+        ("200 OK", r#"{"id":"created","status":"cancelled"}"#), ("200 OK", CREATED)]).await;
+    for _ in 0..3 {
+        assert!(matches!(fetch_created_with(&base, "primary", "created",
+            |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await, Err(Error::NotFound)));
+    }
+    assert!(fetch_created_with(&base, "primary", "other",
+        |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.is_err());
+    server.await.unwrap();
 }

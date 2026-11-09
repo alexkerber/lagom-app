@@ -40,12 +40,12 @@ impl NewEvent {
     }
 }
 
-pub async fn create_event(account: &Account, calendar: &str, draft: &NewEvent) -> Result<Event> {
+pub async fn create_event(account: &Account, calendar: &str, draft: &NewEvent) -> Result<CreatedEvent> {
     create_with("https://www.googleapis.com/calendar/v3/", calendar, draft,
         |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
 }
 
-pub async fn create_with<F, Fut>(base: &str, calendar: &str, draft: &NewEvent, mut token: F) -> Result<Event>
+pub async fn create_with<F, Fut>(base: &str, calendar: &str, draft: &NewEvent, mut token: F) -> Result<CreatedEvent>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
     if calendar.is_empty() { return Err(Error::Invalid("choose a calendar")); }
     let body = draft.body()?.to_string();
@@ -69,5 +69,35 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     if status == reqwest::StatusCode::FORBIDDEN { return Err(Error::CalendarConsent); }
     if !status.is_success() { return Err(Error::Network("could not create event")); }
     let bytes = oauth::body(response).await.map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?;
-    event(serde_json::from_slice(&bytes).map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?)
+    created(serde_json::from_slice(&bytes).map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?)
+}
+
+#[derive(Clone, Debug)]
+pub struct CreatedEvent {
+    pub event: Event,
+    pub conference_pending: bool,
+}
+
+fn created(remote: RemoteEvent) -> Result<CreatedEvent> {
+    let conference_pending = remote.conference_data.as_ref().and_then(|c| c.create_request.as_ref())
+        .and_then(|r| r.status.as_ref()).is_some_and(|s| s.status_code == "pending");
+    Ok(CreatedEvent { event: event(remote)?, conference_pending })
+}
+
+pub async fn fetch_created(account: &Account, calendar: &str, id: &str) -> Result<CreatedEvent> {
+    fetch_created_with("https://www.googleapis.com/calendar/v3/", calendar, id,
+        |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
+}
+
+pub async fn fetch_created_with<F, Fut>(base: &str, calendar: &str, id: &str, mut token: F) -> Result<CreatedEvent>
+where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
+    if calendar.is_empty() || id.is_empty() { return Err(Error::Invalid("missing calendar or event ID")); }
+    let client = oauth::http(Duration::from_secs(30))?;
+    let mut url = Url::parse(base).map_err(|_| Error::Invalid("invalid calendar endpoint"))?;
+    url.path_segments_mut().map_err(|_| Error::Invalid("invalid calendar endpoint"))?
+        .pop_if_empty().extend(["calendars", calendar, "events", id]);
+    let remote: RemoteEvent = get(&client, url, &mut token).await?;
+    if remote.status == "cancelled" { return Err(Error::NotFound); }
+    if remote.id != id { return Err(Error::Network("calendar event ID changed")); }
+    created(remote)
 }
