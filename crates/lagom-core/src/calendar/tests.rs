@@ -1,0 +1,82 @@
+use super::*;
+
+fn calendar() -> Calendar {
+    Calendar { remote_id: "primary".into(), name: "Fixture calendar".into(), color: None, shown: true, writable: true }
+}
+fn event(id: &str, start: &str, end: &str, all_day: bool) -> Event {
+    let stamp = |s: &str| mail_parser::DateTime::parse_rfc3339(&if all_day { format!("{s}T00:00:00Z") } else { s.into() }).unwrap().to_timestamp();
+    Event { remote_id: id.into(), title: id.into(), start: start.into(), end: end.into(), start_utc: stamp(start), end_utc: stamp(end), all_day, location: None, join_url: None }
+}
+fn setup() -> (tempfile::TempDir, Store, Account) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("calendar.db")).unwrap();
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    (dir, store, account)
+}
+
+#[test]
+fn calendar_migrates_v9_without_changing_mail_or_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v9.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for schema in [include_str!("../schema_v1.sql"), include_str!("../schema_v2.sql"), include_str!("../schema_v3.sql"),
+        include_str!("../schema_v4.sql"), include_str!("../schema_v5.sql"), include_str!("../schema_v6.sql"),
+        include_str!("../schema_v7.sql"), include_str!("../schema_v8.sql"), include_str!("../schema_v9.sql")] {
+        db.execute_batch(schema).unwrap();
+    }
+    let store = Store { db };
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    let list = store.default_task_list().unwrap();
+    let task = store.add_task(list, "Keep local task", "", None).unwrap();
+    drop(store);
+    let store = Store::open(path).unwrap();
+    assert_eq!(store.accounts().unwrap(), [account.clone()]);
+    assert_eq!(store.tasks(list, false).unwrap(), [task]);
+    assert_eq!(store.account_scopes(&account.id).unwrap(), "");
+    store.set_account_scopes(&account.id, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+    store.save_account(&account).unwrap();
+    assert!(crate::oauth::calendar_allowed(&store.account_scopes(&account.id).unwrap()));
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 10);
+}
+
+#[test]
+fn today_overlaps_local_day_and_keeps_all_day_dates_across_offsets() {
+    let (_dir, store, account) = setup();
+    let events = vec![
+        event("all-day", "2026-11-09", "2026-11-10", true),
+        event("multi-day", "2026-11-08", "2026-11-11", true),
+        event("ended", "2026-11-08", "2026-11-09", true),
+        event("overnight", "2026-11-08T20:00:00Z", "2026-11-10T01:00:00Z", false),
+        event("meeting", "2026-11-09T12:00:00Z", "2026-11-09T13:00:00Z", false),
+    ];
+    store.replace_calendar_window(&account.id, &[(calendar(), events)]).unwrap();
+    let midnight = mail_parser::DateTime::parse_rfc3339("2026-11-09T00:00:00Z").unwrap().to_timestamp();
+    for offset in [-11 * 3600, 0, 14 * 3600] {
+        let rows = store.today_events("2026-11-09", midnight - offset, midnight - offset + 86400).unwrap();
+        let ids: Vec<_> = rows.iter().map(|e| e.event.remote_id.as_str()).collect();
+        assert!(ids.contains(&"all-day") && ids.contains(&"multi-day") && ids.contains(&"overnight"));
+        assert!(!ids.contains(&"ended"));
+    }
+}
+
+#[test]
+fn window_replacement_rolls_back_and_account_removal_keeps_local_tasks() {
+    let (_dir, store, account) = setup();
+    let task = store.add_task(store.default_task_list().unwrap(), "Local", "", None).unwrap();
+    let event = event("kept", "2026-11-09", "2026-11-10", true);
+    store.replace_calendar_window(&account.id, &[(calendar(), vec![event.clone()])]).unwrap();
+    let mut invalid = event.clone();
+    invalid.end_utc = invalid.start_utc;
+    assert!(store.replace_calendar_window(&account.id, &[(calendar(), vec![invalid])]).is_err());
+    assert_eq!(store.today_events("2026-11-09", 0, 1).unwrap()[0].event, event);
+    store.replace_calendar_window(&account.id, &[(calendar(), vec![])]).unwrap();
+    assert!(store.today_events("2026-11-09", 0, 1).unwrap().is_empty());
+    store.replace_calendar_window(&account.id, &[(calendar(), vec![event])]).unwrap();
+    store.delete_account(&account.id).unwrap();
+    assert!(store.today_events("2026-11-09", 0, 1).unwrap().is_empty());
+    assert_eq!(store.tasks(task.list, false).unwrap(), [task]);
+}

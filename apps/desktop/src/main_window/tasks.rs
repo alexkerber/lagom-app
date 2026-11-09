@@ -38,6 +38,9 @@ impl TaskChange {
 pub(super) struct Today {
     pub(super) lists: Vec<TaskList>,
     pub(super) default: Option<i64>,
+    pub(super) events: Vec<lagom_core::calendar::AgendaEvent>,
+    pub(super) calendar_accounts: Vec<(lagom_core::account::Account, bool)>,
+    pub(super) calendar_sync: std::collections::HashMap<String, crate::sync::SyncState>,
     tasks: Vec<LocalTask>,
     selected: Option<i64>,
     editor: Option<(Edit, Entity<TextInput>)>,
@@ -68,6 +71,7 @@ pub(super) fn bind_keys(cx: &mut App) {
 
 impl MainWindow {
     pub(super) fn reload_tasks(&mut self, cx: &mut Context<Self>) {
+        self.reload_agenda(cx);
         let Some(live) = &self.live else { return };
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let snapshot = (|| -> lagom_core::Result<_> {
@@ -281,7 +285,9 @@ impl MainWindow {
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Today"))
                     .child(button(&t, "Add list", None).on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
                 .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
-                .child(groups)
+                .child(div().flex_1().min_h(px(0.)).flex().gap(px(24.))
+                    .when(!self.today.calendar_accounts.is_empty() || !self.today.events.is_empty(), |d| d.child(self.agenda_view(cx)))
+                    .child(groups))
                 .child(mono("↑ ↓ select · Space complete · Enter rename · ⌥↑ ⌥↓ reorder", t.ink2)))
     }
 }

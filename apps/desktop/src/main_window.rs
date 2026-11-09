@@ -160,6 +160,7 @@ mod html;
 mod conversation;
 mod live;
 mod tasks;
+mod agenda;
 pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
