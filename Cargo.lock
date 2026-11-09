@@ -3683,6 +3683,7 @@ dependencies = [
  "hickory-resolver",
  "keyring",
  "lettre",
+ "libc",
  "log",
  "mail-parser",
  "nom 8.0.0",

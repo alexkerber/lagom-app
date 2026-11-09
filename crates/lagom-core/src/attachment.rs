@@ -72,6 +72,8 @@ fn save_in(dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf> {
                     let _ = std::fs::remove_file(&path);
                     return Err(error.into());
                 }
+                // The file is saved either way; an error here would leave it on disk unreported.
+                let _ = mark_downloaded(&path);
                 return Ok(path);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -80,6 +82,26 @@ fn save_in(dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf> {
     }
     Err(Error::Invalid("too many files with this attachment name"))
 }
+
+/// Gatekeeper, SmartScreen and Office Protected View check only files with the download mark.
+#[cfg(target_os = "macos")]
+fn mark_downloaded(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let value = format!("0083;{now:08x};Lagom;");
+    // SAFETY: both names are NUL-terminated; the value pointer and length come from one live String.
+    let status = unsafe { libc::setxattr(path.as_ptr(), c"com.apple.quarantine".as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) };
+    if status == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+#[cfg(windows)]
+fn mark_downloaded(path: &Path) -> std::io::Result<()> {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n")
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+fn mark_downloaded(_: &Path) -> std::io::Result<()> { Ok(()) }
 
 fn truncate(value: &str, max: usize) -> &str {
     let mut end = value.len().min(max);
@@ -110,6 +132,21 @@ mod tests {
         assert_eq!(strip_bidi("räksmörgås שלום.pdf"), "räksmörgås שלום.pdf");
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(save_in(dir.path(), "invoice\u{202E}fdp.exe", b"").unwrap(), dir.path().join("invoicefdp.exe"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn saved_files_carry_the_quarantine_mark() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_in(dir.path(), "invoice.zip", b"zip").unwrap();
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut value = [0u8; 128];
+        // SAFETY: NUL-terminated names and a buffer of the given length.
+        let n = unsafe { libc::getxattr(path.as_ptr(), c"com.apple.quarantine".as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, 0) };
+        assert!(n > 0, "{}", std::io::Error::last_os_error());
+        let value = std::str::from_utf8(&value[..n as usize]).unwrap();
+        assert!(value.starts_with("0083;") && value.ends_with(";Lagom;"), "{value}");
     }
 
     #[test]
