@@ -80,6 +80,11 @@ impl Inbox {
         let before = self.mail[id].unread;
         self.mail[id].unread = unread;
         if before == unread { return; }
+        if self.items.contains(&id) { self.adjust_account_unread(id, None, unread); }
+        else if let Some(kind) = self.folders.iter().find(|f| f.items.contains(&id)
+            || f.store.is_some_and(|s| self.mail[id].folder == mail::Place::Folder(s))).map(|f| f.kind) {
+            self.adjust_account_unread(id, Some(kind), unread);
+        }
         for folder in &mut self.folders {
             if folder.items.contains(&id) || folder.store.is_some_and(|store| self.mail[id].folder == mail::Place::Folder(store)) {
                 folder.unread = if unread { folder.unread + 1 } else { folder.unread.saturating_sub(1) };
@@ -100,9 +105,10 @@ impl MainWindow {
         if self.emptying_trash() { return; }
         let Some(members) = self.inbox.act_rows(&rows, what) else { return };
         self.clear_motion();
+        let mut destinations = HashMap::new();
         let mut sent = true;
         for member in members {
-            sent &= self.server(what, member, when, cx);
+            sent &= self.server(what, member, when, &mut destinations, cx);
             if !matches!(what, Move::Read(_)) { self.close_popouts(Some(member), cx); }
         }
         if !sent { return; }
@@ -168,13 +174,13 @@ impl MainWindow {
         div().flex_1().min_w(px(0.)).h_full().flex().flex_col()
             .child(toolbar(t).flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.)).px(px(16.))
                 .when(!trash, |d| d
-                    .child(button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
+                    .child(polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
                     .child(button(t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx)))))
-                .child(button(t, "Move", None).on_click(cx.listener(|this, _, window, cx| this.open_palette("move ", window, cx))))
-                .child(button(t, if seen { "Mark read" } else { "Mark unread" }, None)
+                .child(polish::shortcut_button(t, "Move", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.open_palette("move ", window, cx))))
+                .child(polish::shortcut_button(t, if seen { "Mark read" } else { "Mark unread" }, None, self.hints.visible)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_read(cx))))
                 .child(div().flex_1())
-                .child(button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
+                .child(polish::shortcut_button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent), self.hints.visible)
                     .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx)))))
             .child(summary)
     }
@@ -193,7 +199,7 @@ mod tests {
             v.inbox.mail[1].thread_id = "thread".into();
             v.inbox.mail[0].unread = true;
             v.inbox.mail[1].unread = false;
-            v.inbox.mail[1].date = 1;
+            v.inbox.mail[1].date = v.inbox.mail[0].date + 1;
             v.inbox.group = true;
             v.inbox.regroup();
             v.inbox.select(0);

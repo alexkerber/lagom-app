@@ -246,7 +246,7 @@ impl MainWindow {
             .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
             .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).whitespace_nowrap().text_ellipsis().child(title))
-            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/meet.svg", t.ink2, 16.))).child(mono(short_time(&entry.event), t.ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
+            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/camera.svg", t.ink2, 16.))).child(mono(short_time(&entry.event), t.ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.week.detail = Some(entry.clone());
@@ -287,9 +287,9 @@ impl MainWindow {
                 .child(div().flex_1().flex().gap(px(6.)).text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
                     .min_w(px(170.)).child(div().debug_selector(|| "calendar-title-month".into()).child(self.week.anchor.format("%B").to_string())).child(div().debug_selector(|| "calendar-title-year".into()).text_color(t.ink2).child(self.week.anchor.format("%Y").to_string())))
                 .child(div().flex().items_center().border_1().border_color(t.line).rounded(px(radius::CONTROL))
-                    .child(icon_button(&t, "previous-week", "icons/chevron-left.svg", "Previous period · ←").on_click(cx.listener(|this, _, window, cx| { this.move_week(-1, cx); window.focus(&this.focus); })))
+                    .child(icon_button(&t, "previous-week", "icons/previous.svg", "Previous period · ←").on_click(cx.listener(|this, _, window, cx| { this.move_week(-1, cx); window.focus(&this.focus); })))
                     .child(button(&t, "Today", None).on_click(cx.listener(|this, _, window, cx| { this.move_week(0, cx); window.focus(&this.focus); })))
-                    .child(icon_button(&t, "next-week", "icons/chevron-right.svg", "Next period · →").on_click(cx.listener(|this, _, window, cx| { this.move_week(1, cx); window.focus(&this.focus); }))))
+                    .child(icon_button(&t, "next-week", "icons/next.svg", "Next period · →").on_click(cx.listener(|this, _, window, cx| { this.move_week(1, cx); window.focus(&this.focus); }))))
                 .child(div().flex().border_1().border_color(t.line).rounded(px(radius::CONTROL))
                     .children([(View::Day, "Day"), (View::Week, "Week"), (View::Month, "Month")].into_iter().map(|(view, label)|
                         button(&t, label, None).when(view == self.week.view, |d| d.bg(t.sel))
@@ -422,14 +422,16 @@ impl MainWindow {
                 .flex().flex_col().gap(px(12.))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(entry.event.title.clone()))
-                .child(mono(event_time(&entry.event), t.ink2))
+                .child(div().flex().items_center().gap(px(6.))
+                    .when(entry.event.all_day, |d| d.child(icon("icons/sun.svg", t.ink2, 16.)))
+                    .child(mono(event_time(&entry.event), t.ink2)))
                 .children(entry.event.location.clone().map(|location| div().child(location)))
                 .child(mono(entry.calendar.clone(), t.ink2))
                 .children(entry.event.join_url.clone().filter(|s| lagom_core::google::safe_join_url(s)).map(|url|
                     button(&t, "Join", None).on_click(move |_, _, cx| cx.open_url(&url))))
                 .children(entry.event.html_link.clone().filter(|s| lagom_core::google::safe_calendar_url(s)).map(|url|
-                    button(&t, "Open in Google Calendar", None).on_click(move |_, _, cx| cx.open_url(&url))))
-                .child(button(&t, "Close", None).on_click(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))));
+                    icon_button(&t, "Open in Google Calendar", "icons/external.svg", "Open in Google Calendar").on_click(move |_, _, cx| cx.open_url(&url))))
+                .child(icon_button(&t, "Close", "icons/close.svg", "Close event · Esc").on_click(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))));
         }
         page = page.child(self.new_event_sheet(cx));
         page
@@ -580,6 +582,9 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.week.detail.is_some()));
         assert!(cx.debug_bounds("event-detail").is_some());
         assert!(cx.debug_bounds("Join").is_some());
+        for path in ["camera", "sun", "previous", "next", "external", "close"] {
+            assert_eq!(cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap().size, gpui::size(px(16.), px(16.)));
+        }
         assert!(cx.debug_bounds("Open in Google Calendar").is_some());
         cx.simulate_keystrokes("escape right");
         assert_eq!(view.read_with(cx, |v, _| v.week.start), start + chrono::Duration::days(7));

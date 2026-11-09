@@ -217,7 +217,7 @@ impl MainWindow {
             .child(field(TITLE, "Title", cx))
             .child(div().flex().gap(px(8.)).child(field(DATE, "Date", cx)).child(field(END_DATE, if editor.all_day { "Last day" } else { "End date" }, cx)))
             .when(!editor.all_day, |d| d.child(div().flex().gap(px(8.)).child(field(START, "Start · ↑ ↓ 15 min", cx)).child(field(END, "End · ↑ ↓ 15 min", cx))))
-            .child(crate::settings::toggle_row(&t, "All day", editor.all_day).child(icon("icons/all-day.svg", t.ink2, 16.)).focusable().tab_stop(true)
+            .child(crate::settings::toggle_row(&t, "All day", editor.all_day).child(icon("icons/sun.svg", t.ink2, 16.)).focusable().tab_stop(true)
                 .focus(|s| s.border_1().border_color(t.accent))
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "space" {
@@ -246,7 +246,7 @@ impl MainWindow {
                 })));
         } else { sheet = sheet.child(mono(editor.calendars[editor.calendar].2.clone(), t.ink2)); }
         sheet = sheet
-            .child(crate::settings::toggle_row(&t, "Add Google Meet", editor.meet).child(icon("icons/meet.svg", t.ink2, 16.)).focusable().tab_stop(true)
+            .child(crate::settings::toggle_row(&t, "Add Google Meet", editor.meet).child(icon("icons/camera.svg", t.ink2, 16.)).focusable().tab_stop(true)
                 .focus(|s| s.border_1().border_color(t.accent))
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "space" {

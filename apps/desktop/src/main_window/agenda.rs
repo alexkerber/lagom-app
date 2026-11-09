@@ -42,7 +42,7 @@ impl MainWindow {
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
             controls = controls.child(div().flex().items_center().gap(px(8.))
-                .when(*allowed, |d| d.child(icon(if matches!(state, Some(SyncState::Failed(_))) { "icons/cloud-off.svg" } else { "icons/cloud.svg" }, t.ink2, 16.)))
+                .children(state.map(|state| icon(polish::sync_icon(state), t.ink2, 16.)))
                 .child(mono(account.email.clone(), t.ink2))
                 .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))

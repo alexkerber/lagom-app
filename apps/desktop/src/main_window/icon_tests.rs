@@ -44,7 +44,7 @@ impl Render for GlyphButton {
 fn icon_only_button_svg_paints_with_visible_ink(cx: &mut TestAppContext) {
     for theme in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
         for (action, fill) in [(false, None), (true, None), (true, Some(theme.accent))] {
-            for path in ["icons/chevron-left.svg", "icons/calendar-panel.svg", "icons/reply-all.svg", "icons/add-cc.svg", "icons/trash.svg"] {
+            for path in ["icons/chevron-left.svg", "icons/calendar-panel.svg", "icons/reply-all.svg", "icons/cc.svg", "icons/trash.svg"] {
                 let ink = Rc::new(Cell::new(None));
                 let (_, cx) = cx.add_window_view(|_, _| GlyphButton { action, theme, fill, path, ink: ink.clone() });
                 cx.run_until_parked();

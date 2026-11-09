@@ -618,7 +618,7 @@ impl Compose {
                     .border_color(t.line)
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(if self.reply.is_some() { "Reply" } else { "New message" }))
                     .child(
-                        icon_button(t, "discard", "icons/discard-draft.svg", "Discard draft · ⌘⌫")
+                        icon_button(t, "discard", "icons/trash.svg", "Discard draft · ⌘⌫")
                             .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
                     ),
             )
@@ -630,7 +630,7 @@ impl Compose {
                     .child(field("From").child(self.from.clone()))
                     .child(field("To").child(self.address_field(0, window, cx)).when(!self.show_cc, |d| {
                         d.child(
-                            icon_button(t, "add-cc", "icons/add-cc.svg", "Add Cc recipients")
+                            icon_button(t, "add-cc", "icons/cc.svg", "Add Cc")
                                 .on_click(cx.listener(|this, _, window, cx| this.add_cc(window, cx))),
                         )
                     }))

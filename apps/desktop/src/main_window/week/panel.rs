@@ -80,11 +80,11 @@ impl MainWindow {
         let selected = monday(self.week.anchor);
         let mut mini = div().flex().flex_col().gap(px(4.))
             .child(div().flex().items_center()
-                .child(icon_button(&t, "mini-previous", "icons/chevron-left.svg", "Previous month").on_click(cx.listener(|this, _, _, cx| {
+                .child(icon_button(&t, "mini-previous", "icons/previous.svg", "Previous month").on_click(cx.listener(|this, _, _, cx| {
                     this.week.mini_month = shift_month(this.week.mini_month, -1); cx.notify();
                 })))
                 .child(div().flex_1().text_center().font_weight(FontWeight::MEDIUM).child(month.format("%B %Y").to_string()))
-                .child(icon_button(&t, "mini-next", "icons/chevron-right.svg", "Next month").on_click(cx.listener(|this, _, _, cx| {
+                .child(icon_button(&t, "mini-next", "icons/next.svg", "Next month").on_click(cx.listener(|this, _, _, cx| {
                     this.week.mini_month = shift_month(this.week.mini_month, 1); cx.notify();
                 }))))
             .child(div().flex().children(["M", "T", "W", "T", "F", "S", "S"].map(|name| mono(name, t.ink2).flex_1().text_center())));
