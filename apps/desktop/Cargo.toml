@@ -48,7 +48,7 @@ windows = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_U
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSView", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSView", "NSWindow", "NSGraphics", "NSGlassEffectView", "NSVisualEffectView", "objc2-quartz-core"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSBundle"] }
 
 block2 = "0.6.2"

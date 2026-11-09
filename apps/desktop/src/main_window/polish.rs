@@ -40,12 +40,12 @@ impl MainWindow {
         let active = matches!(self.page, Page::Mail) && self.inbox.open_kind() == kind;
         let expanded = self.mailbox_expanded[slot];
         let count = if slot == 0 { self.inbox.count() } else { 0 };
-        let row = pressable(div().id(SharedString::from(format!("nav-{label}"))), t, active && self.inbox.account_filter.is_none())
+        let selected = active && self.inbox.account_filter.is_none();
+        let row = mailbox_style(div().id(SharedString::from(format!("nav-{label}"))), t, selected)
             .debug_selector(move || format!("nav-{label}"))
             .flex().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
-            .when(active && self.inbox.account_filter.is_none(), |d| d.bg(t.sel))
-            .child(icon(path, if active && self.inbox.account_filter.is_none() { t.sel_icon } else { t.ink2 }, 16.))
-            .child(div().flex_1().child(label))
+            .child(icon(path, if selected { t.accent } else { t.ink2 }, 16.))
+            .child(div().flex_1().debug_selector(move || format!("nav-{label}-{}", if selected { "accent" } else { "idle" })).child(label))
             .when(count > 0, |d| d.child(roll(mono(count.to_string(), t.ink2).debug_selector(move || format!("{label}-count")), format!("{label}-{count}"))))
             .when(multiple && slot != 0, |d| d.child(pressable(div().id(("disclosure", slot)), t, false)
                 .debug_selector(move || format!("disclosure-{label}"))
@@ -63,12 +63,14 @@ impl MainWindow {
             .when(multiple && expanded, |d| d.children(accounts.iter().enumerate().map(|(ix, account)| {
                 let selected = active && self.inbox.account_filter.as_deref() == Some(&account.id);
                 let unread = if slot == 0 { self.mailbox_unread(&account.id, slot) } else { 0 };
-                pressable(div().id((SharedString::from(format!("{label}-account")), ix)), t, selected)
+                mailbox_style(div().id((SharedString::from(format!("{label}-account")), ix)), t, selected)
                     .debug_selector(move || format!("{label}-account-{ix}"))
                     .h(px(SIDEBAR_ROW)).pl(px(34.)).pr(px(10.)).flex().items_center().gap(px(8.))
-                    .rounded(px(radius::CONTROL)).when(selected, |d| d.bg(t.sel))
-                    .child(div().size(px(7.)).rounded_full().bg(self.account_accent(ix)).flex_shrink_0())
-                    .child(div().flex_1().min_w(px(0.)).one_line().child(live::short_name(account)))
+                    .rounded(px(radius::CONTROL))
+                    .child(div().size(px(7.)).rounded_full().bg(if selected { t.accent } else { self.account_accent(ix) }).flex_shrink_0())
+                    .child(div().flex_1().min_w(px(0.)).one_line()
+                        .debug_selector(move || format!("{label}-account-{ix}-{}", if selected { "accent" } else { "idle" }))
+                        .child(live::short_name(account)))
                     .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2).debug_selector(move || format!("{label}-account-{ix}-count")), format!("{label}-{ix}-{unread}"))))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_mailbox(kind, Some(ix), cx)))
             })))
@@ -105,10 +107,11 @@ impl MainWindow {
         let keys = match (self.hints.modifiers.platform, self.hints.modifiers.shift) {
             (true, true) => "⌘ Shift", (true, false) => "⌘", _ => "Shift",
         };
-        div().absolute().top(px(8.)).left(px(12.)).px(px(8.)).py(px(4.))
-            .rounded(px(radius::CONTROL)).bg(self.theme.raised).border_1().border_color(self.theme.line)
-            .text_size(px(size::SMALL)).text_color(self.theme.ink2).debug_selector(|| "modifier-hint".into())
-            .child(format!("{keys} · {} selected", self.inbox.selected_members().len()))
+        div().absolute().bottom(px(12.)).left_0().right_0().flex().justify_center()
+            .child(div().px(px(8.)).py(px(4.)).rounded_full()
+                .bg(self.theme.raised).border_1().border_color(self.theme.line)
+                .text_size(px(size::SMALL)).text_color(self.theme.ink2).debug_selector(|| "modifier-hint".into())
+                .child(format!("{keys} · {} selected", self.inbox.selected_members().len())))
     }
 
     pub(super) fn message_action(&mut self, id: usize, action: MessageAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -134,6 +137,15 @@ impl MainWindow {
             this.message_action(id, *action, window, cx);
         }))
     }
+}
+
+pub(super) fn mailbox_style(row: Stateful<Div>, t: &Theme, selected: bool) -> Stateful<Div> {
+    let accent = t.accent;
+    let press = t.press;
+    let hover = Rgba { a: press.a / 2., ..press };
+    pressable(row, t, selected).text_color(t.ink)
+        .when(selected, |d| d.text_color(accent).font_weight(FontWeight::MEDIUM)
+            .hover(move |s| s.bg(hover).text_color(accent)).active(move |s| s.bg(press)))
 }
 
 #[derive(Clone, Copy)]
@@ -344,17 +356,64 @@ mod tests {
     }
 
     #[test]
-    fn review_mail_section_has_no_selection_fill() {
+    fn section_rows_share_the_selected_fill() {
         for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
             for active in [false, true] {
-                let mut mail = sidebar_nav(&t, "icons/mail.svg", "Mail", None, active, true);
-                assert!(mail.style().background.is_none());
-                for label in ["Today", "Calendar", "Todo", "Later"] {
-                    let mut row = sidebar_nav(&t, "icons/later.svg", label, None, active, true);
+                let mut mail = sidebar_nav(&t, "icons/mail.svg", "Mail", None, active, true, true);
+                assert_eq!(mail.style().background.is_some(), active);
+                for label in ["Today", "Calendar", "Todo"] {
+                    let mut row = sidebar_nav(&t, "icons/later.svg", label, None, active, true, true);
                     assert_eq!(row.style().background.is_some(), active);
                 }
             }
         }
+    }
+
+    #[test]
+    fn mailbox_selection_is_accented_without_a_fill() {
+        for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
+            for selected in [false, true] {
+                let mut row = mailbox_style(div().id("mailbox"), &t, selected);
+                assert!(row.style().background.is_none());
+                let text = row.style().text.as_ref().unwrap();
+                assert_eq!(text.color, Some(if selected { t.accent } else { t.ink }.into()));
+                assert_eq!(text.font_weight, selected.then_some(FontWeight::MEDIUM));
+                for label in ["Later", "Trash"] {
+                    let mut row = sidebar_nav(&t, "icons/later.svg", label, None, selected, true, false);
+                    assert!(row.style().background.is_none());
+                    assert_eq!(row.style().text.as_ref().unwrap().color, text.color);
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn mail_keeps_its_section_selection_across_mailboxes(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        view.update(cx, |v, _| v.inbox.folders.push(Folder { kind: Kind::Later, ..Folder::new("Later", None, &[0]) }));
+        for (label, kind) in [("Inbox", None), ("Done", Some(Kind::Done)), ("Sent", Some(Kind::Sent))] {
+            for account in [None, Some(0), Some(1)] {
+                view.update(cx, |v, cx| { v.mailbox_expanded = [true; 3]; v.open_mailbox(kind, account, cx); });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("nav-Mail-filled").is_some());
+                let selected = account.map_or_else(|| format!("nav-{label}-accent"), |ix| format!("{label}-account-{ix}-accent"));
+                assert!(cx.debug_bounds(selected.leak()).is_some());
+            }
+        }
+        for kind in [Kind::Later, Kind::Trash] {
+            view.update(cx, |v, cx| v.open_kind(kind, cx));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("nav-Mail-filled").is_some());
+            assert!(cx.debug_bounds(if kind == Kind::Later { "nav-Later-accent" } else { "nav-Trash-accent" }).is_some());
+        }
+        view.update(cx, |v, cx| {
+            v.mailbox_expanded = [true, false, false];
+            v.open_box(Some(0), cx);
+        });
+        cx.run_until_parked();
+        let folder = view.read_with(cx, |v, _| v.inbox.open.unwrap());
+        assert!(cx.debug_bounds("nav-Mail-filled").is_some());
+        assert!(cx.debug_bounds(format!("folder-{folder}-accent").leak()).is_some());
     }
 
     #[gpui::test]
@@ -457,7 +516,12 @@ mod tests {
             assert!(!view.read_with(cx, |v, _| v.hints.visible));
             cx.executor().advance_clock(Duration::from_millis(1));
             cx.run_until_parked();
-            assert!(cx.debug_bounds("modifier-hint").is_some());
+            let hint = cx.debug_bounds("modifier-hint").unwrap();
+            let header = cx.debug_bounds("list-header").unwrap();
+            let pane = cx.debug_bounds("list-pane").unwrap();
+            assert!(hint.top() >= header.bottom(), "hint must not cover the list header");
+            assert!((hint.center().x - pane.center().x).abs() <= px(1.));
+            assert!(hint.bottom() <= pane.bottom() && hint.bottom() >= pane.bottom() - px(20.));
             cx.simulate_modifiers_change(Default::default());
             assert!(!view.read_with(cx, |v, _| v.hints.visible));
             cx.run_until_parked();
@@ -470,6 +534,31 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| !v.hints.visible && v.hints.timer.is_none()));
+    }
+
+    #[gpui::test]
+    fn modifier_hint_floats_without_moving_rows_after_resize(cx: &mut TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        cx.update(|window, _| window.activate_window());
+        for (width, height) in [MIN_WINDOW, (1440., 900.)] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            for sidebar_hidden in [false, true] {
+                view.update(cx, |v, cx| { v.panes.sidebar_hidden = sidebar_hidden; v.hints.visible = false; cx.notify(); });
+                cx.run_until_parked();
+                let header = cx.debug_bounds("list-header").unwrap();
+                let row = cx.debug_bounds("row-0").unwrap();
+                view.update(cx, |v, cx| { v.hints.visible = true; cx.notify(); });
+                cx.run_until_parked();
+                let hint = cx.debug_bounds("modifier-hint").unwrap();
+                let pane = cx.debug_bounds("list-pane").unwrap();
+                assert_eq!(cx.debug_bounds("list-header").unwrap(), header);
+                assert_eq!(cx.debug_bounds("row-0").unwrap(), row);
+                assert!(hint.top() >= header.bottom());
+                assert!(hint.left() >= pane.left() && hint.right() <= pane.right());
+                assert!((hint.center().x - pane.center().x).abs() <= px(1.));
+                assert!(hint.bottom() <= pane.bottom() && hint.bottom() >= pane.bottom() - px(20.));
+            }
+        }
     }
 
     #[gpui::test]
