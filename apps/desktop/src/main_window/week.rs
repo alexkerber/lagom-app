@@ -351,7 +351,7 @@ impl MainWindow {
                     .when(date == today, |d| d.bg(Theme::light(DEFAULT_ACCENT).accent).text_color(gpui::rgb(0xFFFFFF)))
                     .child(date.day().to_string())));
             let entries = &self.week.days[day];
-            all_day = all_day.child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).px(px(2.))
+            all_day = all_day.child(div().flex_1().min_w(px(0.)).overflow_hidden().flex().flex_col().gap(px(3.)).px(px(2.))
                 .children(entries.iter().enumerate().filter(|(_, e)| e.event.all_day)
                     .map(|(ix, e)| self.calendar_event_line(e, day, ix, cx))));
             let mut column = div().id(("week-day", day)).debug_selector(move || format!("week-day-{day}"))

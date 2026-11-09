@@ -218,7 +218,8 @@ async fn work_completes_creation_while_the_same_folder_is_stalled() {
                 Ok(0) => break,
                 Ok(_) => {},
                 // Dropping the worker closes its cached session without LOGOUT.
-                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                // Windows reports the same close as ConnectionAborted (os error 10053).
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => break,
                 Err(e) => panic!("{e}"),
             }
             let (tag, command) = line.trim_end().split_once(' ').unwrap();

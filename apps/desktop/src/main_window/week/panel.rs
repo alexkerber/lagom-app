@@ -143,7 +143,7 @@ impl MainWindow {
                     .on_mouse_down(MouseButton::Left, |_, window, cx| { window.prevent_default(); cx.stop_propagation(); })
                     .on_click(cx.listener(move |this, _, _, cx| { this.week.suggestion = index; this.add_calendar_guest(cx); })))))
             .children(self.week.guests.iter().enumerate().map(|(index, guest)| div().flex().items_center().gap(px(4.))
-                .child(div().flex_1().min_w(px(0.)).flex().flex_col().child(calendar_title(gpui::StyledText::new(guest.clone()))))
+                .child(div().flex_1().min_w(px(0.)).overflow_hidden().flex().flex_col().child(calendar_title(gpui::StyledText::new(guest.clone()))))
                 .child(icon_button(&t, "remove-guest", "icons/remove-guest.svg", "Remove guest").id(("remove-guest", index))
                     .on_click(cx.listener(move |this, _, _, cx| { this.week.guests.remove(index); cx.notify(); })))))
             .when_some(self.week.guest_error.clone(), |d, error| d.child(mono(error, t.danger)))
