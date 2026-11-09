@@ -103,6 +103,24 @@ impl Store {
         }
         Ok(store)
     }
+    pub fn signature(&self, account: &str) -> Result<String> {
+        Ok(self.db.query_row("SELECT text FROM signatures WHERE account=?1", [account], |r| r.get(0)).optional()?.unwrap_or_default())
+    }
+
+    pub fn set_signature(&self, account: &str, text: &str) -> Result<()> {
+        self.db.execute("INSERT INTO signatures(account,text) VALUES (?1,?2) ON CONFLICT(account) DO UPDATE SET text=excluded.text", params![account, text])?;
+        Ok(())
+    }
+
+    pub fn cached_attachment(&self, message: i64, section: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.db.query_row("SELECT data FROM attachment_cache WHERE message=?1 AND section=?2", params![message, section], |r| r.get(0)).optional()?)
+    }
+
+    pub(crate) fn cache_attachment(&self, message: i64, section: &str, data: &[u8]) -> Result<()> {
+        self.db.execute("INSERT INTO attachment_cache VALUES (?1,?2,?3) ON CONFLICT(message,section) DO UPDATE SET data=excluded.data", params![message, section, data])?;
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         Path::new(self.db.path().expect("file-backed store"))
     }
@@ -462,6 +480,9 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    pub fn attachment_metadata_loaded(&self, message: i64) -> Result<bool> {
+        Ok(self.db.query_row("SELECT attachments_loaded FROM messages WHERE id=?1", [message], |r| r.get(0))?)
+    }
     pub fn attachments(&self, message: i64) -> Result<Vec<crate::attachment::Attachment>> {
         let mut stmt = self.db.prepare("SELECT section,filename,mime_type,size,encoding FROM attachments WHERE message=?1 ORDER BY section")?;
         let rows = stmt.query_map([message], |r| Ok(crate::attachment::Attachment {
@@ -670,6 +691,95 @@ mod mail_tests {
             body_html: None,
         }
     }
+    #[test]
+    fn v10_upgrade_preserves_calendar_data_and_account_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v10.db");
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql")] { db.execute_batch(schema).unwrap(); }
+        let old = Store { db };
+        let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+        let account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        old.db.execute("UPDATE accounts SET scopes='calendar.readonly' WHERE id=?1", [&account.id]).unwrap();
+        old.db.execute("INSERT INTO calendars(id,account,remote_id,name,shown,writable) VALUES (1,?1,'primary','Calendar',1,0)", [&account.id]).unwrap();
+        old.db.execute_batch("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day) VALUES (1,'event','Keep event','2026-11-09','2026-11-10',1,2,1);").unwrap();
+        drop(old);
+        let store = Store::open(path).unwrap();
+        store.set_signature(&account.id, "Team").unwrap();
+        store.save_account(&account).unwrap();
+        assert_eq!(store.db.query_row("SELECT scopes FROM accounts WHERE id=?1", [&account.id], |r| r.get::<_, String>(0)).unwrap(), "calendar.readonly");
+        assert_eq!(store.db.query_row("SELECT title FROM events WHERE calendar=1", [], |r| r.get::<_, String>(0)).unwrap(), "Keep event");
+        assert_eq!(store.signature(&account.id).unwrap(), "Team");
+    }
+
+    #[test]
+    fn v9_upgrade_preserves_mail_drafts_outbox_and_tasks() {
+        mail_upgrade(9);
+    }
+
+    #[test]
+    fn v11_upgrade_preserves_signatures_cached_attachments_mail_drafts_outbox_and_tasks() {
+        mail_upgrade(11);
+    }
+
+    fn mail_upgrade(version: usize) {
+        use crate::{outbox::Draft, smtp::{Outgoing, OutgoingAttachment}};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(format!("v{version}.db"));
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql"), include_str!("schema_v11.sql")].iter().take(version) { db.execute_batch(schema).unwrap(); }
+        let old = Store { db };
+        let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+        let account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        let folder = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let id = old.save_message(&mail(&account, folder, 1)).unwrap();
+        let before = old.message(id).unwrap();
+        let attachment = crate::attachment::Attachment { section: "2".into(), filename: "data.bin".into(), mime_type: "application/octet-stream".into(), size: 2, encoding: "base64".into() };
+        old.save_synced_message(&before, std::slice::from_ref(&attachment)).unwrap();
+        if version == 11 {
+            old.set_signature(&account.id, "Existing signature").unwrap();
+            old.cache_attachment(id, &attachment.section, &[0, 255]).unwrap();
+        }
+        let task = old.add_task(old.default_task_list().unwrap(), "Keep task", "Notes", None).unwrap();
+        let draft = Draft { id: "draft".into(), account: account.id.clone(), text: "Saved edits".into(), ..Default::default() };
+        let mut legacy = serde_json::to_value(&draft).unwrap();
+        legacy.as_object_mut().unwrap().remove("attachments");
+        legacy.as_object_mut().unwrap().remove("forward_source");
+        old.db.execute("INSERT INTO drafts(id,account,content,revision) VALUES (?1,?2,?3,'revision')", params![draft.id, account.id, legacy.to_string()]).unwrap();
+        let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "Queued".into(), ..Default::default() };
+        let queued = old.enqueue(&account, &outgoing, 123).unwrap();
+        let raw = old.pending(&queued).unwrap().raw;
+        assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.attachments(id).unwrap(), [attachment]);
+        assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
+        assert_eq!(store.message(id).unwrap(), before);
+        assert_eq!(store.drafts().unwrap(), [draft.clone()]);
+        assert_eq!(store.pending(&queued).unwrap().raw, raw);
+        assert_eq!(store.tasks(task.list, false).unwrap(), [task]);
+        assert_eq!(store.signature(&account.id).unwrap(), if version == 11 { "Existing signature" } else { "" });
+        store.set_signature(&account.id, "**Team**\nContact").unwrap();
+        store.save_account(&account).unwrap();
+        let parts = vec![OutgoingAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }];
+        let draft = Draft { attachments: parts.clone(), ..draft };
+        store.save_draft(&draft).unwrap();
+        let mail = Outgoing { attachments: parts.clone(), message_id: Some(draft.id.clone()), ..outgoing };
+        let queued = store.enqueue(&account, &mail, 0).unwrap();
+        assert_eq!(store.pending(&queued).unwrap().mail.attachments, parts);
+        assert!(store.undo_send(&queued).unwrap());
+        drop(store);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.signature(&account.id).unwrap(), "**Team**\nContact");
+        assert_eq!(store.drafts().unwrap(), [draft]);
+        store.delete_account(&account.id).unwrap();
+        assert_eq!(store.signature(&account.id).unwrap(), "");
+    }
+
     #[test]
     fn message_summary_revalidates_metadata_without_reading_bodies() {
         let (_temp, s, a, inbox) = setup();

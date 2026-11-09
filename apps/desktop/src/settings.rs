@@ -11,7 +11,7 @@ use crate::motion::spring;
 use crate::theme::{radius, size, Theme};
 
 /// `confirm`: the id of the account whose removal waits for a yes.
-pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool, notifications: bool, task_lists: &[lagom_core::tasks::TaskList], default_list: Option<i64>, cx: &mut Context<MainWindow>) -> Div {
+pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool, notifications: bool, task_lists: &[lagom_core::tasks::TaskList], default_list: Option<i64>, signatures: &std::collections::HashMap<String, gpui::Entity<crate::text_input::TextInput>>, cx: &mut Context<MainWindow>) -> Div {
     let mut list = div().flex().flex_col().pt(px(20.)).border_t_1().border_color(t.line);
     for a in accounts {
         let id = a.id.clone();
@@ -39,7 +39,11 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         } else {
             row.child(button(t, "Remove", None).on_click(cx.listener(move |this, _, _, cx| this.confirm_remove(Some(id.clone()), cx))))
         };
-        list = list.child(row);
+        list = list.child(row).children(signatures.get(&a.id).map(|input|
+            div().debug_selector({ let id = a.id.clone(); move || format!("signature-{id}") })
+                .flex().flex_col().gap(px(6.)).py(px(12.)).child(mono("Signature", t.ink2))
+                .child(div().h(px(72.)).child(input.clone()))
+        ));
     }
     let content = div()
         .w_full()
@@ -56,7 +60,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
         })))
         .child(toggle_row(t, "Group by conversation", group).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
         .child(toggle_row(t, "Notifications for new mail", notifications).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
-        .child(div().flex().flex_col().gap(px(8.)).child("Default task list")
+        .when(!task_lists.is_empty(), |d| d.child(div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(8.)).child("Default task list")
             .children(task_lists.iter().map(|list| {
                 let id = list.id;
                 crate::main_window::pressable(div().id(("default-task-list", id as usize)), t, default_list == Some(id))
@@ -65,7 +69,7 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
                     .when(default_list == Some(id), |d| d.bg(t.sel))
                     .child(format!("{}{}", if default_list == Some(id) { "✓ " } else { "" }, list.name))
                     .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); }))
-            })))
+            }))))
         .child(list)
         .child(div().flex().child(button(t, "Add account", None).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))
         .child(mono("Removing an account keeps its mail on the server.", t.ink2));

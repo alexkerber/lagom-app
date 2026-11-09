@@ -1,5 +1,14 @@
 BEGIN IMMEDIATE;
-ALTER TABLE events ADD COLUMN html_link TEXT;
-CREATE INDEX messages_unread_date ON messages(date DESC,id DESC) WHERE seen=0;
+CREATE TABLE signatures (
+ account TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+ text TEXT NOT NULL
+);
+CREATE TABLE attachment_cache (
+ message INTEGER NOT NULL,
+ section TEXT NOT NULL,
+ data BLOB NOT NULL,
+ PRIMARY KEY(message,section),
+ FOREIGN KEY(message,section) REFERENCES attachments(message,section) ON DELETE CASCADE
+);
 PRAGMA user_version = 11;
 COMMIT;

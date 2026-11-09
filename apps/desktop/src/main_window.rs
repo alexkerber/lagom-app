@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, ease_out_quint, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
-    App, Context, CursorStyle, Div, ElementId, Entity, FocusHandle, FontFeatures, FontWeight, KeyBinding, MouseButton,
+    App, Context, CursorStyle, Div, ElementId, Entity, FocusHandle, Focusable, FontFeatures, FontWeight, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, Stateful, Task, TouchPhase, Window,
 };
@@ -18,13 +18,13 @@ use crate::accounts::{AddAccount, Connect};
 use crate::command_palette::{CommandPalette, MoveTo, Run};
 use crate::compose::{Compose, ComposeEvent};
 use crate::folders::{self, Folder, Kind};
-use crate::mail::{self, LaterWhen, Mail, INBOX_LEN, LATER_SAMPLE};
+use crate::mail::{self, LaterWhen, Mail, ComposeKind, INBOX_LEN, LATER_SAMPLE};
 use crate::motion::spring;
 use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, Reply, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
 
 pub fn bind_keys(cx: &mut App) {
     tasks::bind_keys(cx);
@@ -60,8 +60,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", DeleteMessage, keys),
         KeyBinding::new("secondary-z", Undo, ctx),
         KeyBinding::new("secondary-k", OpenPalette, ctx),
+        KeyBinding::new("m", OpenMovePalette, keys),
         KeyBinding::new("secondary-r", Reply, ctx),
         KeyBinding::new("r", Reply, keys),
+        KeyBinding::new("shift-r", ReplyAll, keys),
+        KeyBinding::new("f", Forward, keys),
         KeyBinding::new("secondary-n", NewMessage, ctx),
         KeyBinding::new("c", NewMessage, keys),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
@@ -80,6 +83,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", DeleteMessage, message),
         KeyBinding::new("secondary-r", Reply, message),
         KeyBinding::new("r", Reply, message),
+        KeyBinding::new("shift-r", ReplyAll, message),
+        KeyBinding::new("f", Forward, message),
+        KeyBinding::new("shift-u", ToggleRead, message),
     ]);
 }
 
@@ -280,6 +286,7 @@ pub struct MainWindow {
     today: tasks::Today,
     week: week::Week,
     task_undo: Option<i64>,
+    signatures: HashMap<String, Entity<TextInput>>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     confirm_empty_trash: bool,
@@ -389,6 +396,7 @@ impl MainWindow {
             today: tasks::Today::default(),
             week: week::Week::default(),
             task_undo: None,
+            signatures: HashMap::new(),
             all_folders: false,
             confirm_empty_trash: false,
             folder_name: None,
@@ -578,6 +586,9 @@ impl MainWindow {
             Run::Done => self.act(Move::Done, cx),
             Run::Later(when) => self.act_selected(Move::Later, when, cx),
             Run::Delete => self.act(Move::Delete, cx),
+            Run::ReplyAll => self.compose_selected(ComposeKind::ReplyAll, window, cx),
+            Run::Forward => self.compose_selected(ComposeKind::Forward, window, cx),
+            Run::ToggleRead => self.toggle_read(cx),
             Run::Reply => self.open_compose(true, window, cx),
             Run::Compose => self.open_compose(false, window, cx),
             Run::InsertFile => {
@@ -601,27 +612,75 @@ impl MainWindow {
 
     /// `reply`: to this message id. See `open_compose`.
     fn compose_for(&mut self, reply: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.compose_kind(reply, ComposeKind::Reply, window, cx);
+    }
+
+    fn mail_action_on(&mut self, id: usize, action: Run, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay_open(cx) { return; }
+        match action {
+            Run::Forward => self.compose_kind(Some(id), ComposeKind::Forward, window, cx),
+            Run::ReplyAll => self.compose_kind(Some(id), ComposeKind::ReplyAll, window, cx),
+            Run::ToggleRead => self.toggle_read_on(id, window, cx),
+            _ => {}
+        }
+    }
+
+    fn compose_selected(&mut self, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.inbox.single() { self.compose_kind(Some(id), kind, window, cx); }
+    }
+
+    fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         self.release(false, cx);
         self.toast = None;
-        let compose = match self.drafts.pop() {
+        let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
+        let compose = match saved {
             Some(compose) => {
                 compose.update(cx, |c, cx| c.reopen(window, cx));
                 compose
             }
             None => {
                 let m = reply.map(|id| &self.inbox.mail[id]);
-                let to = m.map_or("", |m| m.address.as_str());
-                let subject = m.map_or(String::new(), |m| mail::reply_subject(&m.subject));
-                let headers = m.map(|m| mail::reply_headers(&m.message_id, &m.thread_key));
-                let from = match self.live.as_ref().and_then(|l| l.account()) {
-                    Some(a) => a.email.clone(),
-                    None => "Personal · you@home.example".into(),
-                };
-                let compose = cx.new(|cx| Compose::new(&from, to, &subject, headers, window, cx));
-                if let Some(live) = &self.live {
-                    if let Some(account) = live.account().cloned() {
-                        compose.update(cx, |c, cx| c.persist(live.store.clone(), account, cx));
+                let account = match &self.live {
+                    Some(live) => m.and_then(|m| live.accounts.iter().find(|a| a.id == m.account)).or_else(|| live.account()).cloned(),
+                    None => {
+                        let accounts = mail::demo_accounts();
+                        m.and_then(|m| accounts.iter().find(|a| a.id == m.account)).or_else(|| accounts.first()).cloned()
                     }
+                };
+                let from = account.as_ref().map_or("you@home.example", |a| a.email.as_str());
+                let (to, cc) = match (m, kind) {
+                    (Some(m), ComposeKind::ReplyAll) => {
+                        // shortcut: own addresses are the account email and logins; include aliases when accounts store them.
+                        let own = account.as_ref().map(|a| vec![a.email.as_str(), a.imap.username.as_str(), a.smtp.username.as_str()]).unwrap_or_default();
+                        mail::reply_all(&m.address, &m.to, &m.cc, &own)
+                    }
+                    (Some(m), ComposeKind::Reply) => (m.address.clone(), String::new()),
+                    _ => (String::new(), String::new()),
+                };
+                let subject = m.map_or(String::new(), |m| if kind == ComposeKind::Forward { mail::forward_subject(&m.subject) } else { mail::reply_subject(&m.subject) });
+                let headers = m.filter(|_| kind != ComposeKind::Forward).map(|m| mail::reply_headers(&m.message_id, &m.thread_key));
+                let signature = match (&self.live, &account) {
+                    (Some(live), Some(account)) => match live.store.signature(&account.id) {
+                        Ok(signature) => signature,
+                        Err(e) => { self.notify(format!("Could not read signature: {e}"), cx); return; }
+                    },
+                    (None, Some(account)) => self.signatures.get(&account.id)
+                        .map_or_else(String::new, |input| input.read(cx).text().to_string()),
+                    _ => String::new(),
+                };
+                let original = match (m.and_then(|m| m.store), &self.live) {
+                    (Some(id), Some(live)) => match live.store.message(id) {
+                        Ok(message) => Some(message.body_text),
+                        Err(e) => { self.notify(format!("Could not read message: {e}"), cx); return; }
+                    },
+                    _ => m.map(|m| m.body.join("\n\n")),
+                };
+                let body = mail::compose_body(&signature, m.zip(original.as_deref()), kind);
+                let source = m.filter(|_| kind == ComposeKind::Forward).and_then(|m| m.store);
+                let compose = cx.new(|cx| Compose::new(from, &to, &subject, headers, window, cx));
+                compose.update(cx, |c, cx| c.initialize(&cc, &body, source, cx));
+                if let (Some(live), Some(account)) = (&self.live, account) {
+                    compose.update(cx, |c, cx| c.persist(live.store.clone(), account, cx));
                 }
                 self.watch_compose(&compose, window, cx);
                 compose
@@ -634,12 +693,19 @@ impl MainWindow {
     /// Only a failed local write can hold an exit; drafts and sends need no network wait.
     fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
         let mut saved = true;
+        if let Some(live) = &self.live {
+            for (id, input) in &self.signatures {
+                if live.accounts.iter().any(|a| &a.id == id) {
+                    saved &= live.store.with_short_lock_wait(|store| store.set_signature(id, input.read(cx).text())).is_ok();
+                }
+            }
+        }
         for compose in self.drafts.iter().chain(self.compose.iter()) {
             if compose.read(cx).is_modal() || compose.read(cx).keeps_draft() {
                 saved &= compose.update(cx, |c, cx| c.save(cx));
             }
         }
-        if !saved { self.notify("Could not save draft. Check local storage before closing.", cx); }
+        if !saved { self.notify("Could not save local edits. Check local storage before closing.", cx); }
         !saved
     }
 
@@ -680,10 +746,16 @@ impl MainWindow {
                     }
                 }
                 ComposeEvent::Send(id) => this.send_mail(id.clone(), cx),
+                ComposeEvent::LoadForward(draft, id) => {
+                    if let Some(live) = &this.live {
+                        if !live.bridge.send(Cmd::ForwardAttachments { draft: draft.clone(), id: *id }) { this.worker_gone(cx); }
+                    }
+                }
             }
             cx.notify();
         })
         .detach();
+        compose.update(cx, |c, cx| c.load_forward(cx));
     }
 
     fn act(&mut self, what: Move, cx: &mut Context<Self>) {
@@ -1833,9 +1905,9 @@ impl MainWindow {
                 toolbar(t)
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
-                    .child(button(t, "Move", None).on_click(cx.listener(|this, _, window, cx| this.open_palette("move ", window, cx))))
-                    .child(button(t, if self.inbox.selection_unread() { "Mark read" } else { "Mark unread" }, None).on_click(cx.listener(|this, _, _, cx| this.toggle_read(cx))))
                     .child(button(t, "Reply", None).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
+                    .child(icon_button(t, "reply-all", "icons/chevron.svg", "Reply all").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
+                    .child(button(t, "Forward", None).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .when(!trash, |d| d.child(
                         button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     ))
@@ -1845,9 +1917,8 @@ impl MainWindow {
                             cx.notify();
                         })))
                     })
-                    // shortcut: no Forward button until forwarding exists.
                     .child(div().flex_1())
-                    .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2))
+                    .child(mono(format!("{} / {}", self.inbox.list().iter().position(|&row| row == id).unwrap_or(0) + 1, self.inbox.shown_count()), t.ink2).debug_selector(|| "message-counter".into()))
                     .child(
                         icon_button(t, "pop-out", "icons/pop-out.svg", "Open in New Window")
                             .on_click(cx.listener(|this, _, window, cx| this.open_popout(window, cx))),
@@ -1872,6 +1943,7 @@ fn toolbar(t: &Theme) -> Div {
 fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
     pressable(div().id(id), t, false)
+        .debug_selector(move || id.into())
         .flex()
         .items_center()
         .justify_center()
@@ -2074,13 +2146,14 @@ impl Render for MainWindow {
         }
         let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && !self.inbox.unread_only;
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
+        if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
         let panel = match &self.page {
             Page::Home | Page::Todo => self.tasks_view(cx),
             Page::Calendar => self.week_view(cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();
-                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, cx)
+                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, &self.signatures, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
@@ -2132,7 +2205,6 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &ExtendNext, _, cx| if !this.overlay_open(cx) { this.select(|inbox| inbox.extend(1), cx) }))
             .on_action(cx.listener(|this, _: &ExtendPrev, _, cx| if !this.overlay_open(cx) { this.select(|inbox| inbox.extend(-1), cx) }))
             .on_action(cx.listener(|this, _: &crate::text_input::SelectAll, _, cx| if !this.overlay_open(cx) { this.select(Inbox::select_all, cx) }))
-            .on_action(cx.listener(|this, _: &ToggleRead, _, cx| if !this.overlay_open(cx) { this.toggle_read(cx) }))
             .on_action(cx.listener(|this, _: &Done, _, cx| if !this.overlay_open(cx) { this.act(Move::Done, cx) }))
             .on_action(cx.listener(|this, _: &Later, _, cx| if !this.overlay_open(cx) { this.act(Move::Later, cx) }))
             // The guard hands ⌫ to the palette, where it edits the query.
@@ -2152,6 +2224,10 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.open_palette("", window, cx); }
             }))
+            .on_action(cx.listener(|this, _: &OpenMovePalette, window, cx| if !this.overlay_open(cx) { this.open_palette("move ", window, cx) }))
+            .on_action(cx.listener(|this, _: &ReplyAll, window, cx| if !this.overlay_open(cx) { this.compose_selected(ComposeKind::ReplyAll, window, cx) }))
+            .on_action(cx.listener(|this, _: &Forward, window, cx| if !this.overlay_open(cx) { this.compose_selected(ComposeKind::Forward, window, cx) }))
+            .on_action(cx.listener(|this, _: &ToggleRead, _, cx| if !this.overlay_open(cx) { this.toggle_read(cx) }))
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
             .on_action(cx.listener(|this, _: &OpenInWindow, window, cx| if !this.overlay_open(cx) { this.open_popout(window, cx) }))
@@ -3693,16 +3769,17 @@ mod dispatch {
     fn palette_opens_over_compose_and_returns_to_the_body(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         cx.simulate_keystrokes("r");
-        cx.simulate_input("**Hej**");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        cx.simulate_input("**Hi**");
         cx.simulate_keystrokes("secondary-k");
         let palette = view.read_with(cx, |v, _| v.palette.clone()).expect("palette over compose");
         cx.simulate_input("insert");
         assert_eq!(palette.read_with(cx, |p, cx| p.query(cx)), "insert");
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |v, _| v.palette.is_none()));
-        cx.simulate_input(" Åsa");
+        cx.simulate_input(" there");
         let compose = view.read_with(cx, |v, _| v.compose.clone()).unwrap();
-        assert_eq!(compose.read_with(cx, |c, cx| c.body_text(cx)), "**Hej** Åsa");
+        assert_eq!(compose.read_with(cx, |c, cx| c.body_text(cx)), format!("**Hi** there{quote}"));
     }
 
     #[gpui::test]
@@ -3714,23 +3791,24 @@ mod dispatch {
             c.read_with(cx, |c, cx| c.body_text(cx))
         };
         cx.simulate_keystrokes("r");
+        let quote = body(&view, cx);
         cx.simulate_input("Hi there");
-        assert_eq!(body(&view, cx), "Hi there");
+        assert_eq!(body(&view, cx), format!("Hi there{quote}"));
         cx.simulate_keystrokes("secondary-z");
-        assert_eq!(body(&view, cx), "");
+        assert_eq!(body(&view, cx), quote);
         cx.simulate_input("Hello");
         cx.simulate_keystrokes("enter");
-        cx.simulate_input("Alex");
+        cx.simulate_input("Team");
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.drafts.len() == 1));
         cx.simulate_keystrokes("r");
-        assert_eq!(body(&view, cx), "Hello\nAlex");
+        assert_eq!(body(&view, cx), format!("Hello\nTeam{quote}"));
         // ⌘⌫ in the body discards the draft, not a message.
         cx.simulate_keystrokes("cmd-backspace");
         assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.drafts.is_empty()));
         assert_eq!(inbox_len(&view, cx), n);
         cx.simulate_keystrokes("r");
-        assert_eq!(body(&view, cx), "");
+        assert_eq!(body(&view, cx), quote);
     }
 
     #[gpui::test]
@@ -3829,6 +3907,159 @@ mod dispatch {
         cx.simulate_keystrokes("j secondary-o");
         cx.run_until_parked();
         assert_eq!(windows(cx), 3);
+    }
+
+    fn assert_reading_toolbar(cx: &mut VisualTestContext) {
+        frame(cx);
+        let buttons = ["Reply", "reply-all", "Forward", "Later", "Done"].map(|label| cx.debug_bounds(label).unwrap());
+        for pair in buttons.windows(2) {
+            assert!(pair[0].right() <= pair[1].left(), "reading actions stay in order");
+            assert_eq!(pair[0].top(), pair[1].top());
+        }
+        for removed in ["Move", "Mark read", "Mark unread", "Delete"] {
+            assert!(cx.debug_bounds(removed).is_none(), "{removed} crowds the reading toolbar");
+        }
+    }
+
+    #[gpui::test]
+    fn review_reading_toolbar_order_and_reply_all(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        assert_reading_toolbar(cx);
+        let counter = cx.debug_bounds("message-counter").unwrap();
+        let popout = cx.debug_bounds("pop-out").unwrap();
+        assert!(cx.debug_bounds("Later").unwrap().right() <= counter.left());
+        assert!(counter.right() <= popout.left());
+        assert!(popout.right() <= cx.debug_bounds("Done").unwrap().left());
+        view.update(cx, |v, _| v.inbox.mail[0].cc = "copy@example.com".into());
+        let at = cx.debug_bounds("reply-all").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, cx| assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx).cc, ["copy@example.com"]));
+    }
+
+    #[gpui::test]
+    fn review_popout_toolbar_order_and_reply_all_target(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, _| v.inbox.mail[0].cc = "copy@example.com".into());
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        view.update(cx, |v, cx| v.select(Inbox::next, cx));
+        let mut popcx = VisualTestContext::from_window(popout.into(), &cx.cx);
+        assert_reading_toolbar(&mut popcx);
+        let at = popcx.debug_bounds("reply-all").unwrap().center();
+        popcx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, cx| {
+            let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+            assert_eq!(mail.subject, mail::reply_subject(&v.inbox.mail[0].subject));
+            assert_eq!(mail.cc, ["copy@example.com"]);
+        });
+    }
+
+    #[gpui::test]
+    fn review_reading_move_and_read_actions_keep_keyboard_access(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("m");
+        view.read_with(cx, |v, cx| assert_eq!(v.palette.as_ref().unwrap().read(cx).query(cx), "move "));
+        cx.simulate_keystrokes("escape secondary-k");
+        cx.simulate_input("move ");
+        view.read_with(cx, |v, cx| assert_eq!(v.palette.as_ref().unwrap().read(cx).query(cx), "move "));
+        cx.simulate_keystrokes("escape");
+        let before = view.read_with(cx, |v, _| v.inbox.selection_unread());
+        cx.simulate_keystrokes("shift-u");
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.selection_unread()), !before);
+    }
+
+    #[gpui::test]
+    fn review_demo_signatures_are_multiline_and_survive_settings(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("secondary-,");
+        frame(cx);
+        assert!(cx.debug_bounds("signature-personal").is_some());
+        assert!(cx.debug_bounds("signature-work").is_some());
+        for id in ["personal", "work"] {
+            view.update_in(cx, |v, window, cx| window.focus(&v.signatures[id].read(cx).focus_handle(cx)));
+            cx.simulate_input(id);
+            cx.simulate_keystrokes("enter");
+            cx.simulate_input("Team");
+        }
+        view.update_in(cx, |v, window, cx| {
+            window.focus(&v.focus);
+            v.page = Page::Mail;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-,");
+        frame(cx);
+        view.update_in(cx, |v, window, cx| {
+            assert!(v.live.is_none());
+            assert_eq!(v.signatures["personal"].read(cx).text(), "personal\nTeam");
+            assert_eq!(v.signatures["work"].read(cx).text(), "work\nTeam");
+            v.page = Page::Mail;
+            v.inbox.mail[0].account = "work".into();
+            for (target, kind, signature) in [(None, ComposeKind::Reply, "personal"), (Some(0), ComposeKind::Reply, "work"), (Some(0), ComposeKind::ReplyAll, "work"), (Some(0), ComposeKind::Forward, "work")] {
+                v.compose_kind(target, kind, window, cx);
+                let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+                assert!(mail.text.contains(&format!("-- \n{signature}\nTeam")));
+                assert_eq!(mail.text.matches("-- \n").count(), 1);
+                v.compose = None;
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn review_settings_hides_empty_default_task_list_block(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| {
+            v.today.lists.clear();
+            v.today.default = None;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("secondary-,");
+        frame(cx);
+        assert!(cx.debug_bounds("default-task-lists").is_none());
+        view.update(cx, |v, cx| {
+            v.today.lists.push(lagom_core::tasks::TaskList { id: 1, account: None, remote_id: None, name: "Tasks".into(), position: 0 });
+            v.today.default = Some(1);
+            cx.notify();
+        });
+        frame(cx);
+        assert!(cx.debug_bounds("default-task-lists").is_some());
+        assert!(cx.debug_bounds("default-task-list-1").is_some());
+    }
+
+    #[gpui::test]
+    fn forward_toolbar_palette_and_popout_share_the_compose_path(cx: &mut TestAppContext) {
+        for route in ["toolbar", "palette", "popout"] {
+            let (view, cx) = open(cx);
+            let subject = view.read_with(cx, |v, _| v.inbox.mail[0].subject.clone());
+            match route {
+                "toolbar" => {
+                    cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+                    let at = cx.debug_bounds("Forward").unwrap().center();
+                    cx.simulate_click(at, Default::default());
+                }
+                "palette" => {
+                    cx.simulate_keystrokes("secondary-k");
+                    cx.simulate_input("Forward");
+                    cx.simulate_keystrokes("enter");
+                }
+                _ => {
+                    cx.simulate_keystrokes("secondary-o");
+                    let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+                    view.update(cx, |v, cx| v.select(Inbox::next, cx));
+                    cx.update_window(popout.into(), |_, window, cx| {
+                        window.draw(cx).clear();
+                        window.dispatch_action(Box::new(Forward), cx);
+                    }).unwrap();
+                    cx.run_until_parked();
+                }
+            }
+            view.read_with(cx, |v, cx| {
+                let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
+                assert_eq!(mail.subject, format!("Fwd: {subject}"), "{route}");
+                assert!(mail.to.is_empty());
+                assert!(mail.text.contains("> Forwarded message"));
+            });
+        }
     }
 
     #[gpui::test]

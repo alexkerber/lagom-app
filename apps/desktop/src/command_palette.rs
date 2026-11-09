@@ -32,6 +32,9 @@ pub enum Run {
     Later(LaterWhen),
     Delete,
     Reply,
+    ReplyAll,
+    Forward,
+    ToggleRead,
     Compose,
     InsertFile,
     Sync,
@@ -65,6 +68,9 @@ const COMMANDS: &[Command] = &[
     Command { section: "Actions", label: LaterWhen::NextWeek.label(), hint: Hint::Note("Mon 08:00"), action: Action::Run(Run::Later(LaterWhen::NextWeek)) },
     Command { section: "Actions", label: "Move to…", hint: Hint::Note("move"), action: Action::Fill("move ") },
     Command { section: "Actions", label: "Delete", hint: Hint::Key("⌫"), action: Action::Run(Run::Delete) },
+    Command { section: "Actions", label: "Reply all", hint: Hint::Key("⇧R"), action: Action::Run(Run::ReplyAll) },
+    Command { section: "Actions", label: "Forward", hint: Hint::Key("F"), action: Action::Run(Run::Forward) },
+    Command { section: "Actions", label: "Mark as unread / read", hint: Hint::Key("⇧U"), action: Action::Run(Run::ToggleRead) },
     Command { section: "Actions", label: "Reply", hint: Hint::Key("R"), action: Action::Run(Run::Reply) },
     Command { section: "Actions", label: "New message", hint: Hint::Key("C"), action: Action::Run(Run::Compose) },
     Command { section: "Mail", label: "Insert file…", hint: Hint::Note("Markdown"), action: Action::Run(Run::InsertFile) },
@@ -235,7 +241,7 @@ impl CommandPalette {
             commands(query).into_iter().filter(|item| item.action == Action::Run(Run::InsertFile)).collect()
         } else {
             matches(query, &self.folders, &self.hits).into_iter().filter(|item| {
-                self.mail || !matches!(item.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply) | Action::Move(_) | Action::Fill(_))
+                self.mail || !matches!(item.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply | Run::ReplyAll | Run::Forward | Run::ToggleRead) | Action::Move(_) | Action::Fill(_))
             }).collect()
         }
     }
@@ -447,7 +453,7 @@ mod tests {
         palette.read_with(cx, |p, cx| {
             let items = p.matches(cx);
             assert!(items.iter().any(|i| i.action == Action::Run(Run::NewTask)));
-            assert!(!items.iter().any(|i| matches!(i.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply) | Action::Move(_) | Action::Fill(_))));
+            assert!(!items.iter().any(|i| matches!(i.action, Action::Run(Run::Done | Run::Later(_) | Run::Delete | Run::Reply | Run::ReplyAll | Run::Forward | Run::ToggleRead) | Action::Move(_) | Action::Fill(_))));
         });
     }
 

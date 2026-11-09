@@ -193,15 +193,15 @@ fn v11_cache_upgrade_preserves_events_without_inventing_coverage() {
     db.execute_batch("INSERT INTO accounts(id,display_name,email,imap_host,imap_port,imap_security,imap_username,smtp_host,smtp_port,smtp_security,smtp_username,scopes)
         VALUES('fixture','Fixture','fixture@example.test','localhost',993,'tls','fixture','localhost',465,'tls','fixture','https://www.googleapis.com/auth/calendar');
         INSERT INTO calendars(id,account,remote_id,name,writable) VALUES(1,'fixture','primary','Fixture',1);
-        INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day,html_link)
-        VALUES(1,'cached','Kept','2026-11-09','2026-11-10',1,2,1,'https://www.google.com/calendar/event?eid=fixture');").unwrap();
+        INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day)
+        VALUES(1,'cached','Kept','2026-11-09','2026-11-10',1,2,1);").unwrap();
     drop(db);
     let store = Store::open(path).unwrap();
     assert_eq!(store.calendar_window("fixture").unwrap(), None);
     let cached = store.today_events("2026-11-09", 0, 1).unwrap();
     assert_eq!(cached.len(), 1);
     assert_eq!(cached[0].event.title, "Kept");
-    assert_eq!(cached[0].event.html_link.as_deref(), Some("https://www.google.com/calendar/event?eid=fixture"));
+    assert!(cached[0].event.html_link.is_none());
     assert!(crate::oauth::calendar_allowed(&store.account_scopes("fixture").unwrap()));
     assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
 }

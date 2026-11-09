@@ -17,11 +17,20 @@ use lettre::{
 };
 use std::time::Duration;
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OutgoingAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outgoing {
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<OutgoingAttachment>,
     pub subject: String,
     pub text: String,
     pub in_reply_to: Option<String>,
@@ -91,11 +100,24 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
     if !outgoing.references.is_empty() {
         message = message.references(outgoing.references.join(" "));
     }
-    let result = match markdown_html(&outgoing.text) {
-        Some(html) => message.multipart(MultiPart::alternative()
-            .singlepart(SinglePart::plain(outgoing.text.clone()))
-            .singlepart(SinglePart::html(html))),
-        None => message.header(header::ContentType::TEXT_PLAIN).body(outgoing.text.clone()),
+    let html = markdown_html(&outgoing.text);
+    let alternative = || MultiPart::alternative()
+        .singlepart(SinglePart::plain(outgoing.text.clone()))
+        .singlepart(SinglePart::html(html.clone().unwrap_or_default()));
+    let result = if outgoing.attachments.is_empty() {
+        match html {
+            Some(_) => message.multipart(alternative()),
+            None => message.header(header::ContentType::TEXT_PLAIN).body(outgoing.text.clone()),
+        }
+    } else {
+        let mut mixed = if html.is_some() { MultiPart::mixed().multipart(alternative()) }
+            else { MultiPart::mixed().singlepart(SinglePart::plain(outgoing.text.clone())) };
+        for part in &outgoing.attachments {
+            header_value(&part.filename)?;
+            let mime = part.mime_type.parse().map_err(|_| Error::Invalid("invalid attachment MIME type"))?;
+            mixed = mixed.singlepart(lettre::message::Attachment::new(part.filename.clone()).body(part.data.clone(), mime));
+        }
+        message.multipart(mixed)
     };
     result.map_err(|_| Error::Invalid("could not construct message"))
 }
@@ -315,6 +337,21 @@ mod tests {
         (parsed.body_text(0).unwrap().replace("\r\n", "\n"), parsed.body_html(0).map(|h| h.replace("\r\n", "\n")))
     }
     #[test]
+    fn attachments_survive_mime_encoding_with_plain_and_markdown_bodies() {
+        for text in ["Body", "**Body**\n\n> Forwarded message"] {
+            let part = OutgoingAttachment { filename: "report.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255, 10, 13] };
+            let mail = Outgoing { to: vec!["recipient@example.com".into()], text: text.into(), attachments: vec![part.clone()], ..Default::default() };
+            let raw = compose(&account(), &mail).unwrap().formatted();
+            let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+            assert_eq!(parsed.body_text(0).unwrap().replace("\r\n", "\n"), text);
+            let attachment = parsed.attachments().next().unwrap();
+            assert_eq!(attachment.decoded(), part.data);
+            assert_eq!(parsed.attachments().count(), 1);
+            assert!(String::from_utf8_lossy(&raw).contains("report.bin"));
+        }
+    }
+
+    #[test]
     fn markdown_styles_and_plain_source() {
         for (source, expected) in [
             ("- ett\n- två", "<ul>"),
@@ -471,6 +508,7 @@ mod tests {
                 in_reply_to: Some("<parent@test>".into()),
                 references: vec!["<root@test>".into(), "<parent@test>".into()],
                 message_id: Some("<kept@gmail.com>".into()),
+                attachments: Vec::new(),
             },
         )
         .unwrap();

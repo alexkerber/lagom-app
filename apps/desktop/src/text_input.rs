@@ -1053,9 +1053,10 @@ impl Render for TextInput {
             .when(self.multiline, |d| d.size_full().on_scroll_wheel(cx.listener(Self::on_scroll)))
             .when(!self.multiline, |d| d.w_full())
             .when(self.bordered, |d| {
+                // A bordered multi-line field keeps its parent's height; a single line is one control high.
                 d.flex()
-                    .items_center()
-                    .h(px(30.))
+                    .when(!self.multiline, |d| d.items_center().h(px(30.)))
+                    .when(self.multiline, |d| d.py(px(6.)))
                     .px(px(10.))
                     .border_1()
                     .border_color(t.line)
