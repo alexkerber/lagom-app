@@ -66,6 +66,7 @@ pub enum Cmd {
     EmptyTrash { op: u64, folder: i64 },
     CreateFolder { op: u64, account: String, name: String },
     MarkSeen(i64),
+    ForwardAttachments { draft: String, id: i64 },
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
     Send(String),
@@ -112,6 +113,7 @@ pub enum Event {
     /// A MarkSeen finished, done or not.
     Seen(i64),
     Downloaded(Result<PathBuf, String>),
+    ForwardAttachments { draft: String, result: Result<Vec<lagom_core::smtp::OutgoingAttachment>, String> },
     /// `error` says why, also when the message went out but its Sent copy failed.
     Sent { delivery: Delivery, error: Option<String> },
 }
@@ -366,6 +368,10 @@ impl Worker {
                 let error = self.create_folder(&account, &name).await.err().map(|e| e.to_string());
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
+            }
+            Cmd::ForwardAttachments { draft, id } => {
+                let result = self.forward_attachments(id).await.map_err(|e| e.to_string());
+                self.emit(Event::ForwardAttachments { draft, result });
             }
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| e.to_string());
@@ -741,17 +747,41 @@ impl Worker {
         self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
     }
 
-    async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
-        let id = self.resolve(id).await?;
-        let account = self.account(&self.store.message(id)?.summary.account)?;
-        let part = self.store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
+    async fn attachment_bytes(&mut self, id: i64, section: &str) -> lagom_core::Result<Vec<u8>> {
+        if let Some(data) = self.store.cached_attachment(id, section)? { return Ok(data); }
+        let account = self.account(&self.store.message_summary(id)?.account)?;
         let mut session = self.take(&account).await?;
         let result = session.fetch_attachment(&mut self.store, id, section).await;
         self.give(&account.id, session, &result);
-        lagom_core::attachment::save_download(&part.filename, &result?)
+        result
+    }
+
+    async fn forward_attachments(&mut self, id: i64) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
+        let id = self.resolve(id).await?;
+        if !self.store.attachment_metadata_loaded(id)? {
+            let m = self.store.message_summary(id)?;
+            let account = self.account(&m.account)?;
+            self.sync_folder(&account, m.folder).await?;
+            // shortcut: legacy metadata backfill is bounded; retry after sync if this message is beyond that batch.
+            if !self.store.attachment_metadata_loaded(id)? { return Err(Error::Invalid("sync attachments before forwarding")); }
+        }
+        let mut parts = Vec::new();
+        for part in self.store.attachments(id)? {
+            let data = self.attachment_bytes(id, &part.section).await?;
+            parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
+        }
+        Ok(parts)
+    }
+
+    async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
+        let id = self.resolve(id).await?;
+        let part = self.store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
+        let data = self.attachment_bytes(id, section).await?;
+        lagom_core::attachment::save_download(&part.filename, &data)
     }
 
     async fn mark_seen(&mut self, id: i64, seen: bool) -> lagom_core::Result<()> {
+        let id = self.resolve(id).await?;
         let account = self.account(&self.store.message(id)?.summary.account)?;
         let mut session = self.take(&account).await?;
         let result = session.mark_seen(&mut self.store, id, seen).await;
@@ -1681,3 +1711,7 @@ mod greenmail {
 #[cfg(test)]
 #[path = "sync/notification_tests.rs"]
 mod notification_tests;
+
+#[cfg(test)]
+#[path = "sync/mail_basics_tests.rs"]
+mod mail_basics_tests;

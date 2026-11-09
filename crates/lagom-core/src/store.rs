@@ -58,7 +58,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 12 {
+        if version > 13 {
             return Err(Error::Invalid("store was created by a newer Lagom version"));
         }
         if version == 0 {
@@ -100,12 +100,33 @@ impl Store {
         }
         if version < 12 {
             store.db.execute_batch(include_str!("schema_v12.sql"))?;
-            if version < 11 {
+        }
+        if version < 13 {
+            store.db.execute_batch(include_str!("schema_v13.sql"))?;
+            if version < 12 {
                 store.db.execute("UPDATE task_lists SET detached=0", [])?;
             }
         }
         Ok(store)
     }
+    pub fn signature(&self, account: &str) -> Result<String> {
+        Ok(self.db.query_row("SELECT text FROM signatures WHERE account=?1", [account], |r| r.get(0)).optional()?.unwrap_or_default())
+    }
+
+    pub fn set_signature(&self, account: &str, text: &str) -> Result<()> {
+        self.db.execute("INSERT INTO signatures(account,text) VALUES (?1,?2) ON CONFLICT(account) DO UPDATE SET text=excluded.text", params![account, text])?;
+        Ok(())
+    }
+
+    pub fn cached_attachment(&self, message: i64, section: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.db.query_row("SELECT data FROM attachment_cache WHERE message=?1 AND section=?2", params![message, section], |r| r.get(0)).optional()?)
+    }
+
+    pub(crate) fn cache_attachment(&self, message: i64, section: &str, data: &[u8]) -> Result<()> {
+        self.db.execute("INSERT INTO attachment_cache VALUES (?1,?2,?3) ON CONFLICT(message,section) DO UPDATE SET data=excluded.data", params![message, section, data])?;
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         Path::new(self.db.path().expect("file-backed store"))
     }
@@ -255,7 +276,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 13);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -465,6 +486,9 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    pub fn attachment_metadata_loaded(&self, message: i64) -> Result<bool> {
+        Ok(self.db.query_row("SELECT attachments_loaded FROM messages WHERE id=?1", [message], |r| r.get(0))?)
+    }
     pub fn attachments(&self, message: i64) -> Result<Vec<crate::attachment::Attachment>> {
         let mut stmt = self.db.prepare("SELECT section,filename,mime_type,size,encoding FROM attachments WHERE message=?1 ORDER BY section")?;
         let rows = stmt.query_map([message], |r| Ok(crate::attachment::Attachment {
@@ -639,6 +663,110 @@ mod mail_tests {
         }
     }
     #[test]
+    fn v11_upgrade_preserves_signatures_attachments_and_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v11.db");
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql"), include_str!("schema_v11.sql")] { db.execute_batch(schema).unwrap(); }
+        let old = Store { db };
+        let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+        let account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        old.save_authorized_account(&account, crate::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+        old.set_signature(&account.id, "Saved signature").unwrap();
+        let folder = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let message = old.save_message(&mail(&account, folder, 1)).unwrap();
+        let before = old.message(message).unwrap();
+        old.db.execute("INSERT INTO attachments VALUES (?1,'1','data.bin','application/octet-stream',2,'base64')", [message]).unwrap();
+        old.cache_attachment(message, "1", &[0, 255]).unwrap();
+        let list = old.default_task_list().unwrap();
+        let task = old.db.query_row(&format!("INSERT INTO tasks(list,title,notes,updated,created,dirty) VALUES (?1,'Keep task','Private notes',42,41,1) RETURNING {}", crate::tasks::TASK_COLUMNS), [list], crate::tasks::task_row).unwrap();
+        assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 11);
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 13);
+        assert_eq!(store.accounts().unwrap(), [account.clone()]);
+        assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
+        assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
+        assert_eq!(store.message(message).unwrap(), before);
+        assert_eq!(store.cached_attachment(message, "1").unwrap(), Some(vec![0, 255]));
+        assert_eq!(store.tasks(list, true).unwrap(), [task.clone()]);
+        assert_eq!(store.default_task_list().unwrap(), list);
+        assert_eq!(store.db.query_row("SELECT count(*) FROM task_lists WHERE dirty=1 AND detached=0", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert!(store.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none());
+        drop(store);
+        assert_eq!(Store::open(path).unwrap().tasks(list, true).unwrap(), [task]);
+    }
+
+    #[test]
+    fn v10_upgrade_preserves_calendar_data_and_account_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v10.db");
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql")] { db.execute_batch(schema).unwrap(); }
+        let old = Store { db };
+        let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+        let account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        old.db.execute("UPDATE accounts SET scopes='calendar.readonly' WHERE id=?1", [&account.id]).unwrap();
+        old.db.execute("INSERT INTO calendars(id,account,remote_id,name,shown,writable) VALUES (1,?1,'primary','Calendar',1,0)", [&account.id]).unwrap();
+        old.db.execute_batch("INSERT INTO events(calendar,remote_id,title,start,end,start_utc,end_utc,all_day) VALUES (1,'event','Keep event','2026-11-09','2026-11-10',1,2,1);").unwrap();
+        drop(old);
+        let store = Store::open(path).unwrap();
+        store.set_signature(&account.id, "Team").unwrap();
+        store.save_account(&account).unwrap();
+        assert_eq!(store.db.query_row("SELECT scopes FROM accounts WHERE id=?1", [&account.id], |r| r.get::<_, String>(0)).unwrap(), "calendar.readonly");
+        assert_eq!(store.db.query_row("SELECT title FROM events WHERE calendar=1", [], |r| r.get::<_, String>(0)).unwrap(), "Keep event");
+        assert_eq!(store.signature(&account.id).unwrap(), "Team");
+    }
+
+    #[test]
+    fn v9_upgrade_preserves_mail_drafts_outbox_and_tasks() {
+        use crate::{outbox::Draft, smtp::{Outgoing, OutgoingAttachment}};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v9.db");
+        let db = Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"), include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"), include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql")] { db.execute_batch(schema).unwrap(); }
+        let old = Store { db };
+        let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+        let account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        let folder = old.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let id = old.save_message(&mail(&account, folder, 1)).unwrap();
+        let before = old.message(id).unwrap();
+        let task = old.db.query_row(&format!("INSERT INTO tasks(list,title,notes,updated,created,dirty) SELECT list,'Keep task','Notes',42,41,1 FROM task_settings RETURNING {}", crate::tasks::TASK_COLUMNS), [], crate::tasks::task_row).unwrap();
+        let draft = Draft { id: "draft".into(), account: account.id.clone(), text: "Saved edits".into(), ..Default::default() };
+        let mut legacy = serde_json::to_value(&draft).unwrap();
+        legacy.as_object_mut().unwrap().remove("attachments");
+        legacy.as_object_mut().unwrap().remove("forward_source");
+        old.db.execute("INSERT INTO drafts(id,account,content,revision) VALUES (?1,?2,?3,'revision')", params![draft.id, account.id, legacy.to_string()]).unwrap();
+        let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "Queued".into(), ..Default::default() };
+        let queued = old.enqueue(&account, &outgoing, 123).unwrap();
+        let raw = old.pending(&queued).unwrap().raw;
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.message(id).unwrap(), before);
+        assert_eq!(store.drafts().unwrap(), [draft.clone()]);
+        assert_eq!(store.pending(&queued).unwrap().raw, raw);
+        assert_eq!(store.tasks(task.list, false).unwrap(), [task]);
+        assert_eq!(store.signature(&account.id).unwrap(), "");
+        store.set_signature(&account.id, "**Team**\nContact").unwrap();
+        store.save_account(&account).unwrap();
+        let parts = vec![OutgoingAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }];
+        let draft = Draft { attachments: parts.clone(), ..draft };
+        store.save_draft(&draft).unwrap();
+        let mail = Outgoing { attachments: parts.clone(), message_id: Some(draft.id.clone()), ..outgoing };
+        let queued = store.enqueue(&account, &mail, 0).unwrap();
+        assert_eq!(store.pending(&queued).unwrap().mail.attachments, parts);
+        assert!(store.undo_send(&queued).unwrap());
+        drop(store);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.signature(&account.id).unwrap(), "**Team**\nContact");
+        assert_eq!(store.drafts().unwrap(), [draft]);
+        store.delete_account(&account.id).unwrap();
+        assert_eq!(store.signature(&account.id).unwrap(), "");
+    }
+
+    #[test]
     fn message_summary_revalidates_metadata_without_reading_bodies() {
         let (_temp, s, a, inbox) = setup();
         let id = s.save_message(&mail(&a, inbox, 1)).unwrap();
@@ -746,7 +874,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 13);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -818,7 +946,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 13);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -888,7 +1016,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -917,7 +1045,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 13);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));
