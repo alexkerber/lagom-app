@@ -98,9 +98,14 @@ impl Store {
         Path::new(self.db.path().expect("file-backed store"))
     }
 
-    pub fn with_busy_timeout<T>(&self, timeout: std::time::Duration, write: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+    /// Runs `write` with at most ~250 ms of lock waiting, then restores the normal timeout.
+    pub fn with_short_lock_wait<T>(&self, write: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        // Our own 5 ms steps: SQLite's built-in handler may sleep in whole seconds when built without usleep.
+        fn short_wait(attempt: i32) -> bool {
+            attempt < 50 && { std::thread::sleep(std::time::Duration::from_millis(5)); true }
+        }
         let previous: u64 = self.db.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
-        self.db.busy_timeout(timeout)?;
+        self.db.busy_handler(Some(short_wait))?;
         let result = write(self);
         self.db.busy_timeout(std::time::Duration::from_millis(previous))?;
         result
@@ -178,10 +183,7 @@ mod tests {
         let list = store.default_task_list().unwrap();
         worker.db.execute_batch("BEGIN IMMEDIATE;").unwrap();
         let started = Instant::now();
-        let result = store.with_busy_timeout(Duration::from_millis(250), |s| {
-            assert_eq!(timeout(s), 250);
-            s.add_task(list, "Retry", "", None)
-        });
+        let result = store.with_short_lock_wait(|s| s.add_task(list, "Retry", "", None));
         let elapsed = started.elapsed();
         assert!(matches!(result, Err(Error::Store(rusqlite::Error::SqliteFailure(e, _))) if e.code == rusqlite::ErrorCode::DatabaseBusy));
         assert!(elapsed < Duration::from_millis(750), "task write blocked for {elapsed:?}");
@@ -190,7 +192,7 @@ mod tests {
         worker.db.execute_batch("ROLLBACK;").unwrap();
         assert!(store.tasks(list, true).unwrap().is_empty());
         store.db.busy_timeout(Duration::from_millis(1234)).unwrap();
-        let task = store.with_busy_timeout(Duration::from_millis(250), |s| s.add_task(list, "Retry", "", None)).unwrap();
+        let task = store.with_short_lock_wait(|s| s.add_task(list, "Retry", "", None)).unwrap();
         assert_eq!(store.tasks(list, false).unwrap(), [task]);
         assert_eq!(timeout(&store), 1234);
         assert_eq!(timeout(&worker), 5000);
