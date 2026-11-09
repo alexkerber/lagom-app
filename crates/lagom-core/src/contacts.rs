@@ -31,6 +31,11 @@ pub fn valid_recipient(value: &str) -> bool {
     !value.chars().any(char::is_control) && value.parse::<Mailbox>().is_ok()
 }
 
+pub fn recipient_address(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) { return None; }
+    value.parse::<Mailbox>().ok().map(|mailbox| mailbox.email.to_string())
+}
+
 /// Keep invalid pieces too: silently dropping a pasted recipient could send incomplete mail.
 pub fn split_recipients(value: &str) -> Vec<String> {
     let (mut quoted, mut escaped, mut angle, mut comments, mut start) = (false, false, false, 0usize, 0);
@@ -68,7 +73,7 @@ pub struct Contacts {
 }
 
 impl Contacts {
-    fn new(mut entries: Vec<Contact>) -> Self {
+    pub fn new(mut entries: Vec<Contact>) -> Self {
         entries.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.address.cmp(&b.address)));
         let mut prefixes: HashMap<String, Vec<usize>> = HashMap::new();
         for (id, contact) in entries.iter().enumerate() {

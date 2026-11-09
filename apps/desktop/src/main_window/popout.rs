@@ -280,3 +280,23 @@ impl MainWindow {
         });
     }
 }
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn icon_toolbar_keeps_every_action_inside_a_narrow_message_window(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+        view.update_in(cx, |v, window, cx| v.open_popout(window, cx));
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        let mut popup = gpui::VisualTestContext::from_window(popout.into(), cx);
+        popup.simulate_resize(gpui::size(px(420.), px(500.)));
+        popup.run_until_parked();
+        let bounds: Vec<_> = ["Reply", "reply-all", "Forward", "Later", "Done"].into_iter().map(|label| popup.debug_bounds(label).unwrap()).collect();
+        for (i, a) in bounds.iter().enumerate() {
+            assert!(a.left() >= px(0.) && a.right() <= px(420.), "action {i} must fit");
+            for b in bounds.iter().skip(i + 1) { assert!(!a.intersects(b), "toolbar actions must not overlap"); }
+        }
+    }
+}

@@ -121,7 +121,7 @@ const HEADER_H: f32 = 52.;
 pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 
 mod polish;
-use polish::action_icon;
+pub(crate) use polish::action_icon;
 mod panes;
 use panes::{default_list, Panes, SIDEBAR_DEFAULT};
 
@@ -182,6 +182,7 @@ mod live;
 mod tasks;
 mod agenda;
 mod week;
+mod new_event;
 mod home;
 pub(crate) use tasks::TaskChange;
 mod popout;
@@ -452,6 +453,14 @@ impl MainWindow {
         match screen {
             "home" => this.show_section(0, window, cx),
             "calendar" => this.show_section(2, window, cx),
+            "calendar-month" => {
+                this.show_section(2, window, cx);
+                this.calendar_date(this.week.anchor, week::View::Month, cx);
+            }
+            "new-event" if demo => {
+                this.show_section(2, window, cx);
+                this.new_event_default(window, cx);
+            }
             "todo" => this.show_section(3, window, cx),
             "palette" => this.open_palette("done", window, cx),
             // Three adjacent rows and one apart: the joined selection block and a separate one.
@@ -1192,9 +1201,9 @@ pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stat
 }
 
 fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Option<usize>) -> Stateful<Div> {
-    let ink = t.ink;
+    let theme = *t;
     let base = div()
-        .id(label).group(label)
+        .id(label).group("action")
         .debug_selector(move || label.into())
         .flex()
         .items_center()
@@ -1204,18 +1213,26 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .text_size(px(size::BASE))
         .font_weight(FontWeight::MEDIUM)
         .gap(px(6.))
-        .when_some(action_icon(label), |d, path| d.child(
-            icon(path, if fill.is_some() { t.accent_ink } else { t.ink2 }, 16.)
-                .when(fill.is_none(), |icon| icon.group_hover(label, move |s| s.text_color(ink)))))
+        .children(action_icon(label).map(|path| action_glyph(t, path, fill)))
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
             underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
-        }))));
+        }))))
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, label.into())).into());
     match fill {
         // A translucent tint would replace the fill, so a filled button dims a little instead.
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.border_1().border_color(t.line).bg(t.bg).text_color(t.ink), t, false),
     }
 }
+
+fn action_glyph(t: &Theme, path: &'static str, fill: Option<Rgba>) -> gpui::Svg {
+    // GPUI's SVG paint path requires an explicit color on the SVG itself.
+    icon(path, if fill.is_some() { t.accent_ink } else { t.ink2 }, 16.)
+        .when(fill.is_none(), |s| s.group_hover("action", |s| s.text_color(t.ink)))
+}
+
+#[cfg(test)]
+mod icon_tests;
 
 impl MainWindow {
     pub(crate) fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
@@ -1990,7 +2007,7 @@ fn toolbar(t: &Theme) -> Div {
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
 pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str) -> Stateful<Div> {
     let theme = *t;
-    pressable(div().id(id), t, false).group("icon-button")
+    pressable(div().id(id), t, false).group("action")
         .debug_selector(move || id.into())
         .flex()
         .items_center()
@@ -1999,13 +2016,8 @@ pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: 
         .flex_shrink_0()
         .rounded(px(radius::CONTROL))
         .text_color(t.ink2)
-        .child(icon_button_glyph(t, path))
+        .child(action_glyph(t, path, None))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
-}
-
-fn icon_button_glyph(t: &Theme, path: &'static str) -> gpui::Svg {
-    // GPUI's SVG paint path requires an explicit color on the SVG itself.
-    icon(path, t.ink2, 16.).group_hover("icon-button", |s| s.text_color(t.ink))
 }
 
 pub(crate) struct Tip(pub(crate) Theme, pub(crate) SharedString);
@@ -2176,7 +2188,7 @@ impl Render for MainWindow {
         else { self.sidebar_fade = None; }
         let panel = match &self.page {
             Page::Home | Page::Todo => self.tasks_view(window, cx),
-            Page::Calendar => self.week_view(cx),
+            Page::Calendar => self.week_view(window, cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
             Page::Settings(confirm) => {
                 let demo = mail::demo_accounts();

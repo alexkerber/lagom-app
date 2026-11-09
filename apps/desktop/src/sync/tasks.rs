@@ -129,7 +129,7 @@ mod tests {
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
         let (task_tx, mut task_rx) = unbounded_channel();
-        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), task_sync: Some(task_tx), reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: Some(task_tx), reauth_required: HashSet::new(), discovery: None, me, events };
         let mut tasks = TaskWorker::new(Store::open(&path).unwrap(), worker.me.clone(), worker.events.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         tasks.endpoint = Some(format!("http://{}/", listener.local_addr().unwrap()));

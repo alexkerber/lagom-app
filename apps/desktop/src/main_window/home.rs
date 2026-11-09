@@ -10,6 +10,7 @@ impl MainWindow {
             2 | 3 => {
                 self.release(false, cx);
                 self.clear_motion();
+                if section == 2 && !matches!(self.page, Page::Calendar) { self.week.scroll_to_now = true; }
                 self.page = if section == 2 { Page::Calendar } else { Page::Todo };
                 self.reload_tasks(cx);
             }
@@ -80,7 +81,7 @@ mod tests {
     fn review_icon_buttons_give_the_svg_its_own_visible_color() {
         for theme in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
             for path in ["icons/mail.svg", "icons/plus.svg", "icons/more.svg"] {
-                let mut glyph = icon_button_glyph(&theme, path);
+                let mut glyph = action_glyph(&theme, path, None);
                 assert_eq!(glyph.style().text.as_ref().and_then(|text| text.color), Some(theme.ink2.into()), "{path}");
             }
         }

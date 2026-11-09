@@ -5,7 +5,11 @@ use lagom_core::{account::Auth, oauth::{self, Provider}};
 impl MainWindow {
     pub(super) fn reload_agenda(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &self.live else {
-            if self.demo { self.today.events = demo_events(chrono::Local::now().date_naive()); }
+            if self.demo {
+                let day = chrono::Local::now().date_naive();
+                self.today.events = demo_events(day);
+                self.today.events.extend(self.demo_created_on(day));
+            }
             return;
         };
         let result = (|| -> lagom_core::Result<_> {
@@ -120,7 +124,7 @@ pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::A
     [(0, "Planning day"), (9, "Plan the day"), (11, "Design review"), (14, "Focus time")].into_iter().filter_map(|(hour, title)| {
         let start = day.and_hms_opt(hour, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
         let end = start + if hour == 0 { chrono::Duration::days(1) } else { chrono::Duration::minutes(45) };
-        Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(),
+        Some(lagom_core::calendar::AgendaEvent { account: "demo".into(), calendar: "Demo calendar".into(), calendar_id: "demo".into(),
             event: lagom_core::calendar::Event {
                 remote_id: format!("demo-{hour}"), title: title.into(), start: if hour == 0 { day.to_string() } else { start.to_rfc3339() }, end: if hour == 0 { day.succ_opt().unwrap().to_string() } else { end.to_rfc3339() },
                 start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: hour == 0,

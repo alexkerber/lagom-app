@@ -76,13 +76,36 @@ impl AssetSource for Assets {
             "icons/video.svg" => include_bytes!("../assets/icons/video.svg"),
             "icons/attachment.svg" => include_bytes!("../assets/icons/attachment.svg"),
             "icons/sync.svg" => include_bytes!("../assets/icons/sync.svg"),
+            "icons/calendar-panel.svg" => include_bytes!("../assets/icons/calendar-panel.svg"),
+            "icons/calendar-day.svg" => include_bytes!("../assets/icons/calendar-day.svg"),
+            "icons/calendar-week.svg" => include_bytes!("../assets/icons/calendar-week.svg"),
+            "icons/calendar-month.svg" => include_bytes!("../assets/icons/calendar-month.svg"),
+            "icons/calendar-today.svg" => include_bytes!("../assets/icons/calendar-today.svg"),
+            "icons/guests.svg" => include_bytes!("../assets/icons/guests.svg"),
+            "icons/remove-guest.svg" => include_bytes!("../assets/icons/remove-guest.svg"),
+            "icons/meet.svg" => include_bytes!("../assets/icons/meet.svg"),
+            "icons/all-day.svg" => include_bytes!("../assets/icons/all-day.svg"),
+            "icons/synced.svg" => include_bytes!("../assets/icons/synced.svg"),
+            "icons/sync-failed.svg" => include_bytes!("../assets/icons/sync-failed.svg"),
+            "icons/save-event.svg" => include_bytes!("../assets/icons/save-event.svg"),
+            "icons/open-calendar.svg" => include_bytes!("../assets/icons/open-calendar.svg"),
+            "icons/new-message.svg" => include_bytes!("../assets/icons/new-message.svg"),
+            "icons/mark-read.svg" => include_bytes!("../assets/icons/mark-read.svg"),
+            "icons/mark-unread.svg" => include_bytes!("../assets/icons/mark-unread.svg"),
+            "icons/images.svg" => include_bytes!("../assets/icons/images.svg"),
+            "icons/load-more.svg" => include_bytes!("../assets/icons/load-more.svg"),
+            "icons/remove-account.svg" => include_bytes!("../assets/icons/remove-account.svg"),
+            "icons/keep-account.svg" => include_bytes!("../assets/icons/keep-account.svg"),
+            "icons/allow-calendar.svg" => include_bytes!("../assets/icons/allow-calendar.svg"),
+            "icons/allow-tasks.svg" => include_bytes!("../assets/icons/allow-tasks.svg"),
+            "icons/discard-draft.svg" => include_bytes!("../assets/icons/discard-draft.svg"),
+            "icons/add-cc.svg" => include_bytes!("../assets/icons/add-cc.svg"),
             "icons/home.svg" => include_bytes!("../assets/icons/home.svg"),
             "icons/cloud-synced.svg" => include_bytes!("../assets/icons/cloud-synced.svg"),
             "icons/cloud-failed.svg" => include_bytes!("../assets/icons/cloud-failed.svg"),
             "icons/cloud-syncing.svg" => include_bytes!("../assets/icons/cloud-syncing.svg"),
             "icons/copy.svg" => include_bytes!("../assets/icons/copy.svg"),
             "icons/restore.svg" => include_bytes!("../assets/icons/restore.svg"),
-            "icons/load-more.svg" => include_bytes!("../assets/icons/load-more.svg"),
             "icons/cancel.svg" => include_bytes!("../assets/icons/cancel.svg"),
             "icons/retry-send.svg" => include_bytes!("../assets/icons/retry-send.svg"),
             "icons/edit-draft.svg" => include_bytes!("../assets/icons/edit-draft.svg"),
@@ -167,4 +190,28 @@ fn main() {
         #[cfg(target_os = "macos")]
         icon::install();
     });
+}
+
+#[cfg(test)]
+mod action_icon_tests {
+    use super::*;
+
+    #[test]
+    fn action_icons_are_distinct_and_embedded_in_the_house_stroke_style() {
+        let labels = ["Reply", "Reply all", "Forward", "Later", "Done", "New event", "New task", "Day", "Week", "Month", "Today",
+            "Join", "Save event", "Open in Google Calendar", "Cancel", "Add list", "Rename", "Delete list", "Open mail",
+            "Move", "Move to Inbox", "Mark read", "Mark unread", "Undo", "Send", "Load remote images", "Load more",
+            "Add account", "Connect", "Allow Google Tasks access"];
+        let mut paths = std::collections::HashSet::new();
+        for label in labels {
+            let path = main_window::action_icon(label).expect("action icon");
+            assert!(paths.insert(path), "different actions must have different icons: {label}");
+            let bytes = Assets.load(path).unwrap().expect("embedded action icon");
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("viewBox=\"0 0 16 16\"") && svg.contains("stroke-width=\"1.5\""), "{path}");
+        }
+        for path in ["icons/discard-draft.svg", "icons/add-cc.svg", "icons/chevron-left.svg", "icons/calendar-panel.svg", "icons/guests.svg", "icons/remove-guest.svg", "icons/all-day.svg", "icons/sync.svg", "icons/synced.svg", "icons/sync-failed.svg"] {
+            assert!(Assets.load(path).unwrap().is_some(), "{path}");
+        }
+    }
 }

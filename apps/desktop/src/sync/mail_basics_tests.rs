@@ -50,7 +50,7 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
         let session = ImapSync::login(&account, "fixture").await.unwrap();
         let (me, _rx) = unbounded_channel();
         let (events, mut out) = unbounded_channel();
-        let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
         for _ in 0..2 {
             worker.quick(Cmd::ForwardAttachments { draft: "draft".into(), id }).await;
             let Some(Event::ForwardAttachments { draft, result }) = out.recv().await else { panic!("missing forward result") };
@@ -119,7 +119,7 @@ async fn review_two_rejected_toggles_keep_last_confirmed_flags() {
         let (events, mut out) = unbounded_channel();
         me.send(Cmd::Op { op: 1, id, act: Act::Read(false) }).unwrap();
         me.send(Cmd::Op { op: 2, id, act: Act::Read(true) }).unwrap();
-        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
         for expected in [1, 2] {
             let session = ImapSync::login(&account, "fixture").await.unwrap();
             worker.sessions.insert(account.id.clone(), session);

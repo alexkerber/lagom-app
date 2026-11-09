@@ -95,6 +95,11 @@ pub fn calendar_allowed(scopes: &str) -> bool {
                 || has_scope(scopes, "https://www.googleapis.com/auth/calendar.events.readonly")))
 }
 
+pub fn calendar_writable(scopes: &str) -> bool {
+    has_scope(scopes, "https://www.googleapis.com/auth/calendar")
+        || has_scope(scopes, "https://www.googleapis.com/auth/calendar.events")
+}
+
 struct Config {
     id: String,
     secret: Zeroizing<String>,

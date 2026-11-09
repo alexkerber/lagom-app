@@ -206,3 +206,23 @@ fn v11_cache_upgrade_preserves_events_without_inventing_coverage() {
     assert!(crate::oauth::calendar_allowed(&store.account_scopes("fixture").unwrap()));
     assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 14);
 }
+
+#[test]
+fn event_deletion_is_scoped_to_account_and_calendar_and_preserves_coverage() {
+    let (_dir, store, account) = setup();
+    let mut other = account.clone();
+    other.id = "other-account".into();
+    store.save_account(&other).unwrap();
+    let event = event("same-id", "2027-05-09", "2027-05-10", true);
+    let mut second = calendar();
+    second.remote_id = "second".into();
+    store.replace_calendar_window(&account.id, 1, 2, &[(calendar(), vec![event.clone()]), (second, vec![event.clone()])]).unwrap();
+    store.replace_calendar_window(&other.id, 1, 2, &[(calendar(), vec![event])]).unwrap();
+    for _ in 0..2 { store.delete_calendar_event(&account.id, "primary", "same-id").unwrap(); }
+    let rows = store.today_events("2027-05-09", 0, 1).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|e| e.account == account.id && e.calendar_id == "second"));
+    assert!(rows.iter().any(|e| e.account == other.id && e.calendar_id == "primary"));
+    assert_eq!(store.calendar_window(&account.id).unwrap(), Some((1, 2)));
+    assert_eq!(store.calendar_window(&other.id).unwrap(), Some((1, 2)));
+}

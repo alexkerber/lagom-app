@@ -1,3 +1,6 @@
+mod create;
+pub use create::{create_event, create_with, fetch_created, fetch_created_with, CreatedEvent};
+
 use crate::{account::Account, calendar::{Calendar, Event}, oauth, Error, Result};
 use serde::Deserialize;
 use std::{collections::HashSet, future::Future, time::Duration};
@@ -53,7 +56,15 @@ struct RemoteEvent {
 struct EventTime { date: Option<String>, date_time: Option<String> }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Conference { #[serde(default)] entry_points: Vec<EntryPoint> }
+struct Conference {
+    #[serde(default)] entry_points: Vec<EntryPoint>,
+    create_request: Option<ConferenceRequest>,
+}
+#[derive(Deserialize)]
+struct ConferenceRequest { status: Option<ConferenceStatus> }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConferenceStatus { status_code: String }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EntryPoint { entry_point_type: String, uri: String }
@@ -100,32 +111,42 @@ where T: serde::de::DeserializeOwned, F: FnMut(Option<String>) -> Fut, Fut: Futu
     loop {
         let mut page_url = url.clone();
         if let Some(page) = &next { page_url.query_pairs_mut().append_pair("pageToken", page); }
-        let mut access = token(None).await?;
-        let mut response = client.get(page_url.clone()).bearer_auth(access.as_str()).send().await
-            .map_err(|_| Error::Network("calendar unavailable"))?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            access = token(Some(access.to_string())).await?;
-            response = client.get(page_url).bearer_auth(access.as_str()).send().await
-                .map_err(|_| Error::Network("calendar unavailable"))?;
-        }
-        let status = response.status();
-        let bytes = oauth::body(response).await?;
-        if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-            let scope_error = error["error"]["errors"].as_array().is_some_and(|errors|
-                errors.iter().any(|e| e["reason"] == "insufficientPermissions"))
-                || error["error"]["details"].as_array().is_some_and(|details|
-                    details.iter().any(|e| e["reason"] == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"));
-            return Err(if scope_error { Error::CalendarConsent } else { Error::Network("calendar access refused") });
-        }
-        if !status.is_success() { return Err(Error::Network("calendar request failed")); }
-        let page: Page<T> = serde_json::from_slice(&bytes).map_err(|_| Error::Network("invalid calendar response"))?;
+        let page: Page<T> = get(client, page_url, token).await?;
         result.extend(page.items);
         next = page.next_page_token.filter(|s| !s.is_empty());
         let Some(page) = &next else { return Ok(result) };
         if !seen.insert(page.clone()) { return Err(Error::Network("repeated calendar page")); }
     }
+}
+
+async fn get<T, F, Fut>(client: &reqwest::Client, url: Url, token: &mut F) -> Result<T>
+where T: serde::de::DeserializeOwned, F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
+    let mut access = token(None).await?;
+    let mut response = client.get(url.clone()).bearer_auth(access.as_str()).send().await
+        .map_err(|_| Error::Network("calendar unavailable"))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        access = token(Some(access.to_string())).await?;
+        response = client.get(url).bearer_auth(access.as_str()).send().await
+            .map_err(|_| Error::Network("calendar unavailable"))?;
+    }
+    let status = response.status();
+    let bytes = oauth::body(response).await?;
+    if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(calendar_forbidden(&bytes));
+    }
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE { return Err(Error::NotFound); }
+    if !status.is_success() { return Err(Error::Network("calendar request failed")); }
+    serde_json::from_slice(&bytes).map_err(|_| Error::Network("invalid calendar response"))
+}
+
+fn calendar_forbidden(bytes: &[u8]) -> Error {
+    let error: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_default();
+    let scope_error = error["error"]["errors"].as_array().is_some_and(|errors|
+        errors.iter().any(|e| e["reason"] == "insufficientPermissions"))
+        || error["error"]["details"].as_array().is_some_and(|details|
+            details.iter().any(|e| e["reason"] == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"));
+    if scope_error { Error::CalendarConsent } else { Error::Network("calendar access refused") }
 }
 
 pub fn safe_join_url(value: &str) -> bool {

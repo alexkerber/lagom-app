@@ -4,13 +4,62 @@ use lagom_core::calendar::{AgendaEvent, Event as CalendarEvent};
 
 const HOUR: f32 = 60.;
 const MIN_EVENT: f32 = 36.;
+const GUTTER: f32 = 48.;
+mod panel;
+#[cfg(test)]
+mod polish_tests;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum View { Day, Week, Month }
+
+struct PanelPreference(bool);
+impl gpui::Global for PanelPreference {}
+
+impl View {
+    fn start(self, day: NaiveDate) -> NaiveDate {
+        match self { Self::Day => day, Self::Week => monday(day), Self::Month => monday(day.with_day(1).unwrap()) }
+    }
+    fn days(self) -> usize { match self { Self::Day => 1, Self::Week => 7, Self::Month => 42 } }
+}
+
+fn shift_month(day: NaiveDate, delta: i64) -> NaiveDate {
+    let first = day.with_day(1).unwrap();
+    if delta < 0 { first.checked_sub_months(chrono::Months::new((-delta) as u32)) }
+    else { first.checked_add_months(chrono::Months::new(delta as u32)) }.unwrap_or(first)
+}
+
+fn column_fill(t: &Theme, date: NaiveDate, today: NaiveDate) -> Rgba {
+    if date == today { Rgba { a: if t.dark { 0.10 } else { 0.06 }, ..t.accent } }
+    else if date.weekday().num_days_from_monday() >= 5 { if t.dark { Rgba { a: 0.08, ..gpui::rgb(0) } } else { t.subtle } }
+    else { t.bg }
+}
+
+fn now_scroll(minute: f32, height: f32) -> f32 {
+    (minute * HOUR / 60. - height / 3.).clamp(0., (24. * HOUR - height).max(0.))
+}
 
 pub(super) struct Week {
-    start: NaiveDate,
+    pub(super) start: NaiveDate,
+    pub(super) anchor: NaiveDate,
+    pub(super) view: View,
+    mini_month: NaiveDate,
+    panel: Option<bool>,
+    pub(super) guests: Vec<String>,
+    guest_input: Option<Entity<TextInput>>,
+    contacts: lagom_core::contacts::Contacts,
+    contact_account: Option<String>,
+    contact_load: Option<Task<()>>,
+    suggestions: Vec<lagom_core::contacts::Contact>,
+    suggestion: usize,
+    guest_error: Option<String>,
+    pub(super) scroll_to_now: bool,
     days: Vec<Vec<AgendaEvent>>,
     windows: Vec<Option<(i64, i64)>>,
     pub(super) detail: Option<AgendaEvent>,
-    scroll: ScrollHandle,
+    pub(super) editor: Option<new_event::Editor>,
+    pub(super) created: Vec<AgendaEvent>,
+    drag: Option<(usize, u32, u32)>,
+    pub(super) scroll: ScrollHandle,
     tick: Option<Task<()>>,
     loaded_day: Option<NaiveDate>,
 }
@@ -18,8 +67,24 @@ pub(super) struct Week {
 impl Default for Week {
     fn default() -> Self {
         let scroll = ScrollHandle::new();
-        scroll.set_offset(gpui::point(px(0.), px(-8. * HOUR)));
-        Self { start: monday(chrono::Local::now().date_naive()), days: vec![vec![]; 7], windows: vec![], detail: None, scroll, tick: None, loaded_day: None }
+        let today = chrono::Local::now().date_naive();
+        Self { start: monday(today), anchor: today, view: View::Week, mini_month: today.with_day(1).unwrap(), panel: None,
+            guests: vec![], guest_input: None, contacts: Default::default(), contact_account: None, contact_load: None,
+            suggestions: vec![], suggestion: 0, guest_error: None, scroll_to_now: true, days: vec![vec![]; 7], windows: vec![], detail: None, editor: None, created: vec![], drag: None, scroll, tick: None, loaded_day: None }
+    }
+}
+
+impl Week {
+    fn initial_scroll<T: chrono::TimeZone>(&self, now: chrono::DateTime<T>, height: f32) -> f32 {
+        let first = self.days.iter().enumerate().flat_map(|(i, events)|
+            layout(events, self.start + chrono::Duration::days(i as i64), &now.timezone()))
+            .map(|block| block.start).min_by(f32::total_cmp).unwrap_or(480.);
+        let top = (first * HOUR / 60. - HOUR / 2.).clamp(0., (24. * HOUR - height).max(0.));
+        let minute = (now.hour() * 60 + now.minute()) as f32;
+        let today = (now.date_naive() - self.start).num_days();
+        if (0..self.view.days() as i64).contains(&today) && minute * HOUR / 60. >= top + height {
+            now_scroll(minute, height)
+        } else { top }
     }
 }
 
@@ -72,6 +137,16 @@ fn event_title(event: &CalendarEvent) -> gpui::StyledText {
     gpui::StyledText::new(if compact(event) { format!("{} · {}", event.title, short_time(event)) } else { event.title.clone() })
 }
 
+fn calendar_title(title: gpui::StyledText) -> Div {
+    #[cfg(test)]
+    polish_tests::TITLE_LAYOUTS.with(|layouts| {
+        if let Some(layouts) = layouts.borrow_mut().as_mut() { layouts.push(title.layout().clone()); }
+    });
+    // A full-width line in normal flow gives GPUI a width before it shapes and truncates text.
+    // Same construction as the week title that works on main: no min_w(0), and nowrap rather than a line clamp.
+    div().w_full().flex_shrink_0().whitespace_nowrap().text_ellipsis().child(title)
+}
+
 fn event_time(event: &CalendarEvent) -> String {
     if event.all_day {
         let last = NaiveDate::parse_from_str(&event.end, "%Y-%m-%d").ok().and_then(|d| d.pred_opt()).map(|d| d.to_string()).unwrap_or_else(|| event.end.clone());
@@ -84,13 +159,19 @@ fn short_time(event: &CalendarEvent) -> String {
     format!("{}–{}", time(event.start_utc), time(event.end_utc))
 }
 
-actions!(calendar_week, [PreviousWeek, NextWeek, CurrentWeek, CloseEvent]);
+actions!(calendar_week, [PreviousWeek, NextWeek, CurrentWeek, CloseEvent, NewEvent, ToggleCalendarPanel]);
 pub(super) fn bind_keys(cx: &mut App) {
-    let keys = Some("Calendar && !TextInput");
+    let keys = Some("Calendar && !TextInput && !NewEvent");
     cx.bind_keys([
+        KeyBinding::new("enter", crate::text_input::Enter, Some("NewEvent && !TextInput")),
+        KeyBinding::new("escape", crate::text_input::Escape, Some("NewEvent && !TextInput")),
+        KeyBinding::new("tab", crate::text_input::FocusNext, Some("NewEvent && !TextInput")),
+        KeyBinding::new("shift-tab", crate::text_input::FocusPrev, Some("NewEvent && !TextInput")),
         KeyBinding::new("left", PreviousWeek, keys), KeyBinding::new("right", NextWeek, keys),
         KeyBinding::new("t", CurrentWeek, keys), KeyBinding::new("shift-t", CurrentWeek, keys),
         KeyBinding::new("escape", CloseEvent, keys),
+        KeyBinding::new("alt-secondary-p", ToggleCalendarPanel, keys),
+        KeyBinding::new("n", NewEvent, keys), KeyBinding::new("shift-n", NewEvent, keys),
     ]);
 }
 
@@ -105,9 +186,14 @@ impl MainWindow {
         self.week.loaded_day = Some(today);
         let Some(live) = &self.live else {
             if self.demo {
-                self.week.days = vec![vec![]; 7];
+                self.week.days = vec![vec![]; self.week.view.days()];
                 let index = (today - self.week.start).num_days();
-                if (0..7).contains(&index) { self.week.days[index as usize] = agenda::demo_events(today); }
+                if (0..self.week.view.days() as i64).contains(&index) { self.week.days[index as usize] = agenda::demo_events(today); }
+                for i in 0..self.week.view.days() {
+                    let day = self.week.start + chrono::Duration::days(i as i64);
+                    let created = self.demo_created_on(day);
+                    self.week.days[i].extend(created);
+                }
                 let start = monday(today);
                 self.week.windows = vec![Some((agenda::day_start(start, &chrono::Local), agenda::day_start(start + chrono::Duration::weeks(1), &chrono::Local)))];
             }
@@ -116,16 +202,21 @@ impl MainWindow {
         let result = (|| -> lagom_core::Result<_> {
             let windows = self.today.calendar_accounts.iter().map(|(account, _)| live.store.calendar_window(&account.id))
                 .collect::<lagom_core::Result<Vec<_>>>()?;
-            let days = (0..7).map(|i| {
+            let days = (0..self.week.view.days() as i64).map(|i| {
                 let day = self.week.start + chrono::Duration::days(i);
                 live.store.today_events(&day.to_string(), agenda::day_start(day, &chrono::Local), agenda::day_start(day.succ_opt().unwrap(), &chrono::Local))
             }).collect::<lagom_core::Result<Vec<_>>>()?;
             Ok((days, windows))
         })();
         match result {
-            Ok((days, windows)) => { self.week.days = days; self.week.windows = windows; }
+            Ok((days, windows)) => {
+                self.week.detail = self.week.detail.as_ref().and_then(|selected| days.iter().flatten().find(|entry|
+                    entry.account == selected.account && entry.calendar_id == selected.calendar_id && entry.event.remote_id == selected.event.remote_id).cloned());
+                self.week.days = days;
+                self.week.windows = windows;
+            }
             Err(e) => {
-                self.week.days = vec![vec![]; 7];
+                self.week.days = vec![vec![]; self.week.view.days()];
                 self.week.windows.clear();
                 self.notify(format!("Could not read calendar: {e}"), cx);
             }
@@ -133,11 +224,30 @@ impl MainWindow {
     }
 
     pub(super) fn move_week(&mut self, delta: i64, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
-        self.week.start = if delta == 0 { monday(chrono::Local::now().date_naive()) }
-            else { self.week.start.checked_add_signed(chrono::Duration::weeks(delta)).unwrap_or(self.week.start) };
+        if self.week.editor.is_some() || self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+        let today = chrono::Local::now().date_naive();
+        let day = if delta == 0 { today } else if self.week.view == View::Month { shift_month(self.week.anchor, delta) }
+            else { self.week.anchor.checked_add_signed(chrono::Duration::days(delta * if self.week.view == View::Week { 7 } else { 1 })).unwrap_or(self.week.anchor) };
+        self.calendar_date(day, self.week.view, cx);
+        cx.notify();
+    }
+
+    pub(super) fn calendar_date(&mut self, day: NaiveDate, view: View, cx: &mut Context<Self>) {
+        self.week.anchor = day;
+        self.week.view = view;
+        self.week.start = view.start(day);
+        self.week.mini_month = day.with_day(1).unwrap();
         self.week.detail = None;
+        self.week.drag = None;
+        self.week.scroll_to_now = true;
         self.reload_week(cx);
+        cx.notify();
+    }
+
+    fn toggle_calendar_panel(&mut self, cx: &mut Context<Self>) {
+        let show = !self.week.panel.unwrap_or(false);
+        self.week.panel = Some(show);
+        cx.set_global(PanelPreference(show));
         cx.notify();
     }
 
@@ -145,7 +255,9 @@ impl MainWindow {
         element.on_action(cx.listener(|this, _: &PreviousWeek, _, cx| this.move_week(-1, cx)))
             .on_action(cx.listener(|this, _: &NextWeek, _, cx| this.move_week(1, cx)))
             .on_action(cx.listener(|this, _: &CurrentWeek, _, cx| this.move_week(0, cx)))
-            .on_action(cx.listener(|this, _: &CloseEvent, _, cx| { this.week.detail = None; cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleCalendarPanel, _, cx| { this.toggle_calendar_panel(cx); }))
+            .on_action(cx.listener(|this, _: &NewEvent, window, cx| this.new_event_default(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseEvent, window, cx| { this.week.drag = None; this.week.detail = None; this.cancel_new_event(window, cx); }))
     }
 
     fn event_block(&self, entry: &AgendaEvent, title: gpui::StyledText, day: usize, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -157,8 +269,9 @@ impl MainWindow {
             .debug_selector(move || format!("week-event-{day}-{ix}"))
             .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
-            .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).whitespace_nowrap().text_ellipsis().child(title))
-            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(mono(short_time(&entry.event), t.ink2).w_full().flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into())))
+            .child(calendar_title(title).debug_selector(|| "week-title".into()).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM))
+            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/camera.svg", t.ink2, 16.))).child(mono(short_time(&entry.event), t.ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.week.detail = Some(entry.clone());
                 window.focus(&this.focus);
@@ -166,7 +279,7 @@ impl MainWindow {
             }))
     }
 
-    pub(super) fn week_view(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn week_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let now = chrono::Local::now();
         let today = now.date_naive();
         if self.week.loaded_day != Some(today) { self.reload_agenda(cx); self.reload_week(cx); }
@@ -178,35 +291,78 @@ impl MainWindow {
         }
         let t = self.theme;
         let start = self.week.start;
-        let allowed = self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || self.week.days.iter().any(|d| !d.is_empty());
-        let mut page = div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
-            .child(div().flex().items_center().gap(px(8.))
-                .child(div().flex_1().text_size(px(size::TITLE)).font_weight(FontWeight::SEMIBOLD).child("Calendar"))
-                .child(mono(format!("{} – {}", start.format("%-d %b %Y"), (start + chrono::Duration::days(6)).format("%-d %b %Y")), t.ink2))
-                .child(icon_button(&t, "previous-week", "icons/previous.svg", "Previous week · ←").debug_selector(|| "previous-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(-1, cx))))
-                .child(button(&t, "Today", None).tooltip(move |_, cx| cx.new(|_| Tip(t, "Today · T".into())).into()).on_click(cx.listener(|this, _, _, cx| this.move_week(0, cx))))
-                .child(icon_button(&t, "next-week", "icons/next.svg", "Next week · →").debug_selector(|| "next-week".into()).on_click(cx.listener(|this, _, _, cx| this.move_week(1, cx)))));
+        let count = self.week.view.days();
+        let show_panel = *self.week.panel.get_or_insert_with(|| cx.try_global::<PanelPreference>().map_or(f32::from(window.viewport_size().width) > 1200., |p| p.0));
+        if show_panel { self.prepare_calendar_guests(window, cx); }
+        let allowed = self.demo || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || self.week.days.iter().any(|d| !d.is_empty());
+        let mut page = div().relative()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                let minute = this.grid_minute(event.position.y);
+                if let Some((_, _, to)) = &mut this.week.drag { *to = minute; cx.notify(); }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                if let Some((day, from, _)) = this.week.drag.take() {
+                    let (start, end) = new_event::drag_interval(from, this.grid_minute(event.position.y));
+                    this.open_new_event(this.week.start + chrono::Duration::days(day as i64), start, end, window, cx);
+                }
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| { this.week.drag = None; cx.notify(); })).flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
+            .child(div().flex().flex_wrap().items_center().gap(px(8.))
+                .child(div().flex_1().flex().gap(px(6.)).text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
+                    .min_w(px(170.)).child(div().debug_selector(|| "calendar-title-month".into()).child(self.week.anchor.format("%B").to_string())).child(div().debug_selector(|| "calendar-title-year".into()).text_color(t.ink2).child(self.week.anchor.format("%Y").to_string())))
+                .child(div().flex().items_center().border_1().border_color(t.line).rounded(px(radius::CONTROL))
+                    .child(icon_button(&t, "previous-week", "icons/previous.svg", "Previous period · ←").on_click(cx.listener(|this, _, window, cx| { this.move_week(-1, cx); window.focus(&this.focus); })))
+                    .child(button(&t, "Today", None).on_click(cx.listener(|this, _, window, cx| { this.move_week(0, cx); window.focus(&this.focus); })))
+                    .child(icon_button(&t, "next-week", "icons/next.svg", "Next period · →").on_click(cx.listener(|this, _, window, cx| { this.move_week(1, cx); window.focus(&this.focus); }))))
+                .child(div().flex().border_1().border_color(t.line).rounded(px(radius::CONTROL))
+                    .children([(View::Day, "Day"), (View::Week, "Week"), (View::Month, "Month")].into_iter().map(|(view, label)|
+                        button(&t, label, None).when(view == self.week.view, |d| d.bg(t.sel))
+                            .on_click(cx.listener(move |this, _, window, cx| { this.calendar_date(this.week.anchor, view, cx); window.focus(&this.focus); })))))
+                .child(button(&t, "New event", Some(t.accent)).on_click(cx.listener(|this, _, window, cx| this.new_event_default(window, cx))))
+                .child(icon_button(&t, "calendar-panel-toggle", "icons/calendar-panel.svg", "Toggle calendar panel · ⌘⌥P")
+                    .when(show_panel, |d| d.bg(t.sel)).on_click(cx.listener(|this, _, window, cx| { this.toggle_calendar_panel(cx); window.focus(&this.focus); }))));
         page = page.child(self.calendar_controls(cx));
-        if !allowed { return page; }
-        let mut headers = div().flex().flex_shrink_0().pl(px(48.));
-        let mut all_day = div().id("week-all-day").debug_selector(|| "week-all-day".into()).flex().flex_shrink_0().min_h(px(32.)).max_h(px(150.)).overflow_y_scroll()
-            .child(div().w(px(48.)).flex_shrink_0().flex().flex_col().gap(px(2.))
-                .child(icon("icons/sun.svg", t.ink2, 16.)).child(mono("All day", t.ink2)));
-        let mut hours = div().relative().w(px(48.)).flex_shrink_0().h(px(24. * HOUR));
-        for hour in 0..24 {
-            hours = hours.child(mono(format!("{hour:02}:00"), t.ink2).absolute().top(px(hour as f32 * HOUR)));
+        if !allowed {
+            let mut empty = div().flex().flex_1().min_h(px(0.)).gap(px(16.))
+                .child(div().flex_1().flex().flex_col().items_center().justify_center().gap(px(8.))
+                    .child(icon("icons/calendar.svg", t.ink2, 32.)).child(mono("Connect a calendar to see your events", t.ink2)));
+            if show_panel { empty = empty.child(self.calendar_panel(window, cx)); }
+            return page.child(empty).child(self.new_event_sheet(cx));
         }
-        let mut grid = div().flex().h(px(24. * HOUR)).child(hours);
-        for day in 0..7 {
+        let mut body = div().flex().flex_1().min_h(px(0.)).gap(px(16.));
+        let mut calendar = div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(8.));
+        let mut headers = div().flex().flex_shrink_0().pl(px(GUTTER));
+        let mut all_day = div().id("week-all-day").debug_selector(|| "week-all-day".into()).flex().flex_shrink_0().min_h(px(32.)).max_h(px(150.)).overflow_y_scroll()
+            .child(mono("All day", t.ink2).w(px(GUTTER)).flex_shrink_0());
+        let mut hours = div().relative().w(px(GUTTER)).flex_shrink_0().h(px(24. * HOUR));
+        for hour in 0..24 {
+            hours = hours.child(div().absolute().top(px(hour as f32 * HOUR)).w_full().pr(px(8.)).flex().justify_end().items_start()
+                .child(mono(format!("{hour:02}"), t.ink).text_size(px(size::BASE)).debug_selector(move || format!("hour-{hour}")))
+                .child(mono("00", t.ink2).text_size(px(size::SMALL)).debug_selector(move || format!("hour-minutes-{hour}"))));
+        }
+        let mut grid = div().relative().flex().h(px(24. * HOUR)).child(hours);
+        for day in 0..if self.week.view == View::Month { 0 } else { count } {
             let date = start + chrono::Duration::days(day as i64);
             let synced = synced_day(date, &self.week.windows);
-            headers = headers.child(div().flex_1().min_w(px(0.)).text_color(if date == today { t.accent } else { t.ink })
-                .font_weight(FontWeight::MEDIUM).child(date.format("%a %-d").to_string()));
+            headers = headers.child(div().flex_1().min_w(px(0.)).flex().items_center().gap(px(6.)).text_color(t.ink2)
+                .child(div().debug_selector(move || format!("weekday-{day}")).child(date.format("%a").to_string()))
+                .child(div().debug_selector(move || format!("day-number-{day}")).size(px(30.)).flex().items_center().justify_center().rounded_full().text_size(px(size::SUBJECT))
+                    .text_color(if date.weekday().num_days_from_monday() >= 5 { t.ink2 } else { t.ink })
+                    .when(date == today, |d| d.bg(Theme::light(DEFAULT_ACCENT).accent).text_color(gpui::rgb(0xFFFFFF)))
+                    .child(date.day().to_string())));
             let entries = &self.week.days[day];
-            all_day = all_day.child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).px(px(2.))
+            all_day = all_day.child(div().flex_1().min_w(px(0.)).overflow_hidden().flex().flex_col().gap(px(3.)).px(px(2.))
                 .children(entries.iter().enumerate().filter(|(_, e)| e.event.all_day)
-                    .map(|(ix, e)| self.event_block(e, event_title(&e.event), day, ix, cx).min_h(px(26.)))));
-            let mut column = div().relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_color(t.line);
+                    .map(|(ix, e)| self.calendar_event_line(e, day, ix, cx))));
+            let mut column = div().id(("week-day", day)).debug_selector(move || format!("week-day-{day}"))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if this.week.editor.is_some() { return; }
+                    let minute = this.grid_minute(event.position.y);
+                    this.week.drag = Some((day, minute.min(1425), minute));
+                    cx.notify();
+                }))
+                .relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_dashed().border_color(t.line)
+                .bg(column_fill(&t, date, today));
             if !synced {
                 column = column.child(mono("Not synced this far", t.ink2).absolute().top_0().p(px(8.)).debug_selector(move || format!("unsynced-day-{day}")));
             }
@@ -238,25 +394,58 @@ impl MainWindow {
                 (y, i) = (bottom, j);
             }
             column = column.child(events);
-            if date == today {
-                column = column.child(div().absolute().top(px((now.hour() as f32 + now.minute() as f32 / 60.) * HOUR))
-                    .w_full().h(px(2.)).bg(t.accent).debug_selector(|| "current-time".into()));
+            if let Some((selected, from, to)) = self.week.drag {
+                if selected == day {
+                    let (start, end) = new_event::drag_interval(from, to);
+                    column = column.child(div().absolute().top(px(start as f32 * HOUR / 60.)).h(px((end - start) as f32 * HOUR / 60.))
+                        .w_full().bg(Rgba { a: 0.2, ..t.accent }).border_1().border_color(t.accent));
+                }
             }
             grid = grid.child(column);
         }
-        page = page.child(headers).child(all_day)
-            .when((0..7).any(|i| !synced_day(start + chrono::Duration::days(i), &self.week.windows)), |d|
-                d.child(div().flex().flex_col().gap(px(8.)).child(icon("icons/calendar.svg", t.ink2, 32.))
-                    .child(mono("Not synced this far", t.ink2).debug_selector(|| "week-unsynced".into()))))
-            .when(self.week.days.iter().any(|d| !d.is_empty()) || (0..7).any(|i| synced_day(start + chrono::Duration::days(i), &self.week.windows)), |d|
-                d.child(div().id("week-grid").debug_selector(|| "week-grid".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.week.scroll).child(grid)))
-            .child(mono("← → week · T today", t.ink2));
+        let today_index = (today - start).num_days();
+        if (0..count as i64).contains(&today_index) && self.week.view != View::Month {
+            let gold = Theme::dark(crate::theme::Accent::Gold).accent;
+            grid = grid.child(div().absolute().top(px((now.hour() as f32 + now.minute() as f32 / 60.) * HOUR)).left_0().right_0()
+                .debug_selector(|| "current-time".into()).h(px(1.)).flex().items_center()
+                .child(mono(now.format("%H:%M").to_string(), Theme::light(DEFAULT_ACCENT).ink).w(px(GUTTER)).flex_shrink_0()
+                    .text_center().rounded(px(radius::CONTROL)).bg(gold))
+                .child(div().relative().flex_1().h(px(1.)).bg(gold)
+                    .child(div().absolute().left(relative(today_index as f32 / count as f32)).top(px(-3.)).size(px(7.)).rounded_full().bg(gold))));
+        }
+        if self.week.view == View::Month {
+            calendar = calendar.child(self.calendar_month(cx));
+        } else {
+            calendar = calendar.child(headers).child(all_day)
+                .when((0..count).any(|i| !synced_day(start + chrono::Duration::days(i as i64), &self.week.windows)), |d|
+                    d.child(mono("Not synced this far", t.ink2).debug_selector(|| "week-unsynced".into())))
+                .when(self.week.days.iter().any(|d| !d.is_empty()) || (0..count).any(|i| synced_day(start + chrono::Duration::days(i as i64), &self.week.windows)), |d|
+                    d.child(div().id("week-grid").debug_selector(|| "week-grid".into()).relative().flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.week.scroll).child(grid)
+                        .when(self.week.scroll_to_now, |d| {
+                            let entity = cx.entity().downgrade();
+                            d.child(gpui::canvas(|bounds, _, _| bounds.size.height, move |_, height, _, cx| {
+                                let entity = entity.clone();
+                                cx.defer(move |cx| {
+                                    entity.update(cx, |this, cx| {
+                                        if this.week.scroll_to_now && height > px(0.) {
+                                            this.week.scroll_to_now = false;
+                                            this.week.scroll.set_offset(gpui::point(px(0.), px(-this.week.initial_scroll(now, f32::from(height)))));
+                                            cx.notify();
+                                        }
+                                    }).ok();
+                                });
+                            }).absolute().inset_0())
+                        })));
+        }
+        body = body.child(calendar);
+        if show_panel { body = body.child(self.calendar_panel(window, cx)); }
+        page = page.child(body).child(mono("← → navigate · T today · N new event", t.ink2));
         if let Some(entry) = &self.week.detail {
             page = page.child(div().id("event-detail").debug_selector(|| "event-detail".into()).absolute().top(px(64.)).right(px(24.)).w(px(320.))
                 .occlude().max_h(px(400.)).overflow_y_scroll().p(px(16.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).shadow_md()
                 .flex().flex_col().gap(px(12.))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(entry.event.title.clone()))
+                .child(calendar_title(gpui::StyledText::new(entry.event.title.clone())).font_weight(FontWeight::SEMIBOLD))
                 .child(div().flex().items_center().gap(px(6.))
                     .when(entry.event.all_day, |d| d.child(icon("icons/sun.svg", t.ink2, 16.)))
                     .child(mono(event_time(&entry.event), t.ink2)))
@@ -268,7 +457,12 @@ impl MainWindow {
                     icon_button(&t, "Open in Google Calendar", "icons/external.svg", "Open in Google Calendar").on_click(move |_, _, cx| cx.open_url(&url))))
                 .child(icon_button(&t, "Close", "icons/close.svg", "Close event · Esc").on_click(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))));
         }
+        page = page.child(self.new_event_sheet(cx));
         page
+    }
+
+    fn grid_minute(&self, y: Pixels) -> u32 {
+        new_event::snap_minute(f32::from(y - self.week.scroll.bounds().top() - self.week.scroll.offset().y) * 60. / HOUR)
     }
 }
 
@@ -277,9 +471,9 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
-    fn entry(day: NaiveDate, start: u32, end: u32, all_day: bool) -> AgendaEvent {
+    pub(super) fn entry(day: NaiveDate, start: u32, end: u32, all_day: bool) -> AgendaEvent {
         let midnight = day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-        AgendaEvent { account: "fixture".into(), calendar: "Fixture calendar".into(), event: CalendarEvent {
+        AgendaEvent { account: "fixture".into(), calendar: "Fixture calendar".into(), calendar_id: "primary".into(), event: CalendarEvent {
             remote_id: format!("{start}-{end}"), title: "Fixture event".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
             start_utc: midnight + start as i64 * 60, end_utc: midnight + end as i64 * 60,
             all_day, location: Some("Fixture room".into()), join_url: Some("https://meet.example.test/fixture".into()),

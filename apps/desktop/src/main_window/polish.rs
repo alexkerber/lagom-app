@@ -172,8 +172,10 @@ pub(super) fn sync_icon(state: &crate::sync::SyncState) -> &'static str {
     }
 }
 
-pub(super) fn action_icon(label: &str) -> Option<&'static str> {
+pub(crate) fn action_icon(label: &str) -> Option<&'static str> {
     Some(match label {
+        "Day" => "icons/calendar-day.svg", "Week" => "icons/calendar-week.svg", "Month" => "icons/calendar-month.svg",
+        "Save event" | "Saving…" => "icons/save-event.svg",
         "Reply" => "icons/reply.svg", "Reply all" => "icons/reply-all.svg", "Forward" => "icons/forward.svg",
         "Later" => "icons/later.svg", "Done" => "icons/done.svg", "Move to Inbox" => "icons/restore.svg",
         "Move" => "icons/move.svg", "Mark unread" => "icons/unread.svg", "Mark read" => "icons/read.svg",

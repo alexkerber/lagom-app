@@ -3510,6 +3510,7 @@ dependencies = [
  "chrono",
  "embed-resource",
  "gpui",
+ "iana-time-zone",
  "lagom-core",
  "notify-rust",
  "objc2",
