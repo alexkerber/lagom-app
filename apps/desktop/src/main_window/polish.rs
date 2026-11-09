@@ -191,6 +191,7 @@ pub(crate) fn action_icon(label: &str) -> Option<&'static str> {
         "Send" => "icons/send.svg", "New message" => "icons/compose.svg", "Insert file…" => "icons/insert-file.svg",
         "Sync now" => "icons/cloud-syncing.svg", "Settings" => "icons/settings.svg", "Connect" => "icons/connect.svg",
         "Connecting" => "icons/cloud-syncing.svg",
+        "TLS" | "STARTTLS" => "icons/access.svg", "None" => "icons/close.svg",
         _ => return None,
     })
 }

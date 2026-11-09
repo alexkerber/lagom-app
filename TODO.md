@@ -54,6 +54,8 @@
 - [ ] Swipe: GPUI maps `NSEventPhaseCancelled` to Moved, so a system-cancelled gesture leaves the row offset until the next swipe or Esc. Patch or wrap GPUI's phase mapping.
 - [x] Swipe: drag a row with the mouse, same stages as the trackpad. Closed hand while dragging; the arrow at rest, as in native lists (2026-11-06, `feat/feel`).
 - [x] Compose: Esc keeps the draft locally and R brings it back; Send moves it to the outbox and ⌘⌫ discards it.
+- [x] Submit shortcuts: Cmd+Enter on macOS and Ctrl+Enter on Windows/Linux, shared by Compose and account connection with platform hints; inline and popout replies reuse Compose. Ctrl+Backspace deletes a word on Windows/Linux without discarding the draft. Parameterised shortcut and headless dispatch regressions cover both platform choices.
+- [x] Remaining button icons: Settings default-list row actions use icon-only buttons with tooltips; account security choices reuse icon + label buttons. Existing SVGs only, with headless assertions on the rendered controls.
 - [x] Text input: `TextInput` (single and multi-line, selection, word and line keys, clipboard, undo, IME, password mode) in compose and the palette (`feat/text-input`).
 - [ ] Text input: try by hand. Typing, an IME (Japanese, Pinyin), dead keys, mouse and double-click selection, drag past the edge, scrolling a long body, the Edit menu. Tests cover the editing model and GPUI key dispatch only.
 - [ ] Text input: caret, accent selection and focus ring are not in a screenshot yet. GPUI blurs fields in an inactive window, and the capture window was inactive.
