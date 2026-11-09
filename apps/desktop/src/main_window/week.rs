@@ -66,6 +66,12 @@ fn layout<T: chrono::TimeZone>(events: &[AgendaEvent], day: NaiveDate, zone: &T)
     blocks
 }
 
+fn compact(event: &CalendarEvent) -> bool { !event.all_day && event.end_utc - event.start_utc < 30 * 60 }
+
+fn event_title(event: &CalendarEvent) -> gpui::StyledText {
+    gpui::StyledText::new(if compact(event) { format!("{} · {}", event.title, short_time(event)) } else { event.title.clone() })
+}
+
 fn event_time(event: &CalendarEvent) -> String {
     if event.all_day {
         let last = NaiveDate::parse_from_str(&event.end, "%Y-%m-%d").ok().and_then(|d| d.pred_opt()).map(|d| d.to_string()).unwrap_or_else(|| event.end.clone());
@@ -142,17 +148,17 @@ impl MainWindow {
             .on_action(cx.listener(|this, _: &CloseEvent, _, cx| { this.week.detail = None; cx.notify(); }))
     }
 
-    fn event_block(&self, entry: &AgendaEvent, day: usize, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn event_block(&self, entry: &AgendaEvent, title: gpui::StyledText, day: usize, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let index = self.live.as_ref().and_then(|l| l.accounts.iter().position(|a| a.id == entry.account)).unwrap_or(0);
         let accent = self.account_accent(index);
         let t = self.theme;
         let entry = entry.clone();
         pressable(div().id(("week-event", day * 100_000 + ix)), &t, false)
             .debug_selector(move || format!("week-event-{day}-{ix}"))
-            .px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
+            .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
             .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
-            .child(div().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).one_line().child(entry.event.title.clone()))
-            .when(!entry.event.all_day, |d| d.child(mono(short_time(&entry.event), t.ink2)))
+            .child(div().debug_selector(|| "week-title".into()).w_full().flex_shrink_0().text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).one_line().child(title))
+            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(mono(short_time(&entry.event), t.ink2).w_full().flex_shrink_0().one_line().debug_selector(|| "week-time".into())))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.week.detail = Some(entry.clone());
                 window.focus(&this.focus);
@@ -198,7 +204,7 @@ impl MainWindow {
             let entries = &self.week.days[day];
             all_day = all_day.child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).px(px(2.))
                 .children(entries.iter().enumerate().filter(|(_, e)| e.event.all_day)
-                    .map(|(ix, e)| self.event_block(e, day, ix, cx).min_h(px(26.)))));
+                    .map(|(ix, e)| self.event_block(e, event_title(&e.event), day, ix, cx).min_h(px(26.)))));
             let mut column = div().relative().flex_1().min_w(px(0.)).h_full().border_l_1().border_color(t.line);
             if !synced {
                 column = column.child(mono("Not synced this far", t.ink2).p(px(8.)).debug_selector(move || format!("unsynced-day-{day}")));
@@ -207,7 +213,7 @@ impl MainWindow {
                 column = column.child(div().absolute().top(px(hour as f32 * HOUR)).w_full().h(px(1.)).bg(t.line));
             }
             for block in layout(entries, date, &chrono::Local) {
-                column = column.child(self.event_block(&entries[block.event], day, block.event, cx).absolute()
+                column = column.child(self.event_block(&entries[block.event], event_title(&entries[block.event].event), day, block.event, cx).absolute()
                     .top(px(block.start * HOUR / 60.)).h(px((block.end - block.start) * HOUR / 60.))
                     .left(relative(block.lane as f32 / block.lanes as f32)).w(relative(1. / block.lanes as f32)));
             }
@@ -255,6 +261,53 @@ mod tests {
             all_day, location: Some("Fixture room".into()), join_url: Some("https://meet.example.test/fixture".into()),
             html_link: Some("https://www.google.com/calendar/event?eid=fixture".into()),
         } }
+    }
+
+    struct EventPreview { view: Entity<MainWindow>, event: AgendaEvent, width: f32, text: gpui::TextLayout }
+
+    impl Render for EventPreview {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let title = event_title(&self.event.event);
+            self.text = title.layout().clone();
+            div().relative().w(px(self.width)).h(px(45.)).child(self.view.update(cx, |view, cx| view.event_block(&self.event, title, 0, 0, cx).absolute().w(relative(1.)).h_full()))
+        }
+    }
+
+    #[gpui::test]
+    fn review_week_title_uses_full_block_width(cx: &mut TestAppContext) {
+        let (view, _) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+        let mut event = entry(NaiveDate::from_ymd_opt(2026, 11, 9).unwrap(), 540, 585, false);
+        event.event.title = "Plan the next sprint".into();
+        assert_eq!(event.event.title.chars().count(), 20);
+        let (preview, cx) = cx.add_window_view(|_, _| EventPreview { view, event, width: 130., text: Default::default() });
+        cx.run_until_parked();
+        let rendered = preview.read_with(cx, |p, _| p.text.text());
+        // The headless font is monospace: 20 glyphs at 11 px need 132 px before padding.
+        assert_eq!(rendered, "Plan the next sp…");
+        let block = cx.debug_bounds("week-event-0-0").unwrap();
+        let title = cx.debug_bounds("week-title").unwrap();
+        let time = cx.debug_bounds("week-time").unwrap();
+        assert_eq!(block.size.width, px(130.));
+        assert_eq!(title.size.width, px(118.), "title must use the block minus padding and border");
+        assert!(time.top() >= title.bottom(), "time must be on the second line");
+        assert!(time.bottom() <= block.bottom(), "both lines must fit a 45-minute event");
+        preview.update(cx, |p, cx| { p.width = 160.; cx.notify(); });
+        cx.run_until_parked();
+        assert_eq!(preview.read_with(cx, |p, _| p.text.text()), "Plan the next sprint");
+    }
+
+    #[gpui::test]
+    fn review_week_short_events_use_one_line_below_thirty_minutes(cx: &mut TestAppContext) {
+        for minutes in [15, 29, 30, 45] {
+            let (view, _) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+            let mut event = entry(NaiveDate::from_ymd_opt(2026, 11, 9).unwrap(), 540, 540 + minutes, false);
+            event.event.title = "Planning".into();
+            let expected = if minutes < 30 { format!("Planning · {}", short_time(&event.event)) } else { "Planning".into() };
+            let (preview, cx) = cx.add_window_view(|_, _| EventPreview { view, event, width: 240., text: Default::default() });
+            cx.run_until_parked();
+            assert_eq!(preview.read_with(cx, |p, _| p.text.text()), expected);
+            assert_eq!(cx.debug_bounds("week-time").is_some(), minutes >= 30);
+        }
     }
 
     #[gpui::test]

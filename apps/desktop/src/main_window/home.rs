@@ -96,7 +96,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("Show your Google Calendar").is_none());
         assert!(cx.debug_bounds("Add list").is_none());
-        assert!(cx.debug_bounds("task-hint").is_none());
+        assert!(cx.debug_bounds("task-hint").is_some());
         assert!(cx.debug_bounds("agenda-event-0").is_some());
         view.read_with(cx, |v, _| {
             assert!(v.live.is_none());
@@ -125,7 +125,7 @@ mod tests {
                 assert!(matches!((&v.page, screen), (Page::Home, "home") | (Page::Mail, "inbox") | (Page::Calendar, "calendar") | (Page::Todo, "todo")));
             });
             assert_eq!(cx.debug_bounds("Add list").is_some(), screen == "todo");
-            assert_eq!(cx.debug_bounds("task-hint").is_some(), screen == "todo");
+            assert_eq!(cx.debug_bounds("task-hint").is_some(), matches!(screen, "home" | "todo"));
             assert!(cx.debug_bounds("Show your Google Calendar").is_none());
         }
     }

@@ -474,6 +474,18 @@ impl MainWindow {
     }
 
     pub(super) fn open_task_mail(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.demo && self.live.is_none() {
+            let target = self.today.tasks.iter().find(|task| task.id == id).and_then(|task|
+                self.inbox.mail.iter().position(|mail| task.mail_account.as_ref() == Some(&mail.account)
+                    && task.mail_message_id.as_ref() == Some(&mail.message_id)));
+            if let Some(target) = target {
+                self.open_box(None, cx);
+                if let Some(index) = self.inbox.items.iter().position(|&id| id == target) {
+                    self.select(|inbox| inbox.select(index), cx);
+                }
+            }
+            return;
+        }
         let Some(live) = &mut self.live else { return };
         if !live.ops.is_empty() {
             live.task_target = Some(id);
