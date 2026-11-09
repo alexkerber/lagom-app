@@ -34,7 +34,7 @@ Use the entry on the landing page hero, the about window and the empty-inbox sta
 ## Visual direction
 
 - **Type:** one sturdy geometric or grotesque sans for everything. Heavy weight for the wordmark, set in lowercase. A monospace face for shortcuts and counts.
-- **Colour:** warm off-white paper, near-black ink and one strong accent. Explore a Swedish palette: falu red, mustard yellow, pine green and catalogue blue. Pick one accent per concept. Provide light and dark themes.
+- **Colour:** warm off-white paper, near-black ink and one strong accent. Chosen palette "Dusk", from the app icon: Swedish blue as the accent, gold as the second colour, pine green for Done. Provide light and dark themes.
 - **Shape:** flat colour, hard edges, small radii. No gradients, no glass, no shadows beyond one hairline.
 - **Illustration:** assembly-manual line drawings. One line weight, no fill. Use them for empty states and onboarding.
 - **Icon:** a simple flat mark that works at 16 px. Explore the letter "l", a level or balance line, and an empty tray.

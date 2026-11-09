@@ -144,14 +144,15 @@ impl MainWindow {
         let summary = summary.debug_selector(move || format!("{} messages selected", members.len()));
         div().flex_1().min_w(px(0.)).h_full().flex().flex_col()
             .child(toolbar(t).flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.)).px(px(16.))
-                .child(button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.swipe_done))
-                    .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx))))
                 .when(!trash, |d| d
                     .child(button(t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
                     .child(button(t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx)))))
                 .child(button(t, "Move", None).on_click(cx.listener(|this, _, window, cx| this.open_palette("move ", window, cx))))
                 .child(button(t, if seen { "Mark read" } else { "Mark unread" }, None)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_read(cx)))))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_read(cx))))
+                .child(div().flex_1())
+                .child(button(t, if trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| this.act(if trash { Move::Inbox } else { Move::Done }, cx)))))
             .child(summary)
     }
 }
@@ -401,10 +402,12 @@ mod tests {
         cx.simulate_resize(gpui::size(px(MIN_WINDOW.0), px(MIN_WINDOW.1)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("3 messages selected").is_some());
+        let done = cx.debug_bounds("Done").unwrap();
         for button in ["Done", "Later", "Delete", "Move", "Mark read"] {
             let bounds = cx.debug_bounds(button).unwrap();
             let summary = cx.debug_bounds("3 messages selected").unwrap();
             assert!(bounds.left() >= summary.left() && bounds.right() <= summary.right());
+            assert!(bounds.top() < done.top() || bounds.right() <= done.right(), "Done must sit last");
         }
         let before = view.read_with(cx, |v, _| v.inbox.items.len());
         let at = cx.debug_bounds("Done").unwrap().center();

@@ -48,7 +48,7 @@ impl Provider {
             secret: Zeroizing::new(secret),
             auth: auth.into(),
             token: token.into(),
-            scope,
+            scope: scope.into(),
         }
     }
     fn servers(self, email: &str) -> (ServerConfig, ServerConfig) {
@@ -79,18 +79,31 @@ pub fn available(provider: Provider) -> bool {
     !provider.config().id.trim().is_empty()
 }
 
+pub const GOOGLE_CALENDAR_SCOPES: &str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/tasks";
+
+pub fn has_scope(scopes: &str, scope: &str) -> bool { scopes.split_whitespace().any(|s| s == scope) }
+
+pub fn calendar_allowed(scopes: &str) -> bool {
+    has_scope(scopes, "https://www.googleapis.com/auth/calendar")
+        || has_scope(scopes, "https://www.googleapis.com/auth/calendar.readonly")
+        || (has_scope(scopes, "https://www.googleapis.com/auth/calendar.calendarlist.readonly")
+            && (has_scope(scopes, "https://www.googleapis.com/auth/calendar.events")
+                || has_scope(scopes, "https://www.googleapis.com/auth/calendar.events.readonly")))
+}
+
 struct Config {
     id: String,
     secret: Zeroizing<String>,
     auth: String,
     token: String,
-    scope: &'static str,
+    scope: String,
 }
 #[derive(Debug)]
 pub struct SignedIn {
     pub email: String,
     pub display_name: String,
     pub account: Account,
+    pub scopes: String,
 }
 
 fn random() -> String {
@@ -110,11 +123,17 @@ pub async fn sign_in(provider: Provider, open_url: impl FnOnce(&str)) -> Result<
     sign_in_with(provider, provider.config(), None, open_url).await
 }
 /// Replaces credentials only after the provider confirms the existing account's email.
-pub async fn reauthenticate(account: &Account, open_url: impl FnOnce(&str)) -> Result<SignedIn> {
+pub async fn reauthenticate(account: &Account, scopes: &str, open_url: impl FnOnce(&str)) -> Result<SignedIn> {
     let Auth::OAuth(provider) = account.auth else {
         return Err(Error::Invalid("not an OAuth account"));
     };
-    sign_in_with(provider, provider.config(), Some(account), open_url).await
+    let mut config = provider.config();
+    if provider == Provider::Google {
+        for scope in scopes.split_whitespace() {
+            if !has_scope(&config.scope, scope) { config.scope.push_str(&format!(" {scope}")); }
+        }
+    }
+    sign_in_with(provider, config, Some(account), open_url).await
 }
 async fn sign_in_with(
     provider: Provider,
@@ -140,7 +159,7 @@ async fn sign_in_with(
             ("client_id", config.id.as_str()),
             ("redirect_uri", &redirect),
             ("response_type", "code"),
-            ("scope", config.scope),
+            ("scope", config.scope.as_str()),
             ("state", &state),
             ("code_challenge", &challenge(&verifier)),
             ("code_challenge_method", "S256"),
@@ -149,6 +168,7 @@ async fn sign_in_with(
             url.query_pairs_mut()
                 .extend_pairs([("access_type", "offline"), ("prompt", "consent")]);
         }
+        if let Some(account) = existing { url.query_pairs_mut().append_pair("login_hint", &account.email); }
         open_url(url.as_str());
         let code = callback(&listener, &state).await?;
         let mut token = exchange(
@@ -161,6 +181,8 @@ async fn sign_in_with(
             ],
         )
         .await?;
+        // Missing scope means the requested scope set was granted (OAuth 2.0 section 5.1).
+        if token.scope.is_none() { token.scope = Some(config.scope.clone()); }
         complete_sign_in(provider, existing, &mut token).await
     })
     .await
@@ -187,6 +209,9 @@ async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token:
         account
     };
     account.validate()?;
+    if provider == Provider::Google && token.scope.as_ref().is_some_and(|scopes| !has_scope(scopes, "https://mail.google.com/")) {
+        return Err(Error::Invalid("Mail access is required; saved credentials were not replaced"));
+    }
     let refresh = token
         .refresh_token
         .as_deref()
@@ -201,6 +226,7 @@ async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token:
         email,
         display_name,
         account,
+        scopes: token.scope.clone().unwrap_or_default(),
     })
 }
 
@@ -343,6 +369,7 @@ struct Token {
     token_type: String,
     refresh_token: Option<String>,
     id_token: Option<String>,
+    scope: Option<String>,
 }
 impl Drop for Token {
     fn drop(&mut self) {
@@ -445,15 +472,10 @@ async fn access_token_with(
     }
     *cached = None;
     let refresh = account.password()?;
-    let mut token = exchange(
-        config,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
-            ("scope", config.scope),
-        ],
-    )
-    .await?;
+    let mut fields = vec![("grant_type", "refresh_token"), ("refresh_token", refresh.as_str())];
+    // Google refreshes keep the grant; mail must not narrow a calendar-enabled token.
+    if account.auth != Auth::OAuth(Provider::Google) { fields.push(("scope", config.scope.as_str())); }
+    let mut token = exchange(config, &fields).await?;
     if let Some(refresh) = token.refresh_token.as_deref().filter(|s| !s.is_empty()) {
         account.set_password(refresh)?;
     }

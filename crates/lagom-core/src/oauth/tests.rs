@@ -130,6 +130,7 @@ async fn reauthentication_preserves_account_and_rejects_another_identity_before_
         account.display_name = "Custom label".into();
         account.set_password("old-refresh").unwrap();
         let token = |email: &str| Token {
+            scope: None,
             access_token: "new-access".into(), expires_in: 3600, token_type: "Bearer".into(),
             refresh_token: Some("reauth-fixture-refresh".into()),
             id_token: Some(jwt(&serde_json::json!({"email": email, "name": "Provider label"}).to_string())),
@@ -260,6 +261,7 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
                     assert_eq!(form["code"], "test-code");
                 } else {
                     assert_eq!(form["grant_type"], "refresh_token");
+                    assert_eq!(form.contains_key("scope"), provider == Provider::Microsoft);
                     assert_eq!(
                         form["refresh_token"],
                         if n == 1 { "refresh-1" } else { "refresh-2" }
@@ -352,4 +354,51 @@ async fn dropping_sign_in_closes_the_listener() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn calendar_granular_consent_preserves_mail_and_saves_only_granted_scopes() {
+    memory();
+    let (imap, smtp) = Provider::Google.servers("fixture@example.com");
+    let mut account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+    account.auth = Auth::OAuth(Provider::Google);
+    account.set_password("original-fixture").unwrap();
+    let mut token = Token {
+        access_token: "fixture-access".into(), expires_in: 3600, token_type: "Bearer".into(),
+        refresh_token: Some("replacement-fixture".into()), id_token: Some(jwt(r#"{"email":"fixture@example.com"}"#)),
+        scope: Some(GOOGLE_CALENDAR_SCOPES.into()),
+    };
+    assert!(complete_sign_in(Provider::Google, Some(&account), &mut token).await.is_err());
+    assert_eq!(&*account.password().unwrap(), "original-fixture");
+    assert!(cache(&account.id).lock().await.is_none());
+    token.scope = Some("https://mail.google.com/ https://www.googleapis.com/auth/calendar.events".into());
+    let signed = complete_sign_in(Provider::Google, Some(&account), &mut token).await.unwrap();
+    assert_eq!(signed.scopes, token.scope.as_deref().unwrap());
+    assert!(!calendar_allowed(&signed.scopes));
+    assert_eq!(&*account.password().unwrap(), "replacement-fixture");
+    assert!(calendar_allowed(GOOGLE_CALENDAR_SCOPES));
+    assert!(!calendar_allowed("https://www.googleapis.com/auth/calendar.events.extra https://www.googleapis.com/auth/calendar.calendarlist.readonly"));
+    account.delete_password().unwrap();
+}
+
+#[tokio::test]
+async fn calendar_consent_requests_full_scopes_and_existing_identity_hint() {
+    let (imap, smtp) = Provider::Google.servers("fixture@example.com");
+    let mut account = Account::new("fixture@example.com".into(), imap, smtp).unwrap();
+    account.auth = Auth::OAuth(Provider::Google);
+    let mut config = Provider::Google.config();
+    config.id = "fixture-id".into();
+    config.scope.push(' ');
+    config.scope.push_str(GOOGLE_CALENDAR_SCOPES);
+    let mut observed = None;
+    let mut flow = Box::pin(sign_in_with(Provider::Google, config, Some(&account), |url| { observed = Some(url.to_string()); }));
+    assert!(tokio::time::timeout(Duration::from_millis(30), &mut flow).await.is_err());
+    drop(flow);
+    let url = Url::parse(&observed.unwrap()).unwrap();
+    let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(query["login_hint"], account.email);
+    assert_eq!(query["prompt"], "consent");
+    assert!(!query.contains_key("include_granted_scopes"));
+    assert!(has_scope(&query["scope"], "https://mail.google.com/"));
+    for scope in GOOGLE_CALENDAR_SCOPES.split_whitespace() { assert!(has_scope(&query["scope"], scope)); }
 }

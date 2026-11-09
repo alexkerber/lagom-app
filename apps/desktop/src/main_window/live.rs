@@ -339,6 +339,10 @@ impl MainWindow {
                         Err(error) => self.notify(format!("Could not sign in: {error}"), cx),
                     }
                 }
+                Event::CalendarSync(account, state) => {
+                    self.today.calendar_sync.insert(account, state);
+                    read = true;
+                }
                 Event::Changed => read = true,
                 Event::NewMail(messages) => new_mail.extend(messages),
                 Event::Seen(id) => {
@@ -1435,6 +1439,92 @@ mod tests {
             assert!(v.inbox.mail[0].unread && v.inbox.mail[2].unread);
             assert!(!v.inbox.mail[1].unread);
         });
+    }
+
+    #[gpui::test]
+    fn calendar_updates_preserve_unread_selection_and_pending_batch(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.filter_unread(true, cx);
+            v.inbox.select_all();
+            let selected = v.inbox.selected_members();
+            let account = v.live.as_ref().unwrap().accounts[0].id.clone();
+            v.on_events(vec![Event::CalendarSync(account.clone(), SyncState::Synced(0)), Event::Changed], window, cx);
+            assert!(v.inbox.unread_only);
+            assert_eq!(v.inbox.selected_members(), selected);
+            v.toggle_read(cx);
+            let marked: HashSet<_> = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+                Cmd::Op { id, act: Act::Read(true), .. } => id,
+                _ => panic!("expected mark read"),
+            }).collect();
+            assert_eq!(marked.len(), 3);
+            v.on_events(vec![Event::CalendarSync(account, SyncState::Synced(1)), Event::Changed], window, cx);
+            assert!(v.inbox.list().is_empty());
+            assert_eq!(v.inbox.batches.len(), 1);
+            v.undo(cx);
+            assert_eq!(v.inbox.selected_members(), selected);
+            let restored: HashSet<_> = std::iter::from_fn(|| rx.try_recv().ok()).map(|cmd| match cmd {
+                Cmd::Op { id, act: Act::Read(false), .. } => id,
+                _ => panic!("expected mark unread"),
+            }).collect();
+            assert_eq!(restored, marked);
+        });
+    }
+
+    #[gpui::test]
+    fn today_offers_calendar_access_for_existing_google_accounts(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            let mut account = store.accounts().unwrap().remove(0);
+            account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            store.save_account(&account).unwrap();
+            store.add_task(store.default_task_list().unwrap(), "Fixture task", "", None).unwrap();
+            v.reload(cx);
+            v.show_today(window, cx);
+        });
+        cx.run_until_parked();
+        let consent = cx.debug_bounds("allow-calendar-0").expect("Today must offer calendar access");
+        let groups = cx.debug_bounds("today-groups").unwrap();
+        assert!(consent.bottom() <= groups.top(), "consent belongs above tasks");
+        assert!(cx.debug_bounds("calendar-heading").is_none(), "unconsented accounts get only a quiet row");
+        let button = consent.center();
+        cx.simulate_click(button, Default::default());
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::AllowCalendar(_)));
+        view.update_in(cx, |v, window, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            let account = store.accounts().unwrap().remove(0);
+            store.set_account_scopes(&account.id, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+            let day = chrono::Local::now().date_naive();
+            let start = day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+            store.replace_calendar_window(&account.id, i64::MIN, i64::MAX, &[(lagom_core::calendar::Calendar {
+                remote_id: "primary".into(), name: "Fixture calendar".into(), color: None, shown: true, writable: true,
+            }, vec![lagom_core::calendar::Event {
+                remote_id: "fixture".into(), title: "Fixture event".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
+                start_utc: start, end_utc: start + 86400, all_day: true, location: None, join_url: None,
+            }, lagom_core::calendar::Event {
+                remote_id: "fixture-next".into(), title: "Next fixture event".into(), start: day.to_string(), end: day.succ_opt().unwrap().to_string(),
+                start_utc: start, end_utc: start + 86400, all_day: true, location: None, join_url: None,
+            }])]).unwrap();
+            v.on_events(vec![Event::CalendarSync(account.id, SyncState::Synced(0)), Event::Changed], window, cx);
+            assert_eq!(v.today.events.len(), 2);
+            assert!(v.today.calendar_accounts[0].1);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        // GPUI retains old debug bounds; check that the old consent position no longer dispatches.
+        cx.simulate_click(button, Default::default());
+        assert!(rx.try_recv().is_err());
+        let event = cx.debug_bounds("agenda-event-0").unwrap();
+        let groups = cx.debug_bounds("today-groups").unwrap();
+        let next = cx.debug_bounds("agenda-event-1").unwrap();
+        assert!(event.bottom() <= next.top(), "events stay in agenda order");
+        assert!(next.bottom() <= groups.top(), "events belong above tasks");
+        assert_eq!(event.left(), groups.left());
+        assert_eq!(event.size.width, groups.size.width);
     }
 
     #[gpui::test]

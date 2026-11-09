@@ -13,7 +13,7 @@ Based on `feat/oauth` at 0309143. Anything I could not check against live docs i
 | | Calendar | Tasks |
 |---|---|---|
 | Google | Calendar v3: `calendarList.list`, `events.list?singleEvents=true&timeMin&timeMax`, `events.insert?conferenceDataVersion=1&sendUpdates=all` | Tasks v1: `tasklists.list`, `tasks.list?showDeleted&showHidden&updatedMin` |
-| Scopes | `calendar.events` + `calendar.calendarlist.readonly` (the second one is **not verified** to exist), or else `calendar` | `tasks` |
+| Scopes | `calendar.events` + `calendar.calendarlist.readonly` (confirmed in the [CalendarList reference](https://developers.google.com/workspace/calendar/api/v3/reference/calendarList/list)), or else `calendar` | `tasks` |
 | Microsoft Graph | `/me/calendars`, `/me/calendarView?startDateTime&endDateTime`, `POST /me/events` | `/me/todo/lists`, `/me/todo/lists/{id}/tasks` (a delta endpoint exists) |
 | Scopes | `Calendars.ReadWrite offline_access` | `Tasks.ReadWrite` |
 
@@ -21,7 +21,7 @@ Based on `feat/oauth` at 0309143. Anything I could not check against live docs i
 - `https://mail.google.com/` is a restricted scope, so production already needs verification plus a CASA assessment.
 - The Calendar and Tasks scopes are only sensitive. They add a justification and a demo video, not another CASA.
 - While the app is in Testing mode, refresh tokens expire after 7 days and there is a cap of 100 test users (**not verified** for 2026).
-- Users who are already signed in have none of these scopes. Use incremental authorization: when someone first opens the agenda or turns on task sync, run the existing loopback flow for all calendar and tasks scopes together (decided in section 6), with `include_granted_scopes=true&login_hint=<email>`. Reject the result if the ID-token email does not match the account.
+- Users who are already signed in have none of these scopes. Offer a quiet "Show your Google Calendar" row in Today, with events above tasks after consent. Google [does not support incremental authorization for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app) (checked 2026-11-09). Run a new loopback consent with the full mail/identity/calendar/tasks scope set and `login_hint=<email>`; preserve already granted scopes on later sign-ins. Reject the result if the ID-token email does not match the account.
 - Google shows granular consent checkboxes, so read the `scope` field in the token response and store what was actually granted.
 
 **Microsoft:** these are delegated scopes a user can consent to alone. Some tenants block user consent (**not verified** per tenant).
@@ -56,7 +56,7 @@ CREATE TABLE tasks(id INTEGER PRIMARY KEY, list INTEGER NOT NULL REFERENCES task
 - Times are kept in the provider's own form (`start`/`end`), because all-day dates must not go through UTC. `start_utc` is only for sorting.
 - Recurrence: let the provider expand it (`singleEvents` / `calendarView`) and store no RRULE. Mark it in code: `shortcut: no RRULE, add when CalDAV lands`.
 
-New core modules: `crates/lagom-core/src/tasks.rs` and `calendar.rs` (types and store queries, plain `String`/`i64`, ready for UniFFI later), plus `google.rs` and `graph.rs` (JSON over the existing `reqwest`/`serde_json`). No new dependencies.
+Core modules: `crates/lagom-core/src/tasks.rs` and `calendar.rs` (types and store queries, plain `String`/`i64`, ready for UniFFI later), plus `google.rs` and `graph.rs` (JSON over the existing `reqwest`/`serde_json`). No new dependencies.
 
 ## 3. Sync model
 - **Calendar:** on each worker tick (the existing 2-minute one), re-fetch now−7d to now+60d per shown calendar and replace that window in one transaction. This needs no syncToken or deltaLink and has no state to corrupt. Mark it `shortcut: refetch window, move to syncToken/delta when request counts matter`.
@@ -77,7 +77,8 @@ Each slice ships on its own. Local tasks commit directly through the UI store. N
 | Slice | Work | Size |
 |---|---|---|
 | a. Local tasks + `t` | `tasks.rs` view on the start screen. `t` creates a task in the default list with title = subject, plus the Undo toast. Add/rename lists. Opening a task's link finds the mail by Message-ID. No network. | M |
-| b. Google agenda, read-only | Incremental-consent flow, `Resource` in `oauth.rs`, `google.rs` window fetch, `agenda.rs` column next to the inbox. Then Google Tasks sync. | M |
+| b1. Google agenda, read-only | Shipped: full desktop consent, persisted scopes, schema v10, paged `google.rs` window fetch and `agenda.rs` in Today. Google mail and calendar share the same grant/cache; Google refreshes omit scope. | M |
+| b2. Google Tasks | Provider task lists and push/pull task sync. | M |
 | c. Microsoft | Graph token, `graph.rs` calendarView and To Do. | M |
 | d. Create/edit events | Form with `conferenceData.createRequest{requestId, conferenceSolutionKey:{type:"hangoutsMeet"}}`. On Graph, `isOnlineMeeting` (Teams only for work accounts, **not verified** for personal). | L |
 | d′. Zoom (after v1) | Excluded from v1; would need a separate OAuth integration and review. | L, separate |
@@ -120,4 +121,4 @@ Still open for later slices: Google sensitive-scope verification timing; accepti
 - apps/desktop/src/sync.rs
 - apps/desktop/src/main_window.rs
 
-I did not check any provider docs live: scope names, quotas, Testing-mode limits, Zoom PKCE support and Microsoft refreshing across resources all come from memory. The biggest risk is the shared token cache and the fixed refresh scope in `oauth.rs`, which break as soon as a second scope set or resource is added.
+For b1, the Google desktop OAuth, CalendarList and events.list documentation was checked on 2026-11-09. Live provider consent remains untested. Quotas, Testing-mode limits and Microsoft cross-resource refresh remain unverified. Microsoft Graph still needs a resource-keyed token cache in slice c; b1 does not call Graph. The read-only calendar cache replaces overlapping events in fetched calendars atomically, preserving other windows and calendars. Fetches run independently of mail commands; local/pending events must also be preserved when editing lands.

@@ -115,8 +115,6 @@ impl Render for MessageWindow {
                     // macOS: the traffic lights sit in the toolbar, as in the main window's sidebar.
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
-                    .child(button(&t, if in_trash { "Move to Inbox" } else { "Done" }, Some(t.swipe_done))
-                        .on_click(cx.listener(move |this, _, _, cx| this.act(if in_trash { Move::Inbox } else { Move::Done }, cx))))
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
@@ -129,7 +127,11 @@ impl Render for MessageWindow {
                             })
                             .ok();
                         })))
-                    }),
+                    })
+                    // Done last in the accent, as in the main window.
+                    .child(div().flex_1())
+                    .child(button(&t, if in_trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
+                        .on_click(cx.listener(move |this, _, _, cx| this.act(if in_trash { Move::Inbox } else { Move::Done }, cx)))),
             )
             .child(reading_view(&t, (id, &m), !web, self.web.slot(), 0, on_download, on_reply))
     }
