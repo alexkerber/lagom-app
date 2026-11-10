@@ -154,3 +154,14 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Undo restores the previous snooze deadline after Done/Delete/Move, including every member of a conversation. Headless tests verify the queued restore commands and completion reloads with replaced store IDs, retained single/batch selection, page boundaries and subsequent actions.
 - [x] Confirmed server moves survive a failed follow-up sync: report the refresh failure separately and discard the failed session instead of rolling the move back. The next sync refreshes folder contents.
 - [ ] Real-provider TLS/STARTTLS and native keychain acceptance testing, Linux/Windows builds, remaining performance budgets.
+
+## Security review 2026-11-09
+
+- [x] Fixes for the 19 findings of the 2026-11-09 review (sync stall, attachment marking, quoted Markdown, autocomplete, inert tags, iOS data protection and the low findings).
+- [ ] Measure on Windows: the URL `NavigateToString` reports in the navigation gate, the `Zone.Identifier` stream on saved attachments, and whether `<iframe srcdoc>` resource hints are inert.
+- [ ] Measure on an iPhone: data protection class and backup exclusion of the mail store, the `WhenUnlockedThisDeviceOnly` keychain write, link previews off.
+- [ ] iOS: migrate keychain items stored before the accessibility change (rewrite on first read).
+- [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
+- [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
+- [ ] Threading: subjects with list tags or other reply prefixes ("[list] Re:", "Antw:", "TR:", "Re[2]:") now start a new thread.
+- [ ] Install `cargo audit` in CI.

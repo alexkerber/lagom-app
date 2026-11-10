@@ -59,8 +59,14 @@ impl Store {
     /// True when a message in `thread` has this normalised subject, or the thread has no messages left.
     fn same_subject(&self, account: &str, thread: &str, subject: &str) -> Result<bool> {
         let mut stmt = self.db.prepare("SELECT subject FROM messages WHERE account=?1 AND thread_id=?2")?;
-        let subjects = stmt.query_map(params![account, thread], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(subjects.is_empty() || subjects.iter().any(|s| normalised_subject(s) == subject))
+        let mut rows = stmt.query(params![account, thread])?;
+        let mut empty = true;
+        // One row at a time: a thread of large subjects must not be loaded whole.
+        while let Some(row) = rows.next()? {
+            if normalised_subject(&row.get::<_, String>(0)?) == subject { return Ok(true); }
+            empty = false;
+        }
+        Ok(empty)
     }
 
     pub(crate) fn backfill_threads(&self) -> Result<()> {

@@ -104,8 +104,8 @@ addEventListener('keydown', e => {
 /// `<meta refresh>` that fires as the user switches mail cannot spend the app's load.
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn allow_navigation(ours: &std::cell::Cell<bool>, url: &str) -> bool {
-    // shortcut: on Windows the URL `NavigateToString` reports is not known from wry's source, so only the flag gates; check it on Windows and match it here.
-    (cfg!(target_os = "windows") || url == "about:blank") && ours.replace(false)
+    // shortcut: WebView2 `NavigateToString` is documented as `about:blank` and has been seen as a `data:text/html` URI; both pass on Windows. Not run on Windows: measure it there and keep one.
+    (url == "about:blank" || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))) && ours.replace(false)
 }
 
 fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
@@ -548,12 +548,12 @@ mod tests {
         let ours = std::cell::Cell::new(false);
         assert!(!allow_navigation(&ours, "about:blank"), "no load started");
         ours.set(true);
-        if !cfg!(target_os = "windows") {
-            for evil in ["https://evil.example/", "about:srcdoc", "data:text/html,x", "lagom-cid:x"] {
-                assert!(!allow_navigation(&ours, evil), "{evil}");
-            }
-            assert!(ours.get(), "a denied URL leaves the app's load its flag");
+        for evil in ["https://evil.example/", "about:srcdoc", "lagom-cid:x"] {
+            assert!(!allow_navigation(&ours, evil), "{evil}");
         }
+        assert_eq!(allow_navigation(&ours, "data:text/html,x"), cfg!(target_os = "windows"));
+        ours.set(true);
+        assert!(ours.get(), "a denied URL leaves the app's load its flag");
         assert!(allow_navigation(&ours, "about:blank"));
         assert!(!allow_navigation(&ours, "about:blank"), "one load, one navigation");
     }

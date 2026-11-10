@@ -39,6 +39,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + Debug> Io for T {}
 type Wire = Box<dyn Io>;
 pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
+const TIMED_OUT: &str = "IMAP operation timed out";
 async fn net<T, E>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
     net_as("IMAP operation failed", f).await
 }
@@ -49,7 +50,7 @@ async fn net_as<T, E>(
 ) -> Result<T> {
     tokio::time::timeout(TIMEOUT, f)
         .await
-        .map_err(|_| Error::Network("IMAP operation timed out"))?
+        .map_err(|_| Error::Network(TIMED_OUT))?
         .map_err(|_| Error::Network(what))
 }
 async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
@@ -159,11 +160,14 @@ impl ImapSync {
             session,
             capabilities,
             refresh_error: None,
-            password: zeroize::Zeroizing::new(password.to_owned()),
+            // OAuth reconnects with its own token; do not hold the refresh token for the session's life.
+            password: zeroize::Zeroizing::new(if matches!(account.auth, Auth::Password) { password.to_owned() } else { String::new() }),
         })
     }
     /// A fresh session with `folder` selected again, as it was before the failed command.
     async fn reconnect(&mut self, store: &mut Store, folder: &Folder) -> Result<()> {
+        // Free the server's connection slot first: some servers cap connections per account.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tokio::io::AsyncWriteExt::shutdown(self.session.get_mut())).await;
         let fresh = Self::login(&self.account, &self.password).await?;
         (self.session, self.capabilities) = (fresh.session, fresh.capabilities);
         let (selected, _) = self.select(store, folder.id).await?;
@@ -177,7 +181,8 @@ impl ImapSync {
         for _ in 0..2 {
             match self.fetch_message(store, folder, uid).await {
                 Ok(()) => return Ok(true),
-                Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
+                // A timeout is the network's fault, not the message's: keep the checkpoint and retry next sync.
+                Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_) | Error::Network(TIMED_OUT)) => return Err(e),
                 // A rejected response may be half-read; the first retry also covers a dropped connection.
                 Err(_) => self.reconnect(store, folder).await?,
             }

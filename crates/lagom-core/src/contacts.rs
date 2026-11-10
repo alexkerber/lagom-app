@@ -112,7 +112,8 @@ impl Store {
         for row in stmt.query_map([account], |r| r.get::<_, String>(0))? {
             own.insert(row?.to_lowercase());
         }
-        let mut entries: HashMap<String, (Contact, i64)> = HashMap::new();
+        // (contact, name source as (from sent mail, date), score from received mail)
+        let mut entries: HashMap<String, (Contact, (bool, i64), f64)> = HashMap::new();
         let mut messages = HashSet::new();
         // Hostile mail lands in Junk and Trash, and a From header proves nothing: only Sent and Drafts hold the user's mail.
         let mut stmt = self.db.prepare("SELECT m.from_name,m.from_address,m.to_addresses,m.cc,m.date,m.message_id,f.role IN ('sent','drafts') FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder) WHERE m.account=?1 AND f.role NOT IN ('junk','trash')")?;
@@ -139,17 +140,19 @@ impl Store {
                 let name = mailbox.name.unwrap_or_default();
                 let named = !name.trim().is_empty() && !name.eq_ignore_ascii_case(&address);
                 let first = seen.insert(address.clone());
-                let (contact, named_at) = entries.entry(address.clone()).or_insert_with(|| (Contact { name: String::new(), address, score: 0., written: false }, i64::MIN));
-                if first && first_message { contact.score += score; }
+                let (contact, named_at, received) = entries.entry(address.clone()).or_insert_with(|| (Contact { name: String::new(), address, score: 0., written: false }, (false, i64::MIN), 0.));
+                if first && first_message { *if sent { &mut contact.score } else { received } += score; }
                 contact.written |= sent;
-                if named && date >= *named_at {
+                // A name the user wrote beats any name an incoming header claims for the address.
+                if named && (sent, date) >= *named_at {
                     contact.name = name;
-                    *named_at = date;
+                    *named_at = (sent, date);
                 }
             }
         }
         tx.commit()?;
-        Ok(Contacts::new(entries.into_values().map(|(c, _)| c).collect()))
+        // Incoming mail must not lift an address the user wrote to above another one: only sent mail ranks those.
+        Ok(Contacts::new(entries.into_values().map(|(mut c, _, received)| { if !c.written { c.score = received; } c }).collect()))
     }
 }
 

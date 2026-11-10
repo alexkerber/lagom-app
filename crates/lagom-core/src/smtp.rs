@@ -123,7 +123,7 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
 }
 /// Render only parser-generated markup; images become their labels so mail loads no resources.
 fn markdown_html(source: &str) -> Option<String> {
-    use pulldown_cmark::{html, Event, Parser, Tag, TagEnd};
+    use pulldown_cmark::{html, Event, LinkType, Parser, Tag, TagEnd};
     let mut formatted = false;
     let mut links = Vec::new();
     let mut quote = 0usize;
@@ -149,8 +149,10 @@ fn markdown_html(source: &str) -> Option<String> {
             _ if quote > 0 => Vec::new(),
             Event::Html(text) | Event::InlineHtml(text) => vec![Event::Text(text)],
             Event::Start(Tag::HtmlBlock | Tag::Image { .. }) | Event::End(TagEnd::HtmlBlock | TagEnd::Image) => Vec::new(),
-            Event::Start(Tag::Link { ref dest_url, .. }) => {
-                let allowed = url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
+            Event::Start(Tag::Link { link_type, ref dest_url, .. }) => {
+                // Reference links resolve against definitions anywhere, including quoted mail: inline and autolinks only.
+                let allowed = matches!(link_type, LinkType::Inline | LinkType::Autolink | LinkType::Email)
+                    && url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
                 links.push(allowed);
                 if allowed { vec![event] } else { Vec::new() }
             }
@@ -409,6 +411,8 @@ mod tests {
         let html = html.unwrap();
         assert!(html.contains("href=\"https://good.example\"") && html.contains("<strong>nu</strong>"), "{html}");
         assert!(!html.contains("evil.example/login\"") && !html.contains("evil.example/2\""), "{html}");
+        let (_, reference) = parts("See [portal] **now**.\n\n> [portal]: https://evil.example/login");
+        assert!(!reference.unwrap().contains("href"), "a definition in quoted mail must not link the user's text");
         assert!(html.contains("[https://intranet.corp.example/login](https://evil.example/login) *hej* &lt;b&gt;"), "{html}");
         assert!(html.contains("&gt; djup [a](https://evil.example/2)"), "{html}");
         assert_eq!(html.matches("<a ").count(), 1, "{html}");
