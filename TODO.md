@@ -28,7 +28,7 @@
 - [ ] Mobile daily-mail slices 2–5, in order: message-scoped CID images and opt-in remote images; durable draft autosave/restoration with discard; unified inbox search; explicit read/unread from list and message.
 - [ ] Mobile acceptance: verify native layout/gestures (including regular-size phones), accessibility, WKWebView privacy and signed-device Keychain/provider behavior. Generic simulator builds and a headless Swift FFI smoke check do not establish runtime iOS acceptance.
 - [x] First native Android phone/tablet slice in `apps/mobile/android`: Compose system theme and adaptive icon, window-size list/detail, unified/account paged mailboxes, discovery/manual TLS setup, Done/Later/Delete/read, private WebView, Markdown reply/Send with Cc and durable outbox. Kotlin/JNA on the existing Rust FFI; Android Keystore AES-GCM backend through keyring. Gradle wrapper, two-ABI builder, fixture JVM tests and independent Android CI job. Review fixes guard delayed replies against newer compose/selection revisions, use Android system DNS for custom-domain MX discovery, and prepare HTML off the UI thread keyed by message and appearance; fixture regressions cover all three. Follow-up review fixes rebuild loaded pages when pagination overlaps an unapplied refresh, and move both message reads and the Later deadline calculation off Main. JVM regressions cover archived-row removal without skipped rows and execution threads before/after message suspension and marking read.
-- [x] Android compose FFI compatibility: Reply uses shared compose preparation, preserves Cc/account/thread and core-generated signature/quote; JVM fakes match the new draft records and attachment-aware send API. Reply all and Forward remain deferred.
+- [x] Android compose and main-merge FFI compatibility: Reply uses shared compose preparation, preserves Cc/account/thread and core-generated signature/quote; JVM fakes match the planner records, Trash mailbox and attachment-aware send API. Security review #57 and dependency update #62 are retained with Android system DNS on Hickory 0.26, Keystore callbacks, cdylib and the Kotlin-safe `reason` field. Android CI actions are pinned; shared HTML fixtures cover inert nested tags in both themes. Reply all and Forward remain deferred.
 - [ ] Android acceptance on owned hardware: JNA loading, Keystore persistence/invalidation, WebView privacy, gestures/accessibility, tablet/foldable layout and provider TLS. Build/JVM checks do not verify runtime behavior; no emulator or device used. OAuth, background sync/push, attachment transfer and durable draft restoration remain outside the first slice.
 - [x] `lagom-ffi` on `lagom-core`, pinned UniFFI 0.32.2 proc macros and generated Swift bindings. Stable records/errors, serialized network work with independent local WAL access, native Apple keyring and existing HTTP stack cross-compile unchanged. Rust loopback IMAP/SMTP and temporary-store fixtures cover the boundary; Android/Kotlin/JNA bindings and the platform credential callback are supplied by the Android slice.
 
@@ -160,3 +160,17 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Undo restores the previous snooze deadline after Done/Delete/Move, including every member of a conversation. Headless tests verify the queued restore commands and completion reloads with replaced store IDs, retained single/batch selection, page boundaries and subsequent actions.
 - [x] Confirmed server moves survive a failed follow-up sync: report the refresh failure separately and discard the failed session instead of rolling the move back. The next sync refreshes folder contents.
 - [ ] Real-provider TLS/STARTTLS and native keychain acceptance testing, Linux/Windows builds, remaining performance budgets.
+
+## Security review 2026-11-09
+
+- [x] Fixes for the 19 findings of the 2026-11-09 review (sync stall, attachment marking, quoted Markdown, autocomplete, inert tags, iOS data protection and the low findings).
+- [ ] Measure on Windows: the URL `NavigateToString` reports in the navigation gate, the `Zone.Identifier` stream on saved attachments, and whether `<iframe srcdoc>` resource hints are inert.
+- [ ] Measure on an iPhone: data protection class and backup exclusion of the mail store, the `WhenUnlockedThisDeviceOnly` keychain write, link previews off.
+- [ ] iOS: migrate keychain items stored before the accessibility change (rewrite on first read).
+- [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
+- [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
+- [ ] Threading: subjects with list tags or other reply prefixes ("[list] Re:", "Antw:", "TR:", "Re[2]:") now start a new thread.
+- [ ] Install `cargo audit` in CI.
+- [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
+- [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
+- [ ] `cargo audit` warnings: 18 unmaintained crates and two unsound `git2 0.20.4` advisories, not traced to Lagom's code paths.

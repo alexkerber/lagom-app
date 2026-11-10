@@ -28,4 +28,4 @@ keyring = "3.6"
 
 [dev-dependencies]
 tempfile = "3"
-rusqlite = "0.37"
+rusqlite = "0.41"

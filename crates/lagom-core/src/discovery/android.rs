@@ -23,11 +23,11 @@ async fn query(
         let mut answer = vec![0; 65535];
         let len = usize::try_from(resolve(&name, &mut answer)).ok()?;
         let message = Message::from_vec(answer.get(..len)?).ok()?;
-        if message.truncated() || message.response_code() != ResponseCode::NoError {
+        if message.metadata.truncation || message.metadata.response_code != ResponseCode::NoError {
             return None;
         }
-        Some(message.answers().iter().filter_map(|record| match record.data() {
-            Some(RData::MX(mx)) => Some(mx.exchange().to_utf8()),
+        Some(message.answers.iter().filter_map(|record| match &record.data {
+            RData::MX(mx) => Some(mx.exchange.to_utf8()),
             _ => None,
         }).collect())
     }).await.ok()?
@@ -38,10 +38,10 @@ mod tests {
     use super::*;
     use crate::discovery::{discover_with, Discovery};
     use crate::oauth::Provider;
-    use hickory_resolver::proto::{op::MessageType, rr::{Name, Record, rdata::MX}};
+    use hickory_resolver::proto::{op::OpCode, rr::{Name, Record, rdata::MX}};
 
     fn answer(host: &str) -> Vec<u8> {
-        Message::new().set_message_type(MessageType::Response).add_answer(Record::from_rdata(
+        Message::response(0, OpCode::Query).add_answer(Record::from_rdata(
             Name::from_ascii("custom.example").unwrap(), 60,
             RData::MX(MX::new(10, Name::from_ascii(host).unwrap())),
         )).to_vec().unwrap()
@@ -76,8 +76,8 @@ mod tests {
             assert_eq!(result, Discovery::Manual);
         }
         for response in [
-            Message::new().set_truncated(true).to_vec().unwrap(),
-            Message::new().set_response_code(ResponseCode::NXDomain).to_vec().unwrap(),
+            Message::response(0, OpCode::Query).truncate().to_vec().unwrap(),
+            Message::error_msg(0, OpCode::Query, ResponseCode::NXDomain).to_vec().unwrap(),
         ] {
             assert!(query("custom.example".into(), move |_, buffer| {
                 buffer[..response.len()].copy_from_slice(&response);

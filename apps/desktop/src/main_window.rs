@@ -2118,13 +2118,20 @@ fn reading_view(
     let attachment = || m.attachments.iter().enumerate().map(|(index, part)| {
         let on_download = on_download.clone();
         let section = part.section.clone();
+        // The extension never truncates, so a long name cannot hide `.exe`.
+        let (stem, extension) = match part.filename.rsplit_once('.') {
+            Some((stem, extension)) if !stem.is_empty() => (stem.to_owned(), format!(".{extension}")),
+            _ => (part.filename.clone(), String::new()),
+        };
         pressable(div().id(("attachment", index)), t, false)
             .flex().items_center().gap(px(12.)).min_w(px(0.)).flex_shrink_0()
             .px(px(14.)).py(px(10.)).rounded(px(radius::ATTACHMENT))
             .border_1().border_color(t.line).bg(t.subtle)
             .text_size(px(size::SNIPPET)).line_height(relative(LEADING))
             .child(icon("icons/attachment.svg", t.ink2, 16.))
-            .child(div().flex_1().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).child(part.filename.clone()))
+            .child(div().flex_1().min_w(px(0.)).flex().font_weight(FontWeight::MEDIUM)
+                .child(div().min_w(px(0.)).truncate().child(stem))
+                .child(div().flex_shrink_0().child(extension)))
             .child(mono(attachment_size(part.size), t.ink2))
             .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
     }).collect::<Vec<_>>();

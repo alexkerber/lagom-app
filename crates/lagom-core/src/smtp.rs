@@ -156,24 +156,41 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
 }
 /// Render only parser-generated markup; images become their labels so mail loads no resources.
 fn markdown_html(source: &str) -> Option<String> {
-    use pulldown_cmark::{html, Event, Parser, Tag, TagEnd};
+    use pulldown_cmark::{html, Event, LinkType, Parser, Tag, TagEnd};
     let mut formatted = false;
     let mut links = Vec::new();
-    let events = Parser::new(source).filter_map(|event| {
+    let mut quote = 0usize;
+    let events = Parser::new(source).into_offset_iter().flat_map(|(event, range)| {
         if matches!(&event, Event::Start(tag) if !matches!(tag, Tag::Paragraph))
             || matches!(&event, Event::Code(_) | Event::HardBreak | Event::Rule | Event::Html(_) | Event::InlineHtml(_)) {
             formatted = true;
         }
         match event {
-            Event::Html(text) | Event::InlineHtml(text) => Some(Event::Text(text)),
-            Event::Start(Tag::HtmlBlock | Tag::Image { .. }) | Event::End(TagEnd::HtmlBlock | TagEnd::Image) => None,
-            Event::Start(Tag::Link { ref dest_url, .. }) => {
-                let allowed = url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
-                links.push(allowed);
-                allowed.then_some(event)
+            // Quoted text is someone else's mail: show it as written, never as links or other markup.
+            Event::Start(Tag::BlockQuote(_)) => {
+                quote += 1;
+                if quote > 1 { return Vec::new(); }
+                let mut out = vec![event];
+                for (i, line) in source[range].lines().enumerate() {
+                    if i > 0 { out.push(Event::HardBreak); }
+                    let unquoted = line.trim_start().strip_prefix('>').map_or(line, |rest| rest.strip_prefix(' ').unwrap_or(rest));
+                    out.push(Event::Text(unquoted.to_owned().into()));
+                }
+                out
             }
-            Event::End(TagEnd::Link) => links.pop().unwrap_or(false).then_some(event),
-            event => Some(event),
+            Event::End(TagEnd::BlockQuote(_)) => { quote -= 1; if quote == 0 { vec![event] } else { Vec::new() } }
+            _ if quote > 0 => Vec::new(),
+            Event::Html(text) | Event::InlineHtml(text) => vec![Event::Text(text)],
+            Event::Start(Tag::HtmlBlock | Tag::Image { .. }) | Event::End(TagEnd::HtmlBlock | TagEnd::Image) => Vec::new(),
+            Event::Start(Tag::Link { link_type, ref dest_url, .. }) => {
+                // Reference links resolve against definitions anywhere, including quoted mail: inline and autolinks only.
+                let allowed = matches!(link_type, LinkType::Inline | LinkType::Autolink | LinkType::Email)
+                    && url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
+                links.push(allowed);
+                if allowed { vec![event] } else { Vec::new() }
+            }
+            Event::End(TagEnd::Link) => if links.pop().unwrap_or(false) { vec![event] } else { Vec::new() },
+            event => vec![event],
         }
     });
     let mut body = String::new();
@@ -440,6 +457,20 @@ mod tests {
             assert!(markdown_html(&format!("[etikett]({target})")).unwrap().contains("<a "));
         }
         assert!(!markdown_html("![bild](https://example.com/pixel)").unwrap().contains("<img"));
+    }
+    #[test]
+    fn quoted_text_stays_literal() {
+        let source = "Se [ok](https://good.example) **nu**.\n\n> On Monday, x@evil.example wrote:\n>\n> [https://intranet.corp.example/login](https://evil.example/login) *hej* <b>\n> > djup [a](https://evil.example/2)";
+        let (plain, html) = parts(source);
+        assert_eq!(plain, source);
+        let html = html.unwrap();
+        assert!(html.contains("href=\"https://good.example\"") && html.contains("<strong>nu</strong>"), "{html}");
+        assert!(!html.contains("evil.example/login\"") && !html.contains("evil.example/2\""), "{html}");
+        let (_, reference) = parts("See [portal] **now**.\n\n> [portal]: https://evil.example/login");
+        assert!(!reference.unwrap().contains("href"), "a definition in quoted mail must not link the user's text");
+        assert!(html.contains("[https://intranet.corp.example/login](https://evil.example/login) *hej* &lt;b&gt;"), "{html}");
+        assert!(html.contains("&gt; djup [a](https://evil.example/2)"), "{html}");
+        assert_eq!(html.matches("<a ").count(), 1, "{html}");
     }
     #[test]
     fn plain_body_stays_single_part() {

@@ -30,6 +30,10 @@ const DEADLINE: Duration = Duration::from_secs(3);
 pub async fn discover(email: &str) -> Discovery {
     discover_with(
         email,
+        // shortcut: no MX lookup on iOS (see Cargo.toml), presets and autoconfig still apply; add a platform resolver if iOS needs MX.
+        #[cfg(target_os = "ios")]
+        |_| async { None },
+        #[cfg(not(target_os = "ios"))]
         mx,
         |domain| async move {
             let response = oauth::http(DEADLINE)
@@ -49,11 +53,11 @@ pub async fn discover(email: &str) -> Discovery {
 #[cfg(target_os = "android")]
 use android::mx;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn mx(domain: String) -> Option<Vec<String>> {
-    let resolver = hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok()?;
+    let resolver = hickory_resolver::TokioResolver::builder_tokio().ok()?.build().ok()?;
     let mx = resolver.mx_lookup(domain).await.ok()?;
-    Some(mx.iter().map(|r| r.exchange().to_utf8()).collect())
+    Some(mx.answers().iter().filter_map(|r| match &r.data { hickory_resolver::proto::rr::RData::MX(mx) => Some(mx.exchange.to_utf8()), _ => None }).collect())
 }
 
 async fn discover_with<M, MF, A, AF>(email: &str, mx: M, autoconfig: A) -> Discovery

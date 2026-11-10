@@ -173,13 +173,18 @@ impl Store {
         // A wall-clock deadline, not a count of sleeps: macOS can oversleep short sleeps severalfold,
         // so SQLite's own timeout and any fixed number of naps ran to about a second on CI.
         thread_local!(static DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
-        fn short_wait(_attempt: i32) -> bool {
+        unsafe extern "C" fn short_wait(_: *mut std::ffi::c_void, _attempt: std::ffi::c_int) -> std::ffi::c_int {
             let left = DEADLINE.with(|d| d.get()).map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            !left.is_zero() && { std::thread::sleep(left.min(Duration::from_millis(5))); true }
+            (!left.is_zero() && { std::thread::sleep(left.min(Duration::from_millis(5))); true }).into()
         }
         let previous: u64 = self.db.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
         DEADLINE.with(|d| d.set(Some(Instant::now() + Duration::from_millis(250))));
-        self.db.busy_handler(Some(short_wait))?;
+        // rusqlite's busy_handler needs `&mut`, and the store is shared. This handler only sleeps.
+        // SAFETY: the handle is this open connection; the callback is a plain function with no state.
+        let code = unsafe { rusqlite::ffi::sqlite3_busy_handler(self.db.handle(), Some(short_wait), std::ptr::null_mut()) };
+        if code != rusqlite::ffi::SQLITE_OK {
+            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None).into());
+        }
         let result = write(self);
         DEADLINE.with(|d| d.set(None));
         self.db.busy_timeout(std::time::Duration::from_millis(previous))?;
@@ -732,7 +737,7 @@ mod mail_tests {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
         for table in ["attachments", "attachment_cache"] {
-            let (temp, store, account, folder) = setup();
+            let (temp, mut store, account, folder) = setup();
             let part = crate::attachment::Attachment { section: "2".into(), filename: "fixture.txt".into(),
                 mime_type: "text/plain".into(), size: 4, encoding: "7bit".into() };
             let id = store.save_synced_message(&mail(&account, folder, 1), std::slice::from_ref(&part)).unwrap();
@@ -749,7 +754,7 @@ mod mail_tests {
                     assert!(writer.cached_attachment(id, "2").unwrap().is_none());
                 }
                 Authorization::Allow
-            }));
+            })).unwrap();
             let parts = store.cached_forward_attachments(id).unwrap().expect("cached bytes must survive deletion");
             assert!(deleted.load(Ordering::SeqCst));
             assert_eq!(parts.len(), 1, "deletion before reading {table}");
@@ -1153,6 +1158,7 @@ mod mail_tests {
         let mut child = mail(&account, folder, 2);
         child.summary.message_id = "child@test".into();
         child.summary.thread_key = "root@test".into();
+        child.summary.subject = "Re: Hello 1".into();
         let mut root = save_legacy(&old, root);
         let mut child = save_legacy(&old, child);
         old.snooze(root.summary.id, Some(1000)).unwrap();

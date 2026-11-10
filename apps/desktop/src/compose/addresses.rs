@@ -78,8 +78,10 @@ impl Compose {
         cx.notify();
     }
 
-    fn address_enter(&mut self, field: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.addresses.active == Some(field) && !self.addresses.matches.is_empty() {
+    fn address_enter(&mut self, field: usize, tab: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Tab must not slip in an address the user never wrote to; Enter on a shown row is a choice.
+        let pick = self.addresses.matches.get(self.addresses.selected).is_some_and(|c| !tab || c.written);
+        if self.addresses.active == Some(field) && pick {
             self.accept_address(field, self.addresses.selected, cx);
         } else {
             self.commit_address(field, cx);
@@ -111,8 +113,8 @@ impl Compose {
                 .child(format!("{text},"))
         }).collect::<Vec<_>>();
         div().flex_1().min_w(px(0.)).relative()
-            .capture_action(cx.listener(move |this, _: &Enter, window, cx| this.address_enter(field, window, cx)))
-            .capture_action(cx.listener(move |this, _: &FocusNext, window, cx| this.address_enter(field, window, cx)))
+            .capture_action(cx.listener(move |this, _: &Enter, window, cx| this.address_enter(field, false, window, cx)))
+            .capture_action(cx.listener(move |this, _: &FocusNext, window, cx| this.address_enter(field, true, window, cx)))
             .capture_action(cx.listener(move |this, _: &Escape, _, cx| {
                 if this.addresses.active == Some(field) && !this.addresses.matches.is_empty() {
                     this.addresses.matches.clear();
@@ -193,14 +195,20 @@ mod tests {
     }
 
     fn open(cx: &mut TestAppContext) -> (Entity<Compose>, &mut VisualTestContext) {
-        let (store, account, folder) = fixture();
+        let (store, account, inbox) = fixture();
+        let sent = store.save_folder(&account.id, "Sent", None, FolderRole::Sent).unwrap();
         for uid in 1..=8 {
             store.save_message(&Message { summary: MessageSummary {
-                account: account.id.clone(), folder, uid, date: uid as i64,
-                from_name: format!("Équipe {uid}"), from_address: format!("team{uid}@example.com"),
+                account: account.id.clone(), folder: sent, uid, date: uid as i64,
+                from_address: account.email.clone(), to: format!("Équipe {uid} <team{uid}@example.com>"),
                 ..Default::default()
             }, ..Default::default() }).unwrap();
         }
+        store.save_message(&Message { summary: MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, date: 9,
+            from_name: "Anna Berg".into(), from_address: "anna@lookalike.example".into(),
+            ..Default::default()
+        }, ..Default::default() }).unwrap();
         let contacts = store.contacts(&account.id, 10).unwrap();
         let path = store.path().to_owned();
         drop(store);
@@ -238,6 +246,19 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).cc.len()), 2);
         assert!(cx.update(|window, cx| view.read(cx).subject.focus_handle(cx).is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn tab_never_picks_an_address_the_user_never_wrote_to(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_input("anna");
+        assert_eq!(view.read_with(cx, |v, _| v.addresses.matches.iter().map(|c| c.written).collect::<Vec<_>>()), [false]);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).to), ["anna"]);
+        view.update_in(cx, |v, window, cx| v.add_cc(window, cx));
+        cx.simulate_input("anna");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(view.read_with(cx, |v, cx| v.outgoing(cx).cc), ["Anna Berg <anna@lookalike.example>"]);
     }
 
     #[gpui::test]

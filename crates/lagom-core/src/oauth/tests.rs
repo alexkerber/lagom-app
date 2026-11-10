@@ -332,6 +332,51 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
         server.await.unwrap();
     }
 }
+/// Sign-in on a local fake provider: one stray wrong-state request on 127.0.0.1, then the real callback on `host`.
+async fn sign_in_after_a_stray_request(provider: Provider, host: &'static str, email: &'static str) {
+    memory();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let config = Config { id: "test-id".into(), secret: Zeroizing::new("test-secret".into()), auth: format!("{endpoint}/authorize"), token: format!("{endpoint}/token"), scope: provider.config().scope };
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (mut socket, first, _) = request(socket).await;
+        let url = Url::parse(&format!("http://localhost{}", first.split_whitespace().nth(1).unwrap())).unwrap();
+        let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        respond(&mut socket, "200 OK", "{}").await;
+        let port = Url::parse(&params["redirect_uri"]).unwrap().port().unwrap();
+        for (to, state, status) in [("127.0.0.1", "wrong", "400 Bad Request"), (host, params["state"].as_str(), "200 OK")] {
+            let mut callback = tokio::net::TcpStream::connect((to, port)).await.unwrap();
+            callback.write_all(format!("GET /?code=test-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+            let mut response = String::new();
+            callback.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {status}")), "{response}");
+        }
+        let (socket, _) = listener.accept().await.unwrap();
+        let (mut socket, _, form) = request(socket).await;
+        assert!(form.contains("code=test-code"), "{form}");
+        let body = serde_json::json!({"access_token": "access", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "refresh", "id_token": jwt(&format!(r#"{{"email":"{email}"}}"#))}).to_string();
+        respond(&mut socket, "200 OK", &body).await;
+    });
+    let signed = sign_in_with(provider, config, None, |url| {
+        let url = url.to_owned();
+        tokio::spawn(async move { http(Duration::from_secs(3)).unwrap().get(url).send().await.unwrap(); });
+    }).await.unwrap();
+    assert_eq!(signed.email, email);
+    signed.account.delete_password().unwrap();
+    forget(&signed.account.id);
+    server.await.unwrap();
+}
+#[tokio::test]
+async fn a_wrong_state_request_does_not_end_sign_in() {
+    sign_in_after_a_stray_request(Provider::Google, "127.0.0.1", "stray-google@example.com").await;
+}
+#[tokio::test]
+async fn microsoft_localhost_callback_is_accepted_on_ipv6_loopback() {
+    // Without IPv6 loopback on this machine, sign-in runs on IPv4 alone.
+    let host = if std::net::TcpListener::bind("[::1]:0").is_ok() { "::1" } else { "127.0.0.1" };
+    sign_in_after_a_stray_request(Provider::Microsoft, host, "stray-microsoft@example.com").await;
+}
 #[tokio::test]
 async fn dropping_sign_in_closes_the_listener() {
     let mut redirect = None;
