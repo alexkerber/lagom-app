@@ -33,15 +33,26 @@ const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{20
 pub fn html_to_text(html: &str) -> String {
     let document = dom_query::Document::from(html);
     document.select("head, style, script, title, template, [hidden]").remove();
-    // shortcut: visibility uses inline styles only; add a CSS cascade if class-based preheaders need filtering.
+    // shortcut: only simple inline declarations are supported; add a CSS parser/cascade for complex styles or class-based preheaders.
     for node in document.select("[style]").iter() {
-        let hidden = node.attr_or("style", "").split(';').any(|declaration| {
-            let Some((name, value)) = declaration.split_once(':') else { return false; };
-            let value = value.split('!').next().unwrap_or_default().trim();
-            (name.trim().eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none"))
-                || (name.trim().eq_ignore_ascii_case("visibility") && value.eq_ignore_ascii_case("hidden"))
-        });
-        if hidden { node.remove(); }
+        let (mut display, mut visibility) = ((false, false), (false, false));
+        for declaration in node.attr_or("style", "").split(';') {
+            let Some((name, value)) = declaration.split_once(':') else { continue; };
+            let (property, hidden) = if name.trim().eq_ignore_ascii_case("display") {
+                (&mut display, "none")
+            } else if name.trim().eq_ignore_ascii_case("visibility") {
+                (&mut visibility, "hidden")
+            } else { continue; };
+            let (value, important) = match value.split_once('!') {
+                Some((value, priority)) if priority.trim().eq_ignore_ascii_case("important") => (value, true),
+                Some(_) => continue,
+                None => (value, false),
+            };
+            if !value.trim().is_empty() && (!property.1 || important) {
+                *property = (value.trim().eq_ignore_ascii_case(hidden), important);
+            }
+        }
+        if display.0 || visibility.0 { node.remove(); }
     }
     clean_lines(&document.formatted_text())
 }
@@ -198,6 +209,44 @@ mod tests {
         let m = parse(format!("Content-Type: text/html; charset=utf-8\r\n\r\n{html}").as_bytes()).unwrap();
         assert_eq!(m.body_text, "Hello & welcome\n\nRead the news");
         assert_eq!(m.body_html.as_deref(), Some(html));
+    }
+
+    #[test]
+    fn inline_visibility_respects_declaration_order_and_importance() {
+        for (style, visible) in [
+            ("display:none;display:block", true),
+            ("display:block;display:none", false),
+            ("visibility:hidden;visibility:visible", true),
+            ("visibility:visible;visibility:hidden", false),
+            ("display:none!important;display:block", false),
+            ("display:block!important;display:none", true),
+            ("display:none;display:block!important", true),
+            ("display:block;display:none!important", false),
+            ("display:none!important;display:block!important", true),
+            ("display:block!important;display:none!important", false),
+            ("visibility:hidden!important;visibility:visible", false),
+            ("visibility:visible!important;visibility:hidden", true),
+            ("visibility:hidden;visibility:visible!important", true),
+            ("visibility:visible;visibility:hidden!important", false),
+            ("visibility:hidden!important;visibility:visible!important", true),
+            ("visibility:visible!important;visibility:hidden!important", false),
+            (" DISPLAY : BLOCK ! IMPORTANT ; display : none ", true),
+            (" VISIBILITY : VISIBLE ! IMPORTANT ; visibility : hidden ", true),
+            ("display:none;visibility:visible!important", false),
+            ("visibility:hidden;display:block!important", false),
+            ("display:none;display:", false),
+            ("display:block;display:none!invalid", true),
+            ("display:block;display:none!important junk", true),
+            ("display:none;color:red;broken;display:block", true),
+        ] {
+            let html = format!("<p style='{style}'>Order confirmed</p>");
+            let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
+            let expected = if visible { "Order confirmed" } else { "" };
+            assert_eq!(m.body_text, expected, "{style}");
+            assert_eq!(m.summary.snippet, expected, "{style}");
+            let legacy = mail_parser::decoders::html::html_to_text(&html);
+            assert_eq!(readable_text(&legacy, Some(&html)), expected, "{style}");
+        }
     }
 
     #[test]
