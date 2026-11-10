@@ -67,12 +67,20 @@ Send commits Markdown mail to the outbox before dismissing compose. Sync
 attempts delivery and retries temporary failures on subsequent syncs, preserving
 core's backoff and SMTP/Sent checkpoints. Outbox failures remain visible; Send
 again requires confirmation because uncertain delivery may duplicate a message.
-Replies keep the original account, Message-ID and References in Rust.
+The message toolbar's reply menu offers Reply, Reply all and Forward. Rust shares
+subject, quote and signature formatting with desktop. Reply all keeps Cc, excludes
+the source account's email/login identities and deduplicates mailbox addresses.
+Replies keep the original account, Message-ID and References in Rust; forwards
+start a new thread with empty recipients. The composer exposes editable To and Cc.
+Forwarding includes cached attachments and fetches missing parts through core before
+opening compose. A fetch failure keeps the sheet closed and shows an error; older
+messages without attachment metadata need a refresh first. Aliases beyond the
+account email and logins are not yet stored. Attachment picking is not included.
 
 HTML uses a nonpersistent WKWebView, JavaScript disabled, and the same CSP and
 resource-hint blocking policy as desktop. Remote images remain blocked; a
-plain-text toggle is available. Attachment metadata is displayed; download and
-upload are outside this slice. Compose text is held in the sheet until Send;
+plain-text toggle is available. Attachment metadata is displayed; opening
+attachments and picking new files are outside this slice. Compose text is held in the sheet until Send;
 draft autosave/restoration is not implemented. No Android, calendar, todos,
 push or background fetch is included.
 
@@ -91,8 +99,16 @@ Rust FFI tests use temporary stores, an in-memory keyring backend and loopback
 IMAP/SMTP fixtures. They cover global paging/ties, account isolation, Later,
 message/attachment mapping, read-status refusal, archive/Trash, verified account
 creation, durable replies, recovery and shared HTML privacy policy. Existing
-GreenMail tests remain opt-in. `LagomTests` contains four network-free XCTest
-mapping tests; `build-for-testing` compiles them without executing XCTest.
+GreenMail tests remain opt-in. `LagomTests` is a hostless XCTest bundle: it compiles
+the model, presentation and bindings directly, so it never launches the mail app or opens its store. Its nine
+network-free tests cover mapping plus reply/forward preparation, stale selection,
+duplicate actions, preserved edits, Cc, attachments and enqueue failures using a
+fake core. `build-for-testing` only compiles tests. Execute them with
+`xcodebuild test-without-building` on a disposable simulator you create, targeting
+only its UDID, then delete that simulator. Never target someone else's device.
+Rust fixtures additionally cover reply-all identities, quoted originals, signatures,
+thread headers, durable attachment enqueue, cache reuse, loopback fetches and
+attachment failures.
 
 The generated Swift async boundary can also be checked on the host without
 XCTest, an app or a simulator (run the Apple generation and workspace build first):
@@ -120,6 +136,13 @@ local access during a stalled sync, Done on snoozed archived mail and the earlie
 snooze across accounts. These checks never use real accounts or keychains. Native
 layout, navigation, gestures, WKWebView behavior, Dynamic Type and signed-device
 Keychain/provider acceptance still require manual testing.
+
+## Remaining daily-mail work
+
+This slice stops after Reply, Reply all and Forward. Message-scoped CID rendering
+and opt-in remote images, draft autosave/restoration and discard, unified search,
+and explicit read/unread actions remain queued in that order. Sending still saves
+to the outbox durably; closing an unsent composer still loses its text.
 
 ## TestFlight
 

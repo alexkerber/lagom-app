@@ -184,35 +184,13 @@ pub fn fts_query(q: &str) -> Option<String> {
     Some(words.iter().enumerate().map(|(i, w)| if i == last { format!("{w}*") } else { w.clone() }).collect::<Vec<_>>().join(" "))
 }
 
-/// "Re: subject", without stacking "Re: Re:".
-pub fn reply_subject(subject: &str) -> String {
-    if subject.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) { subject.into() } else { format!("Re: {subject}") }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ComposeKind { Reply, ReplyAll, Forward }
-
-pub fn forward_subject(subject: &str) -> String {
-    if subject.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("fwd:")) { subject.into() } else { format!("Fwd: {subject}") }
-}
-
-pub fn reply_all(sender: &str, to: &str, cc: &str, own: &[&str]) -> (String, String) {
-    let mut used: std::collections::HashSet<String> = own.iter().map(|s| s.trim().to_ascii_lowercase()).collect();
-    let mut unique = |field: &str| recipients(field).into_iter().filter(|address| used.insert(address.to_ascii_lowercase())).collect::<Vec<_>>().join(", ");
-    (unique(&format!("{sender}, {to}")), unique(cc))
-}
+pub use lagom_core::compose::{ComposeKind, reply_subject, forward_subject, reply_all};
 
 pub fn compose_body(signature: &str, original: Option<(&Mail, &str)>, kind: ComposeKind) -> String {
-    let mut body = if signature.trim().is_empty() { String::new() } else { format!("-- \n{signature}") };
-    if let Some((m, text)) = original {
-        if !body.is_empty() { body.push_str("\n\n"); }
-        let header = if kind == ComposeKind::Forward {
-            format!("Forwarded message\nFrom: {} <{}>\nDate: {}\nSubject: {}\nTo: {}\n\n", m.from, m.address, full_date(m.date), m.subject, m.to)
-        } else { format!("On {}, {} wrote:\n\n", full_date(m.date), m.address) };
-        body.push_str(&format!("{header}{text}").lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"));
-    }
-    if !body.is_empty() { body.insert_str(0, "\n\n"); }
-    body
+    let date = original.map(|(m, _)| full_date(m.date)).unwrap_or_default();
+    lagom_core::compose::compose_body(signature, original.map(|(m, text)| lagom_core::compose::Original {
+        from: &m.from, address: &m.address, date: &date, subject: &m.subject, to: &m.to, text,
+    }), kind)
 }
 
 /// In-Reply-To and References for a reply.

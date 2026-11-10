@@ -1,6 +1,7 @@
 //! Local-first mail services. Blocking network and keychain calls belong on a worker.
 pub mod account;
 pub mod contacts;
+pub mod compose;
 pub mod calendar;
 pub mod google;
 pub mod attachment;

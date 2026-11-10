@@ -62,7 +62,14 @@ pub struct MailAttachment { pub section: String, pub filename: String, pub mime_
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MailMessage { pub row: MailRow, pub text_body: String, pub html_body: Option<String>, pub attachments: Vec<MailAttachment> }
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct ReplyDraft { pub account: String, pub to: String, pub subject: String, pub body: String, pub reply_to: i64 }
+pub struct ReplyDraft {
+    pub account: String, pub to: String, pub cc: String, pub subject: String, pub body: String,
+    pub reply_to: Option<i64>, pub attachments: Vec<SendAttachment>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ComposeKind { Reply, ReplyAll, Forward }
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SendAttachment { pub filename: String, pub mime_type: String, pub data: Vec<u8> }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SendFailure { pub id: String, pub subject: String, pub message: String }
 
@@ -237,18 +244,69 @@ impl LagomCore {
         })).await
     }
     pub async fn reply_draft(&self, id: i64) -> Result<ReplyDraft> {
-        self.run(move |s| {
-            let m = s.message(id)?;
-            let subject = if m.summary.subject.to_ascii_lowercase().starts_with("re:") { m.summary.subject } else { format!("Re: {}", m.summary.subject) };
-            Ok(ReplyDraft { account: m.summary.account, to: m.summary.from_address, subject,
-                body: format!("\n\n{}", m.body_text.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")), reply_to: id })
-        }).await
+        self.compose_draft(id, ComposeKind::Reply).await
+    }
+    pub async fn compose_draft(&self, id: i64, kind: ComposeKind) -> Result<ReplyDraft> {
+        let mut draft = self.run(move |s| {
+            use lagom_core::compose::{self, Original};
+            use chrono::{Local, TimeZone};
+            let message = s.message(id)?;
+            let m = &message.summary;
+            let a = account(s, &m.account)?;
+            let (to, cc) = match kind {
+                ComposeKind::Reply => (m.from_address.clone(), String::new()),
+                ComposeKind::ReplyAll => {
+                    // shortcut: identities are the account email and logins; include aliases when accounts store them.
+                    compose::reply_all(&m.from_address, &m.to, &m.cc, &[&a.email, &a.imap.username, &a.smtp.username])
+                }
+                ComposeKind::Forward => (String::new(), String::new()),
+            };
+            let forward = kind == ComposeKind::Forward;
+            let subject = if forward { compose::forward_subject(&m.subject) } else { compose::reply_subject(&m.subject) };
+            let date = Local.timestamp_opt(m.date, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+            let body = compose::compose_body(&s.signature(&a.id)?, Some(Original {
+                from: &m.from_name, address: &m.from_address, date: &date, subject: &m.subject, to: &m.to, text: &message.body_text,
+            }), if forward { compose::ComposeKind::Forward } else { compose::ComposeKind::Reply });
+            Ok(ReplyDraft { account: a.id, to, cc, subject, body, reply_to: (!forward).then_some(id), attachments: vec![] })
+        }).await?;
+        if kind == ComposeKind::Forward {
+            let cached = self.run(move |s| {
+                // shortcut: legacy attachment metadata needs a refresh; retry after sync backfills this message.
+                if !s.attachment_metadata_loaded(id)? { return Err(lagom_core::Error::Invalid("sync attachments before forwarding")); }
+                let mut parts = Vec::new();
+                for part in s.attachments(id)? {
+                    let Some(data) = s.cached_attachment(id, &part.section)? else { return Ok(None); };
+                    parts.push(SendAttachment { filename: part.filename, mime_type: part.mime_type, data });
+                }
+                Ok(Some(parts))
+            }).await?;
+            draft.attachments = match cached {
+                Some(parts) => parts,
+                None => self.run_network(move |s| network(async {
+                    let a = account(s, &s.message_summary(id)?.account)?;
+                    let mut session = ImapSync::login(&a, &a.password()?).await?;
+                    let mut parts = Vec::new();
+                    for part in s.attachments(id)? {
+                        let data = match s.cached_attachment(id, &part.section)? {
+                            Some(data) => data,
+                            None => session.fetch_attachment(s, id, &part.section).await?,
+                        };
+                        parts.push(SendAttachment { filename: part.filename, mime_type: part.mime_type, data });
+                    }
+                    let _ = session.logout().await;
+                    Ok(parts)
+                })).await?,
+            };
+        }
+        Ok(draft)
     }
     /// Returns after durable enqueue. Sync delivers it; a transport error never invites a duplicate enqueue.
-    pub async fn send(&self, account_id: String, to: Vec<String>, cc: Vec<String>, subject: String, body_markdown: String, reply_to: Option<i64>) -> Result<String> {
+    pub async fn send(&self, account_id: String, to: Vec<String>, cc: Vec<String>, subject: String, body_markdown: String, reply_to: Option<i64>, attachments: Vec<SendAttachment>) -> Result<String> {
         self.run(move |s| {
             let a = account(s, &account_id)?;
-            let mut outgoing = Outgoing { to, cc, subject, text: body_markdown, ..Default::default() };
+            let mut outgoing = Outgoing { to, cc, subject, text: body_markdown,
+                attachments: attachments.into_iter().map(|a| smtp::OutgoingAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect(),
+                ..Default::default() };
             if let Some(id) = reply_to {
                 let m = s.message_summary(id)?;
                 if m.account != a.id { return Err(lagom_core::Error::Invalid("reply belongs to another account")); }
