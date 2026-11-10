@@ -169,3 +169,6 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
 - [ ] Threading: subjects with list tags or other reply prefixes ("[list] Re:", "Antw:", "TR:", "Re[2]:") now start a new thread.
 - [ ] Install `cargo audit` in CI.
+- [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
+- [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
+- [ ] `cargo audit` warnings: 18 unmaintained crates and two unsound `git2 0.20.4` advisories, not traced to Lagom's code paths.
