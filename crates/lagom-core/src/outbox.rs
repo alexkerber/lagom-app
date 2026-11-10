@@ -10,6 +10,8 @@ pub struct Draft {
     pub account: String,
     pub to: String,
     pub cc: String,
+    #[serde(default)]
+    pub bcc: String,
     // Keep separately entered invalid tokens from combining into a valid mailbox on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_tokens: Option<[Vec<String>; 2]>,
@@ -21,6 +23,14 @@ pub struct Draft {
     pub attachments: Vec<crate::smtp::OutgoingAttachment>,
     #[serde(default)]
     pub forward_source: Option<i64>,
+}
+
+pub struct DraftSummary {
+    pub id: String,
+    pub account: String,
+    pub to: String,
+    pub subject: String,
+    pub snippet: String,
 }
 
 pub struct Pending {
@@ -56,7 +66,7 @@ impl Store {
     /// A late autosave cannot overwrite a newer save, Undo, or a deleted draft.
     pub fn autosave_draft(&self, draft: &Draft, revision: &str) -> Result<()> {
         self.db.execute("UPDATE drafts SET content=?3,revision=lower(hex(randomblob(16)))
-            WHERE id=?1 AND account=?2 AND revision=?4", params![draft.id, draft.account, encode(draft)?, revision])?;
+            WHERE id=?1 AND account=?2 AND revision=?4 AND content<>?3", params![draft.id, draft.account, encode(draft)?, revision])?;
         Ok(())
     }
 
