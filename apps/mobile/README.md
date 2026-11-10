@@ -1,21 +1,21 @@
 # Lagom mobile
 
-Native apps on `lagom-core`, with no mail business logic in Swift.
+Native apps on `lagom-core`, with no mail business logic in Swift or Kotlin.
 
 | Path | Platforms | UI |
 | --- | --- | --- |
 | `apps/mobile/apple` | iPhone and iPad, iOS 18+ | SwiftUI |
-| `apps/mobile/android` | Planned | Jetpack Compose |
+| `apps/mobile/android` | Android phones and tablets, API 29+ | Jetpack Compose |
 
-The first Apple slice uses `crates/lagom-ffi`, with [UniFFI 0.32.2](https://docs.rs/uniffi/0.32.2/uniffi/)
-pinned and proc-macro-generated Swift bindings. One serialized Rust worker owns
+Both native slices use `crates/lagom-ffi`, with [UniFFI 0.32.2](https://docs.rs/uniffi/0.32.2/uniffi/)
+pinned and proc-macro-generated Swift and Kotlin/JNA bindings. One serialized Rust worker owns
 IMAP actions, discovery and credentials. A separate SQLite WAL connection keeps
 cached reads and durable enqueue available during network waits.
-Swift owns navigation, form state and presentation. Mailbox reads include all
+Swift and Kotlin own navigation, form state and presentation. Mailbox reads include all
 accounts, order by date then ID descending, and page in batches of 100. Refreshes
 retain the loaded range until the account or mailbox changes.
 
-## Build
+## Apple build
 
 Use an Apple Silicon Mac with Xcode, Rust targets `aarch64-apple-ios` and
 `aarch64-apple-ios-sim`, and XcodeGen. No running simulator is needed.
@@ -109,8 +109,8 @@ HTML uses a nonpersistent WKWebView, JavaScript disabled, and the same CSP and
 resource-hint blocking policy as desktop. Remote images remain blocked; a
 plain-text toggle is available. Attachment metadata is displayed; opening
 attachments and picking new files are outside this slice. Compose text is held in the sheet until Send;
-draft autosave/restoration is not implemented. No Android, calendar, todos,
-push or background fetch is included. Mobile cannot create events or edit task
+draft autosave/restoration is not implemented. Push and background fetch are outside both
+mobile slices; Android has no calendar or todos yet. iOS cannot create events or edit task
 titles and due dates after creation yet.
 
 ## Verify without opening an app
@@ -166,6 +166,79 @@ local access during a stalled sync, Done on snoozed archived mail and the earlie
 snooze across accounts. These checks never use real accounts or keychains. Native
 layout, navigation, gestures, WKWebView behavior, Dynamic Type and signed-device
 Keychain/provider acceptance still require manual testing.
+
+## Android build
+
+Use JDK 17, Python 3, the Android SDK (platform 37.0, build tools 36.0.0), an installed NDK,
+and Rust. Set `ANDROID_HOME` to the SDK directory; on macOS the build script
+also discovers the conventional user Library SDK location. The script selects
+the newest installed numeric NDK revision (validated with 28.2.13676358).
+No Android Studio, emulator or connected device is needed to build.
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk --version 4.1.2 --locked
+scripts/build-android.sh
+cd apps/mobile/android
+./gradlew assembleDebug
+./gradlew testDebugUnitTest
+```
+
+The checked-in Gradle wrapper pins Gradle 9.9.0 with its distribution checksum;
+AGP 9.5.1 and Kotlin/Compose compiler 2.4.21 are pinned in the root build file.
+These follow the [AGP compatibility requirements](https://developer.android.com/build/releases/agp-9-5-0-release-notes),
+[Gradle release](https://docs.gradle.org/9.9.0/release-notes.html) and
+[Kotlin releases](https://kotlinlang.org/docs/releases.html).
+The script builds release `cdylib`s for arm64-v8a and x86_64 at API 29, then
+runs the workspace UniFFI generator against the Android library. `jniLibs`,
+Kotlin bindings and Gradle outputs are ignored; regenerate after Rust changes
+or `./gradlew clean`. The APK is `app/build/outputs/apk/debug/app-debug.apk`.
+The independent `android` CI job runs these same build and JVM test steps.
+
+Android mirrors the Apple mail slice: email/password discovery and manual
+TLS/STARTTLS settings, unified or per-account Inbox/Later/Done/Sent, pages of
+100 in Rust's newest-first order, pull to refresh, Done/Later swipe actions,
+server read/archive/Trash, tomorrow-at-eight snooze and foreground wake-ups,
+reply threading and durable Markdown Send (including Cc). The outbox shows
+failures and requires confirmation before retrying uncertain delivery.
+Window size classes select list/detail panes for medium/expanded width with
+noncompact height, including unfolded foldables. Compact windows navigate
+between list and message. All actions also have buttons or accessibility actions.
+Colours follow the system appearance and desktop tokens; the adaptive icon
+uses the existing Android background, foreground and monochrome layers.
+
+The added FFI API installs a credential callback before opening the core.
+The error payload is named `reason` because `message` collides with Kotlin
+Exception properties in UniFFI; regenerate both Swift and Kotlin bindings.
+It adapts the existing `keyring` seam; Android refuses to open without it.
+Android Keystore holds a nonexportable AES-256 key. Authenticated AES-GCM
+ciphertext, a fresh nonce and a version byte are atomically written in private
+no-backup storage, bound to the service/account identity as associated data.
+Missing, invalidated or inaccessible keys fail closed. No plaintext credential
+fallback exists. Native Apple/desktop keyring behavior is unchanged. Mail and
+credentials are excluded from backup and device transfer.
+
+The WebView uses Rust's shared HTML/CSP policy, JavaScript disabled, no file or
+content access, no cookies/storage and blocked network loads and requests.
+Only explicit http/https/mailto taps open externally. Plain text is available.
+Attachments display metadata only. As on iOS, OAuth, background sync, push,
+attachment transfer and durable draft restoration are outside this slice.
+Compose survives activity recreation through the ViewModel, but process death
+discards unsent text. Account passwords are never placed in saved instance state.
+
+`python3 scripts/test-build-android.py` checks NDK selection, both ABI arguments
+and early failure without invoking Cargo or touching a device.
+
+JVM tests use a fake core: mapping, retained pages, stale responses, read/action
+failures, durable-send dismissal, independent local work during sync and
+foreground snooze deadlines. JCA tests exercise encryption round trips, nonce
+uniqueness, tampering, account substitution and wrong keys; they do not use an
+Android Keystore or any real account. Rust tests cover the credential adapter
+and shared mail behavior using temporary stores and loopback fixtures.
+Compilation and JVM tests do not establish device acceptance: native JNA loading,
+Keystore hardware/provider behavior, WebView privacy, gestures, accessibility,
+foldable layouts and real-provider TLS still need a separately authorized manual
+run. These commands never start, stop, wipe or install on any device or emulator.
 
 ## Remaining daily-mail work
 

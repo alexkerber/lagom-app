@@ -237,13 +237,19 @@ fn local_later_is_tomorrow_at_eight() {
 
 #[test]
 fn html_privacy_and_recipients_share_core_policy() {
-    let html = "<LINK rel=preconnect href='https://tracker.example'><img src='https://tracker.example/pixel'><script>fetch('/secret')</script>";
+    let html = "<LINK rel=preconnect href='https://tracker.example'><img src='https://tracker.example/pixel'><script>fetch('/secret')</script><iframe srcdoc='&lt;link rel=preconnect href=https://tracker.example&gt;'></iframe><object data='https://tracker.example'></object><embed src='https://tracker.example'><frame src='https://tracker.example'>";
     for dark in [false, true] {
         let document = mail_document(html.into(), dark);
         assert!(document.contains("default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
         assert!(document.find("Content-Security-Policy").unwrap() < document.find("<img").unwrap());
         assert!(document.contains("<x-LINK"));
         assert!(!document.contains("<LINK"));
+        for tag in ["iframe", "object", "embed", "frame"] {
+            assert!(document.contains(&format!("<x-{tag}")));
+            assert!(!document.contains(&format!("<{tag}")));
+            assert!(!document.contains(&format!("</{tag}")));
+        }
+        assert!(document.contains("system-ui,-apple-system,sans-serif"));
     }
     assert_eq!(split_recipients("\"Example, Sender\" <sender@example.test>, next@example.test".into()), ["\"Example, Sender\" <sender@example.test>", "next@example.test"]);
 }

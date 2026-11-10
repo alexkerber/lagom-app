@@ -6,17 +6,20 @@ use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
 
+mod secret_store;
+
 type Result<T> = std::result::Result<T, MailError>;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MailError {
-    #[error("{message}")]
-    Failed { message: String },
+    // Kotlin exceptions already own message; the payload needs a distinct name.
+    #[error("{reason}")]
+    Failed { reason: String },
 }
 impl From<lagom_core::Error> for MailError {
     fn from(error: lagom_core::Error) -> Self { failure(error.to_string()) }
 }
-fn failure(message: impl Into<String>) -> MailError { MailError::Failed { message: message.into() } }
+fn failure(message: impl Into<String>) -> MailError { MailError::Failed { reason: message.into() } }
 fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64 }
 fn milliseconds() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64 }
 fn network<T>(future: impl Future<Output = lagom_core::Result<T>>) -> lagom_core::Result<T> {
@@ -143,6 +146,8 @@ async fn sync_account(store: &mut Store, a: &Account) -> lagom_core::Result<()> 
 impl LagomCore {
     #[uniffi::constructor]
     pub fn open(data_dir: String) -> Result<Arc<Self>> {
+        #[cfg(target_os = "android")]
+        secret_store::require_installed()?;
         // Reopening the same worker must not recover a send still owned by this process.
         static OPEN: std::sync::OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Stores>>>> = std::sync::OnceLock::new();
         std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
@@ -366,6 +371,6 @@ pub fn mail_document(html: String, dark: bool) -> String {
         else { ("#FFFFFF", "#111110", "#2A5BB8", "light") };
     let look = if styled(&html) { "body{background:#fff;color:#000;padding:16px}".to_owned() }
         else { format!("body{{color:{ink}}}a{{color:{accent}}}") };
-    // shortcut: mobile does not serve inline cid: parts yet (desktop uses lagom-cid); add a WKURLSchemeHandler when it does.
-    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 -apple-system;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(false, "cid:"), inert_tags(&html))
+    // shortcut: mobile does not serve inline cid: parts yet (desktop uses lagom-cid); add native cid handlers when it does.
+    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 system-ui,-apple-system,sans-serif;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(false, "cid:"), inert_tags(&html))
 }

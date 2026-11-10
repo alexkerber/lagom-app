@@ -49,14 +49,14 @@ final class MailModelTests: XCTestCase {
 
     override func composeDraft(id: Int64, kind: ComposeKind) async throws -> ReplyDraft {
         calls.append((id, kind))
-        if fail { throw MailError.Failed(message: "fixture failure") }
+        if fail { throw MailError.Failed(reason: "fixture failure") }
         if suspended { return try await withCheckedThrowingContinuation { continuation = $0 } }
         return reply
     }
 
     override func send(accountId: String, to: [String], cc: [String], subject: String, bodyMarkdown: String,
                        replyTo: Int64?, attachments: [SendAttachment]) async throws -> String {
-        if fail { throw MailError.Failed(message: "fixture failure") }
+        if fail { throw MailError.Failed(reason: "fixture failure") }
         sent = ReplyDraft(account: accountId, to: to.joined(separator: ", "), cc: cc.joined(separator: ", "),
                           subject: subject, body: bodyMarkdown, replyTo: replyTo, attachments: attachments)
         return "queued"
