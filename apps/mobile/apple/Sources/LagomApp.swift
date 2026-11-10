@@ -3,16 +3,26 @@ import SwiftUI
 @main
 struct LagomApp: App {
     @State private var model = MailModel()
+    @State private var planner = PlannerModel()
     @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
         WindowGroup {
-            MailView(model: model)
+            RootView(model: model, planner: planner)
                 .tint(Theme.accent)
                 .task { await model.start() }
+                // Local tasks and events load as soon as the store opens, not after the first sync.
+                .task(id: model.core == nil) {
+                    guard let core = model.core else { return }
+                    planner.core = core
+                    await planner.reload()
+                }
                 .onChange(of: phase) { _, phase in
                     // shortcut: foreground/local sync only in v1; add BGAppRefreshTask before background fetch or push.
-                    Task { await model.setForeground(phase == .active) }
+                    Task {
+                        await model.setForeground(phase == .active)
+                        if phase == .active { await planner.reload() }
+                    }
                 }
         }
     }
@@ -20,17 +30,20 @@ struct LagomApp: App {
 
 struct MailView: View {
     @Bindable var model: MailModel
+    let planner: PlannerModel
+    @Binding var section: AppSection
+    @Binding var addAccount: Bool
+    @Binding var removing: MailAccount?
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
-    @State private var addAccount = false
-    @State private var removing: MailAccount?
     @State private var retrying: SendFailure?
+    @State private var unreadOnly = false
 
     var body: some View {
         Group {
             if width == .regular && height == .regular {
                 NavigationSplitView {
-                    sidebar
+                    SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
                 } content: {
                     inbox
                 } detail: {
@@ -46,16 +59,7 @@ struct MailView: View {
             }
         }
         .background(Theme.background)
-        .sheet(isPresented: $addAccount) { AddAccountView(model: model) }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
-        .alert("Mail", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
-            Button("OK") { model.error = nil }
-        } message: { Text(model.error ?? "") }
-        .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
-            if let account = removing {
-                Button("Remove \(account.email)", role: .destructive) { Task { await model.remove(account) }; removing = nil }
-            }
-        }
         .confirmationDialog("Send again? Check Sent first if delivery was uncertain. This can send a duplicate.", isPresented: Binding(get: { retrying != nil }, set: { if !$0 { retrying = nil } })) {
             if let failure = retrying {
                 Button("Send again") {
@@ -67,38 +71,27 @@ struct MailView: View {
                 }
             }
         }
-        .onChange(of: model.accountID) { _, _ in Task { await model.changeScope() } }
-        .onChange(of: model.mailbox) { _, _ in Task { await model.changeScope() } }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
     }
 
-    private var sidebar: some View {
-        List {
-            Section("Mailboxes") {
-                ForEach(MailboxChoice.allCases) { box in
-                    Button { model.mailbox = box } label: {
-                        Label(box.rawValue, systemImage: box.symbol)
-                            .foregroundStyle(model.mailbox == box ? Theme.accent : Theme.ink)
-                    }
-                }
-            }
-            Section("Accounts") {
-                Button("All accounts") { model.accountID = nil }
-                ForEach(model.accounts, id: \.id) { account in
-                    Button { model.accountID = account.id } label: {
-                        Label(account.email, systemImage: model.accountID == account.id ? "checkmark.circle.fill" : "person.crop.circle")
-                    }
-                    .contextMenu { Button("Remove account", role: .destructive) { removing = account } }
-                }
-                Button { addAccount = true } label: { Label("Add account", systemImage: "plus") }
-            }
-        }
-        .navigationTitle("Lagom")
-        .scrollContentBackground(.hidden).background(Theme.subtle)
-    }
-
     private var inbox: some View {
-        List(selection: $model.selectedID) {
+        let rows = unreadOnly ? model.rows.filter(\.unread) : model.rows
+        let words = DateWords()
+        return List(selection: $model.selectedID) {
+            if !model.accounts.isEmpty {
+                HStack {
+                    if model.mailbox == .inbox {
+                        Text("\(planner.inboxLeft(account: model.accountID)) left").font(.subheadline).foregroundStyle(Theme.secondary)
+                    }
+                    Spacer()
+                    Picker("Show", selection: $unreadOnly) {
+                        Text("All").tag(false)
+                        Text("Unread").tag(true)
+                    }
+                    .pickerStyle(.segmented).fixedSize()
+                }
+                .listRowSeparator(.hidden).listRowBackground(Theme.background)
+            }
             if let notice = model.notice {
                 Text(notice).font(.callout).foregroundStyle(Theme.secondary)
                     .onTapGesture { model.notice = nil }
@@ -115,21 +108,33 @@ struct MailView: View {
                     }
                 }
             }
-            ForEach(model.rows, id: \.id) { row in
-                NavigationLink(value: row.id) { MailRowView(row: row) }
-                    .listRowBackground(Theme.background)
-                    .swipeActions(edge: .leading) {
-                        Button { Task { await model.act(.done, id: row.id) } } label: { Label("Done", systemImage: "checkmark") }.tint(Theme.done)
+            ForEach(grouped(rows) { words.group(Date(timeIntervalSince1970: TimeInterval($0.dateUnix))) }) { group in
+                Section {
+                    ForEach(group.items, id: \.id) { row in
+                        NavigationLink(value: row.id) { MailRowView(row: row, accent: accountAccent(model.accounts, row.account), words: words) }
+                            .listRowBackground(Theme.background)
+                            .swipeActions(edge: .leading) {
+                                Button { Task { await model.act(.done, id: row.id) } } label: { Label("Done", systemImage: "checkmark") }.tint(Theme.done)
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                if model.mailbox != .trash {
+                                    Button(role: .destructive) { Task { await model.act(.delete, id: row.id) } } label: { Label("Delete", systemImage: "trash") }
+                                        .tint(Theme.danger)
+                                }
+                                Button { Task { await model.act(.later, id: row.id) } } label: { Label("Later", systemImage: "clock") }.tint(Theme.later)
+                            }
                     }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) { Task { await model.act(.delete, id: row.id) } } label: { Label("Delete", systemImage: "trash") }
-                        Button { Task { await model.act(.later, id: row.id) } } label: { Label("Later", systemImage: "clock") }.tint(Theme.later)
-                    }
+                } header: {
+                    Text(group.title).font(.footnote.weight(.semibold)).foregroundStyle(Theme.secondary).textCase(nil)
+                }
             }
             if model.hasMore { Button("Load more") { Task { await model.reload(more: true) } } }
         }
+        .listStyle(.plain)
         .overlay {
-            if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
+            if unreadOnly && rows.isEmpty && !model.rows.isEmpty {
+                ContentUnavailableView("No unread mail", systemImage: "envelope.open")
+            } else if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
                 ContentUnavailableView {
                     Label(model.accounts.isEmpty ? "Welcome to Lagom" : "No mail here", systemImage: "tray")
                 } description: {
@@ -139,7 +144,7 @@ struct MailView: View {
                 }
             }
         }
-        .navigationTitle(model.mailbox.rawValue)
+        .navigationTitle(title)
         .refreshable { await model.sync() }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -166,6 +171,11 @@ struct MailView: View {
             }
         }
         .scrollContentBackground(.hidden).background(Theme.background)
+    }
+
+    private var title: String {
+        guard model.mailbox == .inbox, let id = model.accountID, let account = model.accounts.first(where: { $0.id == id }) else { return model.mailbox.rawValue }
+        return account.displayName
     }
 
     @ViewBuilder private var detail: some View {

@@ -56,6 +56,9 @@ targets:
       - Tests
       - Sources/MailModel.swift
       - Sources/Theme.swift
+      - Sources/Presentation.swift
+      - Sources/PlannerModel.swift
+      - Sources/Demo.swift
       - Generated/LagomCore.swift
     dependencies:
       - framework: Generated/LagomFFI.xcframework
