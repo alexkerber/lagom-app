@@ -40,18 +40,34 @@ type Wire = Box<dyn Io>;
 pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const TIMED_OUT: &str = "IMAP operation timed out";
-async fn net<T, E>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
+const DROPPED: &str = "IMAP connection lost";
+/// Whether an error is the transport's fault. Lagom's own limits reject with `InvalidData` or `Other`.
+trait Transient {
+    fn transient(&self) -> bool { false }
+}
+impl Transient for std::io::Error {
+    fn transient(&self) -> bool { !matches!(self.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::Other) }
+}
+impl<T: Transient, U> Transient for (T, U) {
+    fn transient(&self) -> bool { self.0.transient() }
+}
+impl Transient for async_imap::error::Error {
+    fn transient(&self) -> bool {
+        match self { Self::Io(e) => e.transient(), Self::ConnectionLost => true, _ => false }
+    }
+}
+async fn net<T, E: Transient>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
     net_as("IMAP operation failed", f).await
 }
 /// Like `net`, with a message that tells the user which step failed: host, TLS or login.
-async fn net_as<T, E>(
+async fn net_as<T, E: Transient>(
     what: &'static str,
     f: impl Future<Output = std::result::Result<T, E>>,
 ) -> Result<T> {
     tokio::time::timeout(TIMEOUT, f)
         .await
         .map_err(|_| Error::Network(TIMED_OUT))?
-        .map_err(|_| Error::Network(what))
+        .map_err(|e| Error::Network(if e.transient() { DROPPED } else { what }))
 }
 async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -166,8 +182,8 @@ impl ImapSync {
     }
     /// A fresh session with `folder` selected again, as it was before the failed command.
     async fn reconnect(&mut self, store: &mut Store, folder: &Folder) -> Result<()> {
-        // Free the server's connection slot first: some servers cap connections per account.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tokio::io::AsyncWriteExt::shutdown(self.session.get_mut())).await;
+        // Drop the old socket first: some servers cap connections per account. The stand-in reads end-of-file.
+        self.session.get_mut().inner = Box::new(tokio::io::duplex(1).0);
         let fresh = Self::login(&self.account, &self.password).await?;
         (self.session, self.capabilities) = (fresh.session, fresh.capabilities);
         let (selected, _) = self.select(store, folder.id).await?;
@@ -178,11 +194,12 @@ impl ImapSync {
     }
     /// False when the message failed on a fresh session too; the session is usable either way.
     async fn try_fetch(&mut self, store: &mut Store, folder: &Folder, uid: u32) -> Result<bool> {
-        for _ in 0..2 {
+        for retry in [false, true] {
             match self.fetch_message(store, folder, uid).await {
                 Ok(()) => return Ok(true),
-                // A timeout is the network's fault, not the message's: keep the checkpoint and retry next sync.
-                Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_) | Error::Network(TIMED_OUT)) => return Err(e),
+                Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
+                // The network's fault, not the message's: keep the checkpoint and try again next sync.
+                Err(e) if matches!(e, Error::Network(TIMED_OUT)) || (retry && matches!(e, Error::Network(DROPPED))) => return Err(e),
                 // A rejected response may be half-read; the first retry also covers a dropped connection.
                 Err(_) => self.reconnect(store, folder).await?,
             }

@@ -116,10 +116,11 @@ impl Store {
         let mut entries: HashMap<String, (Contact, (bool, i64), f64)> = HashMap::new();
         let mut messages = HashSet::new();
         // Hostile mail lands in Junk and Trash, and a From header proves nothing: only Sent and Drafts hold the user's mail.
-        let mut stmt = self.db.prepare("SELECT m.from_name,m.from_address,m.to_addresses,m.cc,m.date,m.message_id,f.role IN ('sent','drafts') FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder) WHERE m.account=?1 AND f.role NOT IN ('junk','trash')")?;
+        let mut stmt = self.db.prepare("SELECT m.from_name,m.from_address,m.to_addresses,m.cc,m.date,m.message_id,f.role IN ('sent','drafts') FROM messages m JOIN folders f ON f.id=coalesce(m.move_target,m.folder) WHERE m.account=?1 AND f.role NOT IN ('junk','trash') ORDER BY 7 DESC")?;
         let mut rows = stmt.query([account])?;
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(5)?;
+            // Sent copies come first, so an Archive copy of the same Message-ID cannot take the sent score.
             // shortcut: copies without Message-ID count separately; deduplicate when a reliable provider identity is stored.
             let first_message = message_id.is_empty() || messages.insert(message_id);
             let from: String = row.get(1)?;
@@ -151,8 +152,11 @@ impl Store {
             }
         }
         tx.commit()?;
-        // Incoming mail must not lift an address the user wrote to above another one: only sent mail ranks those.
-        Ok(Contacts::new(entries.into_values().map(|(mut c, _, received)| { if !c.written { c.score = received; } c }).collect()))
+        // Incoming mail must not rank or name an address the user wrote to: only sent mail does.
+        Ok(Contacts::new(entries.into_values().map(|(mut c, (named_sent, _), received)| {
+            if !c.written { c.score = received; } else if !named_sent { c.name.clear(); }
+            c
+        }).collect()))
     }
 }
 
@@ -326,6 +330,20 @@ mod tests {
         assert_eq!(results.iter().map(|c| (c.address.as_str(), c.written)).collect::<Vec<_>>(),
             [("anna.berg@corp.example", true), ("anna.berg@lookalike.example", false), ("anna.berg@spoof.example", false)]);
         assert_eq!((results[0].score, results[1].score, results[2].score), (4., 5., 5.));
+    }
+
+    #[test]
+    fn incoming_mail_neither_names_nor_ranks_a_written_address() {
+        let (_temp, store, account, inbox, sent) = fixture();
+        let save = |uid, folder, name: &str, from: &str, to: &str, id: &str| store.save_message(&Message { summary: MessageSummary { account: account.id.clone(), folder, uid, from_name: name.into(), from_address: from.into(), to: to.into(), message_id: id.into(), date: 10, ..Default::default() }, ..Default::default() }).unwrap();
+        // The Inbox copy of a sent mail is read first; the Sent copy must still score.
+        save(1, inbox, "", "self@gmail.com", "vendor@example.com", "<m1@self>");
+        save(1, sent, "", "self@gmail.com", "vendor@example.com", "<m1@self>");
+        for uid in 2..=9 { save(uid, inbox, "Finance Director", "vendor@example.com", "self@gmail.com", ""); }
+        let contacts = store.contacts(&account.id, 10).unwrap();
+        assert!(contacts.suggest("finance").is_empty(), "an incoming header must not name a written address");
+        let vendor = &contacts.suggest("vendor")[0];
+        assert_eq!((vendor.name.as_str(), vendor.written, vendor.score), ("", true, 4.));
     }
 
     #[test]
