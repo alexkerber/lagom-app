@@ -61,6 +61,44 @@ class MailModelTest {
         assertTrue(model.message!!.row.unread)
         assertEquals("body", model.message?.textBody)
     }
+    @Test fun delayedReplyCannotOverwriteEditedCompose() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = model(core); model.start(); model.select(1)
+        val gate = CompletableDeferred<Unit>(); core.replyGate = gate
+        val reply = async { model.reply(1) }; runCurrent()
+        model.draft = ComposeDraft("fixture")
+        model.draft = model.draft!!.copy(body = "Unsent text")
+        val edited = model.draft
+        gate.complete(Unit); reply.await()
+        assertEquals(edited, model.draft)
+    }
+    @Test fun delayedReplyStaysDismissedAfterComposeClosesOrSelectionChanges() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = model(core); model.start()
+        for (navigate in listOf<suspend () -> Unit>(
+            { model.draft = ComposeDraft("fixture"); model.draft = null },
+            { model.clearSelection() },
+            { model.select(2) },
+            { model.changeScope(null, Mailbox.SENT) },
+        )) {
+            model.select(1)
+            val gate = CompletableDeferred<Unit>(); core.replyGate = gate
+            val reply = async { model.reply(1) }; runCurrent()
+            navigate()
+            gate.complete(Unit); reply.await()
+            assertNull(model.draft)
+        }
+    }
+    @Test fun newestReplyWinsEvenIfOlderRequestFinishesLast() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.replyGate = gate
+        val first = async { model.reply(1) }; runCurrent()
+        core.replyGate = null
+        model.reply(2)
+        gate.complete(Unit); first.await()
+        assertEquals(2L, model.draft?.replyTo)
+    }
     @Test fun sendDismissesOnlyAfterDurableEnqueueAndDoesNotRequeueOnSyncFailure() = runTest(dispatcher) {
         val core = FakeCore()
         val model = model(core); model.start()
@@ -128,6 +166,7 @@ private class FakeCore : LagomCoreInterface {
     var pageCalls = 0
     var pageGate: CompletableDeferred<Unit>? = null
     var messageGate: CompletableDeferred<Unit>? = null
+    var replyGate: CompletableDeferred<Unit>? = null
     var syncGate: CompletableDeferred<Unit>? = null
     var rejectRead = false
     var rejectSend = false
@@ -165,7 +204,10 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun delete(ids: List<Long>) { check(!rejectAction) }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit
-    override suspend fun replyDraft(id: Long) = ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "Re: Subject", "> body", id)
+    override suspend fun replyDraft(id: Long): ReplyDraft {
+        replyGate?.await()
+        return ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "Re: Subject", "> body", id)
+    }
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
 }

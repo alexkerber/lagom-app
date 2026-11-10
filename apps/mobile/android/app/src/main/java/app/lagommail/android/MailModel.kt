@@ -47,7 +47,11 @@ internal class MailModel(
     var error by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
     // shortcut: compose lives in memory only, add Rust draft persistence before process-death restoration.
-    var draft by mutableStateOf<ComposeDraft?>(null)
+    private var composeRevision = 0
+    private var composeDraft by mutableStateOf<ComposeDraft?>(null)
+    var draft: ComposeDraft?
+        get() = composeDraft
+        set(value) { composeRevision++; composeDraft = value }
     var accountForm by mutableStateOf<AccountForm?>(null)
     private var revision = 0
     private var selectionRevision = 0
@@ -155,7 +159,14 @@ internal class MailModel(
         core?.removeAccount(account.id)
         changeScope(if (accountId == account.id) null else accountId, mailbox)
     }
-    suspend fun reply(id: Long) { core?.replyDraft(id)?.let { draft = ComposeDraft(it) } }
+    suspend fun reply(id: Long) {
+        val core = core ?: return
+        if (draft != null) return
+        val request = ++composeRevision
+        val selection = selectionRevision
+        val reply = core.replyDraft(id)
+        if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply)
+    }
     suspend fun send() {
         val core = core ?: return
         val draft = draft ?: return

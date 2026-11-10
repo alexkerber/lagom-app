@@ -22,16 +22,15 @@ pub enum Discovery {
     },
     Manual,
 }
+#[cfg(any(target_os = "android", test))]
+mod android;
+
 const DEADLINE: Duration = Duration::from_secs(3);
 
 pub async fn discover(email: &str) -> Discovery {
     discover_with(
         email,
-        |domain| async move {
-            let resolver = hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok()?;
-            let mx = resolver.mx_lookup(domain).await.ok()?;
-            Some(mx.iter().map(|r| r.exchange().to_utf8()).collect())
-        },
+        mx,
         |domain| async move {
             let response = oauth::http(DEADLINE)
                 .ok()?
@@ -47,6 +46,16 @@ pub async fn discover(email: &str) -> Discovery {
     )
     .await
 }
+#[cfg(target_os = "android")]
+use android::mx;
+
+#[cfg(not(target_os = "android"))]
+async fn mx(domain: String) -> Option<Vec<String>> {
+    let resolver = hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok()?;
+    let mx = resolver.mx_lookup(domain).await.ok()?;
+    Some(mx.iter().map(|r| r.exchange().to_utf8()).collect())
+}
+
 async fn discover_with<M, MF, A, AF>(email: &str, mx: M, autoconfig: A) -> Discovery
 where
     M: FnOnce(String) -> MF,

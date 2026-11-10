@@ -10,10 +10,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.Composable
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import app.lagommail.core.mailDocument
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.net.URI
 
@@ -21,8 +24,16 @@ internal fun externalMailLink(url: String): Boolean = try {
     URI(url).scheme?.lowercase() in setOf("http", "https", "mailto")
 } catch (_: Exception) { false }
 
-@Composable internal fun MailHtml(html: String) {
-    val document = mailDocument(html, isSystemInDarkTheme())
+internal suspend fun prepareMailDocument(
+    html: String, dark: Boolean, render: (String, Boolean) -> String = ::mailDocument,
+): String = withContext(Dispatchers.Default) { render(html, dark) }
+
+@Composable internal fun MailHtml(messageId: Long, html: String) {
+    val dark = isSystemInDarkTheme()
+    val prepared by key(messageId, html, dark) {
+        produceState<String?>(null) { value = prepareMailDocument(html, dark) }
+    }
+    val document = prepared ?: run { Text("Loading message…"); return }
     AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
         WebView(context).apply {
             settings.javaScriptEnabled = false

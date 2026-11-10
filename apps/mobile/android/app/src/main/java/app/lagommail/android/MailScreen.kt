@@ -186,7 +186,7 @@ internal fun Mailbox.label(): String = when (this) {
             }
         }
         Box(Modifier.weight(1f)) {
-            if (!plain && message.htmlBody != null) MailHtml(message.htmlBody!!)
+            if (!plain && message.htmlBody != null) MailHtml(message.row.id, message.htmlBody!!)
             else SelectionContainer { Text(message.textBody, Modifier.fillMaxSize().verticalScroll(rememberScrollState())) }
         }
         // shortcut: attachment metadata only, add transfers when mobile file handling is implemented.
