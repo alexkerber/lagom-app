@@ -831,10 +831,11 @@ impl MainWindow {
         if self.inbox.mail[id].body.is_empty() {
             self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?, live.store.inline_parts(store)?))) {
                 Ok((m, parts, inline)) => {
+                    let body = mail::paragraphs(&lagom_core::mime::readable_text(&m.body_text, m.body_html.as_deref()));
                     self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
-                    mail::paragraphs(&m.body_text)
+                    body
                 }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
@@ -1290,6 +1291,29 @@ mod tests {
         }));
         view.update(cx, |v, cx| { v.live = Some(fixture_live(store, bridge)); v.page = Page::Mail; cx.notify(); });
         (view, cx, rx)
+    }
+
+    #[gpui::test]
+    fn legacy_newsletter_reads_and_quotes_visible_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let mut summary = incoming(v, 1);
+            summary.from_address = "sender@example.test".into();
+            v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                summary, body_text: "96 * * sup { font-size: 100% !important; }\n\n\nhttps://tracking.example.test/click".into(),
+                body_html: Some(include_str!("../../../../crates/lagom-core/tests/fixtures/newsletter.html").into()),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.single().unwrap();
+            v.open_message(selected, false, cx);
+            assert_eq!(v.inbox.mail[selected].body, ["Hello & welcome", "Read the news"]);
+        });
+        cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        assert!(quote.ends_with("> Hello & welcome\n> \n> Read the news"), "{quote:?}");
+        assert!(!quote.contains("font-size") && !quote.contains("tracking.example.test"));
     }
 
     #[gpui::test]

@@ -2,7 +2,7 @@ use crate::{
     store::{Message, MessageSummary},
     Error, Result,
 };
-use mail_parser::{AddressList, MessageParser};
+use mail_parser::{AddressList, MessageParser, PartKind};
 
 pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
 /// The stored body of a message whose text is over `MAX_MIME_BYTES`: the headers are kept, the
@@ -30,14 +30,51 @@ pub fn metadata_only(header: &[u8]) -> Result<Message> {
 /// out of list previews (`&#847;`, `&zwnj;`, soft hyphens).
 const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
 
-/// The list preview, at most 200 characters on one line. From the HTML when there is one: text
-/// parts are often generated, with CSS and "[Image]" lines in them. mail-parser's conversion
-/// skips `<head>`, `<style>` and `<script>` and decodes entities.
-pub fn snippet(text: &str, html: Option<&str>) -> String {
-    match html {
-        Some(html) => clean_snippet(&mail_parser::decoders::html::html_to_text(html)),
-        None => clean_snippet(text),
+pub fn html_to_text(html: &str) -> String {
+    let document = dom_query::Document::from(html);
+    document.select("head, style, script, title, template, [hidden]").remove();
+    // shortcut: visibility uses inline styles only; add a CSS cascade if class-based preheaders need filtering.
+    for node in document.select("[style]").iter() {
+        let hidden = node.attr_or("style", "").split(';').any(|declaration| {
+            let Some((name, value)) = declaration.split_once(':') else { return false; };
+            let value = value.split('!').next().unwrap_or_default().trim();
+            (name.trim().eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none"))
+                || (name.trim().eq_ignore_ascii_case("visibility") && value.eq_ignore_ascii_case("hidden"))
+                || (name.trim().eq_ignore_ascii_case("mso-hide") && value.eq_ignore_ascii_case("all"))
+        });
+        if hidden { node.remove(); }
     }
+    clean_lines(&document.formatted_text())
+}
+
+/// Prefer the displayed HTML: older stored text has no record of how it was generated.
+pub fn readable_text<'a>(text: &'a str, html: Option<&str>) -> std::borrow::Cow<'a, str> {
+    // Legacy parsing also put the first plain-text part in the HTML slot.
+    match html {
+        Some(html) if !text.starts_with(html) => html_to_text(html).into(),
+        _ => text.into(),
+    }
+}
+
+pub(crate) fn clean_lines(text: &str) -> String {
+    let mut out = String::new();
+    let mut blank = false;
+    for line in text.lines() {
+        if line.trim().is_empty() { blank = !out.is_empty(); continue; }
+        if !out.is_empty() {
+            out.push('\n');
+            if blank { out.push('\n'); }
+        }
+        out.push_str(line.trim_end());
+        blank = false;
+    }
+    out
+}
+
+/// The list preview, at most 200 characters on one line. From the HTML when there is one: text
+/// parts are often generated, with CSS and "[Image]" lines in them.
+pub fn snippet(text: &str, html: Option<&str>) -> String {
+    clean_snippet(&readable_text(text, html))
 }
 
 /// Invisible padding dropped, white space collapsed, cut at 200 characters. Also for snippets
@@ -83,13 +120,17 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
         .unwrap_or(&message_id)
         .to_owned();
     let body_text = parsed
-        .text_bodies()
-        .map(|v| v.into_owned())
+        .text_body()
+        .filter_map(|part| match part.kind() {
+            PartKind::Text => part.text().map(|text| text.into_owned()),
+            PartKind::Html => part.text().map(|html| html_to_text(&html)),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let body_html = parsed
         .html_body()
-        .next()
+        .find(|part| matches!(part.kind(), PartKind::Html))
         .and_then(|part| part.text())
         .map(|v| v.into_owned());
     let snippet = snippet(&body_text, body_html.as_deref());
@@ -119,6 +160,31 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
 mod tests {
     use super::*;
     #[test]
+    fn newsletter_body_has_only_visible_text() {
+        let html = include_str!("../tests/fixtures/newsletter.html");
+        let m = parse(format!("Content-Type: text/html; charset=utf-8\r\n\r\n{html}").as_bytes()).unwrap();
+        assert_eq!(m.body_text, "Hello & welcome\n\nRead the news");
+        assert_eq!(m.body_html.as_deref(), Some(html));
+    }
+
+    #[test]
+    fn html_text_keeps_visible_links_and_plain_mail() {
+        let html = "<title>Title</title><div hidden=false><p>Hidden</p></div><div style='mso-hide:ALL'>Hidden</div><!-- Hidden --><p>Read <a href='https://tracking.example.test' title='Hidden'>this &amp; that</a>.</p><p>https://visible.example.test</p>";
+        assert_eq!(html_to_text(html), "Read this & that.\n\nhttps://visible.example.test");
+        assert_eq!(html_to_text("<p>Keep</p><style>unclosed { color: red }"), "Keep");
+        assert_eq!(html_to_text("<div hidden><span style='display:none'>Nested</span></div><p>Keep</p>"), "Keep");
+        let plain = "A <literal> & URL https://visible.example.test\n\n\n  indented";
+        let m = parse(format!("Content-Type: text/plain\r\n\r\n{plain}").as_bytes()).unwrap();
+        assert_eq!(m.body_text, plain);
+        assert!(m.body_html.is_none());
+        assert_eq!(readable_text(&m.body_text, m.body_html.as_deref()), plain);
+        // Older parsers also stored the plain body in the HTML slot.
+        assert_eq!(readable_text(plain, Some(plain)), plain);
+        let multipart = format!("{plain}\nSecond plain part");
+        assert_eq!(readable_text(&multipart, Some(plain)), multipart);
+    }
+
+    #[test]
     fn recipient_names_survive_sync_headers() {
         let message = parse(b"From: Sender <sender@example.com>\r\nTo: \"Team, West\" <west@example.com>, east@example.com\r\nCc: Team <team@example.com>\r\n\r\nbody").unwrap();
         assert_eq!(crate::contacts::split_recipients(&message.summary.to), ["\"Team, West\" <west@example.com>", "east@example.com"]);
@@ -133,7 +199,7 @@ mod tests {
         assert_eq!(m.summary.from_address, "alice@example.com");
         assert_eq!(m.summary.thread_key, "root@test");
         assert!(m.summary.has_attachments);
-        assert!(m.body_text.contains("Hello plain"));
+        assert_eq!(m.body_text, "Hello plain");
         assert!(m.body_html.unwrap().contains("Hello HTML"));
         assert!(!m.body_text.contains("aGVsbG8="));
     }
@@ -146,12 +212,13 @@ mod tests {
         assert!(!m.summary.has_attachments);
         let m = parse(b"Content-Type: text/plain; charset=windows-1252\r\n\r\nPrice \x80").unwrap();
         assert!(m.body_text.contains('€'));
+        assert!(m.body_html.is_none());
     }
     #[test]
     fn newsletter_snippet_has_no_css_or_padding() {
         let raw = "Content-Type: text/html; charset=utf-8\r\n\r\n<!DOCTYPE html><html><head><title>News</title><style>@media only screen and (max-width: 600px) { .container { width: 100% !important; } }</style></head><body><div style=\"display:none\">Autumn sale &#847; &zwnj; &nbsp; &#847; &zwnj;&nbsp;&shy;</div><table><tr><td><style>.x { color: red }</style><p>Fifty&nbsp;kinds of tomato &amp; two&nbsp;&nbsp; kinds of soil</p></td></tr></table></body></html>";
         let m = parse(raw.as_bytes()).unwrap();
-        assert_eq!(m.summary.snippet, "Autumn sale Fifty kinds of tomato & two kinds of soil");
+        assert_eq!(m.summary.snippet, "Fifty kinds of tomato & two kinds of soil");
         // A generated text part with junk loses to the HTML part.
         assert_eq!(snippet("[Image] Mobile px) { .conta", Some("<p>Real text</p>")), "Real text");
         assert_eq!(snippet("a\u{200C}\u{200C}  b\n\nc", None), "a b c");

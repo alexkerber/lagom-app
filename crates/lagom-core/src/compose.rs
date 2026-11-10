@@ -31,7 +31,8 @@ pub fn compose_body(signature: &str, original: Option<Original<'_>>, kind: Compo
         let header = if kind == ComposeKind::Forward {
             format!("Forwarded message\nFrom: {} <{}>\nDate: {}\nSubject: {}\nTo: {}\n\n", m.from, m.address, m.date, m.subject, m.to)
         } else { format!("On {}, {} wrote:\n\n", m.date, m.address) };
-        body.push_str(&format!("{header}{}", m.text).lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"));
+        let quote = crate::mime::clean_lines(&format!("{header}{}", crate::mime::clean_lines(m.text)));
+        body.push_str(&quote.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"));
     }
     if !body.is_empty() { body.insert_str(0, "\n\n"); }
     body
@@ -40,6 +41,17 @@ pub fn compose_body(signature: &str, original: Option<Original<'_>>, kind: Compo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotes_trim_and_collapse_legacy_blank_lines() {
+        for kind in [ComposeKind::Reply, ComposeKind::ReplyAll, ComposeKind::Forward] {
+            let body = compose_body("", Some(Original { from: "Sender", address: "sender@example.test",
+                date: "2026-01-01", subject: "News", to: "reader@example.test",
+                text: "\n \n\nFirst\n\n \n\nSecond\n \n\n" }), kind);
+            assert!(body.ends_with("> First\n> \n> Second"), "{body:?}");
+            assert!(!body.contains("\n> \n> \n"), "{body:?}");
+        }
+    }
 
     #[test]
     fn reply_all_compares_mailboxes_and_keeps_display_names() {

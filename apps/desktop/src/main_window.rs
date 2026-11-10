@@ -712,7 +712,7 @@ impl MainWindow {
                 };
                 let original = match (m.and_then(|m| m.store), &self.live) {
                     (Some(id), Some(live)) => match live.store.message(id) {
-                        Ok(message) => Some(message.body_text),
+                        Ok(message) => Some(lagom_core::mime::readable_text(&message.body_text, message.body_html.as_deref()).into_owned()),
                         Err(e) => { self.notify(format!("Could not read message: {e}"), cx); return; }
                     },
                     _ => m.map(|m| m.body.join("\n\n")),
