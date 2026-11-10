@@ -57,8 +57,20 @@ fn header_value(value: &str) -> Result<()> {
     }
 }
 pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
+    compose_message(account, outgoing, None)
+}
+
+pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, token: &str) -> Result<Vec<u8>> {
+    let (in_reply_to, references) = draft.reply.clone().unwrap_or_default();
+    let outgoing = Outgoing { subject: draft.subject.clone(), text: draft.text.clone(),
+        attachments: draft.attachments.clone(), in_reply_to, references, message_id: Some(format!("<{token}@draft.lagommail.app>")),
+        ..Default::default() };
+    Ok(compose_message(account, &outgoing, Some(draft))?.formatted())
+}
+
+fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>) -> Result<Message> {
     account.validate()?;
-    if outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
+    if draft.is_none() && outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
         return Err(Error::Invalid("at least one recipient required"));
     }
     header_value(&outgoing.subject)?;
@@ -81,6 +93,27 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
         .from(from)
         .subject(&outgoing.subject)
         .message_id(Some(id));
+    if let Some(draft) = draft {
+        // Drafts can have no recipients or unfinished addresses; the envelope is never submitted.
+        message = message.keep_bcc().envelope(lettre::address::Envelope::new(None, vec![account.email.parse()
+            .map_err(|_| Error::Invalid("invalid sender address"))?])
+            .map_err(|_| Error::Invalid("invalid draft envelope"))?);
+        for (name, value) in [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)] {
+            header_value(value)?;
+            if !value.is_empty() {
+                message = if let Ok(mailboxes) = value.parse::<lettre::message::Mailboxes>() {
+                    match name {
+                        "To" => message.header(header::To::from(mailboxes)),
+                        "Cc" => message.header(header::Cc::from(mailboxes)),
+                        _ => message.header(header::Bcc::from(mailboxes)),
+                    }
+                } else {
+                    // Unfinished input is kept as text, after rejecting header control characters.
+                    message.raw_header(header::HeaderValue::new(header::HeaderName::new_from_ascii_str(name), value.clone()))
+                };
+            }
+        }
+    }
     for to in &outgoing.to {
         message = message.to(mailbox(to)?);
     }
@@ -353,6 +386,28 @@ mod tests {
         assert!(wire.contains("text/html"));
         (parsed.body_text(0).unwrap().replace("\r\n", "\n"), parsed.body_html(0).map(|h| h.replace("\r\n", "\n")))
     }
+    #[test]
+    fn draft_recipient_fallback_keeps_unfinished_text_and_rejects_injection() {
+        let mut draft = crate::outbox::Draft::default();
+        for value in ["unfinished address", "Tëam <unfinished"] {
+            draft.to = value.into();
+            draft.cc = value.into();
+            draft.bcc = value.into();
+            let raw = compose_draft(&account(), &draft, "fixture").unwrap();
+            let parsed = mail_parser::MessageParser::default()
+                .header("To", mail_parser::HeaderForm::Text).header("Cc", mail_parser::HeaderForm::Text)
+                .header("Bcc", mail_parser::HeaderForm::Text).parse(&raw).unwrap();
+            for name in ["To", "Cc", "Bcc"] {
+                assert_eq!(parsed.headers().get(name).unwrap().value().as_text(), Some(value));
+            }
+        }
+        for field in 0..3 {
+            let mut draft = crate::outbox::Draft::default();
+            [&mut draft.to, &mut draft.cc, &mut draft.bcc][field].push_str("unfinished\r\nX-Injected: yes");
+            assert!(compose_draft(&account(), &draft, "fixture").is_err());
+        }
+    }
+
     #[test]
     fn attachments_survive_mime_encoding_with_plain_and_markdown_bodies() {
         for text in ["Body", "**Body**\n\n> Forwarded message"] {

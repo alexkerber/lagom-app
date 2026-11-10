@@ -40,11 +40,11 @@ impl From<MailServer> for ServerConfig {
     }
 }
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
-pub enum Mailbox { Inbox, Later, Done, Sent }
+pub enum Mailbox { Inbox, Later, Done, Sent, Trash }
 impl Mailbox {
     fn role(self) -> Option<FolderRole> { match self {
         Self::Inbox => Some(FolderRole::Inbox), Self::Later => None,
-        Self::Done => Some(FolderRole::Archive), Self::Sent => Some(FolderRole::Sent),
+        Self::Done => Some(FolderRole::Archive), Self::Sent => Some(FolderRole::Sent), Self::Trash => Some(FolderRole::Trash),
     } }
 }
 #[derive(Clone, Debug, uniffi::Record)]
@@ -348,6 +348,8 @@ pub fn tomorrow_at_eight() -> Result<i64> {
         .ok_or_else(|| failure("tomorrow is outside the calendar range"))?;
     Local.from_local_datetime(&tomorrow).earliest().map(|t| t.timestamp()).ok_or_else(|| failure("08:00 does not exist in the local time zone"))
 }
+
+mod planner;
 
 #[cfg(test)]
 mod tests;

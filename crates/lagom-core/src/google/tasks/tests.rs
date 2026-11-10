@@ -260,7 +260,7 @@ fn v10_migration_keeps_local_data_and_marks_lists_for_sync() {
     assert_eq!((task.title.as_str(), task.notes.as_str(), task.updated, task.created), ("Keep", "Notes", 42, 41));
     assert_eq!(store.task_lists().unwrap().len(), 2);
     assert_eq!(store.db.query_row("SELECT count(*) FROM task_lists WHERE dirty=1 AND deleted=0", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 16);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 17);
     assert_eq!(store.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none(), true);
 }
 

@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum MailboxChoice: String, CaseIterable, Identifiable {
-    case inbox = "Inbox", later = "Later", done = "Done", sent = "Sent"
+    case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", trash = "Trash"
     var id: String { rawValue }
     var mailbox: Mailbox {
         switch self {
@@ -10,6 +10,7 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
         case .later: .later
         case .done: .done
         case .sent: .sent
+        case .trash: .trash
         }
     }
     var symbol: String {
@@ -18,6 +19,7 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
         case .later: "clock"
         case .done: "checkmark"
         case .sent: "paperplane"
+        case .trash: "trash"
         }
     }
 }
@@ -82,8 +84,7 @@ final class MailModel {
     func start() async {
         guard core == nil else { return }
         do {
-            let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                .appendingPathComponent("Lagom", isDirectory: true)
+            let directory = try Storage.directory()
             #if os(iOS)
             // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.
             let files = FileManager.default
@@ -178,7 +179,7 @@ final class MailModel {
     }
 
     func sync() async {
-        guard let core else { return }
+        guard let core, !Storage.demo else { return }
         if syncing { syncAgain = true; return }
         syncing = true
         defer { syncing = false }
