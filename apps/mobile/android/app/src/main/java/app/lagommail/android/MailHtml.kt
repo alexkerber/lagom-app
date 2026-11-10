@@ -25,13 +25,13 @@ internal fun externalMailLink(url: String): Boolean = try {
 } catch (_: Exception) { false }
 
 internal suspend fun prepareMailDocument(
-    html: String, dark: Boolean, render: (String, Boolean) -> String = ::mailDocument,
-): String = withContext(Dispatchers.Default) { render(html, dark) }
+    html: String, dark: Boolean, messageId: Long, render: (String, Boolean, Long, Boolean) -> String = ::mailDocument,
+): String = withContext(Dispatchers.Default) { render(html, dark, messageId, false) }
 
 @Composable internal fun MailHtml(messageId: Long, html: String) {
     val dark = isSystemInDarkTheme()
     val prepared by key(messageId, html, dark) {
-        produceState<String?>(null) { value = prepareMailDocument(html, dark) }
+        produceState<String?>(null) { value = prepareMailDocument(html, dark, messageId) }
     }
     val document = prepared ?: run { Text("Loading message…"); return }
     AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->

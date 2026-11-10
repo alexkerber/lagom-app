@@ -182,12 +182,7 @@ impl LaterWhen {
     }
 }
 
-/// A safe FTS5 expression for what the user typed: every word quoted, the last one as a prefix.
-pub fn fts_query(q: &str) -> Option<String> {
-    let words: Vec<String> = q.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', "\"\""))).collect();
-    let last = words.len().checked_sub(1)?;
-    Some(words.iter().enumerate().map(|(i, w)| if i == last { format!("{w}*") } else { w.clone() }).collect::<Vec<_>>().join(" "))
-}
+pub use lagom_core::store::fts_query;
 
 pub use lagom_core::compose::{ComposeKind, reply_subject, forward_subject, reply_all};
 

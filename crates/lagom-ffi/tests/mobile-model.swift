@@ -1,9 +1,12 @@
 import Foundation
 
-final class FixtureCore: LagomCore, @unchecked Sendable {
+@MainActor final class FixtureCore: LagomCore, @unchecked Sendable {
     var deadline: Int64?
     var reads = 0
     var syncs = 0
+    var suspendDone = false
+    var doneContinuation: CheckedContinuation<Void, Error>?
+    var flags: [Int64] = []
     var mail = (1...650).map { id in
         MailRow(id: Int64(id), account: "fixture", senderName: "Sender", senderAddress: "sender@example.test", subject: "Mail", preview: "", dateUnix: Int64(id), unread: true, hasAttachments: false)
     }
@@ -20,10 +23,14 @@ final class FixtureCore: LagomCore, @unchecked Sendable {
         MailMessage(row: mail.first { $0.id == id }!, textBody: "body", htmlBody: nil, attachments: [])
     }
     override func markRead(id: Int64, read: Bool) async throws {
+        flags.append(id)
         let index = mail.firstIndex { $0.id == id }!
         mail[index].unread = !read
     }
-    override func done(ids: [Int64]) async throws { mail.removeAll { ids.contains($0.id) } }
+    override func done(ids: [Int64]) async throws {
+        if suspendDone { try await withCheckedThrowingContinuation { doneContinuation = $0 } }
+        mail.removeAll { ids.contains($0.id) }
+    }
     override func nextSnooze() async throws -> Int64? {
         guard let deadline, Double(deadline) > Date().timeIntervalSince1970 else { return nil }
         return deadline
@@ -38,6 +45,7 @@ struct ModelChecks {
             await wake()
             return
         }
+        await openingDuringArchive()
         let core = FixtureCore(noHandle: .init())
         let model = MailModel()
         model.core = core
@@ -65,6 +73,31 @@ struct ModelChecks {
         await model.changeScope()
         precondition(model.rows.isEmpty && !model.hasMore)
         print("MailModel: pagination regression passed")
+    }
+
+    @MainActor static func openingDuringArchive() async {
+        for rejected in [false, true] {
+            let core = FixtureCore(noHandle: .init())
+            core.suspendDone = true
+            let model = MailModel()
+            model.core = core
+            let pending = Task { await model.act(.done, id: 1) }
+            while core.doneContinuation == nil { await Task.yield() }
+            await model.setRead(id: 1, read: true)
+            precondition(core.flags.isEmpty, "the archived message must remain guarded")
+            model.selectedID = 2
+            await model.select(2)
+            precondition(core.flags == [2], "opening another message dropped its read update")
+            precondition(model.message?.row.unread == false && model.rows[1].unread == false)
+            precondition(core.mail[1].unread == false && model.working)
+            if rejected { core.doneContinuation?.resume(throwing: MailError.Failed(reason: "archive refused")) }
+            else { core.doneContinuation?.resume() }
+            await pending.value
+            precondition(!model.working && model.selectedID == 2 && model.message?.row.id == 2)
+            precondition(model.message?.row.unread == false && model.rows.first { $0.id == 2 }?.unread == false)
+            precondition((model.error != nil) == rejected)
+        }
+        print("MailModel: opening during archive regression passed (success and failure)")
     }
 
     @MainActor static func wake() async {

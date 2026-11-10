@@ -241,8 +241,8 @@ fn local_later_is_tomorrow_at_eight() {
 fn html_privacy_and_recipients_share_core_policy() {
     let html = "<LINK rel=preconnect href='https://tracker.example'><img src='https://tracker.example/pixel'><script>fetch('/secret')</script><iframe srcdoc='&lt;link rel=preconnect href=https://tracker.example&gt;'></iframe><object data='https://tracker.example'></object><embed src='https://tracker.example'><frame src='https://tracker.example'>";
     for dark in [false, true] {
-        let document = mail_document(html.into(), dark);
-        assert!(document.contains("default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
+        let document = mail_document(html.into(), dark, 42, false);
+        assert!(document.contains("default-src 'none'; img-src data: lagom-cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
         assert!(document.find("Content-Security-Policy").unwrap() < document.find("<img").unwrap());
         assert!(document.contains("<x-LINK"));
         assert!(!document.contains("<LINK"));
@@ -607,5 +607,144 @@ async fn forward_fetches_only_missing_parts_and_reuses_the_cache() {
             assert_eq!(draft.attachments[1].data, b"\0\xffhi");
         }
         server.await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn inline_resources_are_scoped_to_the_open_message() {
+    use lagom_core::inline::url;
+    let (dir, core) = fixture();
+    let (first, second) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let b = fixture_account(&s, "b@example.test", 1);
+        (mail(&mut s, &a, 1, 1), mail(&mut s, &b, 1, 2))
+    };
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    for (id, bytes) in [(first, b"first".as_slice()), (second, b"second".as_slice())] {
+        db.execute("INSERT INTO inline_parts VALUES (?1,'same','image/png',?2)", rusqlite::params![id, bytes]).unwrap();
+        db.execute("UPDATE messages SET inline_loaded=1 WHERE id=?1", [id]).unwrap();
+        core.load_inline(id).await.unwrap();
+        let resource = core.inline_resource(id, url(id, "same", false)).await.unwrap();
+        assert_eq!(resource.data, bytes);
+        assert_eq!(resource.mime_type, "image/png");
+    }
+    db.execute("INSERT INTO inline_parts VALUES (?1,'private','image/png',?2)", rusqlite::params![second, b"private".as_slice()]).unwrap();
+    for request in [url(second, "same", false), url(first, "private", false), url(second, "private", false), url(first, "missing", false),
+        format!("{}?other=1", url(first, "same", false)), "lagom-cid://evil/1/c2FtZQ".into(),
+        "file:///1/c2FtZQ".into(), "https://example.test/pixel".into()] {
+        assert!(core.inline_resource(first, request).await.is_err());
+    }
+    assert!(core.inline_resource(-1, url(first, "same", false)).await.is_err());
+    assert!(core.load_inline(-1).await.is_err());
+    core.stores.local.lock().unwrap().delete_message(first).unwrap();
+    assert!(core.inline_resource(first, url(first, "same", false)).await.is_err());
+}
+
+#[tokio::test]
+async fn inline_resource_reads_only_the_requested_blob() {
+    use lagom_core::inline::url;
+    let (dir, core) = fixture();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", 1);
+        mail(&mut s, &a, 1, 1)
+    };
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<1023)
+        INSERT INTO inline_parts SELECT ?1, CAST(n AS TEXT), 'image/png', zeroblob(10240) FROM ids", [id]).unwrap();
+    // Evaluating any unrelated BLOB fails deterministically instead of timing cache amplification.
+    db.execute_batch("ALTER TABLE inline_parts RENAME TO cached_parts;
+        CREATE VIEW inline_parts AS SELECT message,cid,mime_type,
+        CASE WHEN cid='0' THEN data ELSE abs(-9223372036854775808) END AS data FROM cached_parts;").unwrap();
+    for windows in [false, true] {
+        let resource = core.inline_resource(id, url(id, "0", windows)).await.unwrap();
+        assert_eq!(resource.mime_type, "image/png");
+        assert_eq!(resource.data, vec![0; 10240]);
+    }
+    for request in [url(id + 1, "0", false), url(id, "missing", false),
+        format!("{}?query=1", url(id, "0", false)), "https://example.test/pixel".into()] {
+        assert_eq!(core.inline_resource(id, request).await.unwrap_err().to_string(), "not found");
+    }
+}
+
+#[test]
+fn mobile_document_rewrites_cids_and_only_opts_in_remote_images() {
+    let html = "<img src='cid:logo'><img src='https://example.test/pixel'><link rel=prefetch href='https://example.test'>";
+    for remote in [false, true] {
+        let document = mail_document(html.into(), false, 42, remote);
+        assert!(document.contains(&lagom_core::inline::url(42, "logo", false)));
+        assert!(!document.contains("src='cid:logo'"));
+        assert!(document.contains(&lagom_core::html::csp(remote, "lagom-cid:")));
+        assert_eq!(document.contains("lagom-cid: https: http:"), remote);
+        assert!(document.contains("<x-link"));
+    }
+}
+
+#[tokio::test]
+async fn unified_search_uses_desktop_prefixes_and_pages_across_accounts() {
+    let (_dir, core) = fixture();
+    let (a, first, second, snoozed) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let b = fixture_account(&s, "b@example.test", 1);
+        let first = mail(&mut s, &a, 1, 30);
+        let second = mail(&mut s, &b, 1, 20);
+        let snoozed = mail(&mut s, &a, 2, 10);
+        s.snooze(snoozed, Some(now() + 3600)).unwrap();
+        (a, first, second, snoozed)
+    };
+    assert_eq!(core.search(None, "hel".into(), 1, 0).await.unwrap()[0].id, first);
+    assert_eq!(core.search(None, "hello".into(), 1, 1).await.unwrap()[0].id, second);
+    assert!(core.search(None, "hello".into(), 1, 2).await.unwrap().is_empty());
+    assert_eq!(core.search(Some(a.id), "line on".into(), 100, 0).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [first]);
+    for query in ["", "   ", "no-match", "\" OR nonsense"] {
+        assert!(core.search(None, query.into(), 100, 0).await.unwrap().is_empty());
+    }
+    assert!(core.search(None, "hello".into(), 501, 0).await.is_err());
+    assert!(core.search(None, "a".repeat(4097), 100, 0).await.is_err());
+    assert!(core.search(Some("missing".into()), "hello".into(), 100, 0).await.is_err());
+    core.stores.local.lock().unwrap().snooze(snoozed, None).unwrap();
+    assert_eq!(core.search(None, "hello".into(), 100, 0).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn inline_loading_fetches_legacy_mail_and_reuses_cache() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (dir, core) = fixture();
+        let id = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+            mail(&mut s, &a, 1, 1)
+        };
+        // HTML without CID references needs no network, even before the cache was classified.
+        core.load_inline(id).await.unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+        db.execute("UPDATE messages SET body_html='<img src=\"cid:logo\">' WHERE id=?1", [id]).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n" }
+                else if cmd == "UID FETCH 1 (UID BODYSTRUCTURE)" {
+                    "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 20 1)(\"IMAGE\" \"PNG\" NIL \"<logo>\" NIL \"BASE64\" 8) \"RELATED\"))\r\n"
+                } else if cmd == "UID FETCH 1 (UID BODY.PEEK[2])" { "* 1 FETCH (UID 1 BODY[2] {8}\r\nAP9oaQ==)\r\n" }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+        core.load_inline(id).await.unwrap();
+        server.await.unwrap();
+        core.load_inline(id).await.unwrap();
+        assert_eq!(core.inline_resource(id, lagom_core::inline::url(id, "logo", false)).await.unwrap().data, b"\0\xffhi");
     }).await.unwrap();
 }

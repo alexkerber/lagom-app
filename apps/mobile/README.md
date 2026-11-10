@@ -106,12 +106,23 @@ xcrun simctl launch <your-simulator-udid> com.alexkerber.lagom -LagomDemo -lagom
 ```
 
 HTML uses a nonpersistent WKWebView, JavaScript disabled, and the same CSP and
-resource-hint blocking policy as desktop. Remote images remain blocked; a
+resource-hint blocking policy as desktop. A message-scoped `WKURLSchemeHandler`
+serves only that message's cached CID parts through `lagom-cid`; Rust rewrites and
+resolves their URLs with the desktop inline module. Older cached mail fetches missing
+inline parts through core on open. Remote images stay blocked until “Load images”
+is tapped for the open message; switching messages resets that permission. A
 plain-text toggle is available. Attachment metadata is displayed; opening
 attachments and picking new files are outside this slice. Compose text is held in the sheet until Send;
 draft autosave/restoration is not implemented. Push and background fetch are outside both
 mobile slices; Android has no calendar or todos yet. iOS cannot create events or edit task
 titles and due dates after creation yet.
+
+Search in the mail list uses core's full-text index and desktop's quoted-word,
+last-word prefix matching. “All accounts” searches the unified cache; choosing an
+account limits the search to it. Results include all cached folders, omit snoozed
+mail until due, and page in core's index order. Clearing search restores the chosen
+mailbox. A row's context menu and the message toolbar offer Mark read/Mark unread;
+server refusal preserves confirmed flags and shows an error.
 
 ## Verify without opening an app
 
@@ -131,14 +142,16 @@ creation, durable replies, recovery and shared HTML privacy policy. Existing
 GreenMail tests remain opt-in. `LagomTests` is a hostless XCTest bundle: it compiles
 the model, presentation and bindings directly, so it never launches the mail app or opens its store. Its
 network-free tests cover mapping plus reply/forward preparation, stale selection,
-duplicate actions, preserved edits, Cc, attachments and enqueue failures using a
-fake core, plus list dates, date groups, due chips, stored page names and the
+duplicate actions, preserved edits, Cc, attachments and enqueue failures, search paging, stale results, per-message image permission,
+inline completion/failure and confirmed read/unread state using a fake core, plus list dates, date groups, due chips, stored page names and the
 Today/Todo model (blank titles, local due days, completion) against a fake core. `build-for-testing` only compiles tests. Execute them with
 `xcodebuild test-without-building` on a disposable simulator you create, targeting
 only its UDID, then delete that simulator. Never target someone else's device.
 Rust fixtures additionally cover reply-all identities, quoted originals, signatures,
 thread headers, durable attachment enqueue, cache reuse, loopback fetches and
-attachment failures.
+attachment failures. CID fixtures additionally cover lazy fetching, cache reuse,
+forged cross-message URLs and opt-in CSP; search fixtures cover unified/account
+scope, prefixes, paging, empty input and snooze visibility.
 
 The generated Swift async boundary can also be checked on the host without
 XCTest, an app or a simulator (run the Apple generation and workspace build first):
@@ -151,7 +164,7 @@ xcrun swiftc apps/mobile/apple/Generated/LagomCore.swift \
   -lresolv -liconv -o target/mobile-swift-smoke
 target/mobile-swift-smoke
 xcrun swiftc apps/mobile/apple/Generated/LagomCore.swift \
-  apps/mobile/apple/Sources/MailModel.swift crates/lagom-ffi/tests/mobile-model.swift \
+  apps/mobile/apple/Sources/MailModel.swift apps/mobile/apple/Sources/Demo.swift crates/lagom-ffi/tests/mobile-model.swift \
   -I apps/mobile/apple/Generated/LagomFFI.xcframework/ios-arm64/Headers \
   -L target/debug -llagom_ffi -framework Security -framework SystemConfiguration \
   -lresolv -liconv -o target/mobile-model-tests
@@ -160,8 +173,8 @@ target/mobile-model-tests --wake
 ```
 
 This checks seven fixture-only FFI contracts, including the Swift/Tokio async
-bridge and readable errors, plus two MailModel regressions for retained pages
-and foreground snooze deadlines using a fake core. Rust fixtures also verify
+bridge and readable errors, plus MailModel regressions for retained pages,
+opening during archive and foreground snooze deadlines using a fake core. Rust fixtures also verify
 local access during a stalled sync, Done on snoozed archived mail and the earliest
 snooze across accounts. These checks never use real accounts or keychains. Native
 layout, navigation, gestures, WKWebView behavior, Dynamic Type and signed-device
@@ -242,10 +255,12 @@ run. These commands never start, stop, wipe or install on any device or emulator
 
 ## Remaining daily-mail work
 
-This slice stops after Reply, Reply all and Forward. Message-scoped CID rendering
-and opt-in remote images, draft autosave/restoration and discard, unified search,
-and explicit read/unread actions remain queued in that order. Sending still saves
-to the outbox durably; closing an unsent composer still loses its text.
+Reply/Reply all/Forward, message-scoped CID rendering with opt-in remote images,
+unified search and explicit read/unread actions are implemented. Draft
+autosave/restoration and discard remain separate work while server draft sync
+lands. Sending still saves to the outbox durably; closing an unsent composer still
+loses its text. Native layout, gestures and WKWebView privacy acceptance remain
+manual follow-up; no GUI acceptance is claimed by fixture tests or generic builds.
 
 ## TestFlight
 

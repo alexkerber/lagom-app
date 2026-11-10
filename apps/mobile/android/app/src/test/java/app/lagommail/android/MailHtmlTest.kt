@@ -10,10 +10,12 @@ class MailHtmlTest {
     @Test fun largeDocumentIsPreparedOffTheCallerThread() = runBlocking {
         val caller = Thread.currentThread()
         val html = "x".repeat(4 * 1024 * 1024)
-        val result = prepareMailDocument(html, true) { body, dark ->
+        val result = prepareMailDocument(html, true, 42) { body, dark, messageId, remote ->
             assertNotSame(caller, Thread.currentThread())
             assertSame(html, body)
             assertTrue(dark)
+            assertEquals(42L, messageId)
+            assertFalse(remote)
             "prepared"
         }
         assertEquals("prepared", result)
@@ -25,7 +27,7 @@ class MailHtmlTest {
         val release = CountDownLatch(1)
         var published: String? = null
         val job = launch {
-            published = prepareMailDocument("old message", false) { _, _ ->
+            published = prepareMailDocument("old message", false, 43) { _, _, _, _ ->
                 started.countDown()
                 check(release.await(5, TimeUnit.SECONDS))
                 "old document"

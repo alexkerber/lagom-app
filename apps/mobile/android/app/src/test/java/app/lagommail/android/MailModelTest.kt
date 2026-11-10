@@ -221,6 +221,9 @@ class MailModelTest {
 }
 
 private class FakeCore : LagomCoreInterface {
+    override suspend fun inlineResource(id: Long, request: String): InlineResource = error("unused")
+    override suspend fun loadInline(id: Long): Unit = error("unused")
+    override suspend fun search(accountId: String?, query: String, limit: UInt, offset: UInt): List<MailRow> = error("unused")
     // Planner screens are iOS-only so far; the mail model never calls these.
     override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo = error("unused")
     override suspend fun addTodoList(name: String): TodoList = error("unused")

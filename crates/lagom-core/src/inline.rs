@@ -1,6 +1,6 @@
 use crate::{Error, Result, store::Store};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 pub const MAX_INLINE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -188,12 +188,26 @@ pub fn rewrite(html: &str, message: i64, windows: bool) -> String {
 
 /// Only the current document's parts are available, including for forged protocol URLs.
 pub fn resolve<'a>(message: i64, parts: &'a [InlinePart], request: &str) -> Option<&'a InlinePart> {
-    parts.iter().find(|p| request == url(message, &p.cid, false) || request == url(message, &p.cid, true))
+    let cid = request_id(message, request)?;
+    parts.iter().find(|p| p.cid == cid)
+}
+
+fn request_id(message: i64, request: &str) -> Option<String> {
+    let encoded = request.strip_prefix(&url(message, "", false))
+        .or_else(|| request.strip_prefix(&url(message, "", true)))?;
+    String::from_utf8(URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()
 }
 
 impl Store {
     pub fn inline_loaded(&self, message: i64) -> Result<bool> {
         Ok(self.db.query_row("SELECT inline_loaded FROM messages WHERE id=?1", [message], |r| r.get(0))?)
+    }
+
+    pub fn inline_resource(&self, message: i64, request: &str) -> Result<InlinePart> {
+        let cid = request_id(message, request).ok_or(Error::NotFound)?;
+        self.db.query_row("SELECT mime_type,data FROM inline_parts WHERE message=?1 AND cid=?2",
+            params![message, cid], |r| Ok(InlinePart { cid: cid.clone(), mime_type: r.get(0)?, data: r.get(1)? }))
+            .optional()?.ok_or(Error::NotFound)
     }
 
     pub fn inline_parts(&self, message: i64) -> Result<Vec<InlinePart>> {
@@ -306,6 +320,25 @@ mod tests {
         }
         for uri in ["lagom-cid://evil/42/bG9nb0B0ZXN0", "lagom-cid://localhost/43/../42/bG9nb0B0ZXN0", "file:///42/bG9nb0B0ZXN0"] {
             assert!(resolve(42, &parts, uri).is_none());
+        }
+    }
+
+    #[test]
+    fn request_ids_require_exact_message_origin_and_encoding() {
+        for cid in ["logo@test", "café/+?&#", "a", ""] {
+            for windows in [false, true] {
+                let request = url(42, cid, windows);
+                assert_eq!(request_id(42, &request).as_deref(), Some(cid));
+                assert!(request_id(43, &request).is_none());
+                for suffix in ["=", "/", "?q=1", "#fragment"] {
+                    assert!(request_id(42, &format!("{request}{suffix}")).is_none());
+                }
+            }
+        }
+        for request in ["lagom-cid://localhost/042/YQ", "lagom-cid://localhost/42/YR",
+            "lagom-cid://localhost/42/_w", "lagom-cid://evil/42/YQ",
+            "https://lagom-cid.localhost/42/YQ", "lagom-cid://localhost/43/../42/YQ"] {
+            assert!(request_id(42, request).is_none());
         }
     }
 
