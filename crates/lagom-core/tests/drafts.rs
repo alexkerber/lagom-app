@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[derive(Default)]
 struct Mailbox {
     messages: BTreeMap<u32, (Vec<u8>, bool)>,
+    flags: BTreeMap<u32, String>,
     next: u32,
     validity: u32,
     appends: usize,
@@ -91,7 +92,7 @@ impl Fixture {
                         } else if command.starts_with("UID FETCH ") {
                             assert!(command.ends_with("(UID FLAGS BODY.PEEK[])"));
                             let uid = command.split_whitespace().nth(2).unwrap().parse::<u32>().unwrap();
-                            state.messages.get(&uid).map(|(raw, deleted)| format!("* 1 FETCH (UID {uid} FLAGS ({}) BODY[] {{{}}}\r\n{})\r\n", if *deleted { "\\Draft \\Deleted" } else { "\\Draft" }, raw.len(), String::from_utf8_lossy(raw))).unwrap_or_default()
+                            state.messages.get(&uid).map(|(raw, deleted)| format!("* 1 FETCH (UID {uid} FLAGS ({}{}) BODY[] {{{}}}\r\n{})\r\n", state.flags.get(&uid).map_or("\\Draft", String::as_str), if *deleted { " \\Deleted" } else { "" }, raw.len(), String::from_utf8_lossy(raw))).unwrap_or_default()
                         } else if command.starts_with("UID STORE ") {
                             assert!(command.ends_with("+FLAGS.SILENT (\\Deleted)"));
                             let uid = command.split_whitespace().nth(2).unwrap().parse::<u32>().unwrap();
@@ -410,6 +411,63 @@ async fn edits_send_and_discard_during_append_cannot_be_overwritten_or_resurrect
             assert!(f.mailbox.lock().unwrap().visible().is_empty());
             if action == "send" { assert_eq!(f.store.pending(&id).unwrap().mail.text, "newer local text"); }
         }
+        imap.logout().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn imported_inline_media_survives_edit_and_replacement() {
+    let mut f = Fixture::new().await;
+    let raw = b"Subject: Inline photo\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\nPhoto below\r\n--x\r\nContent-Type: image/png; name=photo.png\r\nContent-Disposition: inline; filename=photo.png\r\nContent-Transfer-Encoding: base64\r\n\r\nAAEC/w==\r\n--x\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=data.bin\r\nContent-Transfer-Encoding: base64\r\n\r\nAwQF\r\n--x--\r\n";
+    f.mailbox.lock().unwrap().insert(raw.to_vec());
+    let mut imap = f.connect().await;
+    f.read(&mut imap).await;
+    let mut draft = f.store.drafts().unwrap().remove(0);
+    assert_eq!(draft.attachments.len(), 2);
+    let photo = draft.attachments.iter().find(|a| a.filename == "photo.png").unwrap();
+    assert_eq!(photo.mime_type, "image/png");
+    assert_eq!(photo.data, [0, 1, 2, 255]);
+    draft.text = "Edited text".into();
+    f.store.save_draft(&draft).unwrap();
+    imap.sync_draft(&mut f.store, &draft.id, 0).await.unwrap();
+    {
+        let state = f.mailbox.lock().unwrap();
+        assert_eq!(state.deletions, [1]);
+        assert_eq!(state.visible().len(), 1);
+        let parsed = mail_parser::MessageParser::default().parse(state.visible()[0]).unwrap();
+        let attachments: Vec<_> = parsed.attachments().collect();
+        assert_eq!(attachments.len(), 2);
+        let photo = attachments.iter().find(|a| a.attachment_name() == Some("photo.png")).unwrap();
+        assert_eq!(photo.decoded().as_ref(), &[0, 1, 2, 255]);
+        assert_eq!(attachments.iter().find(|a| a.attachment_name() == Some("data.bin")).unwrap().decoded().as_ref(), &[3, 4, 5]);
+    }
+    imap.logout().await.unwrap();
+}
+
+#[tokio::test]
+async fn foreign_drafts_without_draft_flag_are_replaced_and_discarded() {
+    for update in [false, true] {
+        let mut f = Fixture::new().await;
+        {
+            let mut state = f.mailbox.lock().unwrap();
+            let uid = state.insert(b"Subject: Foreign\r\n\r\nOriginal text".to_vec());
+            state.flags.insert(uid, "\\Seen".into());
+        }
+        let mut imap = f.connect().await;
+        f.read(&mut imap).await;
+        let mut draft = f.store.drafts().unwrap().remove(0);
+        if update {
+            draft.text = "Edited text".into();
+            f.store.save_draft(&draft).unwrap();
+        } else {
+            f.store.delete_draft(&draft.id).unwrap();
+        }
+        imap.sync_draft(&mut f.store, &draft.id, 0).await.unwrap();
+        assert_eq!(f.mailbox.lock().unwrap().deletions, [1]);
+        assert_eq!(f.mailbox.lock().unwrap().visible().len(), usize::from(update));
+        f.read(&mut imap).await;
+        assert_eq!(f.store.drafts().unwrap().len(), usize::from(update));
+        if update { assert_eq!(f.store.draft(&draft.id).unwrap().text, "Edited text"); }
         imap.logout().await.unwrap();
     }
 }

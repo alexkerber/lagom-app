@@ -110,7 +110,7 @@ impl ImapSync {
             if let Some(folder) = folder {
                 let (folder, _) = self.select(store, folder.id).await?;
                 if folder.uidvalidity == Some(copy.validity) {
-                    if let Some((raw, _, true)) = self.draft_raw(copy.uid).await? {
+                    if let Some((raw, _, _)) = self.draft_raw(copy.uid).await? {
                         // IMAP bodies are immutable per UID; a changed body or validity is another copy.
                         if fingerprint(&raw) == copy.hash {
                             net(self.session.run_command_and_check_ok(format!("UID STORE {} +FLAGS.SILENT (\\Deleted)", copy.uid))).await?;

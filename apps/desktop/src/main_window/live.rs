@@ -2462,7 +2462,13 @@ mod tests {
         assert!(cx.debug_bounds(selector).is_some(), "Tasks status belongs on Todo");
         view.update_in(cx, |v, window, cx| v.show_home(window, cx));
         cx.run_until_parked();
-        assert!(cx.debug_bounds(selector).is_none(), "Home keeps its calendar status");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Home)));
+        // GPUI retains debug selectors across frames; check absence in a fresh test window.
+        let home = cx.cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone()).unwrap());
+        let mut home = VisualTestContext::from_window(home.into(), cx);
+        home.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(home.debug_bounds("home-tasks").is_some());
+        assert!(home.debug_bounds(selector).is_none(), "Home keeps its calendar status");
     }
 
     #[gpui::test]
@@ -4517,6 +4523,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn draft_summary_reload_yields_with_large_attachments(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            for index in 0..5 {
+                store.save_draft(&lagom_core::outbox::Draft {
+                    id: format!("<large-{index}@example.com>"), account: v.live.as_ref().unwrap().accounts[0].id.clone(),
+                    subject: format!("Draft {index}"), attachments: vec![lagom_core::smtp::OutgoingAttachment {
+                        filename: "large.bin".into(), mime_type: "application/octet-stream".into(), data: vec![255; 5 * 1024 * 1024],
+                    }], ..Default::default()
+                }).unwrap();
+            }
+            let started = Instant::now();
+            v.reload(cx);
+            eprintln!("draft reload returned in {:?}", started.elapsed());
+            assert!(v.draft_rows.is_empty(), "summary reads must yield to the UI executor");
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.draft_rows.len()), 5);
+        view.update(cx, |v, cx| {
+            v.reload_draft_rows(cx);
+            let store = &v.live.as_ref().unwrap().store;
+            for row in &v.draft_rows { store.delete_draft(&row.id).unwrap(); }
+            v.reload_draft_rows(cx);
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.draft_rows.is_empty()), "the latest reload must win");
+    }
+
+    #[gpui::test]
     fn drafts_view_opens_foreign_bcc_and_reuses_unsaved_compose(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let id = "<foreign@example.com>";
@@ -4532,7 +4568,10 @@ mod tests {
             assert!(v.drafts.is_empty(), "foreign drafts are opened explicitly");
             v.show_drafts(window, cx);
             assert!(matches!(v.page, Page::Drafts));
-            assert_eq!(v.draft_rows.len(), 1);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.draft_rows.len()), 1);
+        view.update_in(cx, |v, window, cx| {
             v.open_draft(id, window, cx);
             let compose = v.compose.as_ref().unwrap().clone();
             assert_eq!(compose.read(cx).outgoing(cx).bcc, ["private@example.com"]);
@@ -4550,6 +4589,7 @@ mod tests {
             assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx), expected);
         });
         cx.simulate_keystrokes("cmd-backspace");
+        cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.draft_rows.is_empty()));
         assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
     }

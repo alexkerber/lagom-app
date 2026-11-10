@@ -3,10 +3,19 @@ use super::*;
 impl MainWindow {
     pub(super) fn reload_draft_rows(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
-        match live.store.draft_summaries() {
-            Ok(rows) => self.draft_rows = rows,
-            Err(error) => self.notify(format!("Could not read drafts: {error}"), cx),
-        }
+        let path = live.store.path().to_owned();
+        let read = cx.background_executor().spawn(async move { Store::open(path)?.draft_summaries() });
+        self.draft_read = Some(cx.spawn(async move |this, cx| {
+            let result = read.await;
+            this.update(cx, |this, cx| {
+                this.draft_read = None;
+                match result {
+                    Ok(rows) => this.draft_rows = rows,
+                    Err(error) => this.notify(format!("Could not read drafts: {error}"), cx),
+                }
+                cx.notify();
+            }).ok();
+        }));
     }
 
     pub(super) fn show_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {

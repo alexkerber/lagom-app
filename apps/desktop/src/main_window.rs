@@ -286,6 +286,7 @@ pub struct MainWindow {
     // Saved drafts, newest last. R and C reopen the newest.
     drafts: Vec<gpui::Entity<Compose>>,
     draft_rows: Vec<lagom_core::outbox::DraftSummary>,
+    draft_read: Option<Task<()>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
@@ -405,6 +406,7 @@ impl MainWindow {
             compose: None,
             drafts: Vec::new(),
             draft_rows: Vec::new(),
+            draft_read: None,
             sending: Vec::new(),
             live,
             demo,

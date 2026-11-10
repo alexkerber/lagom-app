@@ -18,11 +18,12 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
         // shortcut: foreign HTML becomes text, retain HTML when rich-text editing exists.
         text: parsed.text_bodies().map(|text| text.into_owned()).collect::<Vec<_>>().join("\n"),
         reply,
-        attachments: parsed.attachments().map(|part| crate::smtp::OutgoingAttachment {
-            filename: part.attachment_name().unwrap_or("attachment").into(),
-            mime_type: part.content_type().map(|ty| ty.subtype().map_or_else(|| ty.ctype().to_string(), |sub| format!("{}/{sub}", ty.ctype())))
-                .unwrap_or_else(|| "application/octet-stream".into()), data: part.decoded().into_owned(),
-        }).collect(),
+        attachments: parsed.root().parts().filter(|part| part.is_attachment() || matches!(part.role(), mail_parser::PartRole::MediaBody))
+            .map(|part| crate::smtp::OutgoingAttachment {
+                filename: part.attachment_name().unwrap_or("attachment").into(),
+                mime_type: part.content_type().map(|ty| ty.subtype().map_or_else(|| ty.ctype().to_string(), |sub| format!("{}/{sub}", ty.ctype())))
+                    .unwrap_or_else(|| "application/octet-stream".into()), data: part.decoded().into_owned(),
+            }).collect(),
         ..Default::default()
     })
 }
@@ -63,7 +64,7 @@ impl Store {
         Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM drafts WHERE id=?1)", [id], |r| r.get(0))?)
     }
 
-    /// List refreshes must not decode every draft's attachment bytes.
+    /// JSON extraction still parses attachment arrays, so list refreshes need a worker.
     pub fn draft_summaries(&self) -> Result<Vec<crate::outbox::DraftSummary>> {
         let mut query = self.db.prepare("SELECT id,account,json_extract(content,'$.to'),json_extract(content,'$.subject'),
             substr(json_extract(content,'$.text'),1,800) FROM drafts ORDER BY rowid")?;
