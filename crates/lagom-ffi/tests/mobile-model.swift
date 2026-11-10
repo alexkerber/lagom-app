@@ -90,7 +90,7 @@ struct ModelChecks {
             precondition(core.flags == [2], "opening another message dropped its read update")
             precondition(model.message?.row.unread == false && model.rows[1].unread == false)
             precondition(core.mail[1].unread == false && model.working)
-            if rejected { core.doneContinuation?.resume(throwing: MailError.Failed(message: "archive refused")) }
+            if rejected { core.doneContinuation?.resume(throwing: MailError.Failed(reason: "archive refused")) }
             else { core.doneContinuation?.resume() }
             await pending.value
             precondition(!model.working && model.selectedID == 2 && model.message?.row.id == 2)

@@ -115,6 +115,13 @@ pub(super) fn bind_keys(cx: &mut App) {
 }
 
 impl MainWindow {
+    pub(super) fn close_task_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.today.menu.take().is_none() && self.today.editor.take().is_none() { return false; }
+        window.focus(&self.focus);
+        cx.notify();
+        true
+    }
+
     pub(super) fn reload_tasks(&mut self, cx: &mut Context<Self>) {
         self.reload_agenda(cx);
         self.reload_unread(cx);
@@ -846,6 +853,27 @@ mod tests {
         let row = cx.debug_bounds("task-40").unwrap();
         let viewport = cx.debug_bounds("today-groups").unwrap();
         assert!(row.top() >= viewport.top() && row.bottom() <= viewport.bottom(), "row {row:?}, viewport {viewport:?}, offset {:?}", view.read_with(cx, |v, _| v.today.scroll.offset()));
+    }
+
+    #[gpui::test]
+    fn close_window_cancels_task_editor_without_removing_main(cx: &mut TestAppContext) {
+        cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        cx.run_until_parked();
+        let original = view.read_with(cx, |v, _| v.today.tasks.iter().find(|t| t.id == 2).unwrap().title.clone());
+        let at = cx.debug_bounds("task-menu-2").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.today.menu.is_none()));
+        cx.simulate_click(at, Default::default());
+        cx.simulate_keystrokes("enter secondary-a");
+        cx.simulate_input("Uncommitted title");
+        cx.simulate_keystrokes("secondary-w");
+        view.read_with(cx, |v, _| {
+            assert!(v.today.editor.is_none());
+            assert_eq!(v.today.tasks.iter().find(|t| t.id == 2).unwrap().title, original);
+        });
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
     }
 
     #[gpui::test]

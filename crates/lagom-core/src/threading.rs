@@ -2,15 +2,53 @@ use crate::{store::{MessageSummary, Store, SUMMARY_COLUMNS, VISIBLE_SUMMARY_COLU
 use rusqlite::{params, OptionalExtension};
 use std::collections::BTreeSet;
 
+/// References kept per message; the newest are the direct parents.
+const MAX_REFS: usize = 64;
+
+/// The subject in the stored `subject:` node of mail without IDs. Changing this rule orphans
+/// the `thread_links` rows of existing stores: migrate them first.
+fn stored_subject(subject: &str) -> String {
+    let mut subject = subject.trim().to_lowercase();
+    while let Some(rest) = ["re:", "fw:", "fwd:", "sv:", "vs:", "aw:"].iter().find_map(|p| subject.strip_prefix(p)) {
+        subject = rest.trim().to_string();
+    }
+    subject
+}
+
+/// The subject compared when a known reference claims a thread. Never stored.
+fn normalised_subject(subject: &str) -> String {
+    let lower = subject.trim().to_lowercase();
+    let mut subject = lower.as_str();
+    loop {
+        if let Some((tag, rest)) = subject.strip_prefix('[').and_then(|s| s.split_once(']')) {
+            if !tag.is_empty() && !tag.contains('[') && !rest.trim().is_empty() {
+                subject = rest.trim();
+                continue;
+            }
+        }
+        let Some((prefix, rest)) = subject.split_once([':', '：']) else { break };
+        let prefix = prefix.trim();
+        let prefix = match prefix.strip_suffix(']').and_then(|p| p.split_once('[')) {
+            Some((prefix, count)) if !count.is_empty() && count.bytes().all(|c| c.is_ascii_digit()) => prefix,
+            _ => prefix,
+        };
+        // shortcut: recognise common client prefixes only; add others when supported mail supplies fixtures.
+        if !["re", "fw", "fwd", "sv", "vs", "aw", "antw", "wg", "tr", "rép", "ré", "rif",
+            "r", "i", "rv", "enc", "res", "odp", "pd", "vb", "vl", "videresend", "ynt", "ilt", "i̇lt",
+            "απ", "σχ", "πρθ", "отв", "ответ", "пересл", "відп", "回复", "答复", "转发", "回覆", "轉寄",
+            "返信", "転送", "답장", "전달"].contains(&prefix) { break; }
+        subject = rest.trim();
+    }
+    subject.to_owned()
+}
+
 fn nodes(m: &MessageSummary) -> Vec<String> {
-    let mut ids: BTreeSet<String> = m.thread_refs.split_whitespace()
+    let refs: Vec<_> = m.thread_refs.split_whitespace().collect();
+    let mut ids: BTreeSet<String> = refs[refs.len().saturating_sub(MAX_REFS)..].iter().copied()
         .chain(std::iter::once(m.message_id.as_str()))
         .filter(|id| !id.is_empty()).map(|id| format!("id:{id}")).collect();
     if ids.is_empty() {
-        let mut subject = m.subject.trim().to_lowercase();
-        while let Some(rest) = subject.strip_prefix("re:").or_else(|| subject.strip_prefix("fw:")).or_else(|| subject.strip_prefix("fwd:")) {
-            subject = rest.trim().to_string();
-        }
+        let subject = stored_subject(&m.subject);
         let participants: BTreeSet<_> = [&m.from_address, &m.to, &m.cc].into_iter()
             .flat_map(|s| crate::contacts::split_recipients(s))
             .map(|s| s.parse::<lettre::message::Mailbox>().map_or(s.to_lowercase(), |m| m.email.to_string().to_lowercase())).collect();
@@ -24,24 +62,40 @@ fn nodes(m: &MessageSummary) -> Vec<String> {
 }
 
 impl Store {
+    /// References are claims by the sender: a message joins at most one existing thread, only
+    /// one about the same subject, and never merges threads or moves their links.
     pub(crate) fn resolve_thread(&self, m: &MessageSummary) -> Result<String> {
         let nodes = nodes(m);
-        let mut threads = BTreeSet::new();
+        let subject = normalised_subject(&m.subject);
+        let (mut thread, mut fresh) = (None, None);
         for node in &nodes {
             let known: Option<String> = self.db.query_row("SELECT thread_id FROM thread_links WHERE account=?1 AND node=?2",
                 params![m.account, node], |r| r.get(0)).optional()?;
-            threads.insert(known.unwrap_or_else(|| node.clone()));
+            match known {
+                Some(known) if thread.is_none() && self.same_subject(&m.account, &known, &subject)? => thread = Some(known),
+                Some(_) => {}
+                None => { fresh.get_or_insert_with(|| node.clone()); }
+            }
         }
-        let thread = threads.first().unwrap().clone();
-        for old in threads.iter().filter(|old| **old != thread) {
-            self.db.execute("UPDATE messages SET thread_id=?3 WHERE account=?1 AND thread_id=?2", params![m.account, old, thread])?;
-            self.db.execute("UPDATE thread_links SET thread_id=?3 WHERE account=?1 AND thread_id=?2", params![m.account, old, thread])?;
-        }
+        let thread = thread.or(fresh).unwrap_or_else(|| format!("local:{}:{}", m.folder, m.uid));
         for node in nodes {
-            self.db.execute("INSERT INTO thread_links VALUES (?1,?2,?3) ON CONFLICT(account,node) DO UPDATE SET thread_id=excluded.thread_id",
+            self.db.execute("INSERT INTO thread_links VALUES (?1,?2,?3) ON CONFLICT(account,node) DO NOTHING",
                 params![m.account, node, thread])?;
         }
         Ok(thread)
+    }
+
+    /// True when a message in `thread` has this normalised subject, or the thread has no messages left.
+    fn same_subject(&self, account: &str, thread: &str, subject: &str) -> Result<bool> {
+        let mut stmt = self.db.prepare("SELECT subject FROM messages WHERE account=?1 AND thread_id=?2")?;
+        let mut rows = stmt.query(params![account, thread])?;
+        let mut empty = true;
+        // One row at a time: a thread of large subjects must not be loaded whole.
+        while let Some(row) = rows.next()? {
+            if normalised_subject(&row.get::<_, String>(0)?) == subject { return Ok(true); }
+            empty = false;
+        }
+        Ok(empty)
     }
 
     pub(crate) fn backfill_threads(&self) -> Result<()> {
@@ -256,9 +310,10 @@ mod tests {
             m.summary.account = a.id.clone(); m.summary.folder = f; m.summary.uid = uid; m.summary.date = uid as i64;
             s.save_message(&m).unwrap()
         };
+        // Root arrives last: a parent that arrived after both would have to merge two threads.
         let child = save(1, "Message-ID: <child@test>\r\nReferences: <missing@test>\r\nIn-Reply-To: <parent@test>\r\n");
-        let root = save(2, "Message-ID: <root@test>\r\n");
         let parent = save(3, "Message-ID: <parent@test>\r\nIn-Reply-To: <root@test>\r\n");
+        let root = save(2, "Message-ID: <root@test>\r\n");
         let key = s.message(root).unwrap().summary.thread_id;
         for id in [child, parent] { assert_eq!(s.message(id).unwrap().summary.thread_id, key); }
         let other = save(4, "Message-ID: <other@test>\r\n");
@@ -280,5 +335,75 @@ mod tests {
         fallback.summary.uid = 7; fallback.summary.from_address = "different@example.com".into();
         let three = s.save_message(&fallback).unwrap();
         assert_ne!(s.message(one).unwrap().summary.thread_id, s.message(three).unwrap().summary.thread_id);
+    }
+
+    #[test]
+    fn review_localised_replies_and_list_tags_still_require_the_same_subject() {
+        let (_dir, s, account, folder) = fixture();
+        let save = |uid, subject: &str, refs: &str| {
+            let m = Message { summary: MessageSummary {
+                account: account.clone(), folder, uid, subject: subject.into(),
+                message_id: format!("{uid}@example.com"), thread_refs: refs.into(), ..Default::default()
+            }, ..Default::default() };
+            s.message(s.save_message(&m).unwrap()).unwrap().summary.thread_id
+        };
+        let thread = save(1, "[list] Topic", "");
+        for (i, subject) in [
+            "Antw: Topic", "[list] Re: Topic", "Re: [list] Topic", "Re[2]: Topic",
+            "RE[123]: Fwd: [list] Topic", "SV: AW: VS: Topic", "TR: Topic",
+            "Rép: Topic", "Rif: Topic", "R: Topic", "I: Topic", "RV: Topic", "ENC: Topic",
+            "Res: Topic", "Odp: Topic", "PD: Topic", "WG: Topic", "VB: Topic", "VL: Topic",
+            "VS: Topic", "Videresend: Topic", "Ynt: Topic", "İlt: Topic", "Απ: Topic",
+            "Σχ: Topic", "Πρθ: Topic", "Ответ: Topic", "Пересл: Topic", "Відп: Topic",
+            "回复: Topic", "答复: Topic", "转发: Topic", "回覆： Topic", "轉寄: Topic",
+            "返信: Topic", "転送: Topic", "답장: Topic", "전달: Topic",
+            " [list] [announce] Re[2]: Antw: Topic ",
+        ].iter().enumerate() {
+            assert_eq!(save(i as u32 + 2, subject, "1@example.com"), thread, "{subject}");
+        }
+        for (i, subject) in [
+            "[list] Re[2]: Payroll", "Antw: Statement", "Review: Topic", "Re[x]: Topic",
+            "Re[]: Topic", "[list Topic", "[list]", "Topic [list]", "Unknown: Topic",
+        ].iter().enumerate() {
+            assert_ne!(save(i as u32 + 100, subject, "1@example.com"), thread, "{subject}");
+        }
+        assert_ne!(save(200, "Topic", ""), thread, "subject alone must not join messages with IDs");
+    }
+
+    #[test]
+    fn stored_subject_nodes_keep_their_form() {
+        // These strings are in the thread_links of existing stores.
+        let node = |subject: &str| nodes(&MessageSummary { subject: subject.into(), from_address: "a@example.com".into(), to: "b@example.com".into(), ..Default::default() });
+        assert_eq!(node("[list] Topic"), [r#"subject:["[list] topic",["a@example.com","b@example.com"]]"#]);
+        assert_eq!(node("Re: SV: [list] Topic"), node("[list] Topic"));
+        assert_eq!(node("Antw: Topic"), [r#"subject:["antw: topic",["a@example.com","b@example.com"]]"#]);
+        assert_ne!(node("[a] Status"), node("[b] Status"));
+        assert_ne!(node("R: statistics"), node("statistics"));
+    }
+
+    #[test]
+    fn forged_references_neither_join_other_subjects_nor_merge_threads() {
+        let (_dir, s, account, folder) = fixture();
+        let save = |uid, subject: &str, headers: &str| {
+            let mut m = mime::parse(format!("From: someone@example.com\r\nTo: fixture@example.com\r\nSubject: {subject}\r\n{headers}\r\nbody").as_bytes()).unwrap();
+            m.summary.account = account.clone(); m.summary.folder = folder; m.summary.uid = uid;
+            s.message(s.save_message(&m).unwrap()).unwrap().summary.thread_id
+        };
+        let bank = save(1, "Statement", "Message-ID: <stmt-1@bank.example>\r\n");
+        let boss = save(2, "Payroll", "Message-ID: <pay-9@corp.example>\r\n");
+        let forged = "References: <stmt-1@bank.example> <pay-9@corp.example>\r\n";
+        let evil = save(3, "Urgent", &format!("Message-ID: <e1@evil.example>\r\n{forged}"));
+        assert!(evil != bank && evil != boss);
+        // A copied subject joins that one thread, and the other stays apart.
+        assert_eq!(save(4, "RE: Payroll", &format!("Message-ID: <e2@evil.example>\r\n{forged}")), boss);
+        assert_eq!(save(5, "Sv: Statement", "Message-ID: <reply@bank.example>\r\nIn-Reply-To: <stmt-1@bank.example>\r\n"), bank);
+        let threads: BTreeSet<_> = s.list_conversations(&account, Some(folder), 0, 10).unwrap().into_iter().map(|m| m.thread_id).collect();
+        assert_eq!(threads, [bank.clone(), boss.clone(), evil].into());
+        assert_eq!(s.thread_messages(&account, &bank).unwrap().iter().map(|m| m.uid).collect::<Vec<_>>(), [1, 5]);
+        // Only the newest 64 references become nodes.
+        let refs: String = (0..100).map(|i| format!(" <r{i}@x>")).collect();
+        save(6, "Long", &format!("Message-ID: <long@x>\r\nReferences:{refs}\r\n"));
+        let linked = |node: &str| s.db.query_row("SELECT count(*) FROM thread_links WHERE node=?1", [node], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!((linked("id:r35@x"), linked("id:r36@x"), linked("id:r99@x")), (0, 1, 1));
     }
 }

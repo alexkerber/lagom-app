@@ -154,6 +154,11 @@ pub fn safe_join_url(value: &str) -> bool {
         && url.username().is_empty() && url.password().is_none())
 }
 
+/// The host a "Join" link opens, shown on the button so an invite cannot hide where it leads.
+pub fn join_host(value: &str) -> Option<String> {
+    safe_join_url(value).then(|| Url::parse(value).ok()?.host_str().map(str::to_owned)).flatten()
+}
+
 pub fn safe_calendar_url(value: &str) -> bool {
     safe_join_url(value) && Url::parse(value).is_ok_and(|url|
         matches!(url.host_str(), Some("calendar.google.com" | "www.google.com")) && url.path().starts_with("/calendar/"))

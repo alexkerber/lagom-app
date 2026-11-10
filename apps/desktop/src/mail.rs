@@ -28,12 +28,15 @@ pub struct Mail {
     pub snippet: String,
     /// Paragraphs. Empty for store mail until the reading pane loads the body.
     pub body: Vec<String>,
+    /// Full text shared by reading and compose, prepared off the UI thread for HTML mail.
+    pub text: Option<tokio::sync::watch::Receiver<Option<std::sync::Arc<str>>>>,
     /// The HTML part, loaded with the body. Platforms with a web view render it.
     pub html: Option<gpui::SharedString>,
     /// "Load remote images" was clicked for this message.
     pub remote: bool,
     pub attachments: Vec<Attachment>,
     pub inline: std::sync::Arc<Vec<lagom_core::inline::InlinePart>>,
+    pub inline_referenced: bool,
     pub inline_pending: bool,
     pub inline_retry_after: Option<std::time::Instant>,
     pub unread: bool,
@@ -64,10 +67,12 @@ impl Mail {
             // Snippets stored before the core dropped invisible padding.
             snippet: lagom_core::mime::clean_snippet(&m.snippet),
             body: Vec::new(),
+            text: None,
             html: None,
             remote: false,
             attachments: Vec::new(),
             inline: Default::default(),
+            inline_referenced: false,
             inline_pending: false,
             inline_retry_after: None,
             unread: !m.seen,
@@ -376,7 +381,7 @@ const SAMPLE: &[Sample] = &[
     m!("Tickets", "no-reply@tickets.example", "Tue", "Stockholm C → Göteborg C, 14 Nov", "Coach 3, seat 41. Quiet carriage.",
         ["Your journey on 14 November: Stockholm C 07:10, Göteborg C 10:05.", "Coach 3, seat 41. Quiet carriage."], None, false),
     // Long on purpose: the list must end sender, subject and preview in "…", never mid-glyph.
-    m!("Lagom releases and announcements for the desktop and mobile apps", "releases@lagom.example", "Mon",
+    m!("lagom releases and announcements for the desktop and mobile apps", "releases@lagom.example", "Mon",
         "Version 0.4 is out: faster threads, fewer settings and a calmer list for very large inboxes",
         "Threads open faster and there are fewer settings. The list keeps up with a hundred thousand messages, search finds old mail at once, and the full changelog is on the site.",
         ["Version 0.4 is out.", "Threads open faster and there are fewer settings. The full changelog is on the site."], None, false),
@@ -425,13 +430,13 @@ pub fn demo_accounts() -> Vec<lagom_core::account::Account> {
 
 /// An HTML newsletter for the demo: a table layout with inline styles, a `<style>` block, a
 /// data: image, a remote image that stays blocked, and links.
-const NEWSLETTER: &str = r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Lagom 0.4</title>
+const NEWSLETTER: &str = r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>lagom 0.4</title>
 <style>@media only screen and (max-width: 600px) { .container { width: 100% !important; } } .btn:hover { opacity: .9 }</style></head>
 <body style="margin:0;background:#f4f2ee">
 <div style="display:none;max-height:0;overflow:hidden">Threads open faster and there are fewer settings. &#847; &zwnj; &nbsp; &#847; &zwnj; &nbsp;</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f2ee"><tr><td align="center" style="padding:24px 12px">
 <table role="presentation" class="container" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;font-family:Helvetica,Arial,sans-serif;color:#1d1d1b">
-<tr><td style="padding:28px 32px 8px"><img width="40" height="40" alt="Lagom" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MCA0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiByeD0iOSIgZmlsbD0iI0IwM0EyRSIvPjxyZWN0IHg9IjEwIiB5PSIxOCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjQiIHJ4PSIyIiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjAiIGN5PSIyOSIgcj0iMyIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg==" style="display:block;border-radius:9px"></td></tr>
+<tr><td style="padding:28px 32px 8px"><img width="40" height="40" alt="lagom" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MCA0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiByeD0iOSIgZmlsbD0iI0IwM0EyRSIvPjxyZWN0IHg9IjEwIiB5PSIxOCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjQiIHJ4PSIyIiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjAiIGN5PSIyOSIgcj0iMyIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg==" style="display:block;border-radius:9px"></td></tr>
 <tr><td style="padding:8px 32px 0;font-size:26px;line-height:32px;font-weight:bold">Version 0.4 is out</td></tr>
 <tr><td style="padding:12px 32px 0;font-size:15px;line-height:23px;color:#4a4a46">Threads open faster and there are fewer settings. The list keeps up with a hundred thousand messages, and search finds old mail at once.</td></tr>
 <tr><td style="padding:20px 32px 0"><img width="496" height="160" alt="[Remote image: blocked]" src="https://images.example.com/lagom-0.4-banner.png" style="display:block;width:100%;height:auto;background:#ece9e3;border-radius:8px;color:#8a877f;font-size:13px"></td></tr>
@@ -440,7 +445,7 @@ const NEWSLETTER: &str = r##"<!DOCTYPE html><html><head><meta charset="utf-8"><t
 <td width="50%" valign="top" style="padding-left:12px;font-size:14px;line-height:21px"><b>Fewer settings</b><br>Eleven settings are gone. Nobody will miss them.</td></tr></table></td></tr>
 <tr><td style="padding:24px 32px 28px"><a class="btn" href="https://lagom.example/changelog" style="display:inline-block;background:#b03a2e;color:#ffffff;text-decoration:none;font-size:14px;font-weight:bold;padding:10px 18px;border-radius:8px">Read the changelog</a></td></tr>
 </table>
-<p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a877f;margin:16px 0 0">You get this because you use Lagom. <a href="https://lagom.example/unsubscribe" style="color:#8a877f">Unsubscribe</a> · <a href="mailto:releases@lagom.example" style="color:#8a877f">Write to us</a></p>
+<p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a877f;margin:16px 0 0">You get this because you use lagom. <a href="https://lagom.example/unsubscribe" style="color:#8a877f">Unsubscribe</a> · <a href="mailto:releases@lagom.example" style="color:#8a877f">Write to us</a></p>
 </td></tr></table></body></html>"##;
 
 /// Simple HTML, as a phone or webmail writes it: no colours of its own.

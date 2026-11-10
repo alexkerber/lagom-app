@@ -154,7 +154,7 @@ async fn sign_in_with(
         return Err(Error::Invalid("sign-in provider is not configured"));
     }
     tokio::time::timeout(Duration::from_secs(300), async {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let (listener, v6) = listen(provider).await?;
         let host = match provider {
             Provider::Google => "127.0.0.1",
             Provider::Microsoft => "localhost",
@@ -179,7 +179,7 @@ async fn sign_in_with(
         }
         if let Some(account) = existing { url.query_pairs_mut().append_pair("login_hint", &account.email); }
         open_url(url.as_str());
-        let code = callback(&listener, &state).await?;
+        let code = callback(&listener, v6.as_ref(), &state).await?;
         let mut token = exchange(
             &config,
             &[
@@ -273,9 +273,26 @@ fn parse_callback(target: &str, state: &str) -> Result<Zeroizing<String>> {
         .map(|s| Zeroizing::new(s.into()))
         .ok_or(Error::Invalid("authorization code missing"))
 }
-async fn callback(listener: &TcpListener, state: &str) -> Result<Zeroizing<String>> {
+/// Microsoft's `localhost` redirect may reach `[::1]` first, so hold that port too, or another
+/// local process could take it. A port already taken there gets a fresh pair; IPv6 off: IPv4 only.
+async fn listen(provider: Provider) -> Result<(TcpListener, Option<TcpListener>)> {
+    for _ in 0..8 {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        if provider == Provider::Google { return Ok((listener, None)); }
+        match TcpListener::bind(("::1", listener.local_addr()?.port())).await {
+            Ok(v6) => return Ok((listener, Some(v6))),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(_) => return Ok((listener, None)),
+        }
+    }
+    Err(Error::Network("no free sign-in port"))
+}
+async fn callback(listener: &TcpListener, v6: Option<&TcpListener>, state: &str) -> Result<Zeroizing<String>> {
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (mut stream, _) = match v6 {
+            Some(v6) => tokio::select! { accepted = listener.accept() => accepted, accepted = v6.accept() => accepted },
+            None => listener.accept().await,
+        }?;
         let request = tokio::time::timeout(Duration::from_secs(3), async {
             let mut bytes = Zeroizing::new(Vec::new());
             while bytes.len() < 8192 && !bytes.ends_with(b"\r\n\r\n") {
@@ -299,8 +316,10 @@ async fn callback(listener: &TcpListener, state: &str) -> Result<Zeroizing<Strin
             continue;
         }
         let result = parse_callback(parts[1], state);
+        // Any local process can reach the port; only our state may end the wait.
+        let ours = !matches!(result, Err(Error::Invalid("invalid sign-in callback" | "sign-in state mismatch")));
         let body =
-            "<!doctype html><title>Lagom</title><p>You can close this tab and return to Lagom.</p>";
+            "<!doctype html><title>lagom</title><p>You can close this tab and return to lagom.</p>";
         let status = if result.is_ok() {
             "200 OK"
         } else {
@@ -309,7 +328,7 @@ async fn callback(listener: &TcpListener, state: &str) -> Result<Zeroizing<Strin
         let reply = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
         let _ =
             tokio::time::timeout(Duration::from_secs(3), stream.write_all(reply.as_bytes())).await;
-        return result;
+        if ours { return result; }
     }
 }
 

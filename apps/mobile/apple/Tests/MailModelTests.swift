@@ -49,14 +49,14 @@ final class MailModelTests: XCTestCase {
 
     override func composeDraft(id: Int64, kind: ComposeKind) async throws -> ReplyDraft {
         calls.append((id, kind))
-        if fail { throw MailError.Failed(message: "fixture failure") }
+        if fail { throw MailError.Failed(reason: "fixture failure") }
         if suspended { return try await withCheckedThrowingContinuation { continuation = $0 } }
         return reply
     }
 
     override func send(accountId: String, to: [String], cc: [String], subject: String, bodyMarkdown: String,
                        replyTo: Int64?, attachments: [SendAttachment]) async throws -> String {
-        if fail { throw MailError.Failed(message: "fixture failure") }
+        if fail { throw MailError.Failed(reason: "fixture failure") }
         sent = ReplyDraft(account: accountId, to: to.joined(separator: ", "), cc: cc.joined(separator: ", "),
                           subject: subject, body: bodyMarkdown, replyTo: replyTo, attachments: attachments)
         return "queued"
@@ -199,11 +199,11 @@ extension MailModelTests {
     override func markRead(id: Int64, read: Bool) async throws {
         flags.append((id, read))
         if suspendRead { await withCheckedContinuation { readContinuation = $0 } }
-        if failRead { throw MailError.Failed(message: "flag refused") }
+        if failRead { throw MailError.Failed(reason: "flag refused") }
         mail[mail.firstIndex { $0.id == id }!].unread = !read
     }
     override func loadInline(id: Int64) async throws {
-        if failInline { throw MailError.Failed(message: "inline unavailable") }
+        if failInline { throw MailError.Failed(reason: "inline unavailable") }
         if suspendInline { try await withCheckedThrowingContinuation { inlineContinuations[id] = $0 } }
     }
 }
@@ -253,6 +253,33 @@ extension MailModelTests {
         await pending.value
         XCTAssertTrue(model.rows.isEmpty)
         XCTAssertFalse(model.hasMore)
+    }
+
+    @MainActor func testCancelledSelectionCannotDiscardPendingSearch() async {
+        let core = DailyFixtureCore(noHandle: .init())
+        core.mail[0].unread = true
+        core.suspendRead = true
+        let model = MailModel()
+        model.core = core
+        model.selectedID = 1
+        let selection = Task { await model.select(1) }
+        while core.readContinuation == nil { await Task.yield() }
+        core.suspendSearch = true
+        model.searchText = "replacement"
+        let search = Task { await model.changeScope() }
+        while core.searchContinuation == nil { await Task.yield() }
+        selection.cancel()
+        core.readContinuation?.resume()
+        await selection.value
+        XCTAssertFalse(core.mail[0].unread)
+        XCTAssertFalse(model.working)
+        XCTAssertTrue(model.rows.isEmpty)
+        core.searchContinuation?.resume(returning: [core.mail[1]])
+        await search.value
+        XCTAssertEqual(model.rows.map(\.id), [2])
+        XCTAssertEqual(model.searchText, "replacement")
+        XCTAssertEqual(core.queries.count, 1)
+        XCTAssertNil(model.error)
     }
 
     @MainActor func testRemoteImagesResetOnSelectionAndIgnoreStaleRequests() async {

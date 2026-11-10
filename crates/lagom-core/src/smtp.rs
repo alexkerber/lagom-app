@@ -57,8 +57,20 @@ fn header_value(value: &str) -> Result<()> {
     }
 }
 pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
+    compose_message(account, outgoing, None)
+}
+
+pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, token: &str) -> Result<Vec<u8>> {
+    let (in_reply_to, references) = draft.reply.clone().unwrap_or_default();
+    let outgoing = Outgoing { subject: draft.subject.clone(), text: draft.text.clone(),
+        attachments: draft.attachments.clone(), in_reply_to, references, message_id: Some(format!("<{token}@draft.lagommail.app>")),
+        ..Default::default() };
+    Ok(compose_message(account, &outgoing, Some(draft))?.formatted())
+}
+
+fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>) -> Result<Message> {
     account.validate()?;
-    if outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
+    if draft.is_none() && outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
         return Err(Error::Invalid("at least one recipient required"));
     }
     header_value(&outgoing.subject)?;
@@ -81,6 +93,27 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
         .from(from)
         .subject(&outgoing.subject)
         .message_id(Some(id));
+    if let Some(draft) = draft {
+        // Drafts can have no recipients or unfinished addresses; the envelope is never submitted.
+        message = message.keep_bcc().envelope(lettre::address::Envelope::new(None, vec![account.email.parse()
+            .map_err(|_| Error::Invalid("invalid sender address"))?])
+            .map_err(|_| Error::Invalid("invalid draft envelope"))?);
+        for (name, value) in [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)] {
+            header_value(value)?;
+            if !value.is_empty() {
+                message = if let Ok(mailboxes) = value.parse::<lettre::message::Mailboxes>() {
+                    match name {
+                        "To" => message.header(header::To::from(mailboxes)),
+                        "Cc" => message.header(header::Cc::from(mailboxes)),
+                        _ => message.header(header::Bcc::from(mailboxes)),
+                    }
+                } else {
+                    // Unfinished input is kept as text, after rejecting header control characters.
+                    message.raw_header(header::HeaderValue::new(header::HeaderName::new_from_ascii_str(name), value.clone()))
+                };
+            }
+        }
+    }
     for to in &outgoing.to {
         message = message.to(mailbox(to)?);
     }
@@ -123,24 +156,41 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
 }
 /// Render only parser-generated markup; images become their labels so mail loads no resources.
 fn markdown_html(source: &str) -> Option<String> {
-    use pulldown_cmark::{html, Event, Parser, Tag, TagEnd};
+    use pulldown_cmark::{html, Event, LinkType, Parser, Tag, TagEnd};
     let mut formatted = false;
     let mut links = Vec::new();
-    let events = Parser::new(source).filter_map(|event| {
+    let mut quote = 0usize;
+    let events = Parser::new(source).into_offset_iter().flat_map(|(event, range)| {
         if matches!(&event, Event::Start(tag) if !matches!(tag, Tag::Paragraph))
             || matches!(&event, Event::Code(_) | Event::HardBreak | Event::Rule | Event::Html(_) | Event::InlineHtml(_)) {
             formatted = true;
         }
         match event {
-            Event::Html(text) | Event::InlineHtml(text) => Some(Event::Text(text)),
-            Event::Start(Tag::HtmlBlock | Tag::Image { .. }) | Event::End(TagEnd::HtmlBlock | TagEnd::Image) => None,
-            Event::Start(Tag::Link { ref dest_url, .. }) => {
-                let allowed = url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
-                links.push(allowed);
-                allowed.then_some(event)
+            // Quoted text is someone else's mail: show it as written, never as links or other markup.
+            Event::Start(Tag::BlockQuote(_)) => {
+                quote += 1;
+                if quote > 1 { return Vec::new(); }
+                let mut out = vec![event];
+                for (i, line) in source[range].lines().enumerate() {
+                    if i > 0 { out.push(Event::HardBreak); }
+                    let unquoted = line.trim_start().strip_prefix('>').map_or(line, |rest| rest.strip_prefix(' ').unwrap_or(rest));
+                    out.push(Event::Text(unquoted.to_owned().into()));
+                }
+                out
             }
-            Event::End(TagEnd::Link) => links.pop().unwrap_or(false).then_some(event),
-            event => Some(event),
+            Event::End(TagEnd::BlockQuote(_)) => { quote -= 1; if quote == 0 { vec![event] } else { Vec::new() } }
+            _ if quote > 0 => Vec::new(),
+            Event::Html(text) | Event::InlineHtml(text) => vec![Event::Text(text)],
+            Event::Start(Tag::HtmlBlock | Tag::Image { .. }) | Event::End(TagEnd::HtmlBlock | TagEnd::Image) => Vec::new(),
+            Event::Start(Tag::Link { link_type, ref dest_url, .. }) => {
+                // Reference links resolve against definitions anywhere, including quoted mail: inline and autolinks only.
+                let allowed = matches!(link_type, LinkType::Inline | LinkType::Autolink | LinkType::Email)
+                    && url::Url::parse(dest_url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"));
+                links.push(allowed);
+                if allowed { vec![event] } else { Vec::new() }
+            }
+            Event::End(TagEnd::Link) => if links.pop().unwrap_or(false) { vec![event] } else { Vec::new() },
+            event => vec![event],
         }
     });
     let mut body = String::new();
@@ -337,6 +387,28 @@ mod tests {
         (parsed.body_text(0).unwrap().replace("\r\n", "\n"), parsed.body_html(0).map(|h| h.replace("\r\n", "\n")))
     }
     #[test]
+    fn draft_recipient_fallback_keeps_unfinished_text_and_rejects_injection() {
+        let mut draft = crate::outbox::Draft::default();
+        for value in ["unfinished address", "Tëam <unfinished"] {
+            draft.to = value.into();
+            draft.cc = value.into();
+            draft.bcc = value.into();
+            let raw = compose_draft(&account(), &draft, "fixture").unwrap();
+            let parsed = mail_parser::MessageParser::default()
+                .header("To", mail_parser::HeaderForm::Text).header("Cc", mail_parser::HeaderForm::Text)
+                .header("Bcc", mail_parser::HeaderForm::Text).parse(&raw).unwrap();
+            for name in ["To", "Cc", "Bcc"] {
+                assert_eq!(parsed.headers().get(name).unwrap().value().as_text(), Some(value));
+            }
+        }
+        for field in 0..3 {
+            let mut draft = crate::outbox::Draft::default();
+            [&mut draft.to, &mut draft.cc, &mut draft.bcc][field].push_str("unfinished\r\nX-Injected: yes");
+            assert!(compose_draft(&account(), &draft, "fixture").is_err());
+        }
+    }
+
+    #[test]
     fn attachments_survive_mime_encoding_with_plain_and_markdown_bodies() {
         for text in ["Body", "**Body**\n\n> Forwarded message"] {
             let part = OutgoingAttachment { filename: "report.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255, 10, 13] };
@@ -353,6 +425,9 @@ mod tests {
 
     #[test]
     fn markdown_styles_and_plain_source() {
+        assert!(markdown_html("**test **").is_none());
+        let (_, html) = parts("**test **\n\n> Original message");
+        assert!(html.unwrap().contains("<p>**test **</p>"));
         for (source, expected) in [
             ("- ett\n- två", "<ul>"),
             ("- ett\n  - två", "<ul>\n<li>ett\n<ul>"),
@@ -385,6 +460,20 @@ mod tests {
             assert!(markdown_html(&format!("[etikett]({target})")).unwrap().contains("<a "));
         }
         assert!(!markdown_html("![bild](https://example.com/pixel)").unwrap().contains("<img"));
+    }
+    #[test]
+    fn quoted_text_stays_literal() {
+        let source = "Se [ok](https://good.example) **nu**.\n\n> On Monday, x@evil.example wrote:\n>\n> [https://intranet.corp.example/login](https://evil.example/login) *hej* <b>\n> > djup [a](https://evil.example/2)";
+        let (plain, html) = parts(source);
+        assert_eq!(plain, source);
+        let html = html.unwrap();
+        assert!(html.contains("href=\"https://good.example\"") && html.contains("<strong>nu</strong>"), "{html}");
+        assert!(!html.contains("evil.example/login\"") && !html.contains("evil.example/2\""), "{html}");
+        let (_, reference) = parts("See [portal] **now**.\n\n> [portal]: https://evil.example/login");
+        assert!(!reference.unwrap().contains("href"), "a definition in quoted mail must not link the user's text");
+        assert!(html.contains("[https://intranet.corp.example/login](https://evil.example/login) *hej* &lt;b&gt;"), "{html}");
+        assert!(html.contains("&gt; djup [a](https://evil.example/2)"), "{html}");
+        assert_eq!(html.matches("<a ").count(), 1, "{html}");
     }
     #[test]
     fn plain_body_stays_single_part() {

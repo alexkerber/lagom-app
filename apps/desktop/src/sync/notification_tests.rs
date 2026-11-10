@@ -18,6 +18,9 @@ async fn resolving_a_moved_message_notifies_new_inbox_mail() {
 }
 
 async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
+    // SQLite migrations must not consume the protocol hang guard on slow disks.
+    let path = std::env::temp_dir().join(format!("lagom-notify-{into_inbox}-{resolving}-{fail_source}-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let mut store = Store::open(&path).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -62,10 +65,8 @@ async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
                 write.write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
             }
         });
-        let path = std::env::temp_dir().join(format!("lagom-notify-{into_inbox}-{resolving}-{fail_source}-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "fixture".into() };
         let account = Account::new("fixture@example.test".into(), config.clone(), config).unwrap();
-        let mut store = Store::open(&path).unwrap();
         store.save_account(&account).unwrap();
         let inbox = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
         let archive = store.save_folder(&account.id, "Archive", None, FolderRole::Archive).unwrap();

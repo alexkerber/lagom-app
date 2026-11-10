@@ -276,6 +276,7 @@ impl MainWindow {
     /// Reads the store for the account and list on screen. Waits while moves are in flight, so
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_draft_rows(cx);
         self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
         live.stale = true;
@@ -659,7 +660,7 @@ impl MainWindow {
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
-        let mut error = "Mail stopped working. Restart Lagom; pending sends are saved in the outbox.".to_string();
+        let mut error = "Mail stopped working. Restart lagom; pending sends are saved in the outbox.".to_string();
         if let Err(rollback) = rollback { error.push_str(&format!(" Local rollback failed: {rollback}")); }
         self.notify(error, cx);
     }
@@ -833,7 +834,39 @@ impl MainWindow {
                     self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
-                    mail::paragraphs(&m.body_text)
+                    if self.inbox.mail[id].text.is_none() {
+                        let (send, text) = tokio::sync::watch::channel(None);
+                        self.inbox.mail[id].text = Some(text.clone());
+                        if let Some(html) = self.inbox.mail[id].html.clone() {
+                            let source = live.store.clone();
+                            let read = cx.background_executor().spawn(async move {
+                                let text: std::sync::Arc<str> = lagom_core::mime::readable_text(&m.body_text, Some(&html)).into_owned().into();
+                                let body = mail::paragraphs(&text);
+                                let inline_referenced = !lagom_core::inline::referenced_ids(&html).is_empty();
+                                (text, body, inline_referenced)
+                            });
+                            cx.spawn(async move |this, cx| {
+                                let (ready, body, inline_referenced) = read.await;
+                                this.update(cx, |this, cx| {
+                                    if !this.live.as_ref().is_some_and(|live| Rc::ptr_eq(&live.store, &source)) { return; }
+                                    let Some(mail) = this.inbox.mail.get_mut(id).filter(|m| m.store == Some(store)
+                                        && m.text.as_ref().is_some_and(|current| current.same_channel(&text))) else { return };
+                                    mail.body = body;
+                                    mail.inline_referenced = inline_referenced;
+                                    send.send(Some(ready)).ok();
+                                    if let Some(body) = this.expanded.get(&id) {
+                                        body.update(cx, |body, cx| body.refresh(mail, cx));
+                                    }
+                                    this.open_message(id, false, cx);
+                                    cx.notify();
+                                }).ok();
+                            }).detach();
+                        } else {
+                            send.send(Some(m.body_text.into())).ok();
+                        }
+                    }
+                    let text = self.inbox.mail[id].text.as_ref().unwrap().borrow();
+                    text.as_deref().map(mail::paragraphs).unwrap_or_else(|| vec!["Loading message…".into()])
                 }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
@@ -841,7 +874,7 @@ impl MainWindow {
         if !self.inbox.mail[id].inline_pending
             && self.inbox.mail[id].inline_retry_after.is_none_or(|after| std::time::Instant::now() >= after)
             && live.store.inline_loaded(store).is_ok_and(|loaded| !loaded)
-            && self.inbox.mail[id].html.as_deref().is_some_and(|h| !lagom_core::inline::referenced_ids(h).is_empty()) {
+            && self.inbox.mail[id].inline_referenced {
             self.inbox.mail[id].inline_pending = live.bridge.send(Cmd::Inline(store));
         }
         // Reading a filtered list must not consume the next unread row on every reload.
@@ -1091,7 +1124,7 @@ impl MainWindow {
         let Some(live) = &self.live else { return };
         let store = live.store.clone();
         let accounts = live.accounts.clone();
-        match store.drafts() {
+        match store.owned_drafts() {
             Ok(drafts) => for draft in drafts {
                 if let Some(account) = accounts.iter().find(|a| a.id == draft.account) {
                     let compose = cx.new(|cx| Compose::restore(draft, account.clone(), store.clone(), window, cx));
@@ -1113,7 +1146,7 @@ impl MainWindow {
         cx.subscribe(&add, |this, add, Connect(account, password): &Connect, cx| {
             let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::AddAccount(account.clone(), password.clone())));
             if !sent {
-                add.update(cx, |add, cx| add.failed("Mail stopped working. Restart Lagom.".into(), cx));
+                add.update(cx, |add, cx| add.failed("Mail stopped working. Restart lagom.".into(), cx));
             }
         })
         .detach();
@@ -1292,9 +1325,218 @@ mod tests {
     }
 
     #[gpui::test]
+    fn close_window_saves_dirty_composer_without_removing_main(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("recipient@example.com");
+        cx.simulate_keystrokes("tab tab");
+        cx.simulate_input("Keep this text");
+        let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+        let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+        assert_eq!(expected.text, "Keep this text");
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        view.read_with(cx, |v, _| {
+            assert!(v.compose.is_none());
+            assert_eq!(v.drafts.len(), 1);
+            assert_eq!(v.toast.as_ref().unwrap().0, "Draft saved");
+        });
+        let drafts = store.drafts().unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].text, expected.text);
+        assert_eq!(drafts[0].to, expected.to.join(", "));
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, Cmd::Drafts(_))));
+        let revision = store.draft_revision(&drafts[0].id).unwrap();
+        cx.simulate_keystrokes("c secondary-w");
+        assert_eq!(store.drafts().unwrap(), drafts);
+        assert_eq!(store.draft_revision(&drafts[0].id).unwrap(), revision);
+        assert!(view.read_with(cx, |v, _| v.toast.is_none()));
+        cx.simulate_keystrokes("c secondary-a");
+        cx.simulate_input("Temporary edit");
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(store.drafts().unwrap()[0].text, "Temporary edit");
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input(&expected.text);
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.toast.is_none()));
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(store.drafts().unwrap(), drafts);
+        cx.simulate_keystrokes("c");
+        cx.simulate_input(" More text");
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+        let autosaved = store.drafts().unwrap();
+        assert_ne!(autosaved[0].text, drafts[0].text);
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(store.drafts().unwrap(), autosaved);
+        assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().unwrap().0.clone()), "Draft saved");
+    }
+
+    #[gpui::test]
+    #[cfg(target_os = "macos")]
+    fn close_window_keeps_quit_guard_without_an_active_window(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.cx.update(crate::menus::init);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Pending edits");
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("CREATE TRIGGER refuse_quit BEFORE UPDATE ON drafts BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        cx.deactivate_window();
+        cx.cx.update(|cx| {
+            assert!(cx.active_window().is_none());
+            cx.dispatch_action(&crate::menus::Quit);
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        assert!(cx.cx.update(|cx| cx.active_window().is_some()));
+        view.read_with(cx, |v, _| {
+            assert!(v.compose.is_some());
+            assert!(v.toast.as_ref().unwrap().0.contains("Could not save local edits"));
+        });
+    }
+
+    #[gpui::test]
+    fn close_window_failed_save_keeps_the_composer_and_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Do not lose this");
+        let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+        let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("CREATE TRIGGER refuse_save BEFORE UPDATE ON drafts BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        assert_eq!(view.read_with(cx, |v, _| v.compose.clone()), Some(compose.clone()));
+        assert_eq!(compose.read_with(cx, |c, cx| c.outgoing(cx)), expected);
+        assert!(view.read_with(cx, |v, _| v.toast.is_none()));
+        db.execute_batch("DROP TRIGGER refuse_save").unwrap();
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none()));
+        assert_eq!(store.drafts().unwrap()[0].text, expected.text);
+    }
+
+    #[gpui::test]
+    fn close_window_drops_clean_composer_without_a_draft(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        for open in ["c", "r"] {
+            cx.simulate_keystrokes(open);
+            cx.simulate_keystrokes("secondary-w");
+            assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+            view.read_with(cx, |v, _| {
+                assert!(v.compose.is_none() && v.drafts.is_empty());
+                assert!(v.live.as_ref().unwrap().store.drafts().unwrap().is_empty());
+                assert!(v.toast.is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn newsletter_text_yields_and_is_reused_for_reply(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let id = view.update(cx, |v, cx| {
+            let summary = incoming(v, 1);
+            let html = format!("{}<p>Full reply text</p>", "<div style='display:none'>Hidden preheader</div>".repeat(50_000));
+            let id = v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                summary, body_text: "Full reply text".into(), body_html: Some(html),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let start = Instant::now();
+            v.open_message(v.inbox.single().unwrap(), false, cx);
+            eprintln!("newsletter open returned in {:?}", start.elapsed());
+            assert_ne!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Full reply text"], "HTML preparation must yield before conversion");
+            id
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Full reply text"]);
+            let db = rusqlite::Connection::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [id]).unwrap();
+            v.reload(cx);
+        });
+        cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        assert!(quote.ends_with("> Full reply text"), "{quote:?}");
+    }
+
+    #[gpui::test]
+    fn pending_reply_uses_full_text_and_respects_newer_actions(cx: &mut TestAppContext) {
+        for action in ["reply", "forward", "compose", "page", "select"] {
+            let (view, cx, _rx) = window(cx);
+            view.update_in(cx, |v, window, cx| {
+                let summary = incoming(v, 1);
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                    summary, body_text: format!("{}\nQuote tail", "x".repeat(100_001)), body_html: Some("<p>HTML alternative</p>".into()),
+                }).unwrap();
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.inbox.select(0);
+                let kind = if action == "forward" { ComposeKind::Forward } else { ComposeKind::Reply };
+                v.compose_kind(v.inbox.single(), kind, window, cx);
+                assert!(v.compose.is_none(), "compose must wait for background text preparation");
+                match action {
+                    "compose" => v.compose_kind(None, ComposeKind::Reply, window, cx),
+                    "page" => v.set_page(Page::Home, cx),
+                    "select" => v.select(|inbox| inbox.select(0), cx),
+                    _ => {},
+                }
+            });
+            let newer = view.read_with(cx, |v, _| v.compose.as_ref().map(|c| c.entity_id()));
+            cx.run_until_parked();
+            view.read_with(cx, |v, cx| {
+                match action {
+                    "reply" | "forward" => {
+                        let body = v.compose.as_ref().unwrap().read(cx).body_text(cx);
+                        assert!(body.ends_with("> Quote tail"), "compose must keep text beyond the reading cap");
+                        assert!(!v.inbox.mail[v.inbox.single().unwrap()].body.join("\n").contains("Quote tail"));
+                    }
+                    _ => assert_eq!(v.compose.as_ref().map(|c| c.entity_id()), newer),
+                }
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn legacy_newsletter_reads_and_quotes_visible_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let mut summary = incoming(v, 1);
+            summary.from_address = "sender@example.test".into();
+            v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                summary, body_text: "Hidden preheader and padding \u{34f}\u{200c}\u{a0} Hidden preview Invisible preview \u{a0}\n\nHello & welcome\n\u{a0}\nRead the news\n\u{a0}".into(),
+                body_html: Some(include_str!("../../../../crates/lagom-core/tests/fixtures/newsletter.html").into()),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let selected = v.inbox.single().unwrap();
+            v.open_message(selected, false, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Hello & welcome", "Read the news"]));
+        cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        assert!(quote.ends_with("> Hello & welcome\n> \n> Read the news"), "{quote:?}");
+        assert!(!quote.contains("font-size") && !quote.contains("tracking.example.test"));
+    }
+
+    #[gpui::test]
     fn legacy_inline_failure_waits_before_retry_and_completion_survives_summary_reload(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
-        view.update_in(cx, |v, window, cx| {
+        let id = view.update(cx, |v, cx| {
             let store = v.live.as_ref().unwrap().store.clone();
             let mut summary = incoming(v, 1);
             summary.has_attachments = true;
@@ -1309,6 +1551,12 @@ mod tests {
             v.open_message(selected, false, cx);
             v.reload(cx);
             v.open_message(selected, false, cx);
+            assert!(rx.try_recv().is_err(), "CID scanning must also yield to the background executor");
+            id
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            let selected = v.inbox.single().unwrap();
             assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
             assert!(rx.try_recv().is_err());
             v.on_events(vec![Event::Inline { id, error: Some("offline".into()) }], window, cx);
@@ -2276,11 +2524,11 @@ mod tests {
             assert_ne!(v.inbox.current(), Some(selected));
             v.open_current(false, cx);
             assert_eq!(v.reading_thread, Some(selected));
-            assert_eq!(v.inbox.mail[selected].body, ["Body 2"]);
             assert_eq!(v.inbox.mail[selected].html.as_ref().map(|html| html.as_ref()), Some("<p>Body 2</p>"));
             cx.notify();
         });
         cx.run_until_parked();
+        view.read_with(cx, |v, _| assert_eq!(v.inbox.mail[v.reading_thread.unwrap()].body, ["Body 2"]));
         assert!(cx.debug_bounds("Reply").is_some());
     }
 
@@ -2461,7 +2709,13 @@ mod tests {
         assert!(cx.debug_bounds(selector).is_some(), "Tasks status belongs on Todo");
         view.update_in(cx, |v, window, cx| v.show_home(window, cx));
         cx.run_until_parked();
-        assert!(cx.debug_bounds(selector).is_none(), "Home keeps its calendar status");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Home)));
+        // GPUI retains debug selectors across frames; check absence in a fresh test window.
+        let home = cx.cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone()).unwrap());
+        let mut home = VisualTestContext::from_window(home.into(), cx);
+        home.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(home.debug_bounds("home-tasks").is_some());
+        assert!(home.debug_bounds(selector).is_none(), "Home keeps its calendar status");
     }
 
     #[gpui::test]
@@ -2834,6 +3088,7 @@ mod tests {
     fn review_today_undo_cancels_pending_send(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         send_one(cx);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Drafts(_))));
         view.update_in(cx, |v, window, cx| v.show_home(window, cx));
         cx.simulate_keystrokes("secondary-z");
         assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.sending.is_empty()));
@@ -3586,6 +3841,48 @@ mod tests {
             assert_eq!(v.drafts[0].read(cx).body_text(cx), format!("Unfinished fixture draft{quote}"));
             assert!(!v.hold_exit(cx));
         });
+    }
+
+    #[gpui::test]
+    fn notification_draft_survives_reopen_and_close_window(cx: &mut TestAppContext) {
+        for autosaved in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            #[cfg(target_os = "macos")]
+            cx.cx.update(crate::menus::init);
+            cx.simulate_keystrokes("c tab tab");
+            cx.simulate_input("Keep the notification draft");
+            let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+            let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+            assert_eq!(expected.text, "Keep the notification draft");
+            if autosaved {
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+                assert_eq!(store.drafts().unwrap()[0].text, expected.text);
+            }
+            view.update_in(cx, |v, window, cx| {
+                let message = incoming(v, 1);
+                v.on_notification(crate::notifications::Event::Clicked(crate::notifications::Target {
+                    account: message.account, message: Some(message.id),
+                }), window, cx);
+                assert!(v.compose.is_none());
+                assert_eq!(v.drafts, [compose.clone()]);
+            });
+            cx.simulate_keystrokes("c");
+            assert_eq!(view.read_with(cx, |v, _| v.compose.clone()), Some(compose.clone()));
+            assert_eq!(compose.read_with(cx, |c, cx| c.outgoing(cx)), expected);
+            cx.simulate_keystrokes("secondary-w");
+            cx.executor().advance_clock(Duration::from_millis(300));
+            cx.run_until_parked();
+            let drafts = store.drafts().unwrap();
+            assert_eq!(drafts.len(), 1);
+            assert_eq!(drafts[0].text, expected.text);
+            assert_eq!(drafts[0].id, expected.message_id.unwrap());
+            view.read_with(cx, |v, _| {
+                assert!(v.compose.is_none());
+                assert_eq!(v.drafts, [compose]);
+                assert!(v.toast.is_none());
+            });
+        }
     }
 
     #[gpui::test]
@@ -4515,6 +4812,136 @@ mod tests {
     }
 
     #[gpui::test]
+    fn draft_summary_reload_yields_with_large_attachments(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            let store = &v.live.as_ref().unwrap().store;
+            for index in 0..5 {
+                store.save_draft(&lagom_core::outbox::Draft {
+                    id: format!("<large-{index}@example.com>"), account: v.live.as_ref().unwrap().accounts[0].id.clone(),
+                    subject: format!("Draft {index}"), attachments: vec![lagom_core::smtp::OutgoingAttachment {
+                        filename: "large.bin".into(), mime_type: "application/octet-stream".into(), data: vec![255; 5 * 1024 * 1024],
+                    }], ..Default::default()
+                }).unwrap();
+            }
+            let started = Instant::now();
+            v.reload(cx);
+            eprintln!("draft reload returned in {:?}", started.elapsed());
+            assert!(v.draft_rows.is_empty(), "summary reads must yield to the UI executor");
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.draft_rows.len()), 5);
+        view.update(cx, |v, cx| {
+            v.reload_draft_rows(cx);
+            let store = &v.live.as_ref().unwrap().store;
+            for row in &v.draft_rows { store.delete_draft(&row.id).unwrap(); }
+            v.reload_draft_rows(cx);
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.draft_rows.is_empty()), "the latest reload must win");
+    }
+
+    #[gpui::test]
+    fn opening_foreign_draft_yields_before_reading_attachments_or_waiting_for_a_writer(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let account = view.read_with(cx, |v, _| v.live.as_ref().unwrap().accounts[0].id.clone());
+        let id = "<large-foreign@example.com>";
+        store.save_draft(&lagom_core::outbox::Draft {
+            id: id.into(), account, text: "Foreign text".into(), attachments: vec![lagom_core::smtp::OutgoingAttachment {
+                filename: "large.bin".into(), mime_type: "application/octet-stream".into(), data: vec![255; 5 * 1024 * 1024],
+            }], ..Default::default()
+        }).unwrap();
+        let writer = rusqlite::Connection::open(store.path()).unwrap();
+        writer.execute("UPDATE draft_sync SET owned=0 WHERE id=?1", [id]).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        view.update_in(cx, |v, window, cx| {
+            v.open_draft(id, window, cx);
+            assert!(v.compose.is_none(), "opening must yield before loading the draft");
+            assert!(v.toast.is_none(), "opening must not attempt a write on the UI thread");
+        });
+        writer.execute_batch("ROLLBACK").unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| {
+            let compose = v.compose.as_ref().expect("draft should open after acquisition").read(cx);
+            assert_eq!(compose.body_text(cx), "Foreign text");
+            assert_eq!(compose.outgoing(cx).attachments[0].data, vec![255; 5 * 1024 * 1024]);
+        });
+        assert!(writer.query_row("SELECT owned FROM draft_sync WHERE id=?1", [id], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[gpui::test]
+    fn pending_draft_open_cannot_replace_a_newer_action(cx: &mut TestAppContext) {
+        for action in ["draft", "page", "compose"] {
+            let (view, cx, _rx) = window(cx);
+            view.update_in(cx, |v, window, cx| {
+                let live = v.live.as_ref().unwrap();
+                for id in ["<first@example.com>", "<second@example.com>"] {
+                    live.store.save_draft(&lagom_core::outbox::Draft {
+                        id: id.into(), account: live.accounts[0].id.clone(), ..Default::default()
+                    }).unwrap();
+                }
+                v.open_draft("<first@example.com>", window, cx);
+                match action {
+                    "draft" => v.open_draft("<second@example.com>", window, cx),
+                    "page" => v.set_page(Page::Home, cx),
+                    _ => v.open_compose(false, window, cx),
+                }
+            });
+            let newer = view.read_with(cx, |v, _| v.compose.as_ref().map(|c| c.entity_id()));
+            cx.run_until_parked();
+            view.read_with(cx, |v, cx| match action {
+                "draft" => assert_eq!(v.compose.as_ref().unwrap().read(cx).draft_id(), "<second@example.com>"),
+                "page" => { assert!(matches!(v.page, Page::Home)); assert!(v.compose.is_none()); }
+                _ => assert_eq!(v.compose.as_ref().map(|c| c.entity_id()), newer),
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn drafts_view_opens_foreign_bcc_and_reuses_unsaved_compose(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = "<foreign@example.com>";
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_ref().unwrap();
+            let draft = lagom_core::outbox::Draft { id: id.into(), account: live.accounts[0].id.clone(),
+                to: "to@example.com".into(), bcc: "private@example.com".into(), subject: "Foreign draft".into(),
+                text: "Foreign text".into(), ..Default::default() };
+            live.store.save_draft(&draft).unwrap();
+            let db = rusqlite::Connection::open(live.store.path()).unwrap();
+            db.execute("UPDATE draft_sync SET owned=0,revision=(SELECT revision FROM drafts WHERE id=?1) WHERE id=?1", [id]).unwrap();
+            v.restore_drafts(window, cx);
+            assert!(v.drafts.is_empty(), "foreign drafts are opened explicitly");
+            v.show_drafts(window, cx);
+            assert!(matches!(v.page, Page::Drafts));
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.draft_rows.len()), 1);
+        view.update_in(cx, |v, window, cx| v.open_draft(id, window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            let compose = v.compose.as_ref().unwrap().clone();
+            assert_eq!(compose.read(cx).outgoing(cx).bcc, ["private@example.com"]);
+            assert_eq!(compose.read(cx).body_text(cx), "Foreign text");
+            compose.update(cx, |c, cx| c.focus_body(window, cx));
+        });
+        cx.simulate_input("Local edits ");
+        cx.simulate_keystrokes("escape");
+        let expected = view.read_with(cx, |v, cx| v.drafts[0].read(cx).outgoing(cx));
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, Cmd::Drafts(_))));
+        view.update_in(cx, |v, window, cx| {
+            let entity = v.drafts[0].entity_id();
+            v.open_draft(id, window, cx);
+            assert_eq!(v.compose.as_ref().unwrap().entity_id(), entity);
+            assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx), expected);
+        });
+        cx.simulate_keystrokes("cmd-backspace");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.draft_rows.is_empty()));
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+    }
+
+    #[gpui::test]
     fn startup_restores_saved_edits_and_reply_headers(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         view.update(cx, |v, _| {
@@ -4606,6 +5033,7 @@ mod tests {
     fn failed_send_actions_retry_or_restore_for_editing(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         send_one(cx);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Drafts(_))));
         let id = view.update(cx, |v, _| {
             let live = v.live.as_ref().unwrap();
             let id = live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().remove(0);

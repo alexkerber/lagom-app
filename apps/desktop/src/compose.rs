@@ -53,12 +53,16 @@ pub struct Compose {
     _contacts: Option<Task<()>>,
     to: Entity<TextInput>,
     cc: Entity<TextInput>,
+    bcc: Entity<TextInput>,
+    show_bcc: bool,
     subject: Entity<TextInput>,
     body: Entity<TextInput>,
     show_cc: bool,
     words: usize,
     /// Esc closed the sheet: the main window keeps this draft and reopens it.
     keep: bool,
+    opened: Outgoing,
+    saved_before_open: bool,
     /// The field that had focus when Esc closed the sheet.
     refocus: Option<FocusHandle>,
     /// "Account · address" in the From row.
@@ -83,6 +87,7 @@ pub struct Compose {
 pub enum ComposeEvent {
     /// Send was pressed: the sheet is no longer a modal, the Undo window runs.
     Sending,
+    DraftsChanged(String),
     LoadForward(String, i64),
     /// Undo in the window: the sheet is a modal again.
     Restored,
@@ -102,13 +107,14 @@ impl Compose {
         let tokens = recipients(to);
         let to = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
         let cc = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
+        let bcc = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Recipients"));
         let subject = cx.new(|cx| TextInput::new(window, cx).placeholder("Subject").with_text(subject));
         let body = cx.new(|cx| TextInput::new(window, cx).markdown().placeholder("Write your message"));
-        let fields = [&to, &cc, &subject, &body].map(|f| cx.subscribe_in(f, window, Self::on_field)).into();
+        let fields = [&to, &cc, &bcc, &subject, &body].map(|f| cx.subscribe_in(f, window, Self::on_field)).into();
         // A reply starts in the body, a new message in To.
         let first = if reply.is_some() { &body } else { &to };
         window.focus(&first.focus_handle(cx));
-        Self {
+        let mut this = Self {
             store: None,
             attachments: Vec::new(),
             forward_source: None,
@@ -127,11 +133,15 @@ impl Compose {
             _contacts: None,
             to,
             cc,
+            bcc,
+            show_bcc: false,
             subject,
             body,
             show_cc: false,
             words: 0,
             keep: false,
+            opened: Outgoing::default(),
+            saved_before_open: false,
             refocus: None,
             import_error: None,
             _error: None,
@@ -139,7 +149,9 @@ impl Compose {
             _dismiss: None,
             _appearance: appearance,
             _fields: fields,
-        }
+        };
+        this.opened = this.outgoing(cx);
+        this
     }
 
     pub fn initialize(&mut self, cc: &str, body: &str, forward_source: Option<i64>, cx: &mut Context<Self>) {
@@ -148,6 +160,7 @@ impl Compose {
         self.show_cc = !cc.is_empty();
         self.forward_source = forward_source;
         self.count(cx);
+        self.opened = self.outgoing(cx);
     }
 
     pub fn load_forward(&self, cx: &mut Context<Self>) {
@@ -158,9 +171,11 @@ impl Compose {
         if self.message_id != draft || self.forward_source.is_none() { return; }
         match result {
             Ok(parts) => {
+                let untouched = self.outgoing(cx) == self.opened;
                 self.attachments = parts.clone();
                 self.forward_source = None;
                 self.problem = None;
+                if untouched { self.opened = self.outgoing(cx); }
                 self.autosave(cx);
             }
             Err(_) => self.problem = Some("Could not load attachments. Press Send to retry."),
@@ -184,6 +199,8 @@ impl Compose {
         this.addresses.tokens = tokens;
         this.body.update(cx, |input, cx| input.set_text(&draft.text, cx));
         this.show_cc = !draft.cc.is_empty();
+        this.show_bcc = !draft.bcc.is_empty();
+        this.bcc.update(cx, |input, cx| input.set_text(&draft.bcc, cx));
         this.keep = true;
         this.phase = Phase::Gone;
         this.store = Some((store, account));
@@ -195,7 +212,7 @@ impl Compose {
         let tokens = [self.address_tokens(0, cx), self.address_tokens(1, cx)];
         Draft {
             id: self.message_id.clone(), account: account.id.clone(),
-            to: tokens[0].join(", "), cc: tokens[1].join(", "),
+            to: tokens[0].join(", "), cc: tokens[1].join(", "), bcc: self.bcc.read(cx).text().into(),
             recipient_tokens: Some(tokens),
             subject: self.subject.read(cx).text().into(), text: self.body.read(cx).text().into(),
             reply: self.reply.clone(),
@@ -239,6 +256,14 @@ impl Compose {
                 if std::mem::take(&mut this.save_again) { this.autosave(cx); }
             }).ok();
         }));
+    }
+
+    pub(crate) fn draft_id(&self) -> &str { &self.message_id }
+
+    pub(crate) fn sync_draft(&self, cx: &mut Context<Self>) {
+        if let Some((store, account)) = &self.store {
+            if store.flush_draft(&self.message_id).is_ok() { cx.emit(ComposeEvent::DraftsChanged(account.id.clone())); }
+        }
     }
 
     pub(crate) fn account_id(&self) -> Option<&str> {
@@ -363,9 +388,11 @@ impl Compose {
         cx.notify();
     }
 
-    /// Esc kept the draft: the sheet comes back as it was, focus where it was.
+    /// Reopen a retained draft as it was, focus where it was.
     pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.load_contacts(cx);
+        self.saved_before_open = true;
+        self.opened = self.outgoing(cx);
         self.keep = false;
         self.load_forward(cx);
         self.set(Phase::Open, cx);
@@ -398,7 +425,10 @@ impl Compose {
     }
 
     fn count(&mut self, cx: &mut Context<Self>) {
-        self.words = self.body.read(cx).text().split_whitespace().count();
+        self.words = self.body.read(cx).text().lines()
+            .take_while(|line| *line != "-- ")
+            .filter(|line| !line.trim_start().starts_with('>'))
+            .map(|line| line.split_whitespace().count()).sum();
         cx.notify();
     }
 
@@ -408,6 +438,7 @@ impl Compose {
         Outgoing {
             to: self.address_tokens(0, cx),
             cc: self.address_tokens(1, cx),
+            bcc: recipients(self.bcc.read(cx).text()),
             subject: text(&self.subject),
             text: text(&self.body),
             in_reply_to,
@@ -432,13 +463,13 @@ impl Compose {
             return;
         }
         let mail = self.outgoing(cx);
-        if mail.to.is_empty() && mail.cc.is_empty() {
+        if mail.to.is_empty() && mail.cc.is_empty() && mail.bcc.is_empty() {
             self.problem = Some("Add a recipient");
             window.focus(&self.to.focus_handle(cx));
             cx.notify();
             return;
         }
-        if mail.to.iter().chain(&mail.cc).any(|a| !lagom_core::contacts::valid_recipient(a)) {
+        if mail.to.iter().chain(&mail.cc).chain(&mail.bcc).any(|a| !lagom_core::contacts::valid_recipient(a)) {
             self.problem = Some("A recipient is not an email address");
             window.focus(&self.to.focus_handle(cx));
             cx.notify();
@@ -453,6 +484,7 @@ impl Compose {
                 return;
             }
         }
+        self.sync_draft(cx);
         self.problem = None;
         self.phase = Phase::Sent;
         self.keep = false;
@@ -523,6 +555,7 @@ impl Compose {
                     return;
                 }
             }
+            self.sync_draft(cx);
             self.keep = false;
             self.set(Phase::Gone, cx);
         }
@@ -534,16 +567,34 @@ impl Compose {
             return;
         }
         if !self.save(cx) { return; }
+        self.sync_draft(cx);
         self.refocus = self.focused_field(window, cx).map(|i| self.fields()[i].focus_handle(cx));
         self.keep = true;
         self.set(Phase::Gone, cx);
     }
 
-    fn fields(&self) -> [&Entity<TextInput>; 4] {
-        [&self.to, &self.cc, &self.subject, &self.body]
+    pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.is_modal() { return false; }
+        if self.outgoing(cx) != self.opened {
+            self.close(window, cx);
+            return self.phase == Phase::Gone;
+        }
+        if self.saved_before_open {
+            // A pending autosave may still need to replace an edit that was undone before closing.
+            self.keep = true;
+            self.set(Phase::Gone, cx);
+        } else {
+            // persist seeds autosave's revision; an untouched new sheet must not leave that draft behind.
+            self.discard(cx);
+        }
+        false
     }
 
-    /// 0 To, 1 Cc, 2 Subject, 3 Body.
+    fn fields(&self) -> [&Entity<TextInput>; 5] {
+        [&self.to, &self.cc, &self.subject, &self.body, &self.bcc]
+    }
+
+    /// 0 To, 1 Cc, 2 Subject, 3 Body, 4 Bcc.
     pub(crate) fn focused_field(&self, window: &Window, cx: &gpui::App) -> Option<usize> {
         self.fields().iter().position(|f| f.focus_handle(cx).is_focused(window))
     }
@@ -635,6 +686,7 @@ impl Compose {
                         )
                     }))
                     .when(self.show_cc, |d| d.child(field("Cc").child(self.address_field(1, window, cx))))
+                    .when(self.show_bcc, |d| d.child(field("Bcc").child(grow(&self.bcc))))
                     .child(field("Subject").child(grow(&self.subject).font_weight(FontWeight::SEMIBOLD))),
             )
             .when(self.forward_source.is_some() || !self.attachments.is_empty(), |d| d.child(
@@ -802,6 +854,22 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn word_counter_excludes_quotes_and_signature(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        for (text, count) in [
+            ("Thanks for this\n\n> On yesterday, sender wrote:\n> many quoted words\n>\n> more", 3),
+            ("Thanks again\n\n-- \nTeam signature\n\n> Original message", 2),
+            ("> Original\nMy inline reply\n  > Nested quote\nMore text", 5),
+            ("> -- \n> Quoted signature\nStill my reply\r\n-- \r\nMy signature", 3),
+            ("A -- separator is prose", 5),
+            ("", 0),
+        ] {
+            view.update(cx, |v, cx| v.initialize("", text, None, cx));
+            assert_eq!(view.read_with(cx, |v, _| v.words), count, "{text:?}");
+        }
     }
 
     #[gpui::test]

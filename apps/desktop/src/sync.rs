@@ -63,6 +63,7 @@ pub enum Cmd {
     Sync(Option<String>),
     /// IDLE saw a change: INBOX only.
     SyncInbox(String),
+    Drafts(String),
     /// `id` is the store row the UI saw. The worker follows it through earlier moves.
     Op { op: u64, id: i64, act: Act },
     EmptyTrash { op: u64, folder: i64 },
@@ -250,7 +251,7 @@ async fn mail_work(mut w: Worker, mut rx: UnboundedReceiver<Cmd>) {
                 Some(cmd) => w.handle(cmd, &mut rx).await,
                 None => break,
             },
-            _ = retry.tick() => w.retry_events(),
+            _ = retry.tick() => { w.retry_events(); w.sync_drafts(None).await; },
             _ = tick.tick() => w.sync(None, false, &mut rx).await,
         }
     }
@@ -322,6 +323,7 @@ impl Worker {
     async fn quick(&mut self, cmd: Cmd) {
         let calendar_consent = matches!(&cmd, Cmd::AllowCalendar(_));
         match cmd {
+            Cmd::Drafts(account) => self.sync_drafts(Some(&account)).await,
             Cmd::TasksEdited => { if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Edited); } },
             Cmd::TasksReauth(id) => self.require_reauth(&id),
             #[cfg(test)]
@@ -570,7 +572,54 @@ impl Worker {
         self.emit(Event::Changed);
     }
 
+    async fn sync_drafts(&mut self, only: Option<&str>) {
+        let accounts = match self.store.accounts() {
+            Ok(accounts) => accounts,
+            Err(e) => { self.emit(Event::Sync(String::new(), SyncState::Failed(e.to_string()))); return; }
+        };
+        let mut changed = false;
+        for account in accounts.into_iter().filter(|a| only.is_none_or(|id| id == a.id)) {
+            if self.reauth_required.contains(&account.id) { continue; }
+            let now = chrono::Local::now().timestamp_millis();
+            let ids = match self.store.due_drafts(&account.id, now) {
+                Ok(ids) => ids,
+                Err(e) => { self.emit(Event::Sync(account.id, SyncState::Failed(e.to_string()))); continue; }
+            };
+            if ids.is_empty() { continue; }
+            changed = true;
+            let mut failure = None;
+            for id in ids {
+                let result = if failure.is_some() { Ok(()) } else {
+                    match self.take(&account).await {
+                        Ok(mut session) => {
+                            let result = session.sync_draft(&mut self.store, &id, now).await;
+                            self.give(&account.id, session, &result);
+                            result
+                        }
+                        Err(e) => Err(e),
+                    }
+                };
+                if let Err(error) = result { failure = Some(error); }
+                if let Some(error) = &failure {
+                    if let Err(e) = self.store.draft_sync_failed(&id, error, now) {
+                        self.emit(Event::Sync(account.id.clone(), SyncState::Failed(e.to_string())));
+                    }
+                    if matches!(error, Error::Invalid(_)) {
+                        self.emit(Event::Sync(account.id.clone(), SyncState::Failed(format!("Draft kept locally: {error}"))));
+                        failure = None;
+                    }
+                }
+            }
+            if let Some(error) = failure {
+                if matches!(error, Error::ReauthRequired) { self.require_reauth(&account.id); }
+                self.emit(Event::Sync(account.id.clone(), SyncState::Failed(format!("Draft kept locally: {error}"))));
+            }
+        }
+        if changed { self.emit(Event::Changed); }
+    }
+
     async fn sync(&mut self, only: Option<String>, inbox_only: bool, rx: &mut UnboundedReceiver<Cmd>) {
+        self.sync_drafts(only.as_deref()).await;
         let accounts = self.store.accounts().unwrap_or_default();
         for account in accounts.into_iter().filter(|a| only.as_ref().is_none_or(|id| *id == a.id)) {
             if self.reauth_required.contains(&account.id) { continue; }
@@ -1441,6 +1490,9 @@ mod tests {
     async fn reauthentication_progresses_while_another_account_syncs() {
         use lagom_core::account::{Auth, Security, ServerConfig};
         use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::oneshot};
+        // SQLite migrations must not consume the protocol hang guard on slow disks.
+        let path = std::env::temp_dir().join(format!("lagom-reauth-sync-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = Store::open(&path).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
@@ -1469,11 +1521,10 @@ mod tests {
                     socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
                 }
             });
-            let path = std::env::temp_dir().join(format!("lagom-reauth-sync-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             let (me, mut rx) = unbounded_channel();
             let (events, mut out) = unbounded_channel();
             let session = ImapSync::login(&account, "fixture").await.unwrap();
-            let mut worker = Worker { store: Store::open(&path).unwrap(), sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+            let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
             worker.store.save_account(&account).unwrap();
             let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
             let mut reauth = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();

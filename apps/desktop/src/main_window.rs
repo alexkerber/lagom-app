@@ -24,9 +24,10 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, CloseWindow, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
 
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("secondary-w", CloseWindow, None)]);
     tasks::bind_keys(cx);
     week::bind_keys(cx);
     let ctx = Some("MainWindow");
@@ -185,6 +186,7 @@ mod agenda;
 mod week;
 mod new_event;
 mod home;
+mod drafts;
 pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
@@ -201,6 +203,7 @@ const SECTIONS: [(&str, &str, &str); 4] = [
 /// What fills the main panel.
 enum Page {
     Mail,
+    Drafts,
     Home,
     Calendar,
     Todo,
@@ -283,6 +286,9 @@ pub struct MainWindow {
     compose: Option<gpui::Entity<Compose>>,
     // Saved drafts, newest last. R and C reopen the newest.
     drafts: Vec<gpui::Entity<Compose>>,
+    draft_rows: Vec<lagom_core::outbox::DraftSummary>,
+    draft_read: Option<Task<()>>,
+    draft_open: Option<Task<()>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
@@ -401,6 +407,9 @@ impl MainWindow {
             palette: None,
             compose: None,
             drafts: Vec::new(),
+            draft_rows: Vec::new(),
+            draft_read: None,
+            draft_open: None,
             sending: Vec::new(),
             live,
             demo,
@@ -663,6 +672,30 @@ impl MainWindow {
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+        self.draft_open = None;
+        if kind != ComposeKind::Reply || self.drafts.is_empty() {
+            if let Some(id) = reply.filter(|&id| self.live.is_some() && self.inbox.mail[id].store.is_some()) {
+                self.open_message(id, false, cx);
+                let Some(mut text) = self.inbox.mail[id].text.clone() else {
+                    self.notify("Could not read message", cx);
+                    return;
+                };
+                if text.borrow().is_none() {
+                    let selected = self.inbox.single();
+                    self.draft_open = Some(cx.spawn_in(window, async move |this, cx| {
+                        if text.changed().await.is_err() { return; }
+                        this.update_in(cx, |this, window, cx| {
+                            this.draft_open = None;
+                            if this.inbox.single() == selected && this.inbox.mail.get(id)
+                                .and_then(|m| m.text.as_ref()).is_some_and(|current| current.same_channel(&text)) {
+                                this.compose_kind(Some(id), kind, window, cx);
+                            }
+                        }).ok();
+                    }));
+                    return;
+                }
+            }
+        }
         self.release(false, cx);
         self.toast = None;
         let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
@@ -701,13 +734,8 @@ impl MainWindow {
                         .map_or_else(String::new, |input| input.read(cx).text().to_string()),
                     _ => String::new(),
                 };
-                let original = match (m.and_then(|m| m.store), &self.live) {
-                    (Some(id), Some(live)) => match live.store.message(id) {
-                        Ok(message) => Some(message.body_text),
-                        Err(e) => { self.notify(format!("Could not read message: {e}"), cx); return; }
-                    },
-                    _ => m.map(|m| m.body.join("\n\n")),
-                };
+                let original = m.map(|m| m.text.as_ref().and_then(|text| text.borrow().clone())
+                    .unwrap_or_else(|| m.body.join("\n\n").into()));
                 let body = mail::compose_body(&signature, m.zip(original.as_deref()), kind);
                 let source = m.filter(|_| kind == ComposeKind::Forward).and_then(|m| m.store);
                 let compose = cx.new(|cx| Compose::new(from, &to, &subject, headers, window, cx));
@@ -723,8 +751,36 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        if let Some(compose) = self.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
+            if compose.update(cx, |c, cx| c.close_window(window, cx)) { self.notify("Draft saved", cx); }
+            return;
+        }
+        if matches!(self.page, Page::Calendar) && self.week.editor.is_some() {
+            self.cancel_new_event(window, cx);
+            return;
+        }
+        if matches!(self.page, Page::Home | Page::Todo) && self.close_task_overlay(window, cx) { return; }
+        if (matches!(self.page, Page::Calendar) && self.week.detail.take().is_some()) || self.folder_name.take().is_some()
+            || self.message_menu.take().is_some() || std::mem::take(&mut self.confirm_empty_trash) {
+            window.focus(&self.focus);
+            cx.notify();
+            return;
+        }
+        match &self.page {
+            Page::AddAccount(add) => { add.update(cx, |add, cx| add.back(window, cx)); }
+            Page::Settings(Some(_)) => { self.set_page(Page::Settings(None), cx); cx.notify(); }
+            Page::Settings(None) => self.show_section(1, window, cx),
+            _ => hide_main_window(window),
+        }
+    }
+
     /// Only a failed local write can hold an exit; drafts and sends need no network wait.
-    fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
         let mut saved = true;
         if let Some(live) = &self.live {
             for (id, input) in &self.signatures {
@@ -735,7 +791,11 @@ impl MainWindow {
         }
         for compose in self.drafts.iter().chain(self.compose.iter()) {
             if compose.read(cx).is_modal() || compose.read(cx).keeps_draft() {
-                saved &= compose.update(cx, |c, cx| c.save(cx));
+                saved &= compose.update(cx, |c, cx| {
+                    let saved = c.save(cx);
+                    if saved { c.sync_draft(cx); }
+                    saved
+                });
             }
         }
         if !saved { self.notify("Could not save local edits. Check local storage before closing.", cx); }
@@ -750,6 +810,7 @@ impl MainWindow {
                     this.drafts.push(compose.clone());
                 }
             }
+            this.reload_draft_rows(cx);
             this.sending.retain(|c| c != compose);
             if this.compose.is_none() && this.palette.is_none() {
                 window.focus(&this.focus);
@@ -761,6 +822,12 @@ impl MainWindow {
             match e {
                 // The sheet leaves the modal slot but stays alive for its Undo window. The inbox
                 // takes the keys meanwhile.
+                ComposeEvent::DraftsChanged(account) => {
+                    if let Some(live) = &this.live {
+                        if !live.bridge.send(Cmd::Drafts(account.clone())) { this.worker_gone(cx); }
+                    }
+                    this.reload_draft_rows(cx);
+                }
                 ComposeEvent::Sending => {
                     if this.compose.as_ref() == Some(compose) {
                         this.compose = None;
@@ -1052,6 +1119,7 @@ impl MainWindow {
     }
 
     fn select(&mut self, f: impl FnOnce(&mut Inbox), cx: &mut Context<Self>) {
+        self.draft_open = None;
         let before = self.inbox.selected;
         f(&mut self.inbox);
         let ix = self.inbox.selected;
@@ -1386,11 +1454,11 @@ impl MainWindow {
             Some(live) => live.accounts.iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == live.current)).collect(),
             None => mail::demo_accounts().iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == 0)).collect(),
         };
-        let on_mail = matches!(self.page, Page::Mail);
+        let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
         let fade = self.sidebar_fade.map(|at| ease_out_quint()((at.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.))).unwrap_or(1.);
         let show_mail = on_mail || self.sidebar_fade.is_some();
         let unread = if self.live.is_none() { self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count() } else { self.today.unread };
-        let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
+        let open_kind = |kind| matches!(self.page, Page::Mail) && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
         for (i, (name, address, active)) in accounts.into_iter().enumerate() {
             account_rows = account_rows.child(div().flex().flex_col()
@@ -1411,10 +1479,11 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // Room for the macOS traffic lights.
-            .when(cfg!(target_os = "macos"), |d| d.child(div().h(px(16.)).flex_shrink_0()))
+            // macOS: the brand shares the traffic lights' row (lights at y 18, 14 px tall, ending near x 72).
+            .when(cfg!(target_os = "macos"), |d| d.pt(px(5.)))
             .child(
                 div().id("sidebar-brand").debug_selector(|| "sidebar-brand".into())
+                    .when(cfg!(target_os = "macos"), |d| d.ml(px(64.)))
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -1424,7 +1493,7 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(app_mark())
-                    .child("Lagom"),
+                    .child("lagom"),
             )
             .child(
                 div()
@@ -1451,7 +1520,7 @@ impl MainWindow {
                     .gap(px(2.))
                     .flex_shrink_0()
                     .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
-                        let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
+                        let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
                         // Unread mail is a filled badge, so it never reads as a shortcut; every row keeps its ⌘ key.
                         sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
@@ -1465,14 +1534,17 @@ impl MainWindow {
                     })))
                 .when(show_mail, |d| d.child(div().id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
                     .flex().flex_col().gap(px(2.)).opacity(if on_mail { fade } else { 1. - fade })
-                    .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
-                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
+                    .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } }))
+                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } }))
                     .child(self.mailbox_row(0, cx))
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
-                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Later, cx); })))
+                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Later, cx); })))
                     .child(self.mailbox_row(2, cx))
                     .child(self.mailbox_row(1, cx))
-                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Trash, cx); })))
+                    .child(nav("icons/edit-draft.svg", "Drafts", Some(self.draft_rows.len()), matches!(self.page, Page::Drafts))
+                        .debug_selector(|| "nav-Drafts".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.show_drafts(window, cx))))
+                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Trash, cx); })))
                 .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(200.)))
                 .child(account_rows.mt(px(18.))))))
             .child(
@@ -2095,13 +2167,20 @@ fn reading_view(
     let attachment = || m.attachments.iter().enumerate().map(|(index, part)| {
         let on_download = on_download.clone();
         let section = part.section.clone();
+        // The extension never truncates, so a long name cannot hide `.exe`.
+        let (stem, extension) = match part.filename.rsplit_once('.') {
+            Some((stem, extension)) if !stem.is_empty() => (stem.to_owned(), format!(".{extension}")),
+            _ => (part.filename.clone(), String::new()),
+        };
         pressable(div().id(("attachment", index)), t, false)
             .flex().items_center().gap(px(12.)).min_w(px(0.)).flex_shrink_0()
             .px(px(14.)).py(px(10.)).rounded(px(radius::ATTACHMENT))
             .border_1().border_color(t.line).bg(t.subtle)
             .text_size(px(size::SNIPPET)).line_height(relative(LEADING))
             .child(icon("icons/attachment.svg", t.ink2, 16.))
-            .child(div().flex_1().min_w(px(0.)).truncate().font_weight(FontWeight::MEDIUM).child(part.filename.clone()))
+            .child(div().flex_1().min_w(px(0.)).flex().font_weight(FontWeight::MEDIUM)
+                .child(div().min_w(px(0.)).truncate().child(stem))
+                .child(div().flex_shrink_0().child(extension)))
             .child(mono(attachment_size(part.size), t.ink2))
             .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
     }).collect::<Vec<_>>();
@@ -2175,6 +2254,7 @@ impl Render for MainWindow {
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
+            Page::Drafts => "Drafts".into(),
             Page::Home => "Today".into(),
             Page::Todo => "Todo".into(),
             Page::Calendar => "Calendar".into(),
@@ -2188,11 +2268,12 @@ impl Render for MainWindow {
         let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && self.inbox.account_filter.is_none() && !self.inbox.unread_only;
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
-        let on_mail = matches!(self.page, Page::Mail);
+        let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
         if self.sidebar_mail != on_mail { self.sidebar_mail = on_mail; self.sidebar_fade = Some(Instant::now()); }
         if self.sidebar_fade.is_some_and(|at| at.elapsed() < MOTION) { window.request_animation_frame(); }
         else { self.sidebar_fade = None; }
         let panel = match &self.page {
+            Page::Drafts => self.drafts_view(cx),
             Page::Home | Page::Todo => self.tasks_view(window, cx),
             Page::Calendar => self.week_view(window, cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
@@ -2450,16 +2531,25 @@ impl Swipe {
     }
 }
 
-/// ⌘Q and ⌘W flush local edits. Menu and key actions reach
-/// the window before the app's global handlers, which run when this one propagates.
+/// Only Quit propagates to the app; Close Window belongs to the active window.
 fn exit_actions<E: InteractiveElement>(el: E, cx: &mut Context<MainWindow>) -> E {
+    let el = el.on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)));
     #[cfg(target_os = "macos")]
-    let el = el
-        .on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(cx) { cx.propagate() }))
-        .on_action(cx.listener(|this, _: &crate::menus::CloseWindow, _, cx| if !this.hold_exit(cx) { cx.propagate() }));
-    #[cfg(not(target_os = "macos"))]
-    let _ = cx;
+    let el = el.on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(cx) { cx.propagate() }));
     el
+}
+
+fn hide_main_window(_window: &Window) {
+    // GPUI has no per-window hide; keep its owner and background work alive until Dock reopen.
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(_window) else { return; };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return; };
+        // GPUI owns the view for the lifetime of this borrowed Window.
+        let view = unsafe { &*handle.ns_view.as_ptr().cast::<objc2_app_kit::NSView>() };
+        if let Some(window) = view.window() { window.orderOut(None); }
+    }
 }
 
 /// Inbox and folder state as ids into `mail`. Plain Rust, so tests run without a window.
@@ -2852,8 +2942,10 @@ impl Inbox {
         match self.by_store.get(&m.id) {
             Some(&id) => {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
+                fresh.text = self.mail[id].text.take();
                 fresh.html = self.mail[id].html.take();
                 fresh.inline = self.mail[id].inline.clone();
+                fresh.inline_referenced = self.mail[id].inline_referenced;
                 fresh.inline_pending = self.mail[id].inline_pending;
                 fresh.inline_retry_after = self.mail[id].inline_retry_after;
                 fresh.remote = self.mail[id].remote;
@@ -3625,7 +3717,9 @@ mod dispatch {
         view.update(cx, |v, cx| v.undo(cx));
         frame(cx);
         // A late frame must reveal the restored last row even if its motion has ended.
-        view.update(cx, |v, _| v.entering[0].at = Instant::now() - SPRING);
+        view.update(cx, |v, _| {
+            if let Some(row) = v.entering.first_mut() { row.at = Instant::now() - SPRING; }
+        });
         frame(cx);
         selected_in_view(&view, cx);
         view.update(cx, |v, cx| v.open_box(Some(0), cx));
@@ -3647,7 +3741,10 @@ mod dispatch {
         });
         for released in [false, true] {
             view.update(cx, |v, cx| {
-                if released { v.release(false, cx); }
+                if released {
+                    v.release(false, cx);
+                    v.spring.as_mut().unwrap().2 = at;
+                }
                 let layout = v.row_layout(at + Duration::from_millis(70));
                 assert!((layout.bottom() - layout.y(9999) - ROW_H).abs() < 0.1,
                     "a swiped or springing row renders at full height after Undo");
@@ -3879,6 +3976,90 @@ mod dispatch {
         cx.simulate_input(" there");
         let compose = view.read_with(cx, |v, _| v.compose.clone()).unwrap();
         assert_eq!(compose.read_with(cx, |c, cx| c.body_text(cx)), format!("**Hi** there{quote}"));
+    }
+
+    #[gpui::test]
+    fn close_window_dismisses_the_innermost_overlay(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("r secondary-k secondary-w");
+        assert!(view.read_with(cx, |v, _| v.palette.is_none() && v.compose.is_some()));
+        cx.simulate_keystrokes("secondary-w secondary-, secondary-w");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Mail)));
+        view.update(cx, |v, cx| { v.set_page(Page::Settings(Some("fixture".into())), cx); cx.notify(); });
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        cx.update(|window, cx| window.dispatch_action(Box::new(CloseWindow), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Mail)));
+        view.update_in(cx, |v, window, cx| v.new_folder(window, cx));
+        cx.simulate_input("Unfinished folder");
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.folder_name.is_none()));
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+    }
+
+    #[gpui::test]
+    fn close_window_keeps_main_alive_and_reopen_reuses_it(cx: &mut TestAppContext) {
+        cx.on_reopen(|cx| crate::reopen_main_window(true, cx));
+        let (view, cx) = open(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-w");
+        assert!(!cx.cx.quit_requested());
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        cx.cx.simulate_reopen(false);
+        let reopened = cx.cx.update(|cx| cx.active_window().unwrap().downcast::<MainWindow>().unwrap());
+        assert_eq!(reopened.root(cx).unwrap(), view);
+    }
+
+    #[gpui::test]
+    fn dock_reopen_with_a_visible_popout_activates_the_same_main(cx: &mut TestAppContext) {
+        cx.on_reopen(|cx| crate::reopen_main_window(true, cx));
+        let (view, cx) = open(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-w");
+        assert!(!cx.cx.quit_requested());
+        popout.update(cx, |_, window, _| window.activate_window()).unwrap();
+        assert!(cx.cx.update(|cx| cx.active_window()) == Some(popout.into()));
+        for visible in [true, true, false] {
+            cx.cx.simulate_reopen(visible);
+            assert!(cx.cx.update(|cx| cx.active_window()) == Some(cx.window_handle()));
+            assert_eq!(cx.cx.update(|cx| cx.windows().len()), 2);
+            assert_eq!(cx.window_handle().downcast::<MainWindow>().unwrap().root(cx).unwrap(), view);
+            popout.update(cx, |_, window, _| window.activate_window()).unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn application_quit_request_is_observable(cx: &mut TestAppContext) {
+        assert!(!cx.quit_requested());
+        cx.update(|cx| cx.quit());
+        assert!(cx.quit_requested());
+    }
+
+    #[gpui::test]
+    fn close_window_removes_only_the_active_popout(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-o j secondary-o");
+        let handles = view.read_with(cx, |v, _| v.popouts.iter().map(|p| p.1).collect::<Vec<_>>());
+        assert_eq!(handles.len(), 2);
+        let mut popup = VisualTestContext::from_window(handles[1].into(), cx);
+        popup.update(|window, _| window.activate_window());
+        popup.simulate_keystrokes("secondary-w");
+        popup.run_until_parked();
+        assert!(handles[1].read_with(&popup, |_, _| ()).is_err());
+        assert!(handles[0].read_with(&popup, |_, _| ()).is_ok());
+        assert_eq!(popup.cx.update(|cx| cx.windows().len()), 2);
     }
 
     #[gpui::test]

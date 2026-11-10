@@ -23,7 +23,7 @@ mod native;
 /// Whether this platform renders HTML mail.
 pub(super) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_links};
+use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_tags};
 
 fn css(c: Rgba) -> String {
     let ch = |v: f32| (v * 255.).round() as u8;
@@ -47,7 +47,7 @@ pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="color-scheme" content="{scheme}"><style>{base}{look}</style></head>{mail}"#,
         csp = csp(remote, if cfg!(target_os = "windows") { "http://lagom-cid.localhost" } else { "lagom-cid:" }),
-        mail = inert_links(html),
+        mail = inert_tags(html),
     )
 }
 
@@ -57,6 +57,7 @@ pub(super) enum Msg {
     Loaded,
     Open(String),
     Escape,
+    CloseWindow,
     NewTask,
     MailAction(Run),
     Hints { over: bool, command: bool, shift: bool },
@@ -91,6 +92,11 @@ addEventListener('click', e => {
 }, true);
 addEventListener('keydown', e => {
   hints(e);
+  if (e.isTrusted && e[closeModifier] && !(e.metaKey && e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'w') {
+    e.preventDefault();
+    window.ipc.postMessage('close-window');
+    return;
+  }
   if (e.key === 'Escape') window.ipc.postMessage('escape');
   if (!e.isTrusted || e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input,textarea,[contenteditable]')) return;
   const key = e.key.toLowerCase();
@@ -98,6 +104,15 @@ addEventListener('keydown', e => {
   if (command) { e.preventDefault(); window.ipc.postMessage(command); }
 }, true);
 "#;
+
+/// A navigation passes only when the app has just started a load and `url` is that load:
+/// `loadHTMLString` with no base URL is `about:blank`. Another URL never takes the flag, so a
+/// `<meta refresh>` that fires as the user switches mail cannot spend the app's load.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn allow_navigation(ours: &std::cell::Cell<bool>, url: &str) -> bool {
+    // shortcut: WebView2 `NavigateToString` is documented as `about:blank` and has been seen as a `data:text/html` URI; both pass on Windows. Not run on Windows: measure it there and keep one.
+    (url == "about:blank" || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))) && ours.replace(false)
+}
 
 fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
     let mut clip = bounds.intersect(&mask);
@@ -301,6 +316,11 @@ impl Web {
                 host.new_task(cx);
             }
             Msg::Loaded => host.web().ready = true,
+            Msg::CloseWindow => {
+                host.web().unfocus();
+                window.focus(&host.keys());
+                window.dispatch_action(Box::new(super::CloseWindow), cx);
+            }
             Msg::Open(url) if link_allowed(&url) => cx.open_url(&url),
             Msg::Open(_) => {}
             Msg::Escape => {
@@ -342,8 +362,9 @@ impl Web {
                     None => response.status(404).body(std::borrow::Cow::Owned(Vec::new())).unwrap(),
                 }
             })
-            .with_initialization_script(format!("{BRIDGE}\n{}", include_str!("html/fit.js")))
-            .with_navigation_handler(move |_| ours.replace(false))
+            .with_initialization_script(format!("const closeModifier = '{}';\n{BRIDGE}\n{}",
+                if cfg!(target_os = "macos") { "metaKey" } else { "ctrlKey" }, include_str!("html/fit.js")))
+            .with_navigation_handler(move |url| allow_navigation(&ours, &url))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
             .with_on_page_load_handler(move |e, _| {
@@ -357,6 +378,7 @@ impl Web {
                     Some(("open", url)) => Msg::Open(url.to_string()),
                     Some(("hints", state)) => match hint_event(state) { Some(msg) => msg, None => return },
                     _ if body == "escape" => Msg::Escape,
+                    _ if body == "close-window" => Msg::CloseWindow,
                     _ if body == "task" => Msg::NewTask,
                     _ if body == "forward" => Msg::MailAction(Run::Forward),
                     _ if body == "reply-all" => Msg::MailAction(Run::ReplyAll),
@@ -409,6 +431,23 @@ mod tests {
         assert!(matches!(hint_event("1 1 0"), Some(Msg::Hints { over: true, command: true, shift: false })));
         assert!(matches!(hint_event("0 0 0"), Some(Msg::Hints { over: false, command: false, shift: false })));
         for invalid in ["", "1 0", "1 1 1 0", "1 NaN 0", "2 0 0", "1 true false"] { assert!(hint_event(invalid).is_none()); }
+    }
+
+    #[gpui::test]
+    fn close_window_from_html_uses_the_window_action(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        cx.update_window(popout.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        popout.update(cx, |v, window, cx| {
+            Web::event(v, Msg::CloseWindow, window, cx);
+        }).unwrap();
+        cx.run_until_parked();
+        assert!(popout.read_with(cx, |_, _| ()).is_err());
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        view.update_in(cx, |v, window, cx| Web::event(v, Msg::CloseWindow, window, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
     }
 
     #[gpui::test]
@@ -532,6 +571,21 @@ mod tests {
         assert!(doc.contains(r#"<x-LINK rel="preconnect""#) && doc.contains("<x-link rel=dns-prefetch") && doc.contains("<p>&lt;link</p>"));
         assert!(!doc.to_ascii_lowercase().contains("<link"));
         assert!(doc.contains(r#"<meta http-equiv="x-dns-prefetch-control" content="off">"#));
+    }
+
+    #[test]
+    fn only_the_apps_own_load_navigates() {
+        let ours = std::cell::Cell::new(false);
+        assert!(!allow_navigation(&ours, "about:blank"), "no load started");
+        ours.set(true);
+        for evil in ["https://evil.example/", "about:srcdoc", "lagom-cid:x"] {
+            assert!(!allow_navigation(&ours, evil), "{evil}");
+        }
+        assert_eq!(allow_navigation(&ours, "data:text/html,x"), cfg!(target_os = "windows"));
+        ours.set(true);
+        assert!(ours.get(), "a denied URL leaves the app's load its flag");
+        assert!(allow_navigation(&ours, "about:blank"));
+        assert!(!allow_navigation(&ours, "about:blank"), "one load, one navigation");
     }
 
     #[test]

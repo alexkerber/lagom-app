@@ -451,8 +451,8 @@ impl MainWindow {
                     .child(mono(event_time(&entry.event), t.ink2)))
                 .children(entry.event.location.clone().map(|location| div().child(location)))
                 .child(mono(entry.calendar.clone(), t.ink2))
-                .children(entry.event.join_url.clone().filter(|s| lagom_core::google::safe_join_url(s)).map(|url|
-                    button(&t, "Join", None).on_click(move |_, _, cx| cx.open_url(&url))))
+                .children(entry.event.join_url.clone().and_then(|url| Some((lagom_core::google::join_host(&url)?, url))).map(|(host, url)|
+                    button(&t, "Join", None).child(format!("· {host}")).on_click(move |_, _, cx| cx.open_url(&url))))
                 .children(entry.event.html_link.clone().filter(|s| lagom_core::google::safe_calendar_url(s)).map(|url|
                     icon_button(&t, "Open in Google Calendar", "icons/external.svg", "Open in Google Calendar").on_click(move |_, _, cx| cx.open_url(&url))))
                 .child(icon_button(&t, "Close", "icons/close.svg", "Close event · Esc").on_click(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))));

@@ -4,21 +4,34 @@
 use gpui::{actions, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
 
 use crate::text_input;
+use crate::main_window::CloseWindow;
 
 actions!(
     lagom,
-    [Quit, Hide, HideOthers, ShowAll, CloseWindow, Minimize, Zoom, ToggleFullScreen, OpenRepository]
+    [Quit, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen, OpenRepository]
 );
 
 const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
 
 pub fn init(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| {
+        // A hidden main window has no focused action path to guard Quit.
+        if cx.active_window().is_none() {
+            for main in cx.windows().into_iter().filter_map(|w| w.downcast::<crate::main_window::MainWindow>()) {
+                let held = main.update(cx, |main, window, cx| {
+                    let held = main.hold_exit(cx);
+                    if held { window.activate_window(); }
+                    held
+                });
+                if held.unwrap_or(true) { return; }
+            }
+        }
+        cx.quit();
+    });
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &OpenRepository, cx| cx.open_url(REPOSITORY));
-    cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |window| window.remove_window()));
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |window| window.toggle_fullscreen()));
@@ -27,7 +40,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
     ]);

@@ -118,9 +118,10 @@ async fn replies_queue_markdown_durably_without_network_or_cross_account_sends()
 
 #[tokio::test]
 async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (_dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (_dir, core) = fixture();
         let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
         let server = tokio::spawn(async move {
             let mut flags = 0;
@@ -172,10 +173,11 @@ async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
 
 #[tokio::test]
 async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        for all in [false, true] {
+    for all in [false, true] {
+        // Each independent fixture gets a protocol budget after its SQLite migrations.
+        let (_dir, core) = fixture();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-            let (_dir, core) = fixture();
             let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
             let server = tokio::spawn(async move {
                 let mut selected = Vec::new();
@@ -222,8 +224,8 @@ async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders()
             assert_eq!(core.message(inbox[0].id).await.unwrap().text_body, "body");
             assert_eq!(core.mailbox(Some(a.id), Mailbox::Sent, 10, 0).await.unwrap().len(), 1);
             assert_eq!(server.await.unwrap(), [(0, "\"INBOX\"".into()), (0, "\"Archive\"".into()), (1, "\"Sent\"".into())]);
-        }
-    }).await.unwrap();
+        }).await.unwrap();
+    }
 }
 
 #[test]
@@ -237,22 +239,29 @@ fn local_later_is_tomorrow_at_eight() {
 
 #[test]
 fn html_privacy_and_recipients_share_core_policy() {
-    let html = "<LINK rel=preconnect href='https://tracker.example'><img src='https://tracker.example/pixel'><script>fetch('/secret')</script>";
+    let html = "<LINK rel=preconnect href='https://tracker.example'><img src='https://tracker.example/pixel'><script>fetch('/secret')</script><iframe srcdoc='&lt;link rel=preconnect href=https://tracker.example&gt;'></iframe><object data='https://tracker.example'></object><embed src='https://tracker.example'><frame src='https://tracker.example'>";
     for dark in [false, true] {
         let document = mail_document(html.into(), dark, 42, false);
         assert!(document.contains("default-src 'none'; img-src data: lagom-cid:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"));
         assert!(document.find("Content-Security-Policy").unwrap() < document.find("<img").unwrap());
         assert!(document.contains("<x-LINK"));
         assert!(!document.contains("<LINK"));
+        for tag in ["iframe", "object", "embed", "frame"] {
+            assert!(document.contains(&format!("<x-{tag}")));
+            assert!(!document.contains(&format!("<{tag}")));
+            assert!(!document.contains(&format!("</{tag}")));
+        }
+        assert!(document.contains("system-ui,-apple-system,sans-serif"));
     }
     assert_eq!(split_recipients("\"Example, Sender\" <sender@example.test>, next@example.test".into()), ["\"Example, Sender\" <sender@example.test>", "next@example.test"]);
 }
 
 #[tokio::test]
 async fn done_and_delete_move_through_imap_without_crossing_accounts() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (_dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (_dir, core) = fixture();
         let (a, other, id, untouched) = {
             let mut s = core.stores.local.lock().unwrap();
             let a = fixture_account(&s, "moving@example.test", listener.local_addr().unwrap().port());
@@ -315,8 +324,9 @@ async fn done_and_delete_move_through_imap_without_crossing_accounts() {
 
 #[tokio::test]
 async fn manual_add_verifies_both_servers_before_saving() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (_dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let (_dir, core) = fixture();
         for accepted in [false, true] {
             let imap = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let smtp = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -460,6 +470,15 @@ async fn next_snooze_uses_earliest_future_deadline_across_accounts() {
 }
 
 #[tokio::test]
+async fn a_panic_in_one_action_leaves_the_store_usable() {
+    let (_dir, core) = fixture();
+    for network in [false, true] {
+        assert!(core.run_on(network, |_| -> lagom_core::Result<()> { panic!("action panicked") }).await.is_err());
+        assert!(core.run_on(network, |s| s.accounts()).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn reply_all_uses_source_identity_cc_signature_and_thread() {
     let (_dir, core) = fixture();
     let (a, id) = {
@@ -545,9 +564,10 @@ async fn forward_refuses_unknown_or_unavailable_attachments_instead_of_dropping_
 
 #[tokio::test]
 async fn forward_fetches_only_missing_parts_and_reuses_the_cache() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (dir, core) = fixture();
         let id = {
             let mut s = core.stores.local.lock().unwrap();
             let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());

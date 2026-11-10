@@ -172,12 +172,14 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
     )
 }
 
+fn reopen_main_window(demo: bool, cx: &mut App) {
+    if let Err(error) = open_main_window(demo, cx) { eprintln!("Could not reopen mail: {error}"); }
+}
+
 fn main() {
     let demo = std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1");
     let app = Application::new().with_assets(Assets);
-    app.on_reopen(move |cx| {
-        if let Err(error) = open_main_window(demo, cx) { eprintln!("Could not reopen mail: {error}"); }
-    });
+    app.on_reopen(move |cx| reopen_main_window(demo, cx));
     app.run(move |cx: &mut App| {
         // All text is the system font. Geist Mono (palette key caps) comes from the system if
         // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.

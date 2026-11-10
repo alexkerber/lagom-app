@@ -6,17 +6,20 @@ use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
 
+mod secret_store;
+
 type Result<T> = std::result::Result<T, MailError>;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MailError {
-    #[error("{message}")]
-    Failed { message: String },
+    // Kotlin exceptions already own message; the payload needs a distinct name.
+    #[error("{reason}")]
+    Failed { reason: String },
 }
 impl From<lagom_core::Error> for MailError {
     fn from(error: lagom_core::Error) -> Self { failure(error.to_string()) }
 }
-fn failure(message: impl Into<String>) -> MailError { MailError::Failed { message: message.into() } }
+fn failure(message: impl Into<String>) -> MailError { MailError::Failed { reason: message.into() } }
 fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64 }
 fn milliseconds() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64 }
 fn network<T>(future: impl Future<Output = lagom_core::Result<T>>) -> lagom_core::Result<T> {
@@ -40,11 +43,11 @@ impl From<MailServer> for ServerConfig {
     }
 }
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
-pub enum Mailbox { Inbox, Later, Done, Sent }
+pub enum Mailbox { Inbox, Later, Done, Sent, Trash }
 impl Mailbox {
     fn role(self) -> Option<FolderRole> { match self {
         Self::Inbox => Some(FolderRole::Inbox), Self::Later => None,
-        Self::Done => Some(FolderRole::Archive), Self::Sent => Some(FolderRole::Sent),
+        Self::Done => Some(FolderRole::Archive), Self::Sent => Some(FolderRole::Sent), Self::Trash => Some(FolderRole::Trash),
     } }
 }
 #[derive(Clone, Debug, uniffi::Record)]
@@ -90,7 +93,8 @@ impl LagomCore {
         let stores = self.stores.clone();
         // Network futures borrow SQLite across awaits; a separate WAL connection keeps local work available.
         tokio::task::spawn_blocking(move || {
-            let mut store = (if network { &stores.network } else { &stores.local }).lock().map_err(|_| failure("mail worker stopped; reopen the app"))?;
+            // A panic in one action must not disable the app: SQLite transactions keep the store consistent.
+            let mut store = (if network { &stores.network } else { &stores.local }).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             action(&mut store).map_err(MailError::from)
         }).await.map_err(|_| failure("mail worker stopped unexpectedly"))?
     }
@@ -144,6 +148,8 @@ async fn sync_account(store: &mut Store, a: &Account) -> lagom_core::Result<()> 
 impl LagomCore {
     #[uniffi::constructor]
     pub fn open(data_dir: String) -> Result<Arc<Self>> {
+        #[cfg(target_os = "android")]
+        secret_store::require_installed()?;
         // Reopening the same worker must not recover a send still owned by this process.
         static OPEN: std::sync::OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Stores>>>> = std::sync::OnceLock::new();
         std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
@@ -380,6 +386,8 @@ pub fn tomorrow_at_eight() -> Result<i64> {
     Local.from_local_datetime(&tomorrow).earliest().map(|t| t.timestamp()).ok_or_else(|| failure("08:00 does not exist in the local time zone"))
 }
 
+mod planner;
+
 #[cfg(test)]
 mod tests;
 
@@ -390,11 +398,11 @@ pub fn split_recipients(value: String) -> Vec<String> {
 
 #[uniffi::export]
 pub fn mail_document(html: String, dark: bool, message_id: i64, remote: bool) -> String {
-    use lagom_core::html::{csp, inert_links, styled};
+    use lagom_core::html::{csp, inert_tags, styled};
     let (background, ink, accent, scheme) = if dark { ("#2C2C2C", "#F2F2EE", "#8AB0F5", "dark") }
         else { ("#FFFFFF", "#111110", "#2A5BB8", "light") };
     let look = if styled(&html) { "body{background:#fff;color:#000;padding:16px}".to_owned() }
         else { format!("body{{color:{ink}}}a{{color:{accent}}}") };
     let html = lagom_core::inline::rewrite(&html, message_id, false);
-    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 -apple-system;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(remote, "lagom-cid:"), inert_links(&html))
+    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 system-ui,-apple-system,sans-serif;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(remote, "lagom-cid:"), inert_tags(&html))
 }
