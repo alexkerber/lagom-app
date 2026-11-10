@@ -1,7 +1,6 @@
 import SwiftUI
 
-// These pairs follow apps/desktop/src/theme.rs. Text uses iOS text styles rather than the
-// desktop's macOS point sizes, so Dynamic Type scales it like the rest of the system.
+/// The desktop's tokens, `apps/desktop/src/theme.rs`, light and dark.
 enum Theme {
     static let background = color(0xFFFFFF, 0x1E1E1E)
     static let subtle = color(0xF5F5F3, 0x262626)
@@ -9,12 +8,20 @@ enum Theme {
     static let ink = color(0x111110, 0xF2F2EE)
     static let secondary = color(0x5F5F5A, 0x9B9B95)
     static let line = color(0xE6E6E2, 0x3A3A3A)
+    /// `sel`: the neutral selection, under ink text.
+    static let selected = color(0xDCDCDC, 0x464646)
     /// `sel_focus`: the accent as a fill under white text, the same in light and dark.
     static let selection = color(0x2A5BB8, 0x2A5BB8)
+    /// `sel_icon`: the active sidebar icon, lifted halfway to white in dark so it keeps 3:1 on `selected`.
+    static let selectionIcon = color(0x2A5BB8, 0x94ADDC)
     static let accent = color(0x2A5BB8, 0x8AB0F5)
+    /// `accent_ink`: text on an accent fill.
+    static let accentInk = color(0xFFFFFF, 0x1E1E1E)
     static let done = color(0x1E6B4E, 0x4CC38A)
     static let later = color(0x94640A, 0xF5C22E)
     static let danger = color(0xC62828, 0xF87171)
+    /// The sidebar's glass background on desktop, as a solid fill.
+    static let sidebar = color(0xF3F2EF, 0x2A2A2A)
     /// The current-time line in the agenda, as on the desktop week view.
     static let now = later
 
@@ -37,6 +44,69 @@ enum Theme {
                            green: CGFloat((hex >> 8) & 255) / 255,
                            blue: CGFloat(hex & 255) / 255, alpha: 1)
         })
+    }
+}
+
+/// The desktop type scale, `theme::size`, in the system font as on desktop. A macOS point reads
+/// smaller than an iOS point at phone distance, so every size is the desktop's × 1.15 (body 13 → 15),
+/// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.
+enum TextSize {
+    case small, snippet, base, body, title, subject, display
+
+    var points: CGFloat {
+        switch self {
+        case .small: 13      // 11
+        case .snippet: 14    // 12
+        case .base: 15       // 13
+        case .body: 16       // 14, message text
+        case .title: 17      // 15
+        case .subject: 23    // 20
+        case .display: 30    // 26
+        }
+    }
+
+    var style: Font.TextStyle {
+        switch self {
+        case .small: .footnote
+        case .snippet: .subheadline
+        case .base, .body: .body
+        case .title: .headline
+        case .subject: .title2
+        case .display: .largeTitle
+        }
+    }
+}
+
+private struct LagomFont: ViewModifier {
+    @ScaledMetric private var points: CGFloat
+    let weight: Font.Weight
+
+    init(_ size: TextSize, weight: Font.Weight) {
+        _points = ScaledMetric(wrappedValue: size.points, relativeTo: size.style)
+        self.weight = weight
+    }
+
+    func body(content: Content) -> some View { content.font(.system(size: points, weight: weight)) }
+}
+
+extension View {
+    func lagomFont(_ size: TextSize, _ weight: Font.Weight = .regular) -> some View {
+        modifier(LagomFont(size, weight: weight))
+    }
+}
+
+/// A desktop line icon (`apps/desktop/assets/icons`), 16 pt there, tinted by the foreground style.
+struct Icon: View {
+    let name: String
+    @ScaledMetric private var side: CGFloat
+
+    init(_ name: String, size: CGFloat = 18) {
+        self.name = name
+        _side = ScaledMetric(wrappedValue: size, relativeTo: .body)
+    }
+
+    var body: some View {
+        Image(name).renderingMode(.template).resizable().frame(width: side, height: side).accessibilityHidden(true)
     }
 }
 
@@ -64,39 +134,46 @@ struct RowPresentation: Equatable {
     }
 }
 
+/// The desktop list row: unread dot, account bar, sender and time; subject and a two-line snippet
+/// under them. `selected` paints the accent fill with white text, as the focused desktop list does.
 struct MailRowView: View {
     let row: MailRow
     /// The account's mark; nil with a single account, as on desktop.
     var accent: Color? = nil
+    var selected = false
     var words = DateWords()
 
     var body: some View {
         let value = RowPresentation(row)
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Circle().fill(value.unread ? Theme.accent : .clear)
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if let accent {
-                        RoundedRectangle(cornerRadius: 1).fill(accent).frame(width: 3, height: 14)
-                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
-                            .accessibilityHidden(true)
-                    }
-                    Text(value.sender).font(.body.weight(value.unread ? .semibold : .regular)).lineLimit(1)
-                    Spacer(minLength: 4)
-                    if value.hasAttachments {
-                        Image(systemName: "paperclip").font(.footnote).foregroundStyle(Theme.secondary).accessibilityLabel("Attachments")
-                    }
-                    Text(words.listTime(value.date)).font(.subheadline).foregroundStyle(Theme.secondary)
+        let ink = selected ? Color.white : Theme.ink
+        let ink2 = selected ? Color.white.opacity(0.85) : Theme.secondary
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Circle().fill(value.unread ? (selected ? Color.white : Theme.accent) : .clear)
+                    .frame(width: 7, height: 7)
+                if let accent {
+                    RoundedRectangle(cornerRadius: 1.5).fill(accent).frame(width: 3, height: 16)
                 }
-                Text(value.subject).font(.subheadline).lineLimit(1)
-                Text(value.preview).font(.subheadline).foregroundStyle(Theme.secondary).lineLimit(1)
+                Text(value.sender).lagomFont(.base, value.unread ? .semibold : .regular).lineLimit(1)
+                Spacer(minLength: 4)
+                if value.hasAttachments {
+                    Icon("attachment", size: 15).foregroundStyle(ink2)
+                }
+                Text(words.listTime(value.date)).lagomFont(.small).monospacedDigit().foregroundStyle(ink2)
             }
+            Group {
+                Text(value.subject).lagomFont(.base).lineLimit(1)
+                Text(value.preview).lagomFont(.snippet).foregroundStyle(ink2).lineLimit(2, reservesSpace: true)
+            }
+            .padding(.leading, 13)
         }
-        .foregroundStyle(Theme.ink)
-        .padding(.vertical, 4)
+        .foregroundStyle(ink)
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityValue(value.unread ? "Unread" : "Read")
+        .accessibilityValue([value.unread ? "Unread" : "Read", value.hasAttachments ? "Attachments" : nil].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

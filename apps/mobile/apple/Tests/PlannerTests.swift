@@ -18,6 +18,29 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(w.listTime(at(w, "2025-10-01")), "Oct 2025")
     }
 
+    func testReadingDateFollowsTheDesktopReadingPane() {
+        let w = words(now: "2026-11-10")
+        XCTAssertEqual(w.readingDate(at(w, "2026-11-10")), "Today 09:42")
+        XCTAssertEqual(w.readingDate(at(w, "2026-11-09")), "Yesterday 09:42")
+        XCTAssertEqual(w.readingDate(at(w, "2026-11-06")), "Fri 09:42")
+        XCTAssertEqual(w.readingDate(at(w, "2026-10-26")), "26 Oct, 09:42")
+        XCTAssertEqual(w.readingDate(at(w, "2025-10-01")), "1 Oct 2025, 09:42")
+    }
+
+    /// The asset catalog's icons are copies of the desktop's; a change there must reach iOS too.
+    func testIconsAreTheDesktopIcons() throws {
+        let apple = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let icons = apple.appendingPathComponent("Assets.xcassets/Icons")
+        let desktop = apple.appendingPathComponent("../../desktop/assets/icons")
+        let sets = try FileManager.default.contentsOfDirectory(atPath: icons.path).filter { $0.hasSuffix(".imageset") }
+        XCTAssertGreaterThan(sets.count, 30)
+        for set in sets {
+            let name = String(set.dropLast(".imageset".count)) + ".svg"
+            XCTAssertEqual(try Data(contentsOf: icons.appendingPathComponent(set).appendingPathComponent(name)),
+                           try Data(contentsOf: desktop.appendingPathComponent(name)), name)
+        }
+    }
+
     func testDateGroupsStopAtTheStartOfTheWeek() {
         let w = words(now: "2026-11-12") // Thursday
         XCTAssertEqual(w.group(at(w, "2026-11-12")), "Today")

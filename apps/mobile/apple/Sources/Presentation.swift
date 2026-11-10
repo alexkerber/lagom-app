@@ -13,12 +13,13 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .todo: "Todo"
         }
     }
-    var symbol: String {
+    /// The desktop sidebar icon.
+    var icon: String {
         switch self {
-        case .today: "house"
-        case .mail: "envelope"
+        case .today: "home"
+        case .mail: "mail"
         case .calendar: "calendar"
-        case .todo: "checkmark.square"
+        case .todo: "todo"
         }
     }
 }
@@ -48,6 +49,18 @@ struct DateWords {
         case 1: "Yesterday"
         case 2...6: format(date, "EEE")
         default: calendar.component(.year, from: date) == calendar.component(.year, from: now) ? format(date, "dMMM") : format(date, "MMMyyyy")
+        }
+    }
+
+    /// The reading pane's date, `mail::reading_date`: "Today 09:42", "Fri 09:42", "3 Nov, 09:42".
+    func readingDate(_ date: Date) -> String {
+        let time = format(date, "jjmm")
+        switch days(from: date) {
+        case ...0: return "Today \(time)"
+        case 1...6: return "\(listTime(date)) \(time)"
+        default:
+            let thisYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+            return "\(format(date, thisYear ? "dMMM" : "dMMMyyyy")), \(time)"
         }
     }
 

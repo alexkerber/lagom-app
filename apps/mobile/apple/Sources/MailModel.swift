@@ -13,15 +13,8 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
         case .trash: .trash
         }
     }
-    var symbol: String {
-        switch self {
-        case .inbox: "tray"
-        case .later: "clock"
-        case .done: "checkmark"
-        case .sent: "paperplane"
-        case .trash: "trash"
-        }
-    }
+    /// The desktop icon, `apps/desktop/assets/icons`.
+    var icon: String { rawValue.lowercased() }
 }
 
 struct ComposeDraft: Identifiable {
