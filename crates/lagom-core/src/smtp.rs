@@ -425,6 +425,9 @@ mod tests {
 
     #[test]
     fn markdown_styles_and_plain_source() {
+        assert!(markdown_html("**test **").is_none());
+        let (_, html) = parts("**test **\n\n> Original message");
+        assert!(html.unwrap().contains("<p>**test **</p>"));
         for (source, expected) in [
             ("- ett\n- två", "<ul>"),
             ("- ett\n  - två", "<ul>\n<li>ett\n<ul>"),

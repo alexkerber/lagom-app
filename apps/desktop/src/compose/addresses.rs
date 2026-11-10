@@ -110,7 +110,7 @@ impl Compose {
                     this.save_later(cx);
                     cx.notify();
                 }))
-                .child(format!("{text},"))
+                .child(text.clone())
         }).collect::<Vec<_>>();
         div().flex_1().min_w(px(0.)).relative()
             .capture_action(cx.listener(move |this, _: &Enter, window, cx| this.address_enter(field, false, window, cx)))

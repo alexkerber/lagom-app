@@ -672,6 +672,29 @@ impl MainWindow {
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.draft_open = None;
+        if kind != ComposeKind::Reply || self.drafts.is_empty() {
+            if let Some(id) = reply.filter(|&id| self.live.is_some() && self.inbox.mail[id].store.is_some()) {
+                self.open_message(id, false, cx);
+                let Some(mut text) = self.inbox.mail[id].text.clone() else {
+                    self.notify("Could not read message", cx);
+                    return;
+                };
+                if text.borrow().is_none() {
+                    let selected = self.inbox.single();
+                    self.draft_open = Some(cx.spawn_in(window, async move |this, cx| {
+                        if text.changed().await.is_err() { return; }
+                        this.update_in(cx, |this, window, cx| {
+                            this.draft_open = None;
+                            if this.inbox.single() == selected && this.inbox.mail.get(id)
+                                .and_then(|m| m.text.as_ref()).is_some_and(|current| current.same_channel(&text)) {
+                                this.compose_kind(Some(id), kind, window, cx);
+                            }
+                        }).ok();
+                    }));
+                    return;
+                }
+            }
+        }
         self.release(false, cx);
         self.toast = None;
         let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
@@ -710,13 +733,8 @@ impl MainWindow {
                         .map_or_else(String::new, |input| input.read(cx).text().to_string()),
                     _ => String::new(),
                 };
-                let original = match (m.and_then(|m| m.store), &self.live) {
-                    (Some(id), Some(live)) => match live.store.message(id) {
-                        Ok(message) => Some(message.body_text),
-                        Err(e) => { self.notify(format!("Could not read message: {e}"), cx); return; }
-                    },
-                    _ => m.map(|m| m.body.join("\n\n")),
-                };
+                let original = m.map(|m| m.text.as_ref().and_then(|text| text.borrow().clone())
+                    .unwrap_or_else(|| m.body.join("\n\n").into()));
                 let body = mail::compose_body(&signature, m.zip(original.as_deref()), kind);
                 let source = m.filter(|_| kind == ComposeKind::Forward).and_then(|m| m.store);
                 let compose = cx.new(|cx| Compose::new(from, &to, &subject, headers, window, cx));
@@ -1072,6 +1090,7 @@ impl MainWindow {
     }
 
     fn select(&mut self, f: impl FnOnce(&mut Inbox), cx: &mut Context<Self>) {
+        self.draft_open = None;
         let before = self.inbox.selected;
         f(&mut self.inbox);
         let ix = self.inbox.selected;
@@ -2885,8 +2904,10 @@ impl Inbox {
         match self.by_store.get(&m.id) {
             Some(&id) => {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
+                fresh.text = self.mail[id].text.take();
                 fresh.html = self.mail[id].html.take();
                 fresh.inline = self.mail[id].inline.clone();
+                fresh.inline_referenced = self.mail[id].inline_referenced;
                 fresh.inline_pending = self.mail[id].inline_pending;
                 fresh.inline_retry_after = self.mail[id].inline_retry_after;
                 fresh.remote = self.mail[id].remote;
