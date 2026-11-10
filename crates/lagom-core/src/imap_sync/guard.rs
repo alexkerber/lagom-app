@@ -39,8 +39,16 @@ struct Scanner {
     depth: usize,
 }
 
+/// Marks an error as Lagom's own limit, so a TLS or socket error of the same kind is not mistaken for one.
+#[derive(Debug)]
+pub(super) struct Rejected(pub(super) &'static str);
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+}
+impl std::error::Error for Rejected {}
+
 fn invalid() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "IMAP response nesting or framing limit exceeded")
+    io::Error::new(io::ErrorKind::InvalidData, Rejected("IMAP response nesting or framing limit exceeded"))
 }
 
 impl Scanner {

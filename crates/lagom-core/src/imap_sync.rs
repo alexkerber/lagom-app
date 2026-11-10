@@ -41,12 +41,12 @@ pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const TIMED_OUT: &str = "IMAP operation timed out";
 const DROPPED: &str = "IMAP connection lost";
-/// Whether an error is the transport's fault. Lagom's own limits reject with `InvalidData` or `Other`.
+/// Whether an error is the transport's fault. Only Lagom's own limits carry `Rejected`.
 trait Transient {
     fn transient(&self) -> bool { false }
 }
 impl Transient for std::io::Error {
-    fn transient(&self) -> bool { !matches!(self.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::Other) }
+    fn transient(&self) -> bool { !self.get_ref().is_some_and(|e| e.is::<guard::Rejected>()) }
 }
 impl<T: Transient, U> Transient for (T, U) {
     fn transient(&self) -> bool { self.0.transient() }
@@ -1017,6 +1017,19 @@ mod protocol_tests {
         assert!(result.expect("must reject the literal header without waiting for its body").is_err());
     }
 
+    #[tokio::test]
+    async fn only_lagoms_own_limits_are_not_transport_errors() {
+        use std::io::{Error, ErrorKind};
+        // tokio-rustls reports a bad TLS record as InvalidData too: it must keep the checkpoint.
+        for transport in [Error::new(ErrorKind::InvalidData, "corrupt TLS record"), Error::other("tls alert"), ErrorKind::ConnectionReset.into(), ErrorKind::UnexpectedEof.into()] {
+            assert!(transport.transient(), "{transport}");
+            assert!(matches!(net(async { Err::<(), _>(async_imap::error::Error::Io(transport)) }).await, Err(crate::Error::Network(DROPPED))));
+        }
+        assert!(async_imap::error::Error::ConnectionLost.transient());
+        let limit = Error::new(ErrorKind::InvalidData, guard::Rejected("limit"));
+        assert!(!limit.transient());
+        assert!(matches!(net(async { Err::<(), _>(async_imap::error::Error::Io(limit)) }).await, Err(crate::Error::Network("IMAP operation failed"))));
+    }
     #[tokio::test]
     async fn unreadable_message_is_skipped_and_the_checkpoint_moves() {
         // UID 2 has 39 nested multiparts: the wire guard rejects its FETCH and the session.

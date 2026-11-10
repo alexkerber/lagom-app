@@ -38,15 +38,15 @@ impl<T> Bounded<T> {
                 Err(nom::Err::Incomplete(needed)) => {
                     let extra = match needed { nom::Needed::Size(n) => n.get(), nom::Needed::Unknown => 1 };
                     self.needed = self.pending.len().checked_add(extra)
-                        .ok_or_else(|| io::Error::other("IMAP response too large"))?;
+                        .ok_or_else(|| io::Error::other(super::guard::Rejected("IMAP response too large")))?;
                     // async-imap reserves this much before its next read.
                     if self.needed > MAX_LITERAL + 65536 || extra > self.remaining.unwrap_or(usize::MAX).min(self.command) {
-                        return Err(io::Error::other("IMAP download limit exceeded"));
+                        return Err(io::Error::other(super::guard::Rejected("IMAP download limit exceeded")));
                     }
                     self.pending.reserve_exact(self.needed - self.pending.len());
                     break;
                 }
-                Err(_) => return Err(io::Error::other("invalid IMAP response")),
+                Err(_) => return Err(io::Error::other(super::guard::Rejected("invalid IMAP response"))),
             }
         }
         Ok(())
@@ -60,7 +60,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for Bounded<T> {
             .min((MAX_LITERAL + 65536).saturating_sub(this.pending.len()));
         if max == 0 {
             this.remaining = Some(0);
-            return Poll::Ready(Err(io::Error::other("IMAP download limit exceeded")));
+            return Poll::Ready(Err(io::Error::other(super::guard::Rejected("IMAP download limit exceeded"))));
         }
         let mut read = ReadBuf::new(buf.initialize_unfilled_to(max));
         ready!(Pin::new(&mut this.inner).poll_read(cx, &mut read))?;
