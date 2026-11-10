@@ -114,6 +114,7 @@ impl Render for MessageWindow {
         div()
             .key_context("MessageWindow")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .on_action(cx.listener(|this, _: &NewTask, _, cx| this.task(cx)))
             .on_action(cx.listener(|this, _: &Done, _, cx| this.act(Move::Done, cx)))

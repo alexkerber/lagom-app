@@ -221,6 +221,7 @@ mod tests {
 
     #[test]
     fn styles_match_the_sent_markdown() {
+        assert!(ranges("**test **", |l| *l != Look::default()).is_empty());
         assert_eq!(ranges(SAMPLE, |l| l.heading == 1), ["# Rubrik"]);
         assert_eq!(ranges(SAMPLE, |l| l.bold), ["**fet**"]);
         assert_eq!(ranges(SAMPLE, |l| l.italic), ["_kursiv_", "*också*"]);

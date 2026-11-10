@@ -287,7 +287,7 @@ impl AddAccount {
         }
     }
 
-    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.state {
             State::Pick if self.can_cancel => cx.emit(DismissEvent),
             State::Pick | State::Connecting => {}

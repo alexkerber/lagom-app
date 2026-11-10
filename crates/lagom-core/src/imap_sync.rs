@@ -479,7 +479,7 @@ impl ImapSync {
                 if path.is_empty() {
                     message = parsed;
                 } else if *html {
-                    // HTML only: its text, converted by mail-parser, is the body text.
+                    // HTML only: use the same visible text as the MIME parser.
                     if picks.len() == 1 {
                         message.body_text = parsed.body_text;
                     }
