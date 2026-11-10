@@ -60,7 +60,7 @@ impl Provider {
 
     pub fn note(self) -> &'static str {
         match self {
-            Provider::Outlook => "Outlook.com needs Microsoft sign-in (OAuth2), which Lagom does not have yet. An app password works only where Microsoft still allows IMAP with one.",
+            Provider::Outlook => "Outlook.com needs Microsoft sign-in (OAuth2), which lagom does not have yet. An app password works only where Microsoft still allows IMAP with one.",
             Provider::Other => "Your provider's IMAP and SMTP servers. Use an app password if the provider offers one.",
             Provider::Gmail => "Gmail needs an app password, not your Google password. It needs 2-step verification.",
             Provider::ICloud | Provider::Fastmail => "Use an app password, not your normal password.",
@@ -337,7 +337,7 @@ impl AddAccount {
             .flex_col()
             .gap(px(20.))
             .child(headline("Add your mail."))
-            .child(div().text_size(px(size::TITLE)).text_color(t.ink2).line_height(relative(1.4)).child("Lagom keeps a copy on this computer and talks to your provider directly. Nothing goes through us."))
+            .child(div().text_size(px(size::TITLE)).text_color(t.ink2).line_height(relative(1.4)).child("lagom keeps a copy on this computer and talks to your provider directly. Nothing goes through us."))
             .child(list)
             .child(mono(if self.can_cancel { "1–5 pick · esc back" } else { "1–5 pick" }, t.ink2))
     }

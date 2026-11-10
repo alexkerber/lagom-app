@@ -2,6 +2,8 @@
 
 ## Brand and site
 
+- [x] Use lowercase "lagom" in desktop, mobile and site UI, package display names, CLI help, OAuth pages and shared errors.
+
 - [x] Domain: `lagommail.app`, chosen 2026-11-09 (`lagom.app`, `.se`, `.dev` and `.email` are taken). Bundle id `app.lagommail.desktop`. Registration not confirmed in the registry on 2026-11-09.
 - [x] Licence: MIT.
 - [ ] Trademark and competitor search for "Lagom" in classes 9, 38 and 42. Web pass done 2026-11-08: `docs/trademark-check.md` (medium risk, official databases still to search by hand).

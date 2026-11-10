@@ -1444,7 +1444,7 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(app_mark())
-                    .child("Lagom"),
+                    .child("lagom"),
             )
             .child(
                 div()

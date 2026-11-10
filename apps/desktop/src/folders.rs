@@ -50,7 +50,7 @@ pub fn sample() -> Vec<Folder> {
         Folder::new("Trains", Some(1), &[12]),
         Folder::new("Japan 2026", Some(1), &[11]),
         Folder::new("Projects", None, &[]),
-        Folder::new("Lagom", Some(4), &[13]),
+        Folder::new("lagom", Some(4), &[13]),
         Folder::new("Garden", Some(4), &[14]),
         Folder::new("Housing co-op", None, &[15]),
         Folder::new("Newsletters", None, &[16, 17]),

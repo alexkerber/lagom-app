@@ -136,7 +136,7 @@ struct MailView: View {
                 ContentUnavailableView("No unread mail", systemImage: "envelope.open")
             } else if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
                 ContentUnavailableView {
-                    Label(model.accounts.isEmpty ? "Welcome to Lagom" : "No mail here", systemImage: "tray")
+                    Label(model.accounts.isEmpty ? "Welcome to lagom" : "No mail here", systemImage: "tray")
                 } description: {
                     Text(model.accounts.isEmpty ? "Add an account to get started." : "Pull to refresh your mail.")
                 } actions: {

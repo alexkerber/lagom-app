@@ -34,7 +34,7 @@ targets:
     info:
       path: Generated/Info.plist
       properties:
-        CFBundleDisplayName: Lagom
+        CFBundleDisplayName: lagom
         # The owner's export compliance answer, so App Store Connect stops asking per build.
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
