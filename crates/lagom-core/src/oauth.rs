@@ -319,7 +319,7 @@ async fn callback(listener: &TcpListener, v6: Option<&TcpListener>, state: &str)
         // Any local process can reach the port; only our state may end the wait.
         let ours = !matches!(result, Err(Error::Invalid("invalid sign-in callback" | "sign-in state mismatch")));
         let body =
-            "<!doctype html><title>Lagom</title><p>You can close this tab and return to Lagom.</p>";
+            "<!doctype html><title>lagom</title><p>You can close this tab and return to lagom.</p>";
         let status = if result.is_ok() {
             "200 OK"
         } else {

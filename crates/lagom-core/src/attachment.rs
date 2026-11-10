@@ -89,7 +89,7 @@ fn mark_downloaded(path: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let value = format!("0083;{now:08x};Lagom;");
+    let value = format!("0083;{now:08x};lagom;");
     // SAFETY: both names are NUL-terminated; the value pointer and length come from one live String.
     let status = unsafe { libc::setxattr(path.as_ptr(), c"com.apple.quarantine".as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) };
     if status == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
@@ -146,7 +146,7 @@ mod tests {
         let n = unsafe { libc::getxattr(path.as_ptr(), c"com.apple.quarantine".as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, 0) };
         assert!(n > 0, "{}", std::io::Error::last_os_error());
         let value = std::str::from_utf8(&value[..n as usize]).unwrap();
-        assert!(value.starts_with("0083;") && value.ends_with(";Lagom;"), "{value}");
+        assert!(value.starts_with("0083;") && value.ends_with(";lagom;"), "{value}");
     }
 
     #[test]

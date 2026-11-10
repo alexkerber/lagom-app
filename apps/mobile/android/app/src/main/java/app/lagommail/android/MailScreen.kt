@@ -33,7 +33,7 @@ import java.time.format.FormatStyle
         adding -> AddAccountScreen(model) { model.accountForm = null }
         model.draft != null -> ComposeScreen(model)
         else -> Scaffold(topBar = {
-            TopAppBar(title = { Text(if (model.accounts.isEmpty()) "Lagom" else model.mailbox.label()) }, navigationIcon = {
+            TopAppBar(title = { Text(if (model.accounts.isEmpty()) "lagom" else model.mailbox.label()) }, navigationIcon = {
                 Box {
                     TextButton(onClick = { menu = true }) { Text("Mailboxes") }
                     DropdownMenu(menu, { menu = false }) {
@@ -68,7 +68,7 @@ import java.time.format.FormatStyle
                 if (model.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (model.accounts.isEmpty() && !model.loading) {
                     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Welcome to Lagom", style = MaterialTheme.typography.headlineMedium)
+                        Text("Welcome to lagom", style = MaterialTheme.typography.headlineMedium)
                         Text("Add an account to get started.")
                         Button(enabled = model.core != null, onClick = { model.accountForm = AccountForm() }) { Text("Add account") }
                         if (model.core == null) TextButton(onClick = { model.perform { model.setForeground(true) } }) { Text("Try again") }

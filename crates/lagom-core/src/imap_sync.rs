@@ -338,7 +338,7 @@ impl ImapSync {
                 // Otherwise one unreadable message holds the checkpoint below it on every sync.
                 let mut message = mime::placeholder();
                 message.summary.subject = "(message could not be read)".into();
-                message.body_text = "Lagom could not read this message. Open it in another mail app.".into();
+                message.body_text = "lagom could not read this message. Open it in another mail app.".into();
                 self.save(store, &folder, uid, None, message, &[])?;
             }
         }

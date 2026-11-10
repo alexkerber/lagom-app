@@ -42,7 +42,7 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $addAccount) { AddAccountView(model: model) }
-        .alert("Lagom", isPresented: Binding(get: { model.error != nil || planner.error != nil },
+        .alert("lagom", isPresented: Binding(get: { model.error != nil || planner.error != nil },
                                             set: { if !$0 { model.error = nil; planner.error = nil } })) {
             Button("OK") { model.error = nil; planner.error = nil }
         } message: { Text(model.error ?? planner.error ?? "") }
@@ -160,7 +160,7 @@ struct SidebarView: View {
         }
         // The desktop's selection fill: the light accent in both modes, so white text keeps 4.5:1.
         .tint(Theme.selection)
-        .navigationTitle("Lagom")
+        .navigationTitle("lagom")
     }
 
     private func mailbox(_ box: MailboxChoice, count: UInt64) -> some View {

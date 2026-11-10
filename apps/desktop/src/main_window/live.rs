@@ -660,7 +660,7 @@ impl MainWindow {
                 Op::CreateFolder { account, name } => self.folder_failed(&account, &name),
             }
         }
-        let mut error = "Mail stopped working. Restart Lagom; pending sends are saved in the outbox.".to_string();
+        let mut error = "Mail stopped working. Restart lagom; pending sends are saved in the outbox.".to_string();
         if let Err(rollback) = rollback { error.push_str(&format!(" Local rollback failed: {rollback}")); }
         self.notify(error, cx);
     }
@@ -1146,7 +1146,7 @@ impl MainWindow {
         cx.subscribe(&add, |this, add, Connect(account, password): &Connect, cx| {
             let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::AddAccount(account.clone(), password.clone())));
             if !sent {
-                add.update(cx, |add, cx| add.failed("Mail stopped working. Restart Lagom.".into(), cx));
+                add.update(cx, |add, cx| add.failed("Mail stopped working. Restart lagom.".into(), cx));
             }
         })
         .detach();

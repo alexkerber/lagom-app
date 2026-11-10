@@ -1450,10 +1450,11 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // Room for the macOS traffic lights.
-            .when(cfg!(target_os = "macos"), |d| d.child(div().h(px(16.)).flex_shrink_0()))
+            // macOS: the brand shares the traffic lights' row (lights at y 18, 14 px tall, ending near x 72).
+            .when(cfg!(target_os = "macos"), |d| d.pt(px(5.)))
             .child(
                 div().id("sidebar-brand").debug_selector(|| "sidebar-brand".into())
+                    .when(cfg!(target_os = "macos"), |d| d.ml(px(64.)))
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -1463,7 +1464,7 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(app_mark())
-                    .child("Lagom"),
+                    .child("lagom"),
             )
             .child(
                 div()
