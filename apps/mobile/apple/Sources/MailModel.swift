@@ -63,6 +63,10 @@ final class MailModel {
     var failures: [SendFailure] = []
     var accountID: String?
     var mailbox: MailboxChoice = .inbox
+    var searchText = ""
+    var remoteImagesID: Int64?
+    var inlineRevision = 0
+    private var selectionRevision = 0
     var selectedID: Int64?
     var message: MailMessage?
     var error: String?
@@ -70,7 +74,9 @@ final class MailModel {
     var composeDraft: ComposeDraft?
     var preparingCompose = false
     var syncing = false
-    var working = false
+    private var acting = false
+    private var readingIDs: Set<Int64> = []
+    var working: Bool { acting || !readingIDs.isEmpty }
     var hasMore = false
     private var revision = 0
     private var syncAgain = false
@@ -97,6 +103,7 @@ final class MailModel {
         let offset = more ? UInt32(rows.count) : 0
         let account = accountID
         let mailbox = mailbox.mailbox
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let due = try await core.nextSnooze()
             let accounts = try await core.accounts()
@@ -104,18 +111,21 @@ final class MailModel {
             let count = more ? 100 : max(100, rows.count)
             var hasMore = false
             repeat {
-                let batch = try await core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: offset + UInt32(page.count))
+                try Task.checkCancellation()
+                let batch = try await query.isEmpty
+                    ? core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: offset + UInt32(page.count))
+                    : core.search(accountId: account, query: query, limit: 100, offset: offset + UInt32(page.count))
                 page += batch
                 hasMore = batch.count == 100
             } while hasMore && page.count < count
             let failures = try await core.sendFailures()
-            guard request == revision else { return }
+            guard request == revision, !Task.isCancelled else { return }
             self.accounts = accounts
             self.failures = failures
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
             self.hasMore = hasMore
             wake(at: due)
-        } catch { if request == revision { self.error = error.localizedDescription } }
+        } catch { if request == revision && !Task.isCancelled { self.error = error.localizedDescription } }
     }
 
     private func wake(at due: Int64?) {
@@ -141,6 +151,9 @@ final class MailModel {
     }
 
     func changeScope() async {
+        selectionRevision += 1
+        remoteImagesID = nil
+        hasMore = false
         selectedID = nil
         message = nil
         rows = []
@@ -148,21 +161,49 @@ final class MailModel {
     }
 
     func select(_ id: Int64?) async {
+        selectionRevision += 1
+        let request = selectionRevision
+        remoteImagesID = nil
+        inlineRevision = 0
         message = nil
         guard let core, let id else { return }
         do {
             let loaded = try await core.message(id: id)
-            guard selectedID == id else { return }
+            guard selectedID == id, request == selectionRevision else { return }
             message = loaded
-            if loaded.row.unread {
-                try await core.markRead(id: id, read: true)
-                guard selectedID == id else { return }
-                let read = try await core.message(id: id)
-                guard selectedID == id else { return }
-                message = read
-                await reload()
+            async let inline: Void = loadInline(id: id, request: request)
+            if loaded.row.unread { await setRead(id: id, read: true) }
+            await inline
+        } catch { if selectedID == id, request == selectionRevision { self.error = error.localizedDescription } }
+    }
+
+    private func loadInline(id: Int64, request: Int) async {
+        guard let core, message?.htmlBody != nil else { return }
+        do {
+            try await core.loadInline(id: id)
+            guard selectedID == id, request == selectionRevision else { return }
+            inlineRevision += 1
+        } catch { if selectedID == id, request == selectionRevision { self.error = error.localizedDescription } }
+    }
+
+    func loadRemoteImages(id: Int64) {
+        guard selectedID == id, message?.row.id == id else { return }
+        remoteImagesID = id
+    }
+
+    func setRead(id: Int64, read: Bool) async {
+        guard let core, !acting, !readingIDs.contains(id) else { return }
+        readingIDs.insert(id)
+        defer { readingIDs.remove(id) }
+        do {
+            try await core.markRead(id: id, read: read)
+            if selectedID == id {
+                let request = selectionRevision
+                let updated = try await core.message(id: id)
+                if selectedID == id, request == selectionRevision { message = updated }
             }
-        } catch { if selectedID == id { self.error = error.localizedDescription } }
+        } catch { self.error = error.localizedDescription }
+        await reload()
     }
 
     func sync() async {
@@ -179,8 +220,8 @@ final class MailModel {
 
     func act(_ action: MailAction, id: Int64) async {
         guard let core, !working else { return }
-        working = true
-        defer { working = false }
+        acting = true
+        defer { acting = false }
         do {
             switch action {
             case .done: try await core.done(ids: [id])

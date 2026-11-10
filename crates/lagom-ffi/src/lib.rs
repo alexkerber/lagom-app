@@ -62,6 +62,8 @@ pub struct MailAttachment { pub section: String, pub filename: String, pub mime_
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MailMessage { pub row: MailRow, pub text_body: String, pub html_body: Option<String>, pub attachments: Vec<MailAttachment> }
 #[derive(Clone, Debug, uniffi::Record)]
+pub struct InlineResource { pub mime_type: String, pub data: Vec<u8> }
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct ReplyDraft {
     pub account: String, pub to: String, pub cc: String, pub subject: String, pub body: String,
     pub reply_to: Option<i64>, pub attachments: Vec<SendAttachment>,
@@ -224,6 +226,37 @@ impl LagomCore {
                 attachments: s.attachments(id)?.into_iter().map(|a| MailAttachment { section: a.section, filename: a.filename, mime_type: a.mime_type, size: a.size }).collect() })
         }).await
     }
+    pub async fn load_inline(&self, id: i64) -> Result<()> {
+        let needed = self.run(move |s| {
+            let message = s.message(id)?;
+            Ok(!s.inline_loaded(id)? && message.body_html.as_deref().is_some_and(|html| !lagom_core::inline::referenced_ids(html).is_empty()))
+        }).await?;
+        if !needed { return Ok(()); }
+        self.run_network(move |s| network(async {
+            if s.inline_loaded(id)? { return Ok(()); }
+            let a = account(s, &s.message_summary(id)?.account)?;
+            let mut session = ImapSync::login(&a, &a.password()?).await?;
+            let result = session.fetch_inline(s, id).await;
+            let _ = session.logout().await;
+            result
+        })).await
+    }
+    pub async fn inline_resource(&self, id: i64, request: String) -> Result<InlineResource> {
+        self.run(move |s| {
+            let parts = s.inline_parts(id)?;
+            let part = lagom_core::inline::resolve(id, &parts, &request).ok_or(lagom_core::Error::NotFound)?;
+            Ok(InlineResource { mime_type: part.mime_type.clone(), data: part.data.clone() })
+        }).await
+    }
+    pub async fn search(&self, account_id: Option<String>, query: String, limit: u32, offset: u32) -> Result<Vec<MailRow>> {
+        self.run(move |s| {
+            if limit > 500 { return Err(lagom_core::Error::Invalid("page limit must be at most 500")); }
+            if query.len() > 4096 { return Err(lagom_core::Error::Invalid("search query too long")); }
+            if let Some(id) = &account_id { account(s, id)?; }
+            let Some(query) = lagom_core::store::fts_query(&query) else { return Ok(Vec::new()); };
+            Ok(s.search_accounts(account_id.as_deref(), &query, now(), limit, offset)?.into_iter().map(Into::into).collect())
+        }).await
+    }
     pub async fn later(&self, ids: Vec<i64>, until_unix: i64) -> Result<()> {
         self.run(move |s| {
             if until_unix <= now() { return Err(lagom_core::Error::Invalid("Later must be in the future")); }
@@ -357,12 +390,12 @@ pub fn split_recipients(value: String) -> Vec<String> {
 }
 
 #[uniffi::export]
-pub fn mail_document(html: String, dark: bool) -> String {
+pub fn mail_document(html: String, dark: bool, message_id: i64, remote: bool) -> String {
     use lagom_core::html::{csp, inert_links, styled};
     let (background, ink, accent, scheme) = if dark { ("#2C2C2C", "#F2F2EE", "#8AB0F5", "dark") }
         else { ("#FFFFFF", "#111110", "#2A5BB8", "light") };
     let look = if styled(&html) { "body{background:#fff;color:#000;padding:16px}".to_owned() }
         else { format!("body{{color:{ink}}}a{{color:{accent}}}") };
-    // shortcut: mobile does not serve inline cid: parts yet (desktop uses lagom-cid); add a WKURLSchemeHandler when it does.
-    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 -apple-system;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(false, "cid:"), inert_links(&html))
+    let html = lagom_core::inline::rewrite(&html, message_id, false);
+    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 -apple-system;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(remote, "lagom-cid:"), inert_links(&html))
 }

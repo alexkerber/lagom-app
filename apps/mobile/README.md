@@ -78,11 +78,22 @@ messages without attachment metadata need a refresh first. Aliases beyond the
 account email and logins are not yet stored. Attachment picking is not included.
 
 HTML uses a nonpersistent WKWebView, JavaScript disabled, and the same CSP and
-resource-hint blocking policy as desktop. Remote images remain blocked; a
+resource-hint blocking policy as desktop. A message-scoped `WKURLSchemeHandler`
+serves only that message's cached CID parts through `lagom-cid`; Rust rewrites and
+resolves their URLs with the desktop inline module. Older cached mail fetches missing
+inline parts through core on open. Remote images stay blocked until “Load images”
+is tapped for the open message; switching messages resets that permission. A
 plain-text toggle is available. Attachment metadata is displayed; opening
 attachments and picking new files are outside this slice. Compose text is held in the sheet until Send;
 draft autosave/restoration is not implemented. No Android, calendar, todos,
 push or background fetch is included.
+
+Search in the mail list uses core's full-text index and desktop's quoted-word,
+last-word prefix matching. “All accounts” searches the unified cache; choosing an
+account limits the search to it. Results include all cached folders, omit snoozed
+mail until due, and page in core's index order. Clearing search restores the chosen
+mailbox. A row's context menu and the message toolbar offer Mark read/Mark unread;
+server refusal preserves confirmed flags and shows an error.
 
 ## Verify without opening an app
 
@@ -100,15 +111,18 @@ IMAP/SMTP fixtures. They cover global paging/ties, account isolation, Later,
 message/attachment mapping, read-status refusal, archive/Trash, verified account
 creation, durable replies, recovery and shared HTML privacy policy. Existing
 GreenMail tests remain opt-in. `LagomTests` is a hostless XCTest bundle: it compiles
-the model, presentation and bindings directly, so it never launches the mail app or opens its store. Its nine
-network-free tests cover mapping plus reply/forward preparation, stale selection,
-duplicate actions, preserved edits, Cc, attachments and enqueue failures using a
-fake core. `build-for-testing` only compiles tests. Execute them with
+the model, presentation and bindings directly, so it never launches the mail app or opens its store. Its nineteen
+network-free tests cover mapping, reply/forward preparation, stale selection,
+duplicate actions, preserved edits, Cc, attachments, enqueue failures, search paging,
+late results, per-message image permission, inline completion/failure and confirmed
+read/unread state using a fake core. `build-for-testing` only compiles tests. Execute them with
 `xcodebuild test-without-building` on a disposable simulator you create, targeting
 only its UDID, then delete that simulator. Never target someone else's device.
 Rust fixtures additionally cover reply-all identities, quoted originals, signatures,
 thread headers, durable attachment enqueue, cache reuse, loopback fetches and
-attachment failures.
+attachment failures. CID fixtures additionally cover lazy fetching, cache reuse,
+forged cross-message URLs and opt-in CSP; search fixtures cover unified/account
+scope, prefixes, paging, empty input and snooze visibility.
 
 The generated Swift async boundary can also be checked on the host without
 XCTest, an app or a simulator (run the Apple generation and workspace build first):
@@ -139,10 +153,12 @@ Keychain/provider acceptance still require manual testing.
 
 ## Remaining daily-mail work
 
-This slice stops after Reply, Reply all and Forward. Message-scoped CID rendering
-and opt-in remote images, draft autosave/restoration and discard, unified search,
-and explicit read/unread actions remain queued in that order. Sending still saves
-to the outbox durably; closing an unsent composer still loses its text.
+Reply/Reply all/Forward, message-scoped CID rendering with opt-in remote images,
+unified search and explicit read/unread actions are implemented. Draft
+autosave/restoration and discard remain separate work while server draft sync
+lands. Sending still saves to the outbox durably; closing an unsent composer still
+loses its text. Native layout, gestures and WKWebView privacy acceptance remain
+manual follow-up; no GUI acceptance is claimed by fixture tests or generic builds.
 
 ## TestFlight
 

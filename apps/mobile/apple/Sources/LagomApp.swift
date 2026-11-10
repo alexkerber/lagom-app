@@ -69,6 +69,7 @@ struct MailView: View {
         }
         .onChange(of: model.accountID) { _, _ in Task { await model.changeScope() } }
         .onChange(of: model.mailbox) { _, _ in Task { await model.changeScope() } }
+        .task(id: model.searchText) { await model.changeScope() }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
     }
 
@@ -118,6 +119,11 @@ struct MailView: View {
             ForEach(model.rows, id: \.id) { row in
                 NavigationLink(value: row.id) { MailRowView(row: row) }
                     .listRowBackground(Theme.background)
+                    .contextMenu {
+                        Button(row.unread ? "Mark read" : "Mark unread", systemImage: row.unread ? "envelope.open" : "envelope.badge") {
+                            Task { await model.setRead(id: row.id, read: row.unread) }
+                        }.disabled(model.working)
+                    }
                     .swipeActions(edge: .leading) {
                         Button { Task { await model.act(.done, id: row.id) } } label: { Label("Done", systemImage: "checkmark") }.tint(Theme.done)
                     }
@@ -139,7 +145,8 @@ struct MailView: View {
                 }
             }
         }
-        .navigationTitle(model.mailbox.rawValue)
+        .searchable(text: $model.searchText, prompt: "Search all mail")
+        .navigationTitle(model.searchText.isEmpty ? model.mailbox.rawValue : "Search")
         .refreshable { await model.sync() }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -170,7 +177,8 @@ struct MailView: View {
 
     @ViewBuilder private var detail: some View {
         if let message = model.message {
-            MessageView(message: message)
+            MessageView(message: message, model: model)
+                .id(message.row.id)
                 .toolbar {
                     ToolbarItemGroup(placement: .bottomBar) {
                         Menu {
@@ -187,6 +195,9 @@ struct MailView: View {
                             .disabled(model.preparingCompose)
                         if model.preparingCompose { ProgressView().accessibilityLabel("Preparing message") }
                         Button { Task { await model.act(.later, id: message.row.id) } } label: { Label("Later", systemImage: "clock") }
+                        Button(message.row.unread ? "Mark read" : "Mark unread", systemImage: message.row.unread ? "envelope.open" : "envelope.badge") {
+                            Task { await model.setRead(id: message.row.id, read: message.row.unread) }
+                        }
                         Spacer()
                         Button { Task { await model.act(.done, id: message.row.id) } } label: { Label("Done", systemImage: "checkmark") }
                             .buttonStyle(.borderedProminent).tint(Theme.accent)

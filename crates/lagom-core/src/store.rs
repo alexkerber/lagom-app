@@ -5,6 +5,13 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
+/// A safe FTS5 expression for what the user typed: every word quoted, the last one as a prefix.
+pub fn fts_query(q: &str) -> Option<String> {
+    let words: Vec<String> = q.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', "\"\""))).collect();
+    let last = words.len().checked_sub(1)?;
+    Some(words.iter().enumerate().map(|(i, w)| if i == last { format!("{w}*") } else { w.clone() }).collect::<Vec<_>>().join(" "))
+}
+
 pub struct Store {
     pub(crate) db: Connection,
 }
@@ -595,11 +602,14 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MessageSummary>> {
+        self.search_accounts(Some(account), query, now, limit, offset)
+    }
+    pub fn search_accounts(&self, account: Option<&str>, query: &str, now: i64, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
         if query.len() > 4096 {
             return Err(Error::Invalid("search query too long"));
         }
         // shortcut: index order avoids ranking every hit, add bounded relevance ranking when needed.
-        let mut stmt=self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND m.account=?2 AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY messages_fts.rowid LIMIT ?4 OFFSET ?5"))?;
+        let mut stmt=self.db.prepare(&format!("SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR m.account=?2) AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3) ORDER BY messages_fts.rowid LIMIT ?4 OFFSET ?5"))?;
         let rows = stmt.query_map(params![query, account, now, limit, offset], summary_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }

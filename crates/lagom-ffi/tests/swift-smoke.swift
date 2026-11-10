@@ -21,7 +21,7 @@ struct Smoke {
         precondition(recipients.count == 2)
         let tomorrow = try tomorrowAtEight()
         precondition(tomorrow > Int64(Date().timeIntervalSince1970))
-        precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true).contains("<x-LINK"))
+        precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true, messageId: 1, remote: false).contains("<x-LINK"))
         print("Swift FFI smoke: 7 checks passed")
     }
 }
