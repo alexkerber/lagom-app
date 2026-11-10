@@ -183,10 +183,10 @@ struct FilterControl: View {
             .padding(.horizontal, 10).frame(minHeight: 28)
             .background(on ? Theme.raised : .clear, in: RoundedRectangle(cornerRadius: 6))
             .shadow(color: on ? .black.opacity(0.06) : .clear, radius: 1, y: 0.5)
-            .contentShape(Rectangle())
+            // A 44 pt hit target around the drawn 28 pt segment.
+            .padding(.vertical, 8).contentShape(Rectangle()).padding(.vertical, -8)
         }
         .buttonStyle(.plain)
-        .frame(minHeight: 40)
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
@@ -204,10 +204,9 @@ struct SearchField: View {
             if !text.isEmpty {
                 Button { text = "" } label: { Icon("close", size: 16) }
                     .buttonStyle(IconButtonStyle()).accessibilityLabel("Clear search")
-                    .frame(width: 32, height: 32)
             }
         }
-        .padding(.horizontal, 8).frame(minHeight: 36)
+        .padding(.horizontal, 8).frame(minHeight: 44)
         .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
     }

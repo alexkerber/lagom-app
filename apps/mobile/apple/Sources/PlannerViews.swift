@@ -100,7 +100,7 @@ struct TodayView: View {
                         Text(RowPresentation(row).subject).lagomFont(.base).foregroundStyle(Theme.secondary).lineLimit(1)
                         Spacer(minLength: 0)
                     }
-                    .frame(minHeight: 40).contentShape(Rectangle())
+                    .frame(minHeight: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens the message")
@@ -185,7 +185,8 @@ struct EventRow: View {
         }
         .frame(minHeight: 44)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(event.allDay ? "All day, \(event.title)" : event.title)
+        .accessibilityLabel([event.allDay ? "All day" : nil, event.title.isEmpty ? "(No title)" : event.title, event.location]
+            .compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: ", "))
         .accessibilityValue(event.allDay ? "" : (start..<max(start, end)).formatted(.interval.hour().minute()))
     }
 }
@@ -264,7 +265,7 @@ struct TodoView: View {
                                     Text("Completed (\(done.count))").lagomFont(.base)
                                 }
                                 .foregroundStyle(Theme.secondary)
-                                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityValue(open ? "Expanded" : "Collapsed")

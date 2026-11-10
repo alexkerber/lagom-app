@@ -37,13 +37,17 @@ struct MailView: View {
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
     @State private var retrying: SendFailure?
-    @State private var unreadOnly = false
+    // The filter outlives a visit to another page, as on desktop.
+    @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
+    @State private var paneWidth = CGFloat.infinity
 
     private var regular: Bool { width == .regular && height == .regular }
+    /// List and reading pane side by side only where both fit; a narrow iPad pushes the message as a phone does.
+    private var split: Bool { regular && paneWidth >= 740 }
 
     var body: some View {
         Group {
-            if regular {
+            if split {
                 HStack(spacing: 0) {
                     inbox.frame(width: 360)
                     Theme.line.frame(width: 1)
@@ -60,6 +64,7 @@ struct MailView: View {
             }
         }
         .background(Theme.background)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
         .confirmationDialog("Send again? Check Sent first if delivery was uncertain. This can send a duplicate.", isPresented: Binding(get: { retrying != nil }, set: { if !$0 { retrying = nil } })) {
             if let failure = retrying {
@@ -80,11 +85,7 @@ struct MailView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
-                    if regular {
-                        Text(model.searchText.isEmpty ? title : "Search").lagomFont(.base, .bold).lineLimit(1)
-                    } else {
-                        mailboxMenu
-                    }
+                    mailboxMenu
                     HStack(spacing: 6) {
                         Icon(model.syncing ? "cloud-syncing" : "cloud-synced", size: 16)
                             .accessibilityLabel(model.syncing ? "Syncing" : "Synced").accessibilityHidden(false)
@@ -108,7 +109,7 @@ struct MailView: View {
         .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
     }
 
-    /// On a phone the title opens the mailboxes and accounts the iPad sidebar lists.
+    /// The title opens the mailboxes and accounts; the account filter also narrows Later, Sent, Done and Trash.
     private var mailboxMenu: some View {
         Menu {
             Picker("Mailbox", selection: $model.mailbox) {
@@ -195,7 +196,7 @@ struct MailView: View {
     private func mailRow(_ row: MailRow, words: DateWords) -> some View {
         Button { model.selectedID = row.id } label: {
             MailRowView(row: row, accent: accountAccent(model.accounts, row.account),
-                        selected: regular && model.selectedID == row.id, words: words)
+                        selected: split && model.selectedID == row.id, words: words)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -236,7 +237,7 @@ struct MailView: View {
             }
             .background(Theme.background)
             .disabled(model.working)
-        } else if regular {
+        } else if split {
             EmptyState(icon: "mail", title: "No message selected")
         } else {
             // While the message loads, or when it failed to: only the way back.
@@ -252,11 +253,11 @@ struct MailView: View {
 }
 
 extension MailView {
-    /// Back on a phone, Later, Delete, Mark read on iPad, then Done filled at the end.
+    /// Back when the message is pushed, Later, Delete, Mark read on iPad, then Done filled at the end.
     func actions(_ message: MailMessage, iconOnly: Bool) -> some View {
         let id = message.row.id
         return HStack(spacing: 8) {
-            if !regular {
+            if !split {
                 IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)
             }
             HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) { Task { await model.act(.later, id: id) } }
