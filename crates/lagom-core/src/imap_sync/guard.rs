@@ -40,7 +40,7 @@ struct Scanner {
 }
 
 fn invalid() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "IMAP response nesting or framing limit exceeded")
+    super::bounded::rejected("IMAP response nesting or framing limit exceeded")
 }
 
 impl Scanner {

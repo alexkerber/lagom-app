@@ -120,10 +120,11 @@ impl Store {
         let mut rows = stmt.query([account])?;
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(5)?;
-            // shortcut: copies without Message-ID count separately; deduplicate when a reliable provider identity is stored.
-            let first_message = message_id.is_empty() || messages.insert(message_id);
             let from: String = row.get(1)?;
             let sent = own.contains(&from.to_lowercase()) && row.get::<_, bool>(6)?;
+            // Keep the sent contribution even when an untrusted folder copy arrives first.
+            // shortcut: copies without Message-ID count separately; deduplicate when a reliable provider identity is stored.
+            let first_message = message_id.is_empty() || messages.insert((message_id, sent));
             let date: i64 = row.get(4)?;
             let age = now.saturating_sub(date).max(0) as f64 / 86400.;
             let score = if sent { 4. } else { 1. } / (1. + age / 30.);
@@ -213,6 +214,32 @@ mod tests {
         received.summary.message_id = "another@example.com".into();
         store.save_message(&received).unwrap();
         assert_eq!(store.contacts(&account.id, 10).unwrap().suggest("received")[0].score, 2.);
+    }
+
+    #[test]
+    fn review_trusted_folder_copies_keep_frequency_and_recency_scores() {
+        for role in [FolderRole::Sent, FolderRole::Drafts] {
+            for trusted_first in [false, true] {
+                let (_temp, store, account, _, _) = fixture();
+                let archive = store.save_folder(&account.id, "Archive", None, FolderRole::Archive).unwrap();
+                let trusted = store.save_folder(&account.id, "Trusted", None, role).unwrap();
+                let now = 1_800_000_000;
+                for (uid, date) in [(1, now), (2, now - 30 * 86400)] {
+                    for folder in if trusted_first { [trusted, archive] } else { [archive, trusted] } {
+                        store.save_message(&Message { summary: MessageSummary {
+                            account: account.id.clone(), folder, uid, date,
+                            message_id: format!("{uid}@example.com"), from_address: account.email.clone(),
+                            to: "Team Contact <contact@example.com>".into(), ..Default::default()
+                        }, ..Default::default() }).unwrap();
+                    }
+                }
+                let contacts = store.contacts(&account.id, now).unwrap().suggest("contact");
+                assert_eq!(contacts.len(), 1);
+                assert!(contacts[0].written);
+                assert_eq!(contacts[0].score, 6., "role={role:?}, trusted_first={trusted_first}");
+                assert_eq!(contacts[0].name, "Team Contact");
+            }
+        }
     }
 
     #[test]

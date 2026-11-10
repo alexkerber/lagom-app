@@ -5,6 +5,15 @@ pub(super) const MAX_LITERAL: usize = 64 * 1024 * 1024;
 // One maximal response per command: every reply at the existing limits fits, an endless stream does not.
 const COMMAND_BUDGET: usize = MAX_LITERAL + 65536;
 
+// Distinguish our content limits from transport errors, including TLS InvalidData errors.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(super) struct Rejected(&'static str);
+
+pub(super) fn rejected(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, Rejected(reason))
+}
+
 #[derive(Debug)]
 pub(super) struct Bounded<T> {
     pub(super) inner: T,
@@ -38,15 +47,15 @@ impl<T> Bounded<T> {
                 Err(nom::Err::Incomplete(needed)) => {
                     let extra = match needed { nom::Needed::Size(n) => n.get(), nom::Needed::Unknown => 1 };
                     self.needed = self.pending.len().checked_add(extra)
-                        .ok_or_else(|| io::Error::other("IMAP response too large"))?;
+                        .ok_or_else(|| rejected("IMAP response too large"))?;
                     // async-imap reserves this much before its next read.
                     if self.needed > MAX_LITERAL + 65536 || extra > self.remaining.unwrap_or(usize::MAX).min(self.command) {
-                        return Err(io::Error::other("IMAP download limit exceeded"));
+                        return Err(rejected("IMAP download limit exceeded"));
                     }
                     self.pending.reserve_exact(self.needed - self.pending.len());
                     break;
                 }
-                Err(_) => return Err(io::Error::other("invalid IMAP response")),
+                Err(_) => return Err(rejected("invalid IMAP response")),
             }
         }
         Ok(())
@@ -60,7 +69,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for Bounded<T> {
             .min((MAX_LITERAL + 65536).saturating_sub(this.pending.len()));
         if max == 0 {
             this.remaining = Some(0);
-            return Poll::Ready(Err(io::Error::other("IMAP download limit exceeded")));
+            return Poll::Ready(Err(rejected("IMAP download limit exceeded")));
         }
         let mut read = ReadBuf::new(buf.initialize_unfilled_to(max));
         ready!(Pin::new(&mut this.inner).poll_read(cx, &mut read))?;
@@ -102,7 +111,7 @@ mod tests {
             let server = tokio::spawn(async move { let _ = write.write_all(wire).await; });
             let mut read = Bounded::new(read);
             let mut received = Vec::new();
-            assert!(read.read_to_end(&mut received).await.is_err());
+            assert!(read.read_to_end(&mut received).await.unwrap_err().get_ref().is_some_and(|e| e.is::<Rejected>()));
             assert!(read.pending.capacity() < 8192);
             drop(read);
             server.await.unwrap();
@@ -130,7 +139,7 @@ mod tests {
         let mut read = Bounded::new(wire.as_slice());
         read.remaining = Some(128);
         received.clear();
-        assert!(read.read_to_end(&mut received).await.is_err());
+        assert!(read.read_to_end(&mut received).await.unwrap_err().get_ref().is_some_and(|e| e.is::<Rejected>()));
         assert!(received.len() <= 128);
         assert!(read.pending.capacity() < 8192);
     }
@@ -141,7 +150,7 @@ mod tests {
         let mut read = Bounded::new(wire.as_slice());
         read.command = wire.len() / 2;
         let mut received = Vec::new();
-        assert!(read.read_to_end(&mut received).await.is_err());
+        assert!(read.read_to_end(&mut received).await.unwrap_err().get_ref().is_some_and(|e| e.is::<Rejected>()));
         assert!(received.len() <= wire.len() / 2);
         let (wire, mut server) = tokio::io::duplex(64);
         let mut read = Bounded::new(wire);

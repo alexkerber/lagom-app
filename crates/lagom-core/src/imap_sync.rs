@@ -40,8 +40,13 @@ type Wire = Box<dyn Io>;
 pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const TIMED_OUT: &str = "IMAP operation timed out";
-async fn net<T, E>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
-    net_as("IMAP operation failed", f).await
+async fn net<T, E: Into<async_imap::error::Error>>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
+    tokio::time::timeout(TIMEOUT, f).await.map_err(|_| Error::Network(TIMED_OUT))?
+        .map_err(|e| match e.into() {
+            async_imap::error::Error::Io(e) if !e.get_ref().is_some_and(|e| e.is::<bounded::Rejected>()) => Error::Io(e),
+            async_imap::error::Error::ConnectionLost => Error::Io(std::io::ErrorKind::UnexpectedEof.into()),
+            _ => Error::Network("IMAP operation failed"),
+        })
 }
 /// Like `net`, with a message that tells the user which step failed: host, TLS or login.
 async fn net_as<T, E>(
@@ -181,9 +186,9 @@ impl ImapSync {
         for _ in 0..2 {
             match self.fetch_message(store, folder, uid).await {
                 Ok(()) => return Ok(true),
-                // A timeout is the network's fault, not the message's: keep the checkpoint and retry next sync.
+                // Transport failures do not make a message unreadable: keep the checkpoint for the next sync.
                 Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_) | Error::Network(TIMED_OUT)) => return Err(e),
-                // A rejected response may be half-read; the first retry also covers a dropped connection.
+                // A rejected response may be half-read; retry it on a fresh session.
                 Err(_) => self.reconnect(store, folder).await?,
             }
         }
@@ -998,6 +1003,77 @@ mod protocol_tests {
         drop(imap);
         server.await.unwrap();
         assert!(result.expect("must reject the literal header without waiting for its body").is_err());
+    }
+
+    #[tokio::test]
+    async fn review_transport_errors_keep_their_classification() {
+        use std::io::{Error as IoError, ErrorKind};
+        for kind in [ErrorKind::ConnectionReset, ErrorKind::UnexpectedEof, ErrorKind::BrokenPipe, ErrorKind::Other, ErrorKind::InvalidData] {
+            let result = net(async { Err::<(), _>(async_imap::error::Error::Io(IoError::from(kind))) }).await;
+            assert!(matches!(result, Err(Error::Io(e)) if e.kind() == kind), "{kind:?}");
+        }
+        assert!(matches!(net(async { Err::<(), _>(async_imap::error::Error::ConnectionLost) }).await, Err(Error::Io(_))));
+        assert!(matches!(net(async { Err::<(), _>(bounded::rejected("fixture limit")) }).await, Err(Error::Network(_))));
+    }
+
+    #[tokio::test]
+    async fn review_dropped_fetches_retry_on_later_syncs_without_placeholders() {
+        for body_fetch in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let mut failures = 0;
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let (r, mut w) = socket.into_split();
+                    let mut r = BufReader::new(r);
+                    w.write_all(b"* OK fixture\r\n").await.unwrap();
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+                        let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                        let mut out = String::new();
+                        if cmd.starts_with("LIST") { out += "* LIST () \"/\" \"INBOX\"\r\n"; }
+                        else if cmd == "CAPABILITY" { out += "* CAPABILITY IMAP4rev1\r\n"; }
+                        else if cmd.starts_with("SELECT") { out += "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n"; }
+                        else if cmd == "UID SEARCH ALL" { out += "* SEARCH 1\r\n"; }
+                        else if cmd.starts_with("UID FETCH") {
+                            if failures < 2 && cmd.contains(if body_fetch { "BODY.PEEK[TEXT]" } else { "BODYSTRUCTURE" }) {
+                                failures += 1;
+                                w.write_all(b"* 1 FETCH (UID 1 ").await.unwrap();
+                                break;
+                            }
+                            if cmd.contains("BODYSTRUCTURE") {
+                                let header = "From: sender@example.com\r\nSubject: Topic\r\nMessage-ID: <one@example.com>\r\n\r\n";
+                                out += &format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 100 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len());
+                            } else if cmd.contains("BODY.PEEK[TEXT]") {
+                                out += "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n";
+                            } else { out += "* 1 FETCH (UID 1 FLAGS ())\r\n"; }
+                        }
+                        out += &format!("{tag} OK done\r\n");
+                        if w.write_all(out.as_bytes()).await.is_err() { break; }
+                    }
+                }
+            });
+            let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "fixture".into() };
+            let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+            store.save_account(&account).unwrap();
+            let mut results = Vec::new();
+            for _ in 0..3 {
+                let mut imap = ImapSync::login(&account, "fixture").await.unwrap();
+                let result = tokio::time::timeout(Duration::from_secs(2), imap.sync(&mut store, DEFAULT_LIMIT)).await.unwrap();
+                let folder = store.folders(&account.id, 0).unwrap().remove(0);
+                results.push((matches!(result, Err(Error::Folder { source, .. }) if matches!(*source, Error::Io(_))), folder.last_uid, store.known_uids(folder.id).unwrap()));
+            }
+            server.abort();
+            assert_eq!(results, [(true, 0, vec![]), (true, 0, vec![]), (false, 1, vec![1])], "body_fetch={body_fetch}");
+            let folder = store.folders(&account.id, 0).unwrap().remove(0);
+            let message = store.list_messages(folder.id, 0, 1, 0).unwrap().remove(0);
+            assert_eq!(message.subject, "Topic");
+            assert_eq!(store.message(message.id).unwrap().body_text.trim(), "body");
+        }
     }
 
     #[tokio::test]

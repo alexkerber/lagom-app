@@ -163,7 +163,9 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Measure on Windows: the URL `NavigateToString` reports in the navigation gate, the `Zone.Identifier` stream on saved attachments, and whether `<iframe srcdoc>` resource hints are inert.
 - [ ] Measure on an iPhone: data protection class and backup exclusion of the mail store, the `WhenUnlockedThisDeviceOnly` keychain write, link previews off.
 - [ ] iOS: migrate keychain items stored before the accessibility change (rewrite on first read).
+- [x] Sync review: preserve transport failures separately from rejected response data, retain the checkpoint and retry on later syncs. Loopback fixtures drop metadata/body FETCH twice and verify recovery without placeholders; response-budget and unreadable-message tests retain deterministic rejection.
+- [x] Contacts review: deduplicate trusted Sent/Drafts contributions separately from other folder copies so archive order cannot erase frequency/recency scores. Fixtures cover both insertion orders and preserve ownership checks.
 - [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
 - [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
-- [ ] Threading: subjects with list tags or other reply prefixes ("[list] Re:", "Antw:", "TR:", "Re[2]:") now start a new thread.
+- [x] Threading: normalise common localised reply/forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:"). Fixture regressions retain subject equality for References and prevent foreign-thread merges.
 - [ ] Install `cargo audit` in CI.
