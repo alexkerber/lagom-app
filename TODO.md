@@ -167,7 +167,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] iOS: migrate keychain items stored before the accessibility change (rewrite on first read).
 - [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
 - [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
-- [ ] Threading: subjects with list tags or other reply prefixes ("[list] Re:", "Antw:", "TR:", "Re[2]:") now start a new thread.
+- [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
 - [ ] Install `cargo audit` in CI.
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
 - [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
