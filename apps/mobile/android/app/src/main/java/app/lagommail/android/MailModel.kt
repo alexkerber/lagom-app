@@ -23,7 +23,7 @@ internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
     val body: String = "", val replyTo: Long? = null,
 ) {
-    constructor(reply: ReplyDraft) : this(reply.account, reply.to, "", reply.subject, reply.body, reply.replyTo)
+    constructor(reply: ReplyDraft) : this(reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo)
 }
 internal enum class MailAction { Done, Later, Delete }
 
@@ -170,7 +170,7 @@ internal class MailModel(
         if (draft != null) return
         val request = ++composeRevision
         val selection = selectionRevision
-        val reply = core.replyDraft(id)
+        val reply = core.composeDraft(id, ComposeKind.REPLY)
         if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply)
     }
     suspend fun send() {
@@ -179,7 +179,7 @@ internal class MailModel(
         if (sending) return
         sending = true
         try {
-            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo)
+            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo, emptyList())
             this.draft = null
             notice = "Queued for sending"
         } finally { sending = false }

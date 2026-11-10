@@ -107,6 +107,20 @@ class MailModelTest {
         assertTrue(model.message!!.row.unread)
         assertEquals("body", model.message?.textBody)
     }
+    @Test fun replyUsesCoreCompositionAndPreservesSourceAccountWhenSending() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(42, account = "second-account")) }
+        val model = model(core); model.start()
+        model.reply(42)
+        val draft = model.draft!!
+        assertEquals("second-account", draft.account)
+        assertEquals("sender@example.test", draft.to)
+        assertEquals("", draft.cc)
+        assertEquals("Re: Subject", draft.subject)
+        assertEquals("\n\n-- \nSignature\n\n> body", draft.body)
+        assertEquals(42L, draft.replyTo)
+        model.send()
+        assertEquals(draft, core.sent.single())
+    }
     @Test fun delayedReplyCannotOverwriteEditedCompose() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1)) }
         val model = model(core); model.start(); model.select(1)
@@ -250,7 +264,8 @@ private class FakeCore : LagomCoreInterface {
         check(!rejectRead) { "Fixture read refused" }
         mail = mail.map { if (it.id == id) it.copy(unread = !read) else it }
     }
-    override suspend fun send(accountId: String, to: List<String>, cc: List<String>, subject: String, bodyMarkdown: String, replyTo: Long?): String {
+    override suspend fun send(accountId: String, to: List<String>, cc: List<String>, subject: String, bodyMarkdown: String, replyTo: Long?, attachments: List<SendAttachment>): String {
+        check(attachments.isEmpty())
         check(!rejectSend) { "Fixture enqueue refused" }
         sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo)
         return "queued"
@@ -263,9 +278,11 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun delete(ids: List<Long>) { check(!rejectAction) }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit
-    override suspend fun replyDraft(id: Long): ReplyDraft {
+    override suspend fun replyDraft(id: Long): ReplyDraft = error("Reply must use composeDraft")
+    override suspend fun composeDraft(id: Long, kind: ComposeKind): ReplyDraft {
+        check(kind == ComposeKind.REPLY)
         replyGate?.await()
-        return ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "Re: Subject", "> body", id)
+        return ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "", "Re: Subject", "\n\n-- \nSignature\n\n> body", id, emptyList())
     }
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")

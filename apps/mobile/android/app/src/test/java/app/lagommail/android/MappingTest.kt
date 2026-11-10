@@ -18,15 +18,16 @@ class MappingTest {
         assertTrue(value.row.hasAttachments)
         assertEquals("Sender", RowPresentation(row(1).copy(senderName = "Sender")).sender)
     }
-    @Test fun replyMappingKeepsAccountAndThread() {
-        val reply = ReplyDraft("second-account", "sender@example.test", "Re: Subject", "\n\n> Quote", 42)
+    @Test fun replyMappingKeepsAccountCcAndThread() {
+        val reply = ReplyDraft("second-account", "sender@example.test", "copy@example.test", "Re: Subject", "\n\n> Quote", 42, emptyList())
         val draft = ComposeDraft(reply)
         assertEquals(reply.account, draft.account)
         assertEquals(reply.to, draft.to)
         assertEquals(reply.subject, draft.subject)
         assertEquals(reply.body, draft.body)
         assertEquals(reply.replyTo, draft.replyTo)
-        assertEquals("", draft.cc)
+        assertEquals(reply.cc, draft.cc)
+        assertNull(ComposeDraft(reply.copy(replyTo = null)).replyTo)
     }
     @Test fun everyMailboxHasItsLabel() {
         assertEquals(listOf("Inbox", "Later", "Done", "Sent"), Mailbox.entries.map { it.label() })
