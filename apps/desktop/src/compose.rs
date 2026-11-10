@@ -61,6 +61,8 @@ pub struct Compose {
     words: usize,
     /// Esc closed the sheet: the main window keeps this draft and reopens it.
     keep: bool,
+    opened: Outgoing,
+    saved_before_open: bool,
     /// The field that had focus when Esc closed the sheet.
     refocus: Option<FocusHandle>,
     /// "Account · address" in the From row.
@@ -112,7 +114,7 @@ impl Compose {
         // A reply starts in the body, a new message in To.
         let first = if reply.is_some() { &body } else { &to };
         window.focus(&first.focus_handle(cx));
-        Self {
+        let mut this = Self {
             store: None,
             attachments: Vec::new(),
             forward_source: None,
@@ -138,6 +140,8 @@ impl Compose {
             show_cc: false,
             words: 0,
             keep: false,
+            opened: Outgoing::default(),
+            saved_before_open: false,
             refocus: None,
             import_error: None,
             _error: None,
@@ -145,7 +149,9 @@ impl Compose {
             _dismiss: None,
             _appearance: appearance,
             _fields: fields,
-        }
+        };
+        this.opened = this.outgoing(cx);
+        this
     }
 
     pub fn initialize(&mut self, cc: &str, body: &str, forward_source: Option<i64>, cx: &mut Context<Self>) {
@@ -154,6 +160,7 @@ impl Compose {
         self.show_cc = !cc.is_empty();
         self.forward_source = forward_source;
         self.count(cx);
+        self.opened = self.outgoing(cx);
     }
 
     pub fn load_forward(&self, cx: &mut Context<Self>) {
@@ -164,9 +171,11 @@ impl Compose {
         if self.message_id != draft || self.forward_source.is_none() { return; }
         match result {
             Ok(parts) => {
+                let untouched = self.outgoing(cx) == self.opened;
                 self.attachments = parts.clone();
                 self.forward_source = None;
                 self.problem = None;
+                if untouched { self.opened = self.outgoing(cx); }
                 self.autosave(cx);
             }
             Err(_) => self.problem = Some("Could not load attachments. Press Send to retry."),
@@ -379,9 +388,11 @@ impl Compose {
         cx.notify();
     }
 
-    /// Esc kept the draft: the sheet comes back as it was, focus where it was.
+    /// Reopen a retained draft as it was, focus where it was.
     pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.load_contacts(cx);
+        self.saved_before_open = true;
+        self.opened = self.outgoing(cx);
         self.keep = false;
         self.load_forward(cx);
         self.set(Phase::Open, cx);
@@ -560,6 +571,23 @@ impl Compose {
         self.refocus = self.focused_field(window, cx).map(|i| self.fields()[i].focus_handle(cx));
         self.keep = true;
         self.set(Phase::Gone, cx);
+    }
+
+    pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.is_modal() { return false; }
+        if self.outgoing(cx) != self.opened {
+            self.close(window, cx);
+            return self.phase == Phase::Gone;
+        }
+        if self.saved_before_open {
+            // A pending autosave may still need to replace an edit that was undone before closing.
+            self.keep = true;
+            self.set(Phase::Gone, cx);
+        } else {
+            // persist seeds autosave's revision; an untouched new sheet must not leave that draft behind.
+            self.discard(cx);
+        }
+        false
     }
 
     fn fields(&self) -> [&Entity<TextInput>; 5] {

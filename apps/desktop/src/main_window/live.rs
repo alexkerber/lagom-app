@@ -1325,6 +1325,124 @@ mod tests {
     }
 
     #[gpui::test]
+    fn close_window_saves_dirty_composer_without_removing_main(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("c");
+        cx.simulate_input("recipient@example.com");
+        cx.simulate_keystrokes("tab tab");
+        cx.simulate_input("Keep this text");
+        let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+        let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+        assert_eq!(expected.text, "Keep this text");
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        view.read_with(cx, |v, _| {
+            assert!(v.compose.is_none());
+            assert_eq!(v.drafts.len(), 1);
+            assert_eq!(v.toast.as_ref().unwrap().0, "Draft saved");
+        });
+        let drafts = store.drafts().unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].text, expected.text);
+        assert_eq!(drafts[0].to, expected.to.join(", "));
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, Cmd::Drafts(_))));
+        let revision = store.draft_revision(&drafts[0].id).unwrap();
+        cx.simulate_keystrokes("c secondary-w");
+        assert_eq!(store.drafts().unwrap(), drafts);
+        assert_eq!(store.draft_revision(&drafts[0].id).unwrap(), revision);
+        assert!(view.read_with(cx, |v, _| v.toast.is_none()));
+        cx.simulate_keystrokes("c secondary-a");
+        cx.simulate_input("Temporary edit");
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(store.drafts().unwrap()[0].text, "Temporary edit");
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input(&expected.text);
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none() && v.toast.is_none()));
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(store.drafts().unwrap(), drafts);
+        cx.simulate_keystrokes("c");
+        cx.simulate_input(" More text");
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+        let autosaved = store.drafts().unwrap();
+        assert_ne!(autosaved[0].text, drafts[0].text);
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(store.drafts().unwrap(), autosaved);
+        assert_eq!(view.read_with(cx, |v, _| v.toast.as_ref().unwrap().0.clone()), "Draft saved");
+    }
+
+    #[gpui::test]
+    #[cfg(target_os = "macos")]
+    fn close_window_keeps_quit_guard_without_an_active_window(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        cx.cx.update(crate::menus::init);
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Pending edits");
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("CREATE TRIGGER refuse_quit BEFORE UPDATE ON drafts BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        cx.deactivate_window();
+        cx.cx.update(|cx| {
+            assert!(cx.active_window().is_none());
+            cx.dispatch_action(&crate::menus::Quit);
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        assert!(cx.cx.update(|cx| cx.active_window().is_some()));
+        view.read_with(cx, |v, _| {
+            assert!(v.compose.is_some());
+            assert!(v.toast.as_ref().unwrap().0.contains("Could not save local edits"));
+        });
+    }
+
+    #[gpui::test]
+    fn close_window_failed_save_keeps_the_composer_and_text(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("r");
+        cx.simulate_input("Do not lose this");
+        let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+        let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("CREATE TRIGGER refuse_save BEFORE UPDATE ON drafts BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        assert_eq!(view.read_with(cx, |v, _| v.compose.clone()), Some(compose.clone()));
+        assert_eq!(compose.read_with(cx, |c, cx| c.outgoing(cx)), expected);
+        assert!(view.read_with(cx, |v, _| v.toast.is_none()));
+        db.execute_batch("DROP TRIGGER refuse_save").unwrap();
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none()));
+        assert_eq!(store.drafts().unwrap()[0].text, expected.text);
+    }
+
+    #[gpui::test]
+    fn close_window_drops_clean_composer_without_a_draft(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        for open in ["c", "r"] {
+            cx.simulate_keystrokes(open);
+            cx.simulate_keystrokes("secondary-w");
+            assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+            view.read_with(cx, |v, _| {
+                assert!(v.compose.is_none() && v.drafts.is_empty());
+                assert!(v.live.as_ref().unwrap().store.drafts().unwrap().is_empty());
+                assert!(v.toast.is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
     fn newsletter_text_yields_and_is_reused_for_reply(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         let id = view.update(cx, |v, cx| {
@@ -3723,6 +3841,48 @@ mod tests {
             assert_eq!(v.drafts[0].read(cx).body_text(cx), format!("Unfinished fixture draft{quote}"));
             assert!(!v.hold_exit(cx));
         });
+    }
+
+    #[gpui::test]
+    fn notification_draft_survives_reopen_and_close_window(cx: &mut TestAppContext) {
+        for autosaved in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            #[cfg(target_os = "macos")]
+            cx.cx.update(crate::menus::init);
+            cx.simulate_keystrokes("c tab tab");
+            cx.simulate_input("Keep the notification draft");
+            let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+            let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+            assert_eq!(expected.text, "Keep the notification draft");
+            if autosaved {
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+                assert_eq!(store.drafts().unwrap()[0].text, expected.text);
+            }
+            view.update_in(cx, |v, window, cx| {
+                let message = incoming(v, 1);
+                v.on_notification(crate::notifications::Event::Clicked(crate::notifications::Target {
+                    account: message.account, message: Some(message.id),
+                }), window, cx);
+                assert!(v.compose.is_none());
+                assert_eq!(v.drafts, [compose.clone()]);
+            });
+            cx.simulate_keystrokes("c");
+            assert_eq!(view.read_with(cx, |v, _| v.compose.clone()), Some(compose.clone()));
+            assert_eq!(compose.read_with(cx, |c, cx| c.outgoing(cx)), expected);
+            cx.simulate_keystrokes("secondary-w");
+            cx.executor().advance_clock(Duration::from_millis(300));
+            cx.run_until_parked();
+            let drafts = store.drafts().unwrap();
+            assert_eq!(drafts.len(), 1);
+            assert_eq!(drafts[0].text, expected.text);
+            assert_eq!(drafts[0].id, expected.message_id.unwrap());
+            view.read_with(cx, |v, _| {
+                assert!(v.compose.is_none());
+                assert_eq!(v.drafts, [compose]);
+                assert!(v.toast.is_none());
+            });
+        }
     }
 
     #[gpui::test]
