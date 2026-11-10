@@ -41,6 +41,7 @@ pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const TIMED_OUT: &str = "IMAP operation timed out";
 const DROPPED: &str = "IMAP connection lost";
+const FAILED: &str = "IMAP operation failed";
 /// Whether an error is the transport's fault. Only Lagom's own limits carry `Rejected`.
 trait Transient {
     fn transient(&self) -> bool { false }
@@ -57,7 +58,7 @@ impl Transient for async_imap::error::Error {
     }
 }
 async fn net<T, E: Transient>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
-    net_as("IMAP operation failed", f).await
+    net_as(FAILED, f).await
 }
 /// Like `net`, with a message that tells the user which step failed: host, TLS or login.
 async fn net_as<T, E: Transient>(
@@ -201,7 +202,14 @@ impl ImapSync {
                 // The network's fault, not the message's: keep the checkpoint and try again next sync.
                 Err(e) if matches!(e, Error::Network(TIMED_OUT)) || (retry && matches!(e, Error::Network(DROPPED))) => return Err(e),
                 // A rejected response may be half-read; the first retry also covers a dropped connection.
-                Err(_) => self.reconnect(store, folder).await?,
+                Err(e) => {
+                    // A clean end-of-file after a row reads as a short response, not an error: ask the session.
+                    // After FAILED the stream is dead by Lagom's own rejection. async-imap's noop() ignores end-of-file.
+                    if retry && !matches!(e, Error::Network(FAILED)) && matches!(net(self.session.run_command_and_check_ok("NOOP")).await, Err(Error::Network(DROPPED))) {
+                        return Err(Error::Network(DROPPED));
+                    }
+                    self.reconnect(store, folder).await?
+                }
             }
         }
         Ok(false)
@@ -1030,9 +1038,9 @@ mod protocol_tests {
         assert!(!limit.transient());
         assert!(matches!(net(async { Err::<(), _>(async_imap::error::Error::Io(limit)) }).await, Err(crate::Error::Network("IMAP operation failed"))));
     }
-    #[tokio::test]
-    async fn unreadable_message_is_skipped_and_the_checkpoint_moves() {
-        // UID 2 has 39 nested multiparts: the wire guard rejects its FETCH and the session.
+    /// A fake server with three mails. UID 2 has 39 nested multiparts: the wire guard rejects its
+    /// FETCH and the session. With `cut`, the server instead sends a bare row for UID 2 and closes.
+    async fn fake(cut: bool) -> (u16, tokio::task::JoinHandle<()>) {
         let text = r#"("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1)"#;
         let deep = format!("{}{text}{}", "(".repeat(39), " \"MIXED\")".repeat(39));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1057,6 +1065,11 @@ mod protocol_tests {
                         else if let Some(rest) = cmd.strip_prefix("UID FETCH ") {
                             let (set, items) = rest.split_once(' ').unwrap();
                             for uid in set.split(',').filter_map(|u| u.parse::<u32>().ok()) {
+                                if cut && uid == 2 {
+                                    out += "* 2 FETCH (UID 2 FLAGS ())\r\n";
+                                    let _ = w.write_all(out.as_bytes()).await;
+                                    return;
+                                }
                                 if items.contains("BODYSTRUCTURE") {
                                     let header = format!("From: a@example.com\r\nSubject: mail {uid}\r\nMessage-ID: <{uid}@x>\r\n\r\n");
                                     let body = if uid == 2 { deep.as_str() } else { text };
@@ -1074,8 +1087,31 @@ mod protocol_tests {
                 });
             }
         });
+        (port, server)
+    }
+    fn fake_account(port: u16) -> Account {
         let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "u".into() };
-        let account = Account::new("u@example.com".into(), config.clone(), config).unwrap();
+        Account::new("u@example.com".into(), config.clone(), config).unwrap()
+    }
+    #[tokio::test]
+    async fn end_of_file_after_a_row_keeps_the_checkpoint() {
+        let (port, server) = fake(true).await;
+        let account = fake_account(port);
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+        store.save_account(&account).unwrap();
+        let mut imap = ImapSync::login(&account, "pw").await.unwrap();
+        let result = imap.sync(&mut store, DEFAULT_LIMIT).await;
+        assert!(matches!(&result, Err(Error::Folder { source, .. }) if matches!(**source, Error::Network(DROPPED))), "{result:?}");
+        let inbox = store.folders(&account.id, 0).unwrap().into_iter().find(|f| f.name == "INBOX").unwrap();
+        assert_eq!(inbox.last_uid, 0);
+        assert!(store.list_messages(inbox.id, i64::MAX, 100, 0).unwrap().iter().all(|m| m.uid != 2));
+        server.abort();
+    }
+    #[tokio::test]
+    async fn unreadable_message_is_skipped_and_the_checkpoint_moves() {
+        let (port, server) = fake(false).await;
+        let account = fake_account(port);
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(temp.path().join("mail.db")).unwrap();
         store.save_account(&account).unwrap();
