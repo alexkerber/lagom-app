@@ -270,18 +270,9 @@ impl LagomCore {
             Ok(ReplyDraft { account: a.id, to, cc, subject, body, reply_to: (!forward).then_some(id), attachments: vec![] })
         }).await?;
         if kind == ComposeKind::Forward {
-            let cached = self.run(move |s| {
-                // shortcut: legacy attachment metadata needs a refresh; retry after sync backfills this message.
-                if !s.attachment_metadata_loaded(id)? { return Err(lagom_core::Error::Invalid("sync attachments before forwarding")); }
-                let mut parts = Vec::new();
-                for part in s.attachments(id)? {
-                    let Some(data) = s.cached_attachment(id, &part.section)? else { return Ok(None); };
-                    parts.push(SendAttachment { filename: part.filename, mime_type: part.mime_type, data });
-                }
-                Ok(Some(parts))
-            }).await?;
+            let cached = self.run(move |s| s.cached_forward_attachments(id)).await?;
             draft.attachments = match cached {
-                Some(parts) => parts,
+                Some(parts) => parts.into_iter().map(|a| SendAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect(),
                 None => self.run_network(move |s| network(async {
                     let a = account(s, &s.message_summary(id)?.account)?;
                     let mut session = ImapSync::login(&a, &a.password()?).await?;
