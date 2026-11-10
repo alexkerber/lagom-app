@@ -97,9 +97,9 @@ async fn replies_queue_markdown_durably_without_network_or_cross_account_sends()
     assert_eq!(reply.account, a.id);
     assert_eq!(reply.subject, "Re: Hello");
     assert!(reply.body.contains("> line two"));
-    assert!(core.send(b.id, vec![reply.to.clone()], vec![], reply.subject.clone(), "body".into(), Some(id)).await.is_err());
-    assert!(core.send(a.id.clone(), vec!["invalid".into()], vec![], "subject".into(), "body".into(), None).await.is_err());
-    let queued = core.send(a.id.clone(), vec![reply.to], vec![], reply.subject, "**bold**".into(), Some(id)).await.unwrap();
+    assert!(core.send(b.id, vec![reply.to.clone()], vec![], reply.subject.clone(), "body".into(), Some(id), vec![]).await.is_err());
+    assert!(core.send(a.id.clone(), vec!["invalid".into()], vec![], "subject".into(), "body".into(), None, vec![]).await.is_err());
+    let queued = core.send(a.id.clone(), vec![reply.to], vec![], reply.subject, "**bold**".into(), Some(id), vec![]).await.unwrap();
     let s = core.stores.local.lock().unwrap();
     let pending = s.pending(&queued).unwrap();
     assert_eq!(pending.mail.in_reply_to.as_deref(), Some("<m1@example.test>"));
@@ -382,7 +382,7 @@ async fn stalled_sync_keeps_cached_mail_and_durable_enqueue_available() {
         assert_eq!(same.message(id).await.unwrap().text_body, "line one\nline two");
         assert_eq!(same.mailbox(Some(a.id.clone()), Mailbox::Inbox, 100, 0).await.unwrap()[0].id, id);
         assert!(same.mailbox(None, Mailbox::Done, 100, 0).await.unwrap().is_empty());
-        let queued = same.send(a.id.clone(), vec!["to@example.test".into()], vec![], "Queued".into(), "body".into(), None).await.unwrap();
+        let queued = same.send(a.id.clone(), vec!["to@example.test".into()], vec![], "Queued".into(), "body".into(), None, vec![]).await.unwrap();
         let disk = Store::open(dir.path().join("lagom.sqlite3")).unwrap();
         assert_eq!(disk.pending(&queued).unwrap().mail.subject, "Queued");
     }).await;
@@ -466,4 +466,135 @@ async fn a_panic_in_one_action_leaves_the_store_usable() {
         assert!(core.run_on(network, |_| -> lagom_core::Result<()> { panic!("action panicked") }).await.is_err());
         assert!(core.run_on(network, |s| s.accounts()).await.unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn reply_all_uses_source_identity_cc_signature_and_thread() {
+    let (_dir, core) = fixture();
+    let (a, id) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let mut a = fixture_account(&s, "me@example.test", 1);
+        a.imap.username = "alias@example.test".into();
+        s.save_account(&a).unwrap();
+        s.set_signature(&a.id, "Team").unwrap();
+        let id = mail(&mut s, &a, 1, 1);
+        let mut message = s.message(id).unwrap();
+        message.summary.to = "Me <ME@example.test>, Alias <alias@example.test>, Other <other@example.test>".into();
+        message.summary.cc = "other@example.test, Copy <copy@example.test>".into();
+        s.save_message(&message).unwrap();
+        (a, id)
+    };
+    let reply = core.compose_draft(id, ComposeKind::ReplyAll).await.unwrap();
+    assert_eq!(reply.account, a.id);
+    assert_eq!(reply.to, "sender@example.test, Other <other@example.test>");
+    assert_eq!(reply.cc, "Copy <copy@example.test>");
+    assert_eq!(reply.reply_to, Some(id));
+    assert!(reply.body.starts_with("\n\n-- \nTeam\n\n> On "));
+    assert!(reply.body.ends_with("> line one\n> line two"));
+    assert!(reply.attachments.is_empty());
+    let queued = core.send(reply.account, split_recipients(reply.to), split_recipients(reply.cc), reply.subject,
+        reply.body, reply.reply_to, reply.attachments).await.unwrap();
+    let pending = core.stores.local.lock().unwrap().pending(&queued).unwrap();
+    assert_eq!(pending.mail.cc, ["Copy <copy@example.test>"]);
+    assert_eq!(pending.mail.in_reply_to.as_deref(), Some("<m1@example.test>"));
+    assert_eq!(pending.mail.references, ["<root@example.test>", "<m1@example.test>"]);
+    for kind in [ComposeKind::Reply, ComposeKind::ReplyAll, ComposeKind::Forward] {
+        assert!(core.compose_draft(-1, kind).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn forward_preserves_cached_attachments_offline_and_starts_a_new_thread() {
+    let (dir, core) = fixture();
+    let (a, id) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "me@example.test", 1);
+        let id = mail(&mut s, &a, 1, 1);
+        (a, id)
+    };
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("UPDATE messages SET attachments_loaded=1 WHERE id=?1", [id]).unwrap();
+    db.execute("INSERT INTO attachments VALUES (?1,'2','fixture.txt','text/plain',4,'base64')", [id]).unwrap();
+    db.execute("INSERT INTO attachment_cache VALUES (?1,'2',?2)", rusqlite::params![id, b"file".as_slice()]).unwrap();
+    let forward = core.compose_draft(id, ComposeKind::Forward).await.unwrap();
+    assert_eq!(forward.account, a.id);
+    assert!(forward.to.is_empty() && forward.cc.is_empty());
+    assert_eq!(forward.subject, "Fwd: Hello");
+    assert!(forward.reply_to.is_none());
+    assert!(forward.body.contains("> Forwarded message\n> From: "));
+    assert!(forward.body.ends_with("> line one\n> line two"));
+    assert_eq!(forward.attachments.len(), 1);
+    assert_eq!(forward.attachments[0].data, b"file");
+    let queued = core.send(forward.account, vec!["next@example.test".into()], vec![], forward.subject,
+        forward.body, forward.reply_to, forward.attachments).await.unwrap();
+    let pending = core.stores.local.lock().unwrap().pending(&queued).unwrap();
+    assert!(pending.mail.in_reply_to.is_none() && pending.mail.references.is_empty());
+    assert_eq!(pending.mail.attachments[0].filename, "fixture.txt");
+    assert_eq!(pending.mail.attachments[0].mime_type, "text/plain");
+    assert_eq!(pending.mail.attachments[0].data, b"file");
+    assert!(String::from_utf8_lossy(&pending.raw).contains("filename=\"fixture.txt\""));
+}
+
+#[tokio::test]
+async fn forward_refuses_unknown_or_unavailable_attachments_instead_of_dropping_them() {
+    let (dir, core) = fixture();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "me@example.test", 1);
+        mail(&mut s, &a, 1, 1)
+    };
+    assert!(core.compose_draft(id, ComposeKind::Forward).await.unwrap_err().to_string().contains("sync attachments"));
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("UPDATE messages SET attachments_loaded=1 WHERE id=?1", [id]).unwrap();
+    assert!(core.compose_draft(id, ComposeKind::Forward).await.unwrap().attachments.is_empty());
+    db.execute("INSERT INTO attachments VALUES (?1,'2','fixture.txt','text/plain',4,'base64')", [id]).unwrap();
+    assert!(core.compose_draft(id, ComposeKind::Forward).await.is_err());
+    assert!(core.stores.local.lock().unwrap().failed_outbox().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn forward_fetches_only_missing_parts_and_reuses_the_cache() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (dir, core) = fixture();
+        let id = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+            mail(&mut s, &a, 1, 1)
+        };
+        let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+        db.execute("UPDATE messages SET attachments_loaded=1 WHERE id=?1", [id]).unwrap();
+        db.execute("INSERT INTO attachments VALUES (?1,'2','cached.txt','text/plain',4,'7bit')", [id]).unwrap();
+        db.execute("INSERT INTO attachment_cache VALUES (?1,'2',?2)", rusqlite::params![id, b"file".as_slice()]).unwrap();
+        db.execute("INSERT INTO attachments VALUES (?1,'3','data.bin','application/octet-stream',8,'base64')", [id]).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            let mut downloads = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n" }
+                else if cmd == "UID FETCH 1 (UID BODY.PEEK[3])" {
+                    downloads += 1;
+                    "* 1 FETCH (UID 1 BODY[3] {8}\r\nAP9oaQ==)\r\n"
+                } else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+            assert_eq!(downloads, 1);
+        });
+        for _ in 0..2 {
+            let draft = core.compose_draft(id, ComposeKind::Forward).await.unwrap();
+            assert_eq!(draft.attachments.len(), 2);
+            assert_eq!(draft.attachments[0].data, b"file");
+            assert_eq!(draft.attachments[1].data, b"\0\xffhi");
+        }
+        server.await.unwrap();
+    }).await.unwrap();
 }

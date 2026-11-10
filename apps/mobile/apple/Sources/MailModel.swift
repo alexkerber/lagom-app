@@ -22,6 +22,39 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
     }
 }
 
+struct ComposeDraft: Identifiable {
+    let id = UUID()
+    var account: String
+    var to = ""
+    var cc = ""
+    var subject = ""
+    var body = ""
+    var replyTo: Int64?
+    var attachments: [SendAttachment] = []
+    var title = "New message"
+
+    init(account: String) { self.account = account }
+    init(reply: ReplyDraft, kind: ComposeKind = .reply) {
+        account = reply.account
+        to = reply.to
+        cc = reply.cc
+        subject = reply.subject
+        body = reply.body
+        replyTo = reply.replyTo
+        attachments = reply.attachments
+        switch kind {
+        case .reply: title = "Reply"
+        case .replyAll: title = "Reply all"
+        case .forward: title = "Forward"
+        }
+    }
+
+    func enqueue(using core: LagomCore) async throws {
+        _ = try await core.send(accountId: account, to: splitRecipients(value: to), cc: splitRecipients(value: cc),
+                                subject: subject, bodyMarkdown: body, replyTo: replyTo, attachments: attachments)
+    }
+}
+
 @MainActor @Observable
 final class MailModel {
     var core: LagomCore?
@@ -34,6 +67,8 @@ final class MailModel {
     var message: MailMessage?
     var error: String?
     var notice: String?
+    var composeDraft: ComposeDraft?
+    var preparingCompose = false
     var syncing = false
     var working = false
     var hasMore = false
@@ -167,6 +202,17 @@ final class MailModel {
             if selectedID == id { selectedID = nil; message = nil }
         } catch { self.error = error.localizedDescription }
         await reload()
+    }
+
+    func prepareCompose(id: Int64, kind: ComposeKind) async {
+        guard let core, !preparingCompose, composeDraft == nil else { return }
+        preparingCompose = true
+        defer { preparingCompose = false }
+        do {
+            let reply = try await core.composeDraft(id: id, kind: kind)
+            guard selectedID == id, composeDraft == nil else { return }
+            composeDraft = ComposeDraft(reply: reply, kind: kind)
+        } catch { if selectedID == id { self.error = error.localizedDescription } }
     }
 
     func remove(_ account: MailAccount) async {

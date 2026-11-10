@@ -8,8 +8,8 @@ settings:
     # shortcut: arm64 simulator only; add x86_64 when Intel Mac development is needed.
     ARCHS: arm64
     TARGETED_DEVICE_FAMILY: '1,2'
-    # Placeholder: replace the bundle identifier before release.
-    PRODUCT_BUNDLE_IDENTIFIER: iq.lagom.app
+    PRODUCT_BUNDLE_IDENTIFIER: com.alexkerber.lagom
+    DEVELOPMENT_TEAM: 3KFU9JQ5LH
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: '0.1.0'
     CURRENT_PROJECT_VERSION: '1'
@@ -35,6 +35,8 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: Lagom
+        # The owner's export compliance answer, so App Store Connect stops asking per build.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -53,12 +55,20 @@ targets:
   LagomTests:
     type: bundle.unit-test
     platform: iOS
-    sources: Tests
+    # Run fixtures without launching the mail app or opening its store.
+    sources:
+      - Tests
+      - Sources/MailModel.swift
+      - Sources/Theme.swift
+      - Generated/LagomCore.swift
     dependencies:
-      - target: Lagom
+      - framework: Generated/LagomFFI.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: iq.lagom.app.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.alexkerber.lagom.tests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   Lagom:
