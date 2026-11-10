@@ -85,6 +85,18 @@ final class MailModel {
         guard core == nil else { return }
         do {
             let directory = try Storage.directory()
+            #if os(iOS)
+            // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.
+            let files = FileManager.default
+            try files.createDirectory(at: directory, withIntermediateDirectories: true)
+            for item in [directory] + ((try? files.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []) {
+                try files.setAttributes([.protectionKey: FileProtectionType.completeUnlessOpen], ofItemAtPath: item.path)
+            }
+            var backup = URLResourceValues()
+            backup.isExcludedFromBackup = true
+            var excluded = directory
+            try excluded.setResourceValues(backup)
+            #endif
             core = try await Task.detached { try LagomCore.open(dataDir: directory.path) }.value
             await reload()
             await sync()

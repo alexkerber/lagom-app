@@ -68,8 +68,9 @@ impl ImapSync {
                 Ok::<_, async_imap::error::Error>(found)
             }).await?;
             self.session.get_mut().remaining = None;
-            let bytes = fetched.as_ref().and_then(|f| f.section(&path)).ok_or(Error::Network("inline part missing"))?;
-            if bytes.len() != part.size as usize { return Err(Error::Network("inline part size changed")); }
+            // A missing or resized part loses one image, not the message.
+            let Some(bytes) = fetched.as_ref().and_then(|f| f.section(&path)) else { continue };
+            if bytes.len() != part.size as usize { continue; }
             let Ok(data) = attachment::decode(bytes, &part.encoding) else { continue };
             if data.len() > remaining { continue; }
             remaining -= data.len();

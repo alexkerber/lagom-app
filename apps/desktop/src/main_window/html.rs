@@ -23,7 +23,7 @@ mod native;
 /// Whether this platform renders HTML mail.
 pub(super) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_links};
+use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_tags};
 
 fn css(c: Rgba) -> String {
     let ch = |v: f32| (v * 255.).round() as u8;
@@ -47,7 +47,7 @@ pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="color-scheme" content="{scheme}"><style>{base}{look}</style></head>{mail}"#,
         csp = csp(remote, if cfg!(target_os = "windows") { "http://lagom-cid.localhost" } else { "lagom-cid:" }),
-        mail = inert_links(html),
+        mail = inert_tags(html),
     )
 }
 
@@ -98,6 +98,15 @@ addEventListener('keydown', e => {
   if (command) { e.preventDefault(); window.ipc.postMessage(command); }
 }, true);
 "#;
+
+/// A navigation passes only when the app has just started a load and `url` is that load:
+/// `loadHTMLString` with no base URL is `about:blank`. Another URL never takes the flag, so a
+/// `<meta refresh>` that fires as the user switches mail cannot spend the app's load.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn allow_navigation(ours: &std::cell::Cell<bool>, url: &str) -> bool {
+    // shortcut: WebView2 `NavigateToString` is documented as `about:blank` and has been seen as a `data:text/html` URI; both pass on Windows. Not run on Windows: measure it there and keep one.
+    (url == "about:blank" || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))) && ours.replace(false)
+}
 
 fn placement(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
     let mut clip = bounds.intersect(&mask);
@@ -343,7 +352,7 @@ impl Web {
                 }
             })
             .with_initialization_script(format!("{BRIDGE}\n{}", include_str!("html/fit.js")))
-            .with_navigation_handler(move |_| ours.replace(false))
+            .with_navigation_handler(move |url| allow_navigation(&ours, &url))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
             .with_on_page_load_handler(move |e, _| {
@@ -532,6 +541,21 @@ mod tests {
         assert!(doc.contains(r#"<x-LINK rel="preconnect""#) && doc.contains("<x-link rel=dns-prefetch") && doc.contains("<p>&lt;link</p>"));
         assert!(!doc.to_ascii_lowercase().contains("<link"));
         assert!(doc.contains(r#"<meta http-equiv="x-dns-prefetch-control" content="off">"#));
+    }
+
+    #[test]
+    fn only_the_apps_own_load_navigates() {
+        let ours = std::cell::Cell::new(false);
+        assert!(!allow_navigation(&ours, "about:blank"), "no load started");
+        ours.set(true);
+        for evil in ["https://evil.example/", "about:srcdoc", "lagom-cid:x"] {
+            assert!(!allow_navigation(&ours, evil), "{evil}");
+        }
+        assert_eq!(allow_navigation(&ours, "data:text/html,x"), cfg!(target_os = "windows"));
+        ours.set(true);
+        assert!(ours.get(), "a denied URL leaves the app's load its flag");
+        assert!(allow_navigation(&ours, "about:blank"));
+        assert!(!allow_navigation(&ours, "about:blank"), "one load, one navigation");
     }
 
     #[test]

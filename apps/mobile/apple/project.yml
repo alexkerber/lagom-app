@@ -27,6 +27,10 @@ targets:
         embed: false
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
+    entitlements:
+      path: Generated/Lagom.entitlements
+      properties:
+        com.apple.developer.default-data-protection: NSFileProtectionCompleteUnlessOpen
     info:
       path: Generated/Info.plist
       properties:

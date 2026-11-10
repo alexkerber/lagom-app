@@ -137,8 +137,11 @@ fn invalid_dates_and_unsafe_meeting_urls_are_rejected() {
         assert!(event_time(EventTime { date: None, date_time: Some(value.into()) }).is_err());
     }
     assert!(event_time(EventTime { date: None, date_time: Some("2026-11-09T10:00:00.123-07:00".into()) }).is_ok());
-    for url in ["javascript:alert(1)", "https://user:pass@example.test", "http://example.test"] { assert!(!safe_join_url(url)); }
+    for url in ["javascript:alert(1)", "https://user:pass@example.test", "http://example.test"] { assert!(!safe_join_url(url)); assert!(join_host(url).is_none()); }
     assert!(safe_join_url("https://meet.example.test/fixture"));
+    assert_eq!(join_host("https://meet.google.com/abc-defg-hij").as_deref(), Some("meet.google.com"));
+    // A look-alike Unicode host shows in its ASCII form.
+    assert!(join_host("https://g\u{43e}\u{43e}gle.com/x").is_some_and(|host| host.starts_with("xn--") && host.is_ascii()));
 }
 
 #[test]

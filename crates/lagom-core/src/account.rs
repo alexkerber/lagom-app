@@ -121,9 +121,21 @@ impl Account {
         keyring::Entry::new(&service, &self.id).map_err(|_| Error::Secret)
     }
     pub fn set_password(&self, password: &str) -> Result<()> {
-        self.secret_entry()?
-            .set_password(password)
-            .map_err(|_| Error::Secret)
+        let entry = self.secret_entry()?;
+        // iOS: readable only while unlocked and never in backups or device migration. Reads stay with
+        // keyring, which matches service and account only, so older items keep working.
+        #[cfg(target_os = "ios")]
+        {
+            use security_framework::{access_control::{ProtectionMode, SecAccessControl}, passwords::{set_generic_password_options, PasswordOptions}};
+            let service = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
+            let mut options = PasswordOptions::new_generic_password(&service, &self.id);
+            options.set_access_control(SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly), 0).map_err(|_| Error::Secret)?);
+            // An update keeps an older item's class, so the item is replaced.
+            let _ = entry.delete_credential();
+            set_generic_password_options(password.as_bytes(), options).map_err(|_| Error::Secret)
+        }
+        #[cfg(not(target_os = "ios"))]
+        entry.set_password(password).map_err(|_| Error::Secret)
     }
     pub fn password(&self) -> Result<Zeroizing<String>> {
         self.secret_entry()?

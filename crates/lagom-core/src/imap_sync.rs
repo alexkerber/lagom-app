@@ -40,18 +40,36 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + Debug> Io for T {}
 type Wire = Box<dyn Io>;
 pub const DEFAULT_LIMIT: usize = 500;
 const TIMEOUT: Duration = Duration::from_secs(60);
-async fn net<T, E>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
-    net_as("IMAP operation failed", f).await
+const TIMED_OUT: &str = "IMAP operation timed out";
+const DROPPED: &str = "IMAP connection lost";
+const FAILED: &str = "IMAP operation failed";
+/// Whether an error is the transport's fault. Only Lagom's own limits carry `Rejected`.
+trait Transient {
+    fn transient(&self) -> bool { false }
+}
+impl Transient for std::io::Error {
+    fn transient(&self) -> bool { !self.get_ref().is_some_and(|e| e.is::<guard::Rejected>()) }
+}
+impl<T: Transient, U> Transient for (T, U) {
+    fn transient(&self) -> bool { self.0.transient() }
+}
+impl Transient for async_imap::error::Error {
+    fn transient(&self) -> bool {
+        match self { Self::Io(e) => e.transient(), Self::ConnectionLost => true, _ => false }
+    }
+}
+async fn net<T, E: Transient>(f: impl Future<Output = std::result::Result<T, E>>) -> Result<T> {
+    net_as(FAILED, f).await
 }
 /// Like `net`, with a message that tells the user which step failed: host, TLS or login.
-async fn net_as<T, E>(
+async fn net_as<T, E: Transient>(
     what: &'static str,
     f: impl Future<Output = std::result::Result<T, E>>,
 ) -> Result<T> {
     tokio::time::timeout(TIMEOUT, f)
         .await
-        .map_err(|_| Error::Network("IMAP operation timed out"))?
-        .map_err(|_| Error::Network(what))
+        .map_err(|_| Error::Network(TIMED_OUT))?
+        .map_err(|e| Error::Network(if e.transient() { DROPPED } else { what }))
 }
 async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -92,12 +110,12 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
             client
         }
         Security::StartTls => {
-            let mut client = Client::new(Guarded::new(socket));
+            let mut client = Client::new(Bounded::new(Guarded::new(socket)));
             if net(client.read_response()).await?.is_none() {
                 return Err(Error::Network("IMAP greeting missing"));
             }
             net(client.run_command_and_check_ok("STARTTLS", None)).await?;
-            Client::new(Bounded::new(tls(client.into_inner().inner, &config.host).await?))
+            Client::new(Bounded::new(tls(client.into_inner().inner.inner, &config.host).await?))
         }
         Security::Plain => {
             let mut client = Client::new(Bounded::new(Box::new(Guarded::new(socket)) as Wire));
@@ -135,6 +153,8 @@ pub struct ImapSync {
     session: Session<Bounded<Wire>>,
     capabilities: Capabilities,
     refresh_error: Option<Error>,
+    /// Kept to reconnect after a message whose response left the session unusable.
+    password: zeroize::Zeroizing<String>,
 }
 impl ImapSync {
     pub async fn login(account: &Account, password: &str) -> Result<Self> {
@@ -158,7 +178,42 @@ impl ImapSync {
             session,
             capabilities,
             refresh_error: None,
+            // OAuth reconnects with its own token; do not hold the refresh token for the session's life.
+            password: zeroize::Zeroizing::new(if matches!(account.auth, Auth::Password) { password.to_owned() } else { String::new() }),
         })
+    }
+    /// A fresh session with `folder` selected again, as it was before the failed command.
+    async fn reconnect(&mut self, store: &mut Store, folder: &Folder) -> Result<()> {
+        // Drop the old socket first: some servers cap connections per account. The stand-in reads end-of-file.
+        self.session.get_mut().inner = Box::new(tokio::io::duplex(1).0);
+        let fresh = Self::login(&self.account, &self.password).await?;
+        (self.session, self.capabilities) = (fresh.session, fresh.capabilities);
+        let (selected, _) = self.select(store, folder.id).await?;
+        if selected.uidvalidity != folder.uidvalidity {
+            return Err(Error::Invalid("mailbox changed; resync"));
+        }
+        Ok(())
+    }
+    /// False when the message failed on a fresh session too; the session is usable either way.
+    async fn try_fetch(&mut self, store: &mut Store, folder: &Folder, uid: u32) -> Result<bool> {
+        for retry in [false, true] {
+            match self.fetch_message(store, folder, uid).await {
+                Ok(()) => return Ok(true),
+                Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
+                // The network's fault, not the message's: keep the checkpoint and try again next sync.
+                Err(e) if matches!(e, Error::Network(TIMED_OUT)) || (retry && matches!(e, Error::Network(DROPPED))) => return Err(e),
+                // A rejected response may be half-read; the first retry also covers a dropped connection.
+                Err(e) => {
+                    // A clean end-of-file after a row reads as a short response, not an error: ask the session.
+                    // After FAILED the stream is dead by Lagom's own rejection. async-imap's noop() ignores end-of-file.
+                    if retry && !matches!(e, Error::Network(FAILED)) && matches!(net(self.session.run_command_and_check_ok("NOOP")).await, Err(Error::Network(DROPPED))) {
+                        return Err(Error::Network(DROPPED));
+                    }
+                    self.reconnect(store, folder).await?
+                }
+            }
+        }
+        Ok(false)
     }
     /// A confirmed move can succeed while its subsequent refresh fails.
     pub fn take_refresh_error(&mut self) -> Option<Error> {
@@ -279,13 +334,18 @@ impl ImapSync {
             sorted.iter().filter(|u| **u > last).copied().collect()
         };
         for &uid in &candidates {
-            if !known.contains(&uid) {
-                self.fetch_message(store, &folder, uid).await?;
+            if !known.contains(&uid) && !self.try_fetch(store, &folder, uid).await? {
+                // Otherwise one unreadable message holds the checkpoint below it on every sync.
+                let mut message = mime::placeholder();
+                message.summary.subject = "(message could not be read)".into();
+                message.body_text = "Lagom could not read this message. Open it in another mail app.".into();
+                self.save(store, &folder, uid, None, message, &[])?;
             }
         }
         for uid in store.missing_metadata(id, limit)? {
             if present.contains(&uid) {
-                self.fetch_message(store, &folder, uid).await?;
+                // On failure the stored row stays as it is.
+                self.try_fetch(store, &folder, uid).await?;
             }
         }
         let query =
@@ -360,7 +420,7 @@ impl ImapSync {
         // never stops the folder's later UIDs.
         if header.len() >= 262144 {
             let message = mime::metadata_only(header).unwrap_or_else(|_| mime::placeholder());
-            return self.save(store, folder, uid, fetch, message, &attachments).map(|_| ());
+            return self.save(store, folder, uid, Some(fetch), message, &attachments).map(|_| ());
         }
         let mut message;
         // The first text part (search, and the reading pane where HTML does not render) and the
@@ -371,7 +431,7 @@ impl ImapSync {
             message = mime::parse(header)?;
         } else {
             if picks.iter().map(|p| p.2 as usize).sum::<usize>() > mime::MAX_MIME_BYTES {
-                return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments).map(|_| ());
+                return self.save(store, folder, uid, Some(fetch), mime::metadata_only(header)?, &attachments).map(|_| ());
             }
             let section = |path: &[u32]| path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
             // GreenMail emits malformed partial text responses; check octets before full part fetch.
@@ -405,7 +465,7 @@ impl ImapSync {
                 .ok_or(Error::Network("MIME text part missing"))?;
                 total += headers.len() + text.len();
                 if headers.len() >= 65536 || total > mime::MAX_MIME_BYTES {
-                    return self.save(store, folder, uid, fetch, mime::metadata_only(header)?, &attachments).map(|_| ());
+                    return self.save(store, folder, uid, Some(fetch), mime::metadata_only(header)?, &attachments).map(|_| ());
                 }
                 let mut raw = headers.to_vec();
                 if !raw.ends_with(b"\r\n") {
@@ -431,12 +491,12 @@ impl ImapSync {
             message.summary.snippet = mime::snippet(&message.body_text, message.body_html.as_deref());
         }
         let inline = self.inline_parts(uid, body, message.body_html.as_deref().unwrap_or_default()).await?;
-        let id = self.save(store, folder, uid, fetch, message, &attachments)?;
+        let id = self.save(store, folder, uid, Some(fetch), message, &attachments)?;
         store.save_inline_parts(id, &inline)
     }
     /// Fills the IMAP-side fields of a parsed message and stores it.
-    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: &Fetch, mut message: Message, attachments: &[Attachment]) -> Result<i64> {
-        let (seen, flagged) = flags(fetch);
+    fn save(&self, store: &Store, folder: &Folder, uid: u32, fetch: Option<&Fetch>, mut message: Message, attachments: &[Attachment]) -> Result<i64> {
+        let (seen, flagged) = fetch.map(flags).unwrap_or_default();
         let m = &mut message.summary;
         m.account = self.account.id.clone();
         m.folder = folder.id;
@@ -451,10 +511,10 @@ impl ImapSync {
         m.seen = seen;
         m.flagged = flagged;
         m.has_attachments = !attachments.is_empty();
-        m.size = fetch.size.unwrap_or_default();
+        m.size = fetch.and_then(|f| f.size).unwrap_or_default();
         if m.date == 0 {
             m.date = fetch
-                .internal_date()
+                .and_then(|f| f.internal_date())
                 .map(|d| d.timestamp())
                 .unwrap_or_default();
         }
@@ -728,7 +788,7 @@ fn attachment_filename(common: &async_imap::imap_proto::BodyContentCommon<'_>) -
     let disposition = common.disposition.as_ref().map(|d| params(&d.params)).unwrap_or_default();
     let header = format!("Content-Type: application/octet-stream{}\r\nContent-Disposition: attachment{disposition}\r\n\r\nx", params(&common.ty.params));
     let message = mail_parser::MessageParser::default().parse(header.as_bytes())?;
-    let name = message.attachments().next()?.attachment_name().filter(|s| !s.is_empty()).map(str::to_owned);
+    let name = message.attachments().next()?.attachment_name().map(attachment::strip_bidi).filter(|s| !s.is_empty());
     name
 }
 type TextPart = (Vec<u32>, bool, u32, String);
@@ -818,6 +878,8 @@ mod tests {
         let (text, parts) = parsed_parts(r#"("APPLICATION" "PDF" NIL NIL NIL "BASE64" 8 NIL ("ATTACHMENT" ("FILENAME" "=?UTF-8?Q?r=C3=A4ksm=C3=B6rg=C3=A5s.pdf?=")))"#);
         assert!(text.is_empty());
         assert_eq!((&*parts[0].section, &*parts[0].filename), ("1", "räksmörgås.pdf"));
+        let (_, parts) = parsed_parts("(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"invoice\u{202E}fdp.exe\") NIL NIL \"BASE64\" 8)");
+        assert_eq!(parts[0].filename, "invoicefdp.exe");
         let (text, parts) = parsed_parts(r#"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1) "MIXED" NIL ("ATTACHMENT" ("FILENAME" "bundle")))"#);
         assert!(text.is_empty());
         assert_eq!(parts[0].section, "1");
@@ -928,7 +990,7 @@ mod protocol_tests {
         let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities, refresh_error: None };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, password: Default::default() };
         let start = tokio::time::Instant::now();
         let result = imap.all_uids().await;
         assert!(matches!(result, Err(Error::Network("IMAP operation timed out"))), "{result:?}");
@@ -972,11 +1034,114 @@ mod protocol_tests {
         let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities, refresh_error: None };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, password: Default::default() };
         let result = tokio::time::timeout(Duration::from_secs(2), imap.fetch_attachment(&mut store, id, "1")).await;
         drop(imap);
         server.await.unwrap();
         assert!(result.expect("must reject the literal header without waiting for its body").is_err());
+    }
+
+    #[tokio::test]
+    async fn only_lagoms_own_limits_are_not_transport_errors() {
+        use std::io::{Error, ErrorKind};
+        // tokio-rustls reports a bad TLS record as InvalidData too: it must keep the checkpoint.
+        for transport in [Error::new(ErrorKind::InvalidData, "corrupt TLS record"), Error::other("tls alert"), ErrorKind::ConnectionReset.into(), ErrorKind::UnexpectedEof.into()] {
+            assert!(transport.transient(), "{transport}");
+            assert!(matches!(net(async { Err::<(), _>(async_imap::error::Error::Io(transport)) }).await, Err(crate::Error::Network(DROPPED))));
+        }
+        assert!(async_imap::error::Error::ConnectionLost.transient());
+        let limit = Error::new(ErrorKind::InvalidData, guard::Rejected("limit"));
+        assert!(!limit.transient());
+        assert!(matches!(net(async { Err::<(), _>(async_imap::error::Error::Io(limit)) }).await, Err(crate::Error::Network("IMAP operation failed"))));
+    }
+    /// A fake server with three mails. UID 2 has 39 nested multiparts: the wire guard rejects its
+    /// FETCH and the session. With `cut`, the server instead sends a bare row for UID 2 and closes.
+    async fn fake(cut: bool) -> (u16, tokio::task::JoinHandle<()>) {
+        let text = r#"("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1)"#;
+        let deep = format!("{}{text}{}", "(".repeat(39), " \"MIXED\")".repeat(39));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else { return };
+                let deep = deep.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = socket.into_split();
+                    let mut r = BufReader::new(r);
+                    w.write_all(b"* OK fake\r\n").await.unwrap();
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                        let mut out = String::new();
+                        if cmd.starts_with("LIST") { out += "* LIST () \"/\" \"INBOX\"\r\n"; }
+                        else if cmd == "CAPABILITY" { out += "* CAPABILITY IMAP4rev1\r\n"; }
+                        else if cmd.starts_with("SELECT") { out += "* 3 EXISTS\r\n* OK [UIDVALIDITY 7] v\r\n* OK [UIDNEXT 4] n\r\n"; }
+                        else if cmd == "UID SEARCH ALL" { out += "* SEARCH 1 2 3\r\n"; }
+                        else if let Some(rest) = cmd.strip_prefix("UID FETCH ") {
+                            let (set, items) = rest.split_once(' ').unwrap();
+                            for uid in set.split(',').filter_map(|u| u.parse::<u32>().ok()) {
+                                if cut && uid == 2 {
+                                    out += "* 2 FETCH (UID 2 FLAGS ())\r\n";
+                                    let _ = w.write_all(out.as_bytes()).await;
+                                    return;
+                                }
+                                if items.contains("BODYSTRUCTURE") {
+                                    let header = format!("From: a@example.com\r\nSubject: mail {uid}\r\nMessage-ID: <{uid}@x>\r\n\r\n");
+                                    let body = if uid == 2 { deep.as_str() } else { text };
+                                    out += &format!("* {uid} FETCH (UID {uid} FLAGS () RFC822.SIZE 10 BODYSTRUCTURE {body} BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len());
+                                } else if items.contains("BODY.PEEK[TEXT]") {
+                                    out += &format!("* {uid} FETCH (UID {uid} BODY[TEXT] {{4}}\r\nbody)\r\n");
+                                } else {
+                                    out += &format!("* {uid} FETCH (UID {uid} FLAGS ())\r\n");
+                                }
+                            }
+                        } else if cmd == "LOGOUT" { out += "* BYE bye\r\n"; }
+                        out += &format!("{tag} OK done\r\n");
+                        if w.write_all(out.as_bytes()).await.is_err() { return; }
+                    }
+                });
+            }
+        });
+        (port, server)
+    }
+    fn fake_account(port: u16) -> Account {
+        let config = ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "u".into() };
+        Account::new("u@example.com".into(), config.clone(), config).unwrap()
+    }
+    #[tokio::test]
+    async fn end_of_file_after_a_row_keeps_the_checkpoint() {
+        let (port, server) = fake(true).await;
+        let account = fake_account(port);
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+        store.save_account(&account).unwrap();
+        let mut imap = ImapSync::login(&account, "pw").await.unwrap();
+        let result = imap.sync(&mut store, DEFAULT_LIMIT).await;
+        assert!(matches!(&result, Err(Error::Folder { source, .. }) if matches!(**source, Error::Network(DROPPED))), "{result:?}");
+        let inbox = store.folders(&account.id, 0).unwrap().into_iter().find(|f| f.name == "INBOX").unwrap();
+        assert_eq!(inbox.last_uid, 0);
+        assert!(store.list_messages(inbox.id, i64::MAX, 100, 0).unwrap().iter().all(|m| m.uid != 2));
+        server.abort();
+    }
+    #[tokio::test]
+    async fn unreadable_message_is_skipped_and_the_checkpoint_moves() {
+        let (port, server) = fake(false).await;
+        let account = fake_account(port);
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+        store.save_account(&account).unwrap();
+        for _ in 0..2 {
+            let mut imap = ImapSync::login(&account, "pw").await.unwrap();
+            imap.sync(&mut store, DEFAULT_LIMIT).await.unwrap();
+            imap.logout().await.unwrap();
+            let inbox = store.folders(&account.id, 0).unwrap().into_iter().find(|f| f.name == "INBOX").unwrap();
+            assert_eq!(inbox.last_uid, 3);
+            let mut stored: Vec<_> = store.list_messages(inbox.id, i64::MAX, 100, 0).unwrap().into_iter().map(|m| (m.uid, m.subject)).collect();
+            stored.sort();
+            assert_eq!(stored, [(1, "mail 1".into()), (2, "(message could not be read)".into()), (3, "mail 3".into())]);
+        }
+        server.abort();
     }
 
     #[tokio::test]

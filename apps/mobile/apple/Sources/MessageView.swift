@@ -59,6 +59,8 @@ struct MailHTML: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
+        // A long-press preview would fetch the link outside the navigation delegate and the CSP.
+        view.allowsLinkPreview = false
         view.isOpaque = false
         view.backgroundColor = .clear
         return view

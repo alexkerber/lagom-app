@@ -18,6 +18,8 @@ impl View {
         {
             use wry::WebViewExtMacOS;
             let native = web.webview();
+            // A force-click preview would fetch the link outside the navigation gate and the CSP.
+            let _: () = unsafe { objc2::msg_send![&*native, setAllowsLinkPreview: false] };
             let parent = unsafe { native.superview() }?;
             let clip = objc2_app_kit::NSView::new(objc2::MainThreadMarker::new()?);
             clip.setWantsLayer(true);
