@@ -17,7 +17,7 @@ use std::{
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
-#[command(name = "lagom-cli", about = "Local-first Lagom mail core test client")]
+#[command(name = "lagom-cli", about = "Local-first lagom mail core test client")]
 struct Args {
     #[arg(
         long,

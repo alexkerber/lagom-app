@@ -36,7 +36,7 @@ pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
             div()
                 .text_size(px(size::DISPLAY))
                 .font_weight(FontWeight::BOLD)
-                .child("Lagom. Nothing left."),
+                .child("lagom. Nothing left."),
         )
         .child(
             div()
