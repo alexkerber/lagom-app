@@ -388,10 +388,10 @@ impl Compose {
         cx.notify();
     }
 
-    /// Esc kept the draft: the sheet comes back as it was, focus where it was.
+    /// Reopen a retained draft as it was, focus where it was.
     pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.load_contacts(cx);
-        self.saved_before_open = self.keep;
+        self.saved_before_open = true;
         self.opened = self.outgoing(cx);
         self.keep = false;
         self.load_forward(cx);

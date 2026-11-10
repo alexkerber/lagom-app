@@ -3715,6 +3715,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn notification_draft_survives_reopen_and_close_window(cx: &mut TestAppContext) {
+        for autosaved in [false, true] {
+            let (view, cx, _rx) = window(cx);
+            #[cfg(target_os = "macos")]
+            cx.cx.update(crate::menus::init);
+            cx.simulate_keystrokes("c tab tab");
+            cx.simulate_input("Keep the notification draft");
+            let (store, compose) = view.read_with(cx, |v, _| (v.live.as_ref().unwrap().store.clone(), v.compose.clone().unwrap()));
+            let expected = compose.read_with(cx, |c, cx| c.outgoing(cx));
+            assert_eq!(expected.text, "Keep the notification draft");
+            if autosaved {
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+                assert_eq!(store.drafts().unwrap()[0].text, expected.text);
+            }
+            view.update_in(cx, |v, window, cx| {
+                let message = incoming(v, 1);
+                v.on_notification(crate::notifications::Event::Clicked(crate::notifications::Target {
+                    account: message.account, message: Some(message.id),
+                }), window, cx);
+                assert!(v.compose.is_none());
+                assert_eq!(v.drafts, [compose.clone()]);
+            });
+            cx.simulate_keystrokes("c");
+            assert_eq!(view.read_with(cx, |v, _| v.compose.clone()), Some(compose.clone()));
+            assert_eq!(compose.read_with(cx, |c, cx| c.outgoing(cx)), expected);
+            cx.simulate_keystrokes("secondary-w");
+            cx.executor().advance_clock(Duration::from_millis(300));
+            cx.run_until_parked();
+            let drafts = store.drafts().unwrap();
+            assert_eq!(drafts.len(), 1);
+            assert_eq!(drafts[0].text, expected.text);
+            assert_eq!(drafts[0].id, expected.message_id.unwrap());
+            view.read_with(cx, |v, _| {
+                assert!(v.compose.is_none());
+                assert_eq!(v.drafts, [compose]);
+                assert!(v.toast.is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
     fn reauthentication_actions_and_events_preserve_selection_and_retry_state(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let account = view.update(cx, |v, _| v.live.as_ref().unwrap().accounts[0].id.clone());
