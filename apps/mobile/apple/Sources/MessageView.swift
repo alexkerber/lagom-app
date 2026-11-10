@@ -65,10 +65,11 @@ struct MessageView: View {
                 .background(Theme.subtle, in: Circle())
                 .overlay(Circle().strokeBorder(Theme.line))
                 .accessibilityHidden(true)
-            // The full address wraps rather than truncates, so a look-alike sender stays visible.
+            // The address wraps, and a very long one keeps its domain, so a look-alike sender stays visible.
             VStack(alignment: .leading, spacing: 2) {
-                Text(sender).lagomFont(.base, .semibold)
-                Text(row.senderAddress).lagomFont(.small).foregroundStyle(Theme.secondary).textSelection(.enabled)
+                Text(sender).lagomFont(.base, .semibold).lineLimit(2)
+                Text(row.senderAddress).lagomFont(.small).foregroundStyle(Theme.secondary)
+                    .lineLimit(4).truncationMode(.middle).textSelection(.enabled)
                 Text(DateWords().readingDate(Date(timeIntervalSince1970: TimeInterval(row.dateUnix))))
                     .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
             }
