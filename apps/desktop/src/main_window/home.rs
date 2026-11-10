@@ -13,6 +13,7 @@ impl Page {
 
 impl MainWindow {
     pub(super) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.draft_open = None;
         self.page = page;
         if self.demo { return; }
         let saved = match self.page {

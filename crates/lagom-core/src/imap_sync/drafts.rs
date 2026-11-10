@@ -57,7 +57,10 @@ impl ImapSync {
             for staged in &pending { uploading |= same_upload(&raw, staged)?; }
             if !uploading { store.import_draft(&self.account.id, &folder.name, validity, uid, &raw)?; }
         }
-        store.reconcile_drafts(&self.account.id, &folder.name, validity, &present)
+        store.reconcile_drafts(&self.account.id, &folder.name, validity, &present)?;
+        // Older versions cached server drafts as mail, including their full-text search entries.
+        store.db.execute("DELETE FROM messages WHERE folder=?1", [folder.id])?;
+        Ok(())
     }
 
     /// The caller persists backoff too when login fails, before a session is available.

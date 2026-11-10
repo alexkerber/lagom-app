@@ -101,7 +101,16 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
         for (name, value) in [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)] {
             header_value(value)?;
             if !value.is_empty() {
-                message = message.raw_header(header::HeaderValue::new(header::HeaderName::new_from_ascii_str(name), value.clone()));
+                message = if let Ok(mailboxes) = value.parse::<lettre::message::Mailboxes>() {
+                    match name {
+                        "To" => message.header(header::To::from(mailboxes)),
+                        "Cc" => message.header(header::Cc::from(mailboxes)),
+                        _ => message.header(header::Bcc::from(mailboxes)),
+                    }
+                } else {
+                    // Unfinished input is kept as text, after rejecting header control characters.
+                    message.raw_header(header::HeaderValue::new(header::HeaderName::new_from_ascii_str(name), value.clone()))
+                };
             }
         }
     }
@@ -360,6 +369,28 @@ mod tests {
         assert!(wire.contains("text/html"));
         (parsed.body_text(0).unwrap().replace("\r\n", "\n"), parsed.body_html(0).map(|h| h.replace("\r\n", "\n")))
     }
+    #[test]
+    fn draft_recipient_fallback_keeps_unfinished_text_and_rejects_injection() {
+        let mut draft = crate::outbox::Draft::default();
+        for value in ["unfinished address", "Tëam <unfinished"] {
+            draft.to = value.into();
+            draft.cc = value.into();
+            draft.bcc = value.into();
+            let raw = compose_draft(&account(), &draft, "fixture").unwrap();
+            let parsed = mail_parser::MessageParser::default()
+                .header("To", mail_parser::HeaderForm::Text).header("Cc", mail_parser::HeaderForm::Text)
+                .header("Bcc", mail_parser::HeaderForm::Text).parse(&raw).unwrap();
+            for name in ["To", "Cc", "Bcc"] {
+                assert_eq!(parsed.headers().get(name).unwrap().value().as_text(), Some(value));
+            }
+        }
+        for field in 0..3 {
+            let mut draft = crate::outbox::Draft::default();
+            [&mut draft.to, &mut draft.cc, &mut draft.bcc][field].push_str("unfinished\r\nX-Injected: yes");
+            assert!(compose_draft(&account(), &draft, "fixture").is_err());
+        }
+    }
+
     #[test]
     fn attachments_survive_mime_encoding_with_plain_and_markdown_bodies() {
         for text in ["Body", "**Body**\n\n> Forwarded message"] {

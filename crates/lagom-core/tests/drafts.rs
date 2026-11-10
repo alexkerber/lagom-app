@@ -130,6 +130,70 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn quoted_unicode_recipients_survive_foreign_draft_replacement() {
+    let mut f = Fixture::new().await;
+    let recipients = "\"Tëam, QA\" <team@example.com>, other@example.com";
+    let raw = format!("To: {recipients}\r\nCc: {recipients}\r\nBcc: {recipients}\r\nSubject: Foreign\r\n\r\nOriginal text");
+    f.mailbox.lock().unwrap().insert(raw.into_bytes());
+    let mut imap = f.connect().await;
+    f.read(&mut imap).await;
+    let mut draft = f.store.drafts().unwrap().remove(0);
+    assert_eq!(draft.to, recipients);
+    draft.text = "Edited text".into();
+    f.store.save_draft(&draft).unwrap();
+    imap.sync_draft(&mut f.store, &draft.id, 0).await.unwrap();
+    {
+        let state = f.mailbox.lock().unwrap();
+        assert_eq!(state.deletions, [1]);
+        assert_eq!(state.visible().len(), 1);
+        let parsed = mail_parser::MessageParser::default().parse(state.visible()[0]).unwrap();
+        for addresses in [parsed.to(), parsed.cc(), parsed.bcc()] {
+            let addresses = addresses.unwrap();
+            let mailboxes: Vec<_> = addresses.mailboxes().collect();
+            assert_eq!(mailboxes.len(), 2);
+            assert_eq!(mailboxes[0].name(), Some("Tëam, QA"));
+            assert_eq!(mailboxes[0].address(), Some("team@example.com"));
+            assert_eq!(mailboxes[1].address(), Some("other@example.com"));
+        }
+    }
+    imap.logout().await.unwrap();
+}
+
+#[tokio::test]
+async fn draft_sync_retires_legacy_search_cache() {
+    use lagom_core::store::{FolderRole, Message, MessageSummary};
+    let mut f = Fixture::new().await;
+    let mut imap = f.connect().await;
+    let folder = imap.list_folders(&f.store).await.unwrap().remove(0);
+    f.store.reset_uidvalidity(folder.id, 7).unwrap();
+    let other = Account::new("other@example.com".into(), f.account.imap.clone(), f.account.smtp.clone()).unwrap();
+    f.store.save_account(&other).unwrap();
+    let inbox = f.store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    for (account, folder) in [(&f.account.id, folder.id), (&other.id, inbox)] {
+        f.store.save_message(&Message {
+            summary: MessageSummary { account: account.clone(), folder, uid: 1, ..Default::default() },
+            body_text: "legacysearchtext".into(), ..Default::default()
+        }).unwrap();
+    }
+    assert_eq!(f.store.search(&f.account.id, "legacysearchtext", 0, 20, 0).unwrap().len(), 1);
+    f.mailbox.lock().unwrap().insert(b"Subject: Foreign\r\n\r\nlegacysearchtext".to_vec());
+    f.read(&mut imap).await;
+    let draft = f.store.drafts().unwrap().remove(0);
+    f.store.delete_draft(&draft.id).unwrap();
+    imap.sync_draft(&mut f.store, &draft.id, 0).await.unwrap();
+    f.read(&mut imap).await;
+    assert!(f.mailbox.lock().unwrap().visible().is_empty());
+    assert!(f.store.known_uids(folder.id).unwrap().is_empty());
+    assert!(f.store.search(&f.account.id, "legacysearchtext", 0, 20, 0).unwrap().is_empty());
+    let results = f.store.search(&other.id, "legacysearchtext", 0, 20, 0).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].folder, inbox);
+    let db = rusqlite::Connection::open(f.store.path()).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'legacysearchtext'", [], |r| r.get::<_, usize>(0)).unwrap(), 1);
+    imap.logout().await.unwrap();
+}
+
+#[tokio::test]
 async fn save_update_throttle_close_send_undo_and_discard() {
     let mut f = Fixture::new().await;
     let mut imap = f.connect().await;

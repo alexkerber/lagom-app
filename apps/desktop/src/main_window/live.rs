@@ -4553,6 +4553,63 @@ mod tests {
     }
 
     #[gpui::test]
+    fn opening_foreign_draft_yields_before_reading_attachments_or_waiting_for_a_writer(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let store = view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.clone());
+        let account = view.read_with(cx, |v, _| v.live.as_ref().unwrap().accounts[0].id.clone());
+        let id = "<large-foreign@example.com>";
+        store.save_draft(&lagom_core::outbox::Draft {
+            id: id.into(), account, text: "Foreign text".into(), attachments: vec![lagom_core::smtp::OutgoingAttachment {
+                filename: "large.bin".into(), mime_type: "application/octet-stream".into(), data: vec![255; 5 * 1024 * 1024],
+            }], ..Default::default()
+        }).unwrap();
+        let writer = rusqlite::Connection::open(store.path()).unwrap();
+        writer.execute("UPDATE draft_sync SET owned=0 WHERE id=?1", [id]).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        view.update_in(cx, |v, window, cx| {
+            v.open_draft(id, window, cx);
+            assert!(v.compose.is_none(), "opening must yield before loading the draft");
+            assert!(v.toast.is_none(), "opening must not attempt a write on the UI thread");
+        });
+        writer.execute_batch("ROLLBACK").unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| {
+            let compose = v.compose.as_ref().expect("draft should open after acquisition").read(cx);
+            assert_eq!(compose.body_text(cx), "Foreign text");
+            assert_eq!(compose.outgoing(cx).attachments[0].data, vec![255; 5 * 1024 * 1024]);
+        });
+        assert!(writer.query_row("SELECT owned FROM draft_sync WHERE id=?1", [id], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[gpui::test]
+    fn pending_draft_open_cannot_replace_a_newer_action(cx: &mut TestAppContext) {
+        for action in ["draft", "page", "compose"] {
+            let (view, cx, _rx) = window(cx);
+            view.update_in(cx, |v, window, cx| {
+                let live = v.live.as_ref().unwrap();
+                for id in ["<first@example.com>", "<second@example.com>"] {
+                    live.store.save_draft(&lagom_core::outbox::Draft {
+                        id: id.into(), account: live.accounts[0].id.clone(), ..Default::default()
+                    }).unwrap();
+                }
+                v.open_draft("<first@example.com>", window, cx);
+                match action {
+                    "draft" => v.open_draft("<second@example.com>", window, cx),
+                    "page" => v.set_page(Page::Home, cx),
+                    _ => v.open_compose(false, window, cx),
+                }
+            });
+            let newer = view.read_with(cx, |v, _| v.compose.as_ref().map(|c| c.entity_id()));
+            cx.run_until_parked();
+            view.read_with(cx, |v, cx| match action {
+                "draft" => assert_eq!(v.compose.as_ref().unwrap().read(cx).draft_id(), "<second@example.com>"),
+                "page" => { assert!(matches!(v.page, Page::Home)); assert!(v.compose.is_none()); }
+                _ => assert_eq!(v.compose.as_ref().map(|c| c.entity_id()), newer),
+            });
+        }
+    }
+
+    #[gpui::test]
     fn drafts_view_opens_foreign_bcc_and_reuses_unsaved_compose(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let id = "<foreign@example.com>";
@@ -4571,8 +4628,9 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.draft_rows.len()), 1);
+        view.update_in(cx, |v, window, cx| v.open_draft(id, window, cx));
+        cx.run_until_parked();
         view.update_in(cx, |v, window, cx| {
-            v.open_draft(id, window, cx);
             let compose = v.compose.as_ref().unwrap().clone();
             assert_eq!(compose.read(cx).outgoing(cx).bcc, ["private@example.com"]);
             assert_eq!(compose.read(cx).body_text(cx), "Foreign text");

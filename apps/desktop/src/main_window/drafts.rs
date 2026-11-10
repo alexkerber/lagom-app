@@ -30,23 +30,38 @@ impl MainWindow {
 
     pub(super) fn open_draft(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
-        let compose = if let Some(index) = self.drafts.iter().position(|c| c.read(cx).draft_id() == id) {
-            self.drafts.remove(index)
-        } else {
-            let Some(live) = &self.live else { return };
-            let draft = match live.store.take_draft(id) {
-                Ok(draft) => draft,
-                Err(error) => { self.notify(format!("Could not open draft: {error}"), cx); return; }
-            };
-            let Some(account) = live.accounts.iter().find(|a| a.id == draft.account).cloned() else { return };
-            let store = live.store.clone();
-            let compose = cx.new(|cx| Compose::restore(draft, account, store, window, cx));
-            self.watch_compose(&compose, window, cx);
-            compose
-        };
-        compose.update(cx, |compose, cx| compose.reopen(window, cx));
-        self.compose = Some(compose);
-        cx.notify();
+        self.draft_open = None;
+        if let Some(index) = self.drafts.iter().position(|c| c.read(cx).draft_id() == id) {
+            let compose = self.drafts.remove(index);
+            compose.update(cx, |compose, cx| compose.reopen(window, cx));
+            self.compose = Some(compose);
+            cx.notify();
+            return;
+        }
+        let Some(live) = &self.live else { return };
+        let store = live.store.clone();
+        let path = store.path().to_owned();
+        let id = id.to_owned();
+        let read = cx.background_executor().spawn(async move { Store::open(path)?.take_draft(&id) });
+        self.draft_open = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = read.await;
+            this.update_in(cx, |this, window, cx| {
+                this.draft_open = None;
+                if this.palette.is_some() || this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+                let Some(live) = &this.live else { return };
+                if !Rc::ptr_eq(&live.store, &store) { return; }
+                let draft = match result {
+                    Ok(draft) => draft,
+                    Err(error) => { this.notify(format!("Could not open draft: {error}"), cx); return; }
+                };
+                let Some(account) = live.accounts.iter().find(|a| a.id == draft.account).cloned() else { return };
+                let compose = cx.new(|cx| Compose::restore(draft, account, store, window, cx));
+                this.watch_compose(&compose, window, cx);
+                compose.update(cx, |compose, cx| compose.reopen(window, cx));
+                this.compose = Some(compose);
+                cx.notify();
+            }).ok();
+        }));
     }
 
     pub(super) fn drafts_view(&self, cx: &mut Context<Self>) -> Div {

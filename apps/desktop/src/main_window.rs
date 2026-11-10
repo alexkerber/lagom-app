@@ -287,6 +287,7 @@ pub struct MainWindow {
     drafts: Vec<gpui::Entity<Compose>>,
     draft_rows: Vec<lagom_core::outbox::DraftSummary>,
     draft_read: Option<Task<()>>,
+    draft_open: Option<Task<()>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
@@ -407,6 +408,7 @@ impl MainWindow {
             drafts: Vec::new(),
             draft_rows: Vec::new(),
             draft_read: None,
+            draft_open: None,
             sending: Vec::new(),
             live,
             demo,
@@ -669,6 +671,7 @@ impl MainWindow {
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+        self.draft_open = None;
         self.release(false, cx);
         self.toast = None;
         let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
