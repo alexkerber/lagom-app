@@ -40,7 +40,7 @@ fn notice(messages: &[MessageSummary]) -> Option<Notice> {
     Some(Notice {
         title: if messages.len() == 1 {
             if first.from_name.is_empty() { first.from_address.clone() } else { first.from_name.clone() }
-        } else { "Lagom".into() },
+        } else { "lagom".into() },
         body: if messages.len() == 1 { first.subject.clone() } else { format!("{} new messages", messages.len()) },
         target: Target { account: first.account.clone(), message: (messages.len() == 1).then_some(first.id) },
     })
@@ -148,7 +148,7 @@ mod platform {
             if std::thread::Builder::new().name("lagom-notification".into()).spawn(move || {
                 // Escape server-supported body markup: mail subjects are plain text.
                 let body = notice.body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                match notify_rust::Notification::new().appname("Lagom").summary(&notice.title)
+                match notify_rust::Notification::new().appname("lagom").summary(&notice.title)
                     .body(&body).action("default", "Open").timeout(10_000).show()
                 {
                     Ok(handle) => handle.wait_for_action(|action| {
@@ -230,6 +230,7 @@ mod tests {
         assert_eq!(first.body, "Subject");
         assert_eq!(first.target.message, Some(11));
         let other = notices.iter().find(|n| n.target.account == "other").unwrap();
+        assert_eq!(other.title, "lagom");
         assert_eq!(other.body, "2 new messages");
         assert_eq!(other.target.message, None);
     }

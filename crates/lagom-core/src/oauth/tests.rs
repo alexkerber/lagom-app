@@ -242,7 +242,7 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
                 .unwrap();
             let mut response = String::new();
             callback.read_to_string(&mut response).await.unwrap();
-            assert!(response.contains("You can close this tab and return to Lagom."));
+            assert!(response.contains("You can close this tab and return to lagom."));
             for n in 0..3 {
                 let (socket, _) = listener.accept().await.unwrap();
                 let (mut socket, _, form) = request(socket).await;

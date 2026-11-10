@@ -59,7 +59,7 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > 17 {
-            return Err(Error::Invalid("store was created by a newer Lagom version"));
+            return Err(Error::Invalid("store was created by a newer lagom version"));
         }
         if version == 0 {
             db.execute_batch(include_str!("schema_v1.sql"))?;

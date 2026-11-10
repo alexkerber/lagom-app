@@ -425,7 +425,10 @@ impl Compose {
     }
 
     fn count(&mut self, cx: &mut Context<Self>) {
-        self.words = self.body.read(cx).text().split_whitespace().count();
+        self.words = self.body.read(cx).text().lines()
+            .take_while(|line| *line != "-- ")
+            .filter(|line| !line.trim_start().starts_with('>'))
+            .map(|line| line.split_whitespace().count()).sum();
         cx.notify();
     }
 
@@ -851,6 +854,22 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn word_counter_excludes_quotes_and_signature(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        for (text, count) in [
+            ("Thanks for this\n\n> On yesterday, sender wrote:\n> many quoted words\n>\n> more", 3),
+            ("Thanks again\n\n-- \nTeam signature\n\n> Original message", 2),
+            ("> Original\nMy inline reply\n  > Nested quote\nMore text", 5),
+            ("> -- \n> Quoted signature\nStill my reply\r\n-- \r\nMy signature", 3),
+            ("A -- separator is prose", 5),
+            ("", 0),
+        ] {
+            view.update(cx, |v, cx| v.initialize("", text, None, cx));
+            assert_eq!(view.read_with(cx, |v, _| v.words), count, "{text:?}");
+        }
     }
 
     #[gpui::test]

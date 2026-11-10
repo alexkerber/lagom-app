@@ -53,7 +53,7 @@ impl Service {
     pub fn authorize(&self) {
         let Some(center) = &self.center else {
             let _ = self.events.send(Event::Authorized(false));
-            let _ = self.events.send(Event::Failed("Notifications require the Lagom app bundle"));
+            let _ = self.events.send(Event::Failed("Notifications require the lagom app bundle"));
             return;
         };
         let events = self.events.clone();

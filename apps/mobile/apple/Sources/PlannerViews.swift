@@ -321,7 +321,7 @@ struct CalendarView: View {
                                            description: Text("No events in the next two weeks."))
                 } else {
                     ContentUnavailableView("Calendar needs a Google account", systemImage: "calendar",
-                                           description: Text("Lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar."))
+                                           description: Text("lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar."))
                 }
             }
         }

@@ -3732,6 +3732,7 @@ dependencies = [
  "async-imap",
  "base64 0.22.1",
  "dirs 6.0.0",
+ "dom_query",
  "futures-util",
  "hickory-resolver",
  "keyring",
