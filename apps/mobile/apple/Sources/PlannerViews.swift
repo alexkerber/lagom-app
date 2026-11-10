@@ -1,5 +1,11 @@
 import SwiftUI
 
+/// Page padding: the desktop's 24 on iPad, 16 at phone width.
+private struct PagePadding: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var width
+    func body(content: Content) -> some View { content.padding(.horizontal, width == .regular ? 24 : 16) }
+}
+
 /// The desktop's calm Today page: schedule, what is due, and a short look at unread mail.
 struct TodayView: View {
     let planner: PlannerModel
@@ -9,103 +15,143 @@ struct TodayView: View {
     @State private var newTask = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
+        VStack(alignment: .leading, spacing: 0) {
+            PageTitle(title: "Today") {
                 Text(Date.now, format: .dateTime.weekday(.wide).day().month(.wide))
-                    .font(.subheadline).foregroundStyle(Theme.secondary).padding(.bottom, -16)
-                if width == .regular {
-                    HStack(alignment: .top, spacing: 40) { schedule; tasks }
-                } else {
-                    schedule
-                    tasks
-                }
-                mail
+                    .lagomFont(.small).foregroundStyle(Theme.secondary)
             }
-            .padding(.horizontal, 20).padding(.vertical, 8)
-            .frame(maxWidth: 980, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .modifier(PagePadding()).padding(.top, 8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 32) {
+                    if width == .regular {
+                        HStack(alignment: .top, spacing: 32) { schedule; tasks }
+                    } else {
+                        schedule
+                        tasks
+                    }
+                    mail
+                }
+                .modifier(PagePadding()).padding(.vertical, 16)
+            }
+            .refreshable { await planner.reload() }
+            if planner.unreadCount > 0 {
+                Button { openMail(nil) } label: {
+                    HStack(spacing: 8) {
+                        Icon("mail")
+                        Text("\(planner.unreadCount) unread in Inbox").lagomFont(.base)
+                        Icon("chevron-right")
+                    }
+                    .foregroundStyle(Theme.secondary).frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .modifier(PagePadding()).padding(.bottom, 4)
+            }
         }
         .background(Theme.background)
-        .navigationTitle("Today")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { newTask = true } label: { Label("New task", systemImage: "plus") }.disabled(planner.lists.isEmpty)
-            }
-        }
-        .refreshable { await planner.reload() }
         .sheet(isPresented: $newTask) { NewTaskView(planner: planner, list: planner.defaultList, due: Date()) }
     }
 
     private var schedule: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            heading("Schedule")
-            let events = planner.today?.events ?? []
+        let events = planner.today?.events ?? []
+        let now = Date()
+        // The now line sits before the first timed event still to start, as on desktop.
+        let nowIndex = events.firstIndex { !$0.allDay && Date(timeIntervalSince1970: TimeInterval($0.startUnix)) > now } ?? events.count
+        return VStack(alignment: .leading, spacing: 4) {
+            Heading(title: "Schedule").padding(.bottom, 8)
             if events.isEmpty {
                 quiet(planner.calendarConnected ? "Nothing scheduled today." : "Your calendar shows here once a Google account is connected. Google sign-in is coming to iPhone and iPad.",
-                      symbol: "calendar")
-            }
-            ForEach(Array(events.enumerated()), id: \.offset) { _, event in
-                EventRow(event: event, accent: accountAccent(model.accounts, event.account))
+                      icon: "calendar")
+            } else {
+                ForEach(Array(events.enumerated()), id: \.offset) { index, event in
+                    if index == nowIndex { NowLine(now: now) }
+                    EventRow(event: event, accent: accountAccent(model.accounts, event.account), now: now)
+                }
+                if nowIndex == events.count { NowLine(now: now) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var tasks: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            heading("To do").padding(.bottom, 6)
+        VStack(alignment: .leading, spacing: 0) {
+            Heading(title: "To do").padding(.bottom, 8)
             let tasks = planner.today?.tasks ?? []
-            if tasks.isEmpty { quiet("Nothing due today.", symbol: "checkmark.circle").padding(.bottom, 6) }
+            if tasks.isEmpty { quiet("Nothing due today.", icon: "todo").padding(.bottom, 6) }
             ForEach(tasks, id: \.id) { todo in
                 TodoRow(todo: todo) { Task { await planner.toggle(todo) } }
             }
-            Button { newTask = true } label: {
-                Label("New task", systemImage: "plus").font(.body).foregroundStyle(Theme.secondary)
-            }
-            .buttonStyle(.plain).padding(.vertical, 8).disabled(planner.lists.isEmpty)
+            AddRow(title: "New task") { newTask = true }.disabled(planner.lists.isEmpty)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var mail: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            heading("Mail")
+        VStack(alignment: .leading, spacing: 4) {
+            Heading(title: "Mail").padding(.bottom, 8)
             let unread = planner.today?.unread ?? []
             if unread.isEmpty {
-                quiet(model.accounts.isEmpty ? "Add an account in Mail to see new mail here." : "No unread mail in Inbox.", symbol: "tray")
+                quiet(model.accounts.isEmpty ? "Add an account in Mail to see new mail here." : "No unread mail in Inbox.", icon: "inbox")
             }
             ForEach(unread, id: \.id) { row in
                 Button { openMail(row.id) } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(RowPresentation(row).sender).font(.body.weight(.semibold)).lineLimit(1)
-                        Text(RowPresentation(row).subject).font(.subheadline).foregroundStyle(Theme.secondary).lineLimit(1)
+                    HStack(spacing: 10) {
+                        Circle().fill(Theme.accent).frame(width: 7, height: 7)
+                        Text(RowPresentation(row).sender).lagomFont(.base, .semibold).lineLimit(1)
+                        Text(RowPresentation(row).subject).lagomFont(.base).foregroundStyle(Theme.secondary).lineLimit(1)
+                        Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    .frame(minHeight: 40).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Opens the message")
             }
-            if planner.unreadCount > 0 {
-                Button { openMail(nil) } label: {
-                    Label { Text("\(planner.unreadCount) unread in Inbox") + Text(" ›").foregroundStyle(Theme.secondary) } icon: { Image(systemName: "envelope") }
-                        .font(.subheadline)
-                }
-                .buttonStyle(.plain).foregroundStyle(Theme.secondary).padding(.top, 2)
-            }
         }
     }
-
 }
 
-private func heading(_ text: String) -> some View {
-    Text(text).font(.headline).foregroundStyle(Theme.ink).accessibilityAddTraits(.isHeader)
+private func quiet(_ text: String, icon: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Icon(icon).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
+        Text(text).lagomFont(.snippet)
+    }
+    .foregroundStyle(Theme.secondary)
 }
 
-private func quiet(_ text: String, symbol: String) -> some View {
-    Label(text, systemImage: symbol).font(.subheadline).foregroundStyle(Theme.secondary)
+/// "+ New task", "+ Add task": a quiet line that adds.
+private struct AddRow: View {
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Icon("plus").frame(width: 22)
+                Text(title).lagomFont(.base)
+            }
+            .foregroundStyle(Theme.secondary).padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }
 
-/// One schedule line: time, the account's bar, the title, and a meeting link when there is one.
+/// The current time in gold across the schedule.
+private struct NowLine: View {
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(now, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit().frame(width: 52, alignment: .leading)
+            Capsule().frame(height: 2)
+        }
+        .foregroundStyle(Theme.now)
+        .frame(minHeight: 28)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Now, \(now.formatted(.dateTime.hour().minute()))")
+    }
+}
+
+/// One schedule line, desktop `agenda_view`: time, the account's bar, the title, and a meeting link.
 struct EventRow: View {
     let event: AgendaItem
     var accent: Color?
@@ -115,65 +161,67 @@ struct EventRow: View {
         let start = Date(timeIntervalSince1970: TimeInterval(event.startUnix))
         let end = Date(timeIntervalSince1970: TimeInterval(event.endUnix))
         let past = !event.allDay && end < now
-        HStack(alignment: .center, spacing: 12) {
-            Group {
-                if event.allDay {
-                    Image(systemName: "sun.max").foregroundStyle(Theme.later).accessibilityLabel("All day")
-                } else {
-                    Text(start, format: .dateTime.hour().minute())
-                }
+        HStack(alignment: .center, spacing: 10) {
+            if event.allDay {
+                Icon("sun").foregroundStyle(Theme.secondary).frame(width: 52, alignment: .trailing)
+                Circle().fill(accent ?? Theme.accent).frame(width: 5, height: 5)
+            } else {
+                Text(start, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit()
+                    .foregroundStyle(Theme.secondary).frame(width: 52, alignment: .leading)
+                RoundedRectangle(cornerRadius: 1).fill(accent ?? Theme.accent).frame(width: 2, height: 28)
             }
-            .font(.subheadline.monospacedDigit()).foregroundStyle(Theme.secondary)
-            .frame(minWidth: 52, alignment: .leading)
-            RoundedRectangle(cornerRadius: 1.5).fill(accent ?? Theme.accent).frame(width: 3).frame(minHeight: 22)
-                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
-                Text(event.title.isEmpty ? "(No title)" : event.title).font(.body).foregroundStyle(past ? Theme.secondary : Theme.ink)
+                Text(event.title.isEmpty ? "(No title)" : event.title).lagomFont(.base).lineLimit(1)
+                    .foregroundStyle(past ? Theme.secondary : Theme.ink)
                 if let location = event.location, !location.isEmpty {
-                    Text(location).font(.footnote).foregroundStyle(Theme.secondary).lineLimit(1)
+                    Text(location).lagomFont(.small).foregroundStyle(Theme.secondary).lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
             if let link = event.joinUrl.flatMap(URL.init(string:)), ["https", "http"].contains(link.scheme?.lowercased() ?? "") {
-                Link(destination: link) { Image(systemName: "video").font(.body) }
+                Link(destination: link) { Icon("video").foregroundStyle(Theme.secondary).frame(minWidth: 44, minHeight: 44) }
                     .accessibilityLabel("Join meeting")
             }
         }
-        .padding(.vertical, 2)
+        .frame(minHeight: 44)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(event.allDay ? "All day, \(event.title)" : event.title)
         .accessibilityValue(event.allDay ? "" : (start..<max(start, end)).formatted(.interval.hour().minute()))
     }
 }
 
-/// A task: a completion circle, its title, and the due chip in the danger colour once overdue.
+/// A task, desktop `task_row`: a completion circle, its title, a mail mark, and the due chip.
 struct TodoRow: View {
     let todo: Todo
     let toggle: () -> Void
     var words = DateWords()
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Button(action: toggle) {
-                Image(systemName: todo.done ? "checkmark.circle.fill" : "circle")
-                    .font(.title3).foregroundStyle(todo.done ? Theme.done : Theme.secondary)
-                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                Circle().strokeBorder(Theme.secondary, lineWidth: 1)
+                    .frame(width: 21, height: 21)
+                    .overlay { if todo.done { Icon("done", size: 16).foregroundStyle(Theme.secondary) } }
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
             }
-            .buttonStyle(.plain).padding(.horizontal, -10)
+            .buttonStyle(.plain).padding(.horizontal, -11)
             .accessibilityLabel(todo.done ? "Mark as not done" : "Mark as done")
-            Text(todo.title).font(.body)
+            Text(todo.title).lagomFont(.base)
                 .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if todo.fromMail {
-                Image(systemName: "envelope").font(.footnote).foregroundStyle(Theme.secondary).accessibilityLabel("From mail")
+                Icon("mail").foregroundStyle(Theme.secondary).accessibilityHidden(false).accessibilityLabel("From mail")
             }
             if !todo.done, let due = todo.due.flatMap(words.due) {
-                Text(due.label).font(.footnote)
+                Text(due.label).lagomFont(.small)
                     .foregroundStyle(due.overdue ? Theme.danger : Theme.secondary)
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background(due.overdue ? Theme.danger.opacity(0.1) : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.key))
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(due.overdue ? Theme.danger.opacity(0.12) : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.key))
                     .accessibilityLabel(due.overdue ? "Overdue, due \(due.label)" : "Due \(due.label)")
             }
         }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 46)
         .accessibilityElement(children: .contain)
     }
 }
@@ -187,46 +235,57 @@ struct TodoView: View {
     @State private var showDone: Set<Int64> = []
 
     var body: some View {
-        List {
-            ForEach(planner.lists, id: \.id) { list in
-                let all = planner.todos[list.id] ?? []
-                let done = all.filter(\.done)
-                Section {
-                    ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
-                    Button { adding = list.id } label: {
-                        Label("Add task", systemImage: "plus").foregroundStyle(Theme.secondary)
-                    }
-                    if !done.isEmpty {
-                        DisclosureGroup("Completed (\(done.count))", isExpanded: Binding(
-                            get: { showDone.contains(list.id) },
-                            set: { if $0 { showDone.insert(list.id) } else { showDone.remove(list.id) } })) {
-                            ForEach(done, id: \.id) { row($0) }
-                        }
-                        .foregroundStyle(Theme.secondary)
-                    }
-                } header: {
-                    Text(list.name).font(.headline).foregroundStyle(Theme.ink).textCase(nil)
-                }
-                .listRowBackground(Theme.background)
-            }
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden).background(Theme.background)
-        .overlay {
-            if planner.lists.isEmpty {
-                ContentUnavailableView("No lists", systemImage: "checkmark.square", description: Text("Add a list to start."))
-            }
-        }
-        .navigationTitle("Todo")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+        VStack(alignment: .leading, spacing: 0) {
+            PageTitle(title: "Todo") {
                 Menu {
-                    Button("New task", systemImage: "plus") { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
-                    Button("New list", systemImage: "list.bullet") { listName = ""; newList = true }
-                } label: { Label("Add", systemImage: "plus") }
+                    Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
+                    Button("New list") { listName = ""; newList = true }
+                } label: { Icon("plus") }
+                    .menuStyle(.button).buttonStyle(IconButtonStyle())
+                    .accessibilityLabel("Add")
+                    .padding(.trailing, -6)
             }
+            .modifier(PagePadding()).padding(.top, 8)
+            List {
+                ForEach(planner.lists, id: \.id) { list in
+                    let all = planner.todos[list.id] ?? []
+                    let done = all.filter(\.done)
+                    Group {
+                        Heading(title: list.name).padding(.top, 16).padding(.bottom, 4)
+                        ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
+                        AddRow(title: "Add task") { adding = list.id }
+                        if !done.isEmpty {
+                            let open = showDone.contains(list.id)
+                            Button {
+                                if open { showDone.remove(list.id) } else { showDone.insert(list.id) }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Icon(open ? "chevron" : "chevron-right")
+                                    Text("Completed (\(done.count))").lagomFont(.base)
+                                }
+                                .foregroundStyle(Theme.secondary)
+                                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityValue(open ? "Expanded" : "Collapsed")
+                            if open { ForEach(done, id: \.id) { row($0) } }
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 0)
+            .scrollContentBackground(.hidden)
+            .modifier(PagePadding())
+            .overlay {
+                if planner.lists.isEmpty { EmptyState(icon: "todo", title: "No lists", detail: "Add a list to start.") }
+            }
+            .refreshable { await planner.reloadTodos() }
         }
-        .refreshable { await planner.reloadTodos() }
+        .background(Theme.background)
         .sheet(item: Binding(get: { adding.map(ListID.init) }, set: { adding = $0?.id })) { list in
             NewTaskView(planner: planner, list: list.id, due: nil)
         }
@@ -239,11 +298,11 @@ struct TodoView: View {
 
     private func row(_ todo: Todo) -> some View {
         TodoRow(todo: todo) { Task { await planner.toggle(todo) } }
-            .listRowBackground(Theme.background)
             .swipeActions {
-                Button(role: .destructive) { Task { await planner.delete(todo) } } label: { Label("Delete", systemImage: "trash") }
+                Button(role: .destructive) { Task { await planner.delete(todo) } } label: { Label("Delete", image: "trash") }
                     .tint(Theme.danger)
             }
+            .accessibilityAction(named: "Delete") { Task { await planner.delete(todo) } }
     }
 }
 
@@ -259,28 +318,37 @@ struct NewTaskView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Task", text: $title).focused($focused).submitLabel(.done).onSubmit(save)
+        SheetScaffold(title: "New task", cancel: { dismiss() }) {
+            VStack(spacing: 0) {
+                FieldRow(label: "Task") {
+                    TextField("", text: $title).focused($focused).submitLabel(.done).onSubmit(save).accessibilityLabel("Task")
+                }
                 if planner.lists.count > 1 {
-                    Picker("List", selection: $list) {
-                        ForEach(planner.lists, id: \.id) { Text($0.name).tag(Optional($0.id)) }
+                    FieldRow(label: "List") {
+                        Picker("List", selection: $list) {
+                            ForEach(planner.lists, id: \.id) { Text($0.name).tag(Optional($0.id)) }
+                        }
+                        .labelsHidden().tint(Theme.ink)
                     }
                 }
-                Toggle("Due date", isOn: Binding(get: { due != nil }, set: { due = $0 ? (due ?? Date()) : nil }))
-                if let date = due {
-                    DatePicker("Due", selection: Binding(get: { date }, set: { due = $0 }), displayedComponents: .date)
+                FieldRow(label: "Due") {
+                    HStack {
+                        if let date = due {
+                            DatePicker("Due", selection: Binding(get: { date }, set: { due = $0 }), displayedComponents: .date).labelsHidden()
+                        }
+                        Spacer()
+                        Toggle("Due date", isOn: Binding(get: { due != nil }, set: { due = $0 ? (due ?? Date()) : nil })).labelsHidden()
+                    }
                 }
+                Spacer(minLength: 0)
             }
-            .navigationTitle("New task").navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Add", action: save).disabled(saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-            .onAppear { focused = true }
+            .padding(.horizontal, 16)
+        } footer: {
+            HouseButton(title: "Add task", icon: "plus", primary: true, action: save)
+                .disabled(saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty)
+            Spacer(minLength: 0)
         }
+        .onAppear { focused = true }
         .presentationDetents([.medium, .large])
     }
 
@@ -294,39 +362,62 @@ struct NewTaskView: View {
     }
 }
 
-/// Read-only agenda of cached events; core syncs Google Calendar on desktop.
+/// Cached events by day under the desktop's month title; each day headed as the desktop week's columns.
 struct CalendarView: View {
     let planner: PlannerModel
     let model: MailModel
     private let words = DateWords()
 
     var body: some View {
-        List {
-            ForEach(grouped(planner.agenda, by: \.day)) { day in
-                Section {
-                    ForEach(Array(day.items.enumerated()), id: \.offset) { _, event in
-                        EventRow(event: event, accent: accountAccent(model.accounts, event.account)).listRowBackground(Theme.background)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text(Date.now, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
+                Text(Date.now, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
+            }
+            .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
+            .frame(minHeight: 44).modifier(PagePadding()).padding(.top, 8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(grouped(planner.agenda, by: \.day)) { day in
+                        DayHeader(day: words.day(day.title) ?? .now).padding(.top, 14).padding(.bottom, 2)
+                        ForEach(Array(day.items.enumerated()), id: \.offset) { _, event in
+                            EventRow(event: event, accent: accountAccent(model.accounts, event.account))
+                        }
                     }
-                } header: {
-                    Text(words.dayTitle(day.title)).font(.headline).foregroundStyle(Theme.ink).textCase(nil)
+                }
+                .modifier(PagePadding()).padding(.bottom, 16)
+            }
+            .refreshable { await planner.reloadAgenda() }
+            .overlay {
+                if planner.agenda.isEmpty {
+                    if planner.calendarConnected {
+                        EmptyState(icon: "calendar", title: "Nothing scheduled", detail: "No events in the next two weeks.")
+                    } else {
+                        EmptyState(icon: "calendar", title: "Calendar needs a Google account",
+                                   detail: "lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar.")
+                    }
                 }
             }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden).background(Theme.background)
-        .overlay {
-            if planner.agenda.isEmpty {
-                if planner.calendarConnected {
-                    ContentUnavailableView("Nothing scheduled", systemImage: "calendar",
-                                           description: Text("No events in the next two weeks."))
-                } else {
-                    ContentUnavailableView("Calendar needs a Google account", systemImage: "calendar",
-                                           description: Text("lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar."))
-                }
-            }
-        }
-        .navigationTitle("Calendar")
-        .refreshable { await planner.reloadAgenda() }
+        .background(Theme.background)
     }
+}
 
+/// "Mon 9" as the desktop week's column heads, today's number in a filled accent circle.
+private struct DayHeader: View {
+    let day: Date
+
+    var body: some View {
+        let today = Calendar.current.isDateInToday(day)
+        HStack(spacing: 8) {
+            Text(day, format: .dateTime.weekday(.abbreviated)).lagomFont(.base).foregroundStyle(Theme.secondary)
+            Text(day, format: .dateTime.day()).lagomFont(.subject)
+                .foregroundStyle(today ? Theme.accentInk : Theme.ink)
+                .frame(minWidth: 38, minHeight: 38)
+                .background(today ? Theme.accent : .clear, in: Circle())
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(DateWords().dayTitle(DateWords().coreDay(day)))
+        .accessibilityAddTraits(.isHeader)
+    }
 }
