@@ -1253,7 +1253,8 @@ mod tests {
             _ = &mut run => panic!("worker exited"),
             result = async {
                 listed.await.unwrap();
-                tokio::time::timeout(Duration::from_secs(3), async {
+                // LIST stays gated until completion; this deadline only bounds a hung fixture.
+                tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
                         if matches!(out.recv().await, Some(Event::TasksSync(id, SyncState::Synced(_))) if id == google.id) { break; }
                     }

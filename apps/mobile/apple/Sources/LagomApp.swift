@@ -23,7 +23,6 @@ struct MailView: View {
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
     @State private var addAccount = false
-    @State private var compose: ComposeDraft?
     @State private var removing: MailAccount?
     @State private var retrying: SendFailure?
 
@@ -48,7 +47,7 @@ struct MailView: View {
         }
         .background(Theme.background)
         .sheet(isPresented: $addAccount) { AddAccountView(model: model) }
-        .sheet(item: $compose) { draft in ComposeView(model: model, draft: draft) }
+        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
         .alert("Mail", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK") { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -162,8 +161,8 @@ struct MailView: View {
                 if model.syncing { ProgressView().accessibilityLabel("Syncing") }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button { compose = ComposeDraft(account: model.accountID ?? model.accounts.first?.id ?? "") } label: { Label("Compose", systemImage: "square.and.pencil") }
-                    .disabled(model.accounts.isEmpty || model.core == nil)
+                Button { model.composeDraft = ComposeDraft(account: model.accountID ?? model.accounts.first?.id ?? "") } label: { Label("Compose", systemImage: "square.and.pencil") }
+                    .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
             }
         }
         .scrollContentBackground(.hidden).background(Theme.background)
@@ -174,13 +173,19 @@ struct MailView: View {
             MessageView(message: message)
                 .toolbar {
                     ToolbarItemGroup(placement: .bottomBar) {
-                        Button {
-                            Task {
-                                do {
-                                    if let reply = try await model.core?.replyDraft(id: message.row.id) { compose = ComposeDraft(reply: reply) }
-                                } catch { model.error = error.localizedDescription }
+                        Menu {
+                            Button("Reply", systemImage: "arrowshape.turn.up.left") {
+                                Task { await model.prepareCompose(id: message.row.id, kind: .reply) }
                             }
-                        } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
+                            Button("Reply all", systemImage: "arrowshape.turn.up.left.2") {
+                                Task { await model.prepareCompose(id: message.row.id, kind: .replyAll) }
+                            }
+                            Button("Forward", systemImage: "arrowshape.turn.up.right") {
+                                Task { await model.prepareCompose(id: message.row.id, kind: .forward) }
+                            }
+                        } label: { Label("Reply or forward", systemImage: "arrowshape.turn.up.left") }
+                            .disabled(model.preparingCompose)
+                        if model.preparingCompose { ProgressView().accessibilityLabel("Preparing message") }
                         Button { Task { await model.act(.later, id: message.row.id) } } label: { Label("Later", systemImage: "clock") }
                         Spacer()
                         Button { Task { await model.act(.done, id: message.row.id) } } label: { Label("Done", systemImage: "checkmark") }

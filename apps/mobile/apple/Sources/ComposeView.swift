@@ -1,23 +1,5 @@
 import SwiftUI
 
-struct ComposeDraft: Identifiable {
-    let id = UUID()
-    var account: String
-    var to = ""
-    var subject = ""
-    var body = ""
-    var replyTo: Int64?
-
-    init(account: String) { self.account = account }
-    init(reply: ReplyDraft) {
-        account = reply.account
-        to = reply.to
-        subject = reply.subject
-        body = reply.body
-        replyTo = reply.replyTo
-    }
-}
-
 struct ComposeView: View {
     let model: MailModel
     @State var draft: ComposeDraft
@@ -32,13 +14,21 @@ struct ComposeView: View {
                     ForEach(model.accounts, id: \.id) { Text($0.email).tag($0.id) }
                 }.disabled(draft.replyTo != nil)
                 TextField("To", text: $draft.to).textContentType(.emailAddress).keyboardType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("Cc", text: $draft.cc).textContentType(.emailAddress).keyboardType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("Subject", text: $draft.subject)
                 Section("Message · Markdown supported") {
                     TextEditor(text: $draft.body).frame(minHeight: 220).accessibilityLabel("Message body")
                 }
+                if !draft.attachments.isEmpty {
+                    Section("Attachments") {
+                        ForEach(draft.attachments.indices, id: \.self) { index in
+                            Label(draft.attachments[index].filename, systemImage: "paperclip")
+                        }
+                    }
+                }
                 if let error { Text(error).foregroundStyle(Theme.danger) }
             }
-            .navigationTitle(draft.replyTo == nil ? "New message" : "Reply")
+            .navigationTitle(draft.title)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(sending) }
                 ToolbarItem(placement: .confirmationAction) {
@@ -48,13 +38,13 @@ struct ComposeView: View {
                             sending = true
                             defer { sending = false }
                             do {
-                                _ = try await core.send(accountId: draft.account, to: splitRecipients(value: draft.to), cc: [], subject: draft.subject, bodyMarkdown: draft.body, replyTo: draft.replyTo)
+                                try await draft.enqueue(using: core)
                                 model.notice = "Queued for sending"
                                 dismiss()
                                 await model.sync()
                             } catch { self.error = error.localizedDescription }
                         }
-                    }.disabled(sending || draft.to.isEmpty || draft.account.isEmpty)
+                    }.disabled(sending || (draft.to.isEmpty && draft.cc.isEmpty) || draft.account.isEmpty)
                 }
             }
             .disabled(sending)
