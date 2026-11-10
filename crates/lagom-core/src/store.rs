@@ -141,6 +141,20 @@ impl Store {
         Ok(self.db.query_row("SELECT data FROM attachment_cache WHERE message=?1 AND section=?2", params![message, section], |r| r.get(0)).optional()?)
     }
 
+    pub fn cached_forward_attachments(&self, message: i64) -> Result<Option<Vec<crate::smtp::OutgoingAttachment>>> {
+        // Sync can delete the source on another connection between these reads.
+        let tx = self.db.unchecked_transaction()?;
+        // shortcut: legacy attachment metadata needs a refresh; retry after sync backfills this message.
+        if !self.attachment_metadata_loaded(message)? { return Err(Error::Invalid("sync attachments before forwarding")); }
+        let mut parts = Vec::new();
+        for part in self.attachments(message)? {
+            let Some(data) = self.cached_attachment(message, &part.section)? else { return Ok(None); };
+            parts.push(crate::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
+        }
+        tx.commit()?;
+        Ok(Some(parts))
+    }
+
     pub(crate) fn cache_attachment(&self, message: i64, section: &str, data: &[u8]) -> Result<()> {
         self.db.execute("INSERT INTO attachment_cache VALUES (?1,?2,?3) ON CONFLICT(message,section) DO UPDATE SET data=excluded.data", params![message, section, data])?;
         Ok(())
@@ -710,6 +724,40 @@ impl Store {
 #[cfg(test)]
 mod mail_tests {
     use super::*;
+    #[test]
+    fn cached_forward_attachments_survive_concurrent_deletion() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        for table in ["attachments", "attachment_cache"] {
+            let (temp, store, account, folder) = setup();
+            let part = crate::attachment::Attachment { section: "2".into(), filename: "fixture.txt".into(),
+                mime_type: "text/plain".into(), size: 4, encoding: "7bit".into() };
+            let id = store.save_synced_message(&mail(&account, folder, 1), std::slice::from_ref(&part)).unwrap();
+            store.cache_attachment(id, &part.section, b"file").unwrap();
+            let writer = Store::open(temp.path().join("mail.db")).unwrap();
+            let deleted = Arc::new(AtomicBool::new(false));
+            let observed = deleted.clone();
+            // Delete after the metadata read, before preparing the next SELECT on the local connection.
+            store.db.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(ctx.action, AuthAction::Read { table_name, .. } if table_name == table)
+                    && !observed.swap(true, Ordering::SeqCst) {
+                    writer.delete_message(id).unwrap();
+                    assert!(writer.attachments(id).unwrap().is_empty());
+                    assert!(writer.cached_attachment(id, "2").unwrap().is_none());
+                }
+                Authorization::Allow
+            }));
+            let parts = store.cached_forward_attachments(id).unwrap().expect("cached bytes must survive deletion");
+            assert!(deleted.load(Ordering::SeqCst));
+            assert_eq!(parts.len(), 1, "deletion before reading {table}");
+            assert_eq!(parts[0].filename, part.filename);
+            assert_eq!(parts[0].mime_type, part.mime_type);
+            assert_eq!(parts[0].data, b"file");
+            assert!(store.message(id).is_err());
+            assert!(store.cached_forward_attachments(id).is_err());
+        }
+    }
+
     fn setup() -> (tempfile::TempDir, Store, Account, i64) {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("mail.db")).unwrap();
