@@ -3981,14 +3981,45 @@ mod dispatch {
 
     #[gpui::test]
     fn close_window_keeps_main_alive_and_reopen_reuses_it(cx: &mut TestAppContext) {
+        cx.on_reopen(|cx| crate::reopen_main_window(true, cx));
         let (view, cx) = open(cx);
         #[cfg(target_os = "macos")]
         cx.cx.update(crate::menus::init);
         cx.update(|window, _| window.activate_window());
         cx.simulate_keystrokes("secondary-w");
+        assert!(!cx.cx.quit_requested());
         assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
-        let reopened = cx.cx.update(|cx| crate::open_main_window(true, cx).unwrap());
+        cx.cx.simulate_reopen(false);
+        let reopened = cx.cx.update(|cx| cx.active_window().unwrap().downcast::<MainWindow>().unwrap());
         assert_eq!(reopened.root(cx).unwrap(), view);
+    }
+
+    #[gpui::test]
+    fn dock_reopen_with_a_visible_popout_activates_the_same_main(cx: &mut TestAppContext) {
+        cx.on_reopen(|cx| crate::reopen_main_window(true, cx));
+        let (view, cx) = open(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-w");
+        assert!(!cx.cx.quit_requested());
+        popout.update(cx, |_, window, _| window.activate_window()).unwrap();
+        assert!(cx.cx.update(|cx| cx.active_window()) == Some(popout.into()));
+        for visible in [true, true, false] {
+            cx.cx.simulate_reopen(visible);
+            assert!(cx.cx.update(|cx| cx.active_window()) == Some(cx.window_handle()));
+            assert_eq!(cx.cx.update(|cx| cx.windows().len()), 2);
+            assert_eq!(cx.window_handle().downcast::<MainWindow>().unwrap().root(cx).unwrap(), view);
+            popout.update(cx, |_, window, _| window.activate_window()).unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn application_quit_request_is_observable(cx: &mut TestAppContext) {
+        assert!(!cx.quit_requested());
+        cx.update(|cx| cx.quit());
+        assert!(cx.quit_requested());
     }
 
     #[gpui::test]
