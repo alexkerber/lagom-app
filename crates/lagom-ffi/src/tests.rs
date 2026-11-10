@@ -621,6 +621,33 @@ async fn inline_resources_are_scoped_to_the_open_message() {
     assert!(core.inline_resource(first, url(first, "same", false)).await.is_err());
 }
 
+#[tokio::test]
+async fn inline_resource_reads_only_the_requested_blob() {
+    use lagom_core::inline::url;
+    let (dir, core) = fixture();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", 1);
+        mail(&mut s, &a, 1, 1)
+    };
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<1023)
+        INSERT INTO inline_parts SELECT ?1, CAST(n AS TEXT), 'image/png', zeroblob(10240) FROM ids", [id]).unwrap();
+    // Evaluating any unrelated BLOB fails deterministically instead of timing cache amplification.
+    db.execute_batch("ALTER TABLE inline_parts RENAME TO cached_parts;
+        CREATE VIEW inline_parts AS SELECT message,cid,mime_type,
+        CASE WHEN cid='0' THEN data ELSE abs(-9223372036854775808) END AS data FROM cached_parts;").unwrap();
+    for windows in [false, true] {
+        let resource = core.inline_resource(id, url(id, "0", windows)).await.unwrap();
+        assert_eq!(resource.mime_type, "image/png");
+        assert_eq!(resource.data, vec![0; 10240]);
+    }
+    for request in [url(id + 1, "0", false), url(id, "missing", false),
+        format!("{}?query=1", url(id, "0", false)), "https://example.test/pixel".into()] {
+        assert_eq!(core.inline_resource(id, request).await.unwrap_err().to_string(), "not found");
+    }
+}
+
 #[test]
 fn mobile_document_rewrites_cids_and_only_opts_in_remote_images() {
     let html = "<img src='cid:logo'><img src='https://example.test/pixel'><link rel=prefetch href='https://example.test'>";

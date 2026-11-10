@@ -243,9 +243,8 @@ impl LagomCore {
     }
     pub async fn inline_resource(&self, id: i64, request: String) -> Result<InlineResource> {
         self.run(move |s| {
-            let parts = s.inline_parts(id)?;
-            let part = lagom_core::inline::resolve(id, &parts, &request).ok_or(lagom_core::Error::NotFound)?;
-            Ok(InlineResource { mime_type: part.mime_type.clone(), data: part.data.clone() })
+            let part = s.inline_resource(id, &request)?;
+            Ok(InlineResource { mime_type: part.mime_type, data: part.data })
         }).await
     }
     pub async fn search(&self, account_id: Option<String>, query: String, limit: u32, offset: u32) -> Result<Vec<MailRow>> {

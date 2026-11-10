@@ -74,9 +74,9 @@ final class MailModel {
     var composeDraft: ComposeDraft?
     var preparingCompose = false
     var syncing = false
-    private var acting = false
+    private var actingID: Int64?
     private var readingIDs: Set<Int64> = []
-    var working: Bool { acting || !readingIDs.isEmpty }
+    var working: Bool { actingID != nil || !readingIDs.isEmpty }
     var hasMore = false
     private var revision = 0
     private var syncAgain = false
@@ -192,7 +192,7 @@ final class MailModel {
     }
 
     func setRead(id: Int64, read: Bool) async {
-        guard let core, !acting, !readingIDs.contains(id) else { return }
+        guard let core, actingID != id, !readingIDs.contains(id) else { return }
         readingIDs.insert(id)
         defer { readingIDs.remove(id) }
         do {
@@ -220,8 +220,8 @@ final class MailModel {
 
     func act(_ action: MailAction, id: Int64) async {
         guard let core, !working else { return }
-        acting = true
-        defer { acting = false }
+        actingID = id
+        defer { actingID = nil }
         do {
             switch action {
             case .done: try await core.done(ids: [id])
