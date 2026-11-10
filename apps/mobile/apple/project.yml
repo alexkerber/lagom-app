@@ -51,9 +51,17 @@ targets:
   LagomTests:
     type: bundle.unit-test
     platform: iOS
-    sources: Tests
+    # Run fixtures without launching the mail app or opening its store.
+    sources:
+      - Tests
+      - Sources/MailModel.swift
+      - Sources/Theme.swift
+      - Generated/LagomCore.swift
     dependencies:
-      - target: Lagom
+      - framework: Generated/LagomFFI.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.alexkerber.lagom.tests
