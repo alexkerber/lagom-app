@@ -6,6 +6,22 @@ permissions:
   contents: read
 
 jobs:
+  audit:
+    name: RustSec audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit@0.23.0
+      - name: Audit dependencies
+        # Vulnerabilities fail; unmaintained, unsound and yanked warnings remain visible.
+        run: cargo audit
+
   build-and-test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

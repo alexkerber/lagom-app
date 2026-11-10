@@ -22,6 +22,8 @@
 - [x] Desktop UI framework: GPUI.
 - [x] Build and start on macOS (2026-11-06).
 - [ ] Build on Linux and Windows (CI).
+- [x] RustSec CI audit on every push and pull request with cargo-audit 0.23.0; vulnerabilities fail and informational/yanked warnings remain visible. Local audit: no vulnerabilities or ignored advisories.
+- [x] Protocol fixture deadlines exclude SQLite migration setup; outbox retries and independent FFI scenarios each get their own unchanged hang guard. Mail flags, forwarding, notifications, reauthentication and mobile fixtures retain their behavior assertions.
 - [x] First native iPhone/iPad mail slice in `apps/mobile/apple`: SwiftUI size-class split navigation, unified/account Inbox/Later/Done/Sent, server Done/Delete/read actions, local Later, replies and Markdown outbox, email-first/manual account setup, shared HTML privacy policy, desktop theme colours and platform icons. XcodeGen, arm64 device/simulator XCFramework builder and a separate macOS CI job. No background fetch, push, mobile OAuth, attachment transfer or draft restoration yet.
 - [x] Mobile review: cached reads and durable enqueue stay available during network waits; refreshes retain loaded pages; Done clears snooze on already archived mail; a foreground timer reloads at the earliest snooze deadline. Rust fixtures and headless Swift model regressions cover all four fixes. Folder sync now prioritizes Inbox, drops failed sessions and continues after folder-specific errors while reporting the failure; a loopback regression covers single-account and all-account refresh with Archive rejected before Inbox in LIST order and Sent synced through a new connection.
 - [x] Mobile daily-mail slice 1: Reply, Reply all and Forward from the message toolbar; shared Rust subject/quote/signature logic, editable Cc, source-account reply headers and new forward threads. Forward attachments use cached bytes or core's on-demand fetch; failures never silently omit them. Cached forwarding reads metadata and bytes in one transaction so concurrent sync deletion cannot silently drop attachments; a two-connection regression covers deletion before the attachment list and cache reads. Rust fixtures and hostless fake-core XCTests cover preparation, stale selection, enqueue and attachments.
@@ -173,7 +175,6 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
 - [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
 - [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
-- [ ] Install `cargo audit` in CI.
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
 - [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
-- [ ] `cargo audit` warnings: 18 unmaintained crates and two unsound `git2 0.20.4` advisories, not traced to Lagom's code paths.
+- [ ] `cargo audit` warnings: 18 unmaintained dependency warnings and two unsound `git2 0.20.4` advisories (RUSTSEC-2026-0183, RUSTSEC-2026-0184), still reported without ignores; update the upstream dependency chains.
