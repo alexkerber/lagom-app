@@ -14,6 +14,7 @@ pub mod presets;
 pub mod oauth;
 pub mod smtp;
 pub mod outbox;
+mod drafts;
 pub mod store;
 mod threading;
 pub mod tasks;

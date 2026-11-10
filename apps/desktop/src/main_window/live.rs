@@ -276,6 +276,7 @@ impl MainWindow {
     /// Reads the store for the account and list on screen. Waits while moves are in flight, so
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_draft_rows(cx);
         self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
         live.stale = true;
@@ -1091,7 +1092,7 @@ impl MainWindow {
         let Some(live) = &self.live else { return };
         let store = live.store.clone();
         let accounts = live.accounts.clone();
-        match store.drafts() {
+        match store.owned_drafts() {
             Ok(drafts) => for draft in drafts {
                 if let Some(account) = accounts.iter().find(|a| a.id == draft.account) {
                     let compose = cx.new(|cx| Compose::restore(draft, account.clone(), store.clone(), window, cx));
@@ -2834,6 +2835,7 @@ mod tests {
     fn review_today_undo_cancels_pending_send(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         send_one(cx);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Drafts(_))));
         view.update_in(cx, |v, window, cx| v.show_home(window, cx));
         cx.simulate_keystrokes("secondary-z");
         assert!(view.read_with(cx, |v, _| v.compose.is_some() && v.sending.is_empty()));
@@ -4515,6 +4517,44 @@ mod tests {
     }
 
     #[gpui::test]
+    fn drafts_view_opens_foreign_bcc_and_reuses_unsaved_compose(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = "<foreign@example.com>";
+        view.update_in(cx, |v, window, cx| {
+            let live = v.live.as_ref().unwrap();
+            let draft = lagom_core::outbox::Draft { id: id.into(), account: live.accounts[0].id.clone(),
+                to: "to@example.com".into(), bcc: "private@example.com".into(), subject: "Foreign draft".into(),
+                text: "Foreign text".into(), ..Default::default() };
+            live.store.save_draft(&draft).unwrap();
+            let db = rusqlite::Connection::open(live.store.path()).unwrap();
+            db.execute("UPDATE draft_sync SET owned=0,revision=(SELECT revision FROM drafts WHERE id=?1) WHERE id=?1", [id]).unwrap();
+            v.restore_drafts(window, cx);
+            assert!(v.drafts.is_empty(), "foreign drafts are opened explicitly");
+            v.show_drafts(window, cx);
+            assert!(matches!(v.page, Page::Drafts));
+            assert_eq!(v.draft_rows.len(), 1);
+            v.open_draft(id, window, cx);
+            let compose = v.compose.as_ref().unwrap().clone();
+            assert_eq!(compose.read(cx).outgoing(cx).bcc, ["private@example.com"]);
+            assert_eq!(compose.read(cx).body_text(cx), "Foreign text");
+            compose.update(cx, |c, cx| c.focus_body(window, cx));
+        });
+        cx.simulate_input("Local edits ");
+        cx.simulate_keystrokes("escape");
+        let expected = view.read_with(cx, |v, cx| v.drafts[0].read(cx).outgoing(cx));
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, Cmd::Drafts(_))));
+        view.update_in(cx, |v, window, cx| {
+            let entity = v.drafts[0].entity_id();
+            v.open_draft(id, window, cx);
+            assert_eq!(v.compose.as_ref().unwrap().entity_id(), entity);
+            assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx), expected);
+        });
+        cx.simulate_keystrokes("cmd-backspace");
+        assert!(view.read_with(cx, |v, _| v.draft_rows.is_empty()));
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+    }
+
+    #[gpui::test]
     fn startup_restores_saved_edits_and_reply_headers(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         view.update(cx, |v, _| {
@@ -4606,6 +4646,7 @@ mod tests {
     fn failed_send_actions_retry_or_restore_for_editing(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         send_one(cx);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Drafts(_))));
         let id = view.update(cx, |v, _| {
             let live = v.live.as_ref().unwrap();
             let id = live.store.due_outbox(&live.accounts[0].id, i64::MAX).unwrap().remove(0);

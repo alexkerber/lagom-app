@@ -57,8 +57,20 @@ fn header_value(value: &str) -> Result<()> {
     }
 }
 pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
+    compose_message(account, outgoing, None)
+}
+
+pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, token: &str) -> Result<Vec<u8>> {
+    let (in_reply_to, references) = draft.reply.clone().unwrap_or_default();
+    let outgoing = Outgoing { subject: draft.subject.clone(), text: draft.text.clone(),
+        attachments: draft.attachments.clone(), in_reply_to, references, message_id: Some(format!("<{token}@draft.lagommail.app>")),
+        ..Default::default() };
+    Ok(compose_message(account, &outgoing, Some(draft))?.formatted())
+}
+
+fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>) -> Result<Message> {
     account.validate()?;
-    if outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
+    if draft.is_none() && outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
         return Err(Error::Invalid("at least one recipient required"));
     }
     header_value(&outgoing.subject)?;
@@ -81,6 +93,18 @@ pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
         .from(from)
         .subject(&outgoing.subject)
         .message_id(Some(id));
+    if let Some(draft) = draft {
+        // Drafts can have no recipients or unfinished addresses; the envelope is never submitted.
+        message = message.keep_bcc().envelope(lettre::address::Envelope::new(None, vec![account.email.parse()
+            .map_err(|_| Error::Invalid("invalid sender address"))?])
+            .map_err(|_| Error::Invalid("invalid draft envelope"))?);
+        for (name, value) in [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)] {
+            header_value(value)?;
+            if !value.is_empty() {
+                message = message.raw_header(header::HeaderValue::new(header::HeaderName::new_from_ascii_str(name), value.clone()));
+            }
+        }
+    }
     for to in &outgoing.to {
         message = message.to(mailbox(to)?);
     }

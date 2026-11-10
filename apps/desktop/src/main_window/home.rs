@@ -19,7 +19,7 @@ impl MainWindow {
             Page::Home => StartPage::Home,
             Page::Calendar => StartPage::Calendar,
             Page::Todo => StartPage::Todo,
-            Page::Mail | Page::Settings(_) | Page::AddAccount(_) => StartPage::Mail,
+            Page::Mail | Page::Drafts | Page::Settings(_) | Page::AddAccount(_) => StartPage::Mail,
         };
         if self.panes.start_page != saved {
             self.panes.start_page = saved;
