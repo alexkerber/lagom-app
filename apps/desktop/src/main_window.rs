@@ -1190,11 +1190,11 @@ pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> gpui::Svg {
     icon
 }
 
-fn app_mark() -> gpui::Img {
-    // The app icon as the Dock shows it. Its plate fills 824 of 1024 px, so 26 px draws a ~21 px tile.
+fn app_mark(size: f32) -> gpui::Img {
+    // The app icon as the Dock shows it. Its plate fills 824 of 1024 px, so 20 px draws a ~16 px tile.
     // Named as embedded: GPUI would read the bare string "app-icon.png" as a URI host and fetch it.
     gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded("app-icon.png".into())))
-        .size(px(26.))
+        .size(px(size))
         .flex_shrink_0()
 }
 
@@ -1431,20 +1431,21 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // macOS: the brand shares the traffic lights' row (lights at y 18, 14 px tall, ending near x 72).
-            .when(cfg!(target_os = "macos"), |d| d.pt(px(5.)))
+            // macOS: the brand shares the traffic lights' row (lights 14 px, x 18..72, centre y 25). A 28 px row
+            // from y 11 keeps the centre; a 16 px gap after the lights and a mark near their size keep it from
+            // reading as a fourth button.
+            .when(cfg!(target_os = "macos"), |d| d.pt(px(11.)))
             .child(
                 div().id("sidebar-brand").debug_selector(|| "sidebar-brand".into())
-                    .when(cfg!(target_os = "macos"), |d| d.ml(px(64.)))
+                    .when(cfg!(target_os = "macos"), |d| d.ml(px(66.)).h(px(28.)).gap(px(7.)))
+                    .when(!cfg!(target_os = "macos"), |d| d.h(px(40.)).gap(px(10.)))
                     .flex()
                     .flex_shrink_0()
                     .items_center()
-                    .gap(px(10.))
-                    .h(px(40.))
                     .px(px(8.))
                     .rounded(px(radius::CONTROL))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(app_mark())
+                    .child(app_mark(if cfg!(target_os = "macos") { 20. } else { 26. }))
                     .child("lagom"),
             )
             .child(
