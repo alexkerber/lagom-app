@@ -7,9 +7,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.lagommail.core.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 
 internal data class RowPresentation(val row: MailRow) {
@@ -54,6 +56,7 @@ internal class MailModel(
         set(value) { composeRevision++; composeDraft = value }
     var accountForm by mutableStateOf<AccountForm?>(null)
     private var revision = 0
+    private var appliedRevision = 0
     private var selectionRevision = 0
     private var syncAgain = false
     private var foreground = false
@@ -74,15 +77,17 @@ internal class MailModel(
     }
     suspend fun reload(more: Boolean = false) {
         val core = core ?: return
+        // Pending reloads may have changed the rows before the pagination offset.
+        val append = more && revision == appliedRevision
         val request = ++revision
         val old = rows
-        val offset = if (more) old.size else 0
+        val offset = if (append) old.size else 0
         val account = accountId
         val box = mailbox
         val due = core.nextSnooze()
         val accounts = core.accounts()
         val page = mutableListOf<MailRow>()
-        val count = if (more) 100 else maxOf(100, old.size)
+        val count = maxOf(100, old.size + if (more) 100 else 0) - offset
         var hasMore: Boolean
         do {
             val batch = core.mailbox(account, box, 100u, (offset + page.size).toUInt())
@@ -93,8 +98,9 @@ internal class MailModel(
         if (request != revision) return
         this.accounts = accounts
         this.failures = failures
-        rows = (if (more) old + page else page).distinctBy { it.id }
+        rows = (if (append) old + page else page).distinctBy { it.id }
         this.hasMore = hasMore
+        appliedRevision = request
         wake?.cancel()
         wake = if (foreground && due != null) viewModelScope.launch {
             delay(maxOf(1, due * 1000 - now()))
@@ -115,13 +121,13 @@ internal class MailModel(
         val request = ++selectionRevision
         selectedId = id; message = null
         try {
-            val loaded = core.message(id)
+            val loaded = withContext(Dispatchers.IO) { core.message(id) }
             if (request != selectionRevision) return
             message = loaded
             if (loaded.row.unread) {
                 core.markRead(id, true)
                 if (request != selectionRevision) return
-                val read = core.message(id)
+                val read = withContext(Dispatchers.IO) { core.message(id) }
                 if (request != selectionRevision) return
                 message = read
                 reload()
@@ -149,7 +155,7 @@ internal class MailModel(
         try {
             when (action) {
                 MailAction.Done -> core.done(listOf(id))
-                MailAction.Later -> core.later(listOf(id), tomorrow())
+                MailAction.Later -> core.later(listOf(id), withContext(Dispatchers.IO) { tomorrow() })
                 MailAction.Delete -> core.delete(listOf(id))
             }
             if (selectedId == id) clearSelection()

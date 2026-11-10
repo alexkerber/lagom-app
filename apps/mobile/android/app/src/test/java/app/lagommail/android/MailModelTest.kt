@@ -47,12 +47,58 @@ class MailModelTest {
         gate.complete(Unit); old.await()
         assertTrue(model.rows.isEmpty())
     }
+    @Test fun paginationDuringActionRefreshKeepsRemovedMailOutAndDoesNotSkipRows() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = (1L..250L).reversed().map { row(it) } }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.pageGate = gate
+        val action = async { model.act(MailAction.Done, 250) }; runCurrent()
+        core.pageGate = null
+        model.reload(more = true)
+        gate.complete(Unit); action.await()
+        assertEquals(core.mail.take(200), model.rows)
+        model.reload(more = true)
+        assertEquals(core.mail, model.rows)
+        assertFalse(model.hasMore)
+    }
+    @Test fun messageReadsIncludingAfterMarkReadRunOffMain() = runTest(dispatcher) {
+        val main = Thread.currentThread()
+        val core = FakeCore().apply { mail = listOf(row(1, unread = true)) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.messageGate = gate
+        val started = CompletableDeferred<Unit>(); core.messageStarted = started
+        val selection = model.perform { model.select(1) }
+        started.await()
+        gate.complete(Unit); selection.join()
+        assertNull(model.error)
+        assertEquals(4, core.messageThreads.size)
+        assertTrue(core.messageThreads.all { it !== main })
+        assertSame(main, core.markReadThread)
+        assertFalse(model.message!!.row.unread)
+    }
+    @Test fun laterComputesDeadlineOffMainAndReturnsToMain() = runTest(dispatcher) {
+        val main = Thread.currentThread()
+        var deadlineThread: Thread? = null
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = MailModel(open = { core }, tomorrow = {
+            deadlineThread = Thread.currentThread()
+            86_400
+        })
+        model.start()
+        model.perform { model.act(MailAction.Later, 1) }.join()
+        assertNull(model.error)
+        assertNotNull(deadlineThread)
+        assertNotSame(main, deadlineThread)
+        assertSame(main, core.laterThread)
+        assertEquals(listOf(1L) to 86_400L, core.snoozed)
+        assertFalse(model.working)
+    }
     @Test fun lateMessageCannotReplaceNewSelectionAndReadFailureKeepsCachedBody() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1), row(2, unread = true)) }
         val model = model(core); model.start()
         val gate = CompletableDeferred<Unit>()
         core.messageGate = gate
-        val first = async { model.select(1) }; runCurrent()
+        val started = CompletableDeferred<Unit>(); core.messageStarted = started
+        val first = async { model.select(1) }; started.await()
         core.messageGate = null
         core.rejectRead = true
         try { model.select(2); fail("expected refusal") } catch (_: IllegalStateException) { }
@@ -166,6 +212,10 @@ private class FakeCore : LagomCoreInterface {
     var pageCalls = 0
     var pageGate: CompletableDeferred<Unit>? = null
     var messageGate: CompletableDeferred<Unit>? = null
+    var messageStarted: CompletableDeferred<Unit>? = null
+    val messageThreads = mutableListOf<Thread>()
+    var markReadThread: Thread? = null
+    var laterThread: Thread? = null
     var replyGate: CompletableDeferred<Unit>? = null
     var syncGate: CompletableDeferred<Unit>? = null
     var rejectRead = false
@@ -187,10 +237,16 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun syncAll() { syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
     override suspend fun sync(accountId: String) = syncAll()
     override suspend fun message(id: Long): MailMessage {
+        messageThreads += Thread.currentThread()
         val result = MailMessage(mail.first { it.id == id }, "body", null, emptyList())
-        messageGate?.await(); return result
+        val gate = messageGate
+        messageStarted?.complete(Unit)
+        gate?.await()
+        messageThreads += Thread.currentThread()
+        return result
     }
     override suspend fun markRead(id: Long, read: Boolean) {
+        markReadThread = Thread.currentThread()
         check(!rejectRead) { "Fixture read refused" }
         mail = mail.map { if (it.id == id) it.copy(unread = !read) else it }
     }
@@ -199,8 +255,11 @@ private class FakeCore : LagomCoreInterface {
         sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo)
         return "queued"
     }
-    override suspend fun later(ids: List<Long>, untilUnix: Long) { check(!rejectAction); snoozed = ids to untilUnix }
-    override suspend fun done(ids: List<Long>) { check(!rejectAction) }
+    override suspend fun later(ids: List<Long>, untilUnix: Long) {
+        laterThread = Thread.currentThread()
+        check(!rejectAction); snoozed = ids to untilUnix
+    }
+    override suspend fun done(ids: List<Long>) { check(!rejectAction); mail = mail.filterNot { it.id in ids } }
     override suspend fun delete(ids: List<Long>) { check(!rejectAction) }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit
