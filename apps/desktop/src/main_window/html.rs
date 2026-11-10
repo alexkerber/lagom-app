@@ -57,6 +57,7 @@ pub(super) enum Msg {
     Loaded,
     Open(String),
     Escape,
+    CloseWindow,
     NewTask,
     MailAction(Run),
     Hints { over: bool, command: bool, shift: bool },
@@ -91,6 +92,11 @@ addEventListener('click', e => {
 }, true);
 addEventListener('keydown', e => {
   hints(e);
+  if (e.isTrusted && e[closeModifier] && !(e.metaKey && e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'w') {
+    e.preventDefault();
+    window.ipc.postMessage('close-window');
+    return;
+  }
   if (e.key === 'Escape') window.ipc.postMessage('escape');
   if (!e.isTrusted || e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input,textarea,[contenteditable]')) return;
   const key = e.key.toLowerCase();
@@ -310,6 +316,11 @@ impl Web {
                 host.new_task(cx);
             }
             Msg::Loaded => host.web().ready = true,
+            Msg::CloseWindow => {
+                host.web().unfocus();
+                window.focus(&host.keys());
+                window.dispatch_action(Box::new(super::CloseWindow), cx);
+            }
             Msg::Open(url) if link_allowed(&url) => cx.open_url(&url),
             Msg::Open(_) => {}
             Msg::Escape => {
@@ -351,7 +362,8 @@ impl Web {
                     None => response.status(404).body(std::borrow::Cow::Owned(Vec::new())).unwrap(),
                 }
             })
-            .with_initialization_script(format!("{BRIDGE}\n{}", include_str!("html/fit.js")))
+            .with_initialization_script(format!("const closeModifier = '{}';\n{BRIDGE}\n{}",
+                if cfg!(target_os = "macos") { "metaKey" } else { "ctrlKey" }, include_str!("html/fit.js")))
             .with_navigation_handler(move |url| allow_navigation(&ours, &url))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_download_started_handler(|_, _| false)
@@ -366,6 +378,7 @@ impl Web {
                     Some(("open", url)) => Msg::Open(url.to_string()),
                     Some(("hints", state)) => match hint_event(state) { Some(msg) => msg, None => return },
                     _ if body == "escape" => Msg::Escape,
+                    _ if body == "close-window" => Msg::CloseWindow,
                     _ if body == "task" => Msg::NewTask,
                     _ if body == "forward" => Msg::MailAction(Run::Forward),
                     _ if body == "reply-all" => Msg::MailAction(Run::ReplyAll),
@@ -418,6 +431,23 @@ mod tests {
         assert!(matches!(hint_event("1 1 0"), Some(Msg::Hints { over: true, command: true, shift: false })));
         assert!(matches!(hint_event("0 0 0"), Some(Msg::Hints { over: false, command: false, shift: false })));
         for invalid in ["", "1 0", "1 1 1 0", "1 NaN 0", "2 0 0", "1 true false"] { assert!(hint_event(invalid).is_none()); }
+    }
+
+    #[gpui::test]
+    fn close_window_from_html_uses_the_window_action(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = super::super::dispatch::open(cx);
+        cx.simulate_keystrokes("secondary-o");
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        cx.update_window(popout.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        popout.update(cx, |v, window, cx| {
+            Web::event(v, Msg::CloseWindow, window, cx);
+        }).unwrap();
+        cx.run_until_parked();
+        assert!(popout.read_with(cx, |_, _| ()).is_err());
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        view.update_in(cx, |v, window, cx| Web::event(v, Msg::CloseWindow, window, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
     }
 
     #[gpui::test]

@@ -24,9 +24,10 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, CloseWindow, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
 
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("secondary-w", CloseWindow, None)]);
     tasks::bind_keys(cx);
     week::bind_keys(cx);
     let ctx = Some("MainWindow");
@@ -732,8 +733,36 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        if let Some(compose) = self.compose.as_ref().filter(|c| c.read(cx).is_modal()) {
+            if compose.update(cx, |c, cx| c.close_window(window, cx)) { self.notify("Draft saved", cx); }
+            return;
+        }
+        if matches!(self.page, Page::Calendar) && self.week.editor.is_some() {
+            self.cancel_new_event(window, cx);
+            return;
+        }
+        if matches!(self.page, Page::Home | Page::Todo) && self.close_task_overlay(window, cx) { return; }
+        if (matches!(self.page, Page::Calendar) && self.week.detail.take().is_some()) || self.folder_name.take().is_some()
+            || self.message_menu.take().is_some() || std::mem::take(&mut self.confirm_empty_trash) {
+            window.focus(&self.focus);
+            cx.notify();
+            return;
+        }
+        match &self.page {
+            Page::AddAccount(add) => { add.update(cx, |add, cx| add.back(window, cx)); }
+            Page::Settings(Some(_)) => { self.set_page(Page::Settings(None), cx); cx.notify(); }
+            Page::Settings(None) => self.show_section(1, window, cx),
+            _ => hide_main_window(window),
+        }
+    }
+
     /// Only a failed local write can hold an exit; drafts and sends need no network wait.
-    fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn hold_exit(&mut self, cx: &mut Context<Self>) -> bool {
         let mut saved = true;
         if let Some(live) = &self.live {
             for (id, input) in &self.signatures {
@@ -2482,16 +2511,25 @@ impl Swipe {
     }
 }
 
-/// ⌘Q and ⌘W flush local edits. Menu and key actions reach
-/// the window before the app's global handlers, which run when this one propagates.
+/// Only Quit propagates to the app; Close Window belongs to the active window.
 fn exit_actions<E: InteractiveElement>(el: E, cx: &mut Context<MainWindow>) -> E {
+    let el = el.on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)));
     #[cfg(target_os = "macos")]
-    let el = el
-        .on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(cx) { cx.propagate() }))
-        .on_action(cx.listener(|this, _: &crate::menus::CloseWindow, _, cx| if !this.hold_exit(cx) { cx.propagate() }));
-    #[cfg(not(target_os = "macos"))]
-    let _ = cx;
+    let el = el.on_action(cx.listener(|this, _: &crate::menus::Quit, _, cx| if !this.hold_exit(cx) { cx.propagate() }));
     el
+}
+
+fn hide_main_window(_window: &Window) {
+    // GPUI has no per-window hide; keep its owner and background work alive until Dock reopen.
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(_window) else { return; };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return; };
+        // GPUI owns the view for the lifetime of this borrowed Window.
+        let view = unsafe { &*handle.ns_view.as_ptr().cast::<objc2_app_kit::NSView>() };
+        if let Some(window) = view.window() { window.orderOut(None); }
+    }
 }
 
 /// Inbox and folder state as ids into `mail`. Plain Rust, so tests run without a window.
@@ -3916,6 +3954,59 @@ mod dispatch {
         cx.simulate_input(" there");
         let compose = view.read_with(cx, |v, _| v.compose.clone()).unwrap();
         assert_eq!(compose.read_with(cx, |c, cx| c.body_text(cx)), format!("**Hi** there{quote}"));
+    }
+
+    #[gpui::test]
+    fn close_window_dismisses_the_innermost_overlay(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("r secondary-k secondary-w");
+        assert!(view.read_with(cx, |v, _| v.palette.is_none() && v.compose.is_some()));
+        cx.simulate_keystrokes("secondary-w secondary-, secondary-w");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Mail)));
+        view.update(cx, |v, cx| { v.set_page(Page::Settings(Some("fixture".into())), cx); cx.notify(); });
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        cx.update(|window, cx| window.dispatch_action(Box::new(CloseWindow), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Mail)));
+        view.update_in(cx, |v, window, cx| v.new_folder(window, cx));
+        cx.simulate_input("Unfinished folder");
+        cx.simulate_keystrokes("secondary-w");
+        assert!(view.read_with(cx, |v, _| v.folder_name.is_none()));
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+    }
+
+    #[gpui::test]
+    fn close_window_keeps_main_alive_and_reopen_reuses_it(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        let reopened = cx.cx.update(|cx| crate::open_main_window(true, cx).unwrap());
+        assert_eq!(reopened.root(cx).unwrap(), view);
+    }
+
+    #[gpui::test]
+    fn close_window_removes_only_the_active_popout(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        #[cfg(target_os = "macos")]
+        cx.cx.update(crate::menus::init);
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("secondary-o j secondary-o");
+        let handles = view.read_with(cx, |v, _| v.popouts.iter().map(|p| p.1).collect::<Vec<_>>());
+        assert_eq!(handles.len(), 2);
+        let mut popup = VisualTestContext::from_window(handles[1].into(), cx);
+        popup.update(|window, _| window.activate_window());
+        popup.simulate_keystrokes("secondary-w");
+        popup.run_until_parked();
+        assert!(handles[1].read_with(&popup, |_, _| ()).is_err());
+        assert!(handles[0].read_with(&popup, |_, _| ()).is_ok());
+        assert_eq!(popup.cx.update(|cx| cx.windows().len()), 2);
     }
 
     #[gpui::test]
