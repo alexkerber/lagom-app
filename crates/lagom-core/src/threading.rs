@@ -5,12 +5,41 @@ use std::collections::BTreeSet;
 /// References kept per message; the newest are the direct parents.
 const MAX_REFS: usize = 64;
 
-fn normalised_subject(subject: &str) -> String {
+/// The subject in the stored `subject:` node of mail without IDs. Changing this rule orphans
+/// the `thread_links` rows of existing stores: migrate them first.
+fn stored_subject(subject: &str) -> String {
     let mut subject = subject.trim().to_lowercase();
     while let Some(rest) = ["re:", "fw:", "fwd:", "sv:", "vs:", "aw:"].iter().find_map(|p| subject.strip_prefix(p)) {
         subject = rest.trim().to_string();
     }
     subject
+}
+
+/// The subject compared when a known reference claims a thread. Never stored.
+fn normalised_subject(subject: &str) -> String {
+    let lower = subject.trim().to_lowercase();
+    let mut subject = lower.as_str();
+    loop {
+        if let Some((tag, rest)) = subject.strip_prefix('[').and_then(|s| s.split_once(']')) {
+            if !tag.is_empty() && !tag.contains('[') && !rest.trim().is_empty() {
+                subject = rest.trim();
+                continue;
+            }
+        }
+        let Some((prefix, rest)) = subject.split_once([':', '：']) else { break };
+        let prefix = prefix.trim();
+        let prefix = match prefix.strip_suffix(']').and_then(|p| p.split_once('[')) {
+            Some((prefix, count)) if !count.is_empty() && count.bytes().all(|c| c.is_ascii_digit()) => prefix,
+            _ => prefix,
+        };
+        // shortcut: recognise common client prefixes only; add others when supported mail supplies fixtures.
+        if !["re", "fw", "fwd", "sv", "vs", "aw", "antw", "wg", "tr", "rép", "ré", "rif",
+            "r", "i", "rv", "enc", "res", "odp", "pd", "vb", "vl", "videresend", "ynt", "ilt", "i̇lt",
+            "απ", "σχ", "πρθ", "отв", "ответ", "пересл", "відп", "回复", "答复", "转发", "回覆", "轉寄",
+            "返信", "転送", "답장", "전달"].contains(&prefix) { break; }
+        subject = rest.trim();
+    }
+    subject.to_owned()
 }
 
 fn nodes(m: &MessageSummary) -> Vec<String> {
@@ -19,7 +48,7 @@ fn nodes(m: &MessageSummary) -> Vec<String> {
         .chain(std::iter::once(m.message_id.as_str()))
         .filter(|id| !id.is_empty()).map(|id| format!("id:{id}")).collect();
     if ids.is_empty() {
-        let subject = normalised_subject(&m.subject);
+        let subject = stored_subject(&m.subject);
         let participants: BTreeSet<_> = [&m.from_address, &m.to, &m.cc].into_iter()
             .flat_map(|s| crate::contacts::split_recipients(s))
             .map(|s| s.parse::<lettre::message::Mailbox>().map_or(s.to_lowercase(), |m| m.email.to_string().to_lowercase())).collect();
@@ -306,6 +335,50 @@ mod tests {
         fallback.summary.uid = 7; fallback.summary.from_address = "different@example.com".into();
         let three = s.save_message(&fallback).unwrap();
         assert_ne!(s.message(one).unwrap().summary.thread_id, s.message(three).unwrap().summary.thread_id);
+    }
+
+    #[test]
+    fn review_localised_replies_and_list_tags_still_require_the_same_subject() {
+        let (_dir, s, account, folder) = fixture();
+        let save = |uid, subject: &str, refs: &str| {
+            let m = Message { summary: MessageSummary {
+                account: account.clone(), folder, uid, subject: subject.into(),
+                message_id: format!("{uid}@example.com"), thread_refs: refs.into(), ..Default::default()
+            }, ..Default::default() };
+            s.message(s.save_message(&m).unwrap()).unwrap().summary.thread_id
+        };
+        let thread = save(1, "[list] Topic", "");
+        for (i, subject) in [
+            "Antw: Topic", "[list] Re: Topic", "Re: [list] Topic", "Re[2]: Topic",
+            "RE[123]: Fwd: [list] Topic", "SV: AW: VS: Topic", "TR: Topic",
+            "Rép: Topic", "Rif: Topic", "R: Topic", "I: Topic", "RV: Topic", "ENC: Topic",
+            "Res: Topic", "Odp: Topic", "PD: Topic", "WG: Topic", "VB: Topic", "VL: Topic",
+            "VS: Topic", "Videresend: Topic", "Ynt: Topic", "İlt: Topic", "Απ: Topic",
+            "Σχ: Topic", "Πρθ: Topic", "Ответ: Topic", "Пересл: Topic", "Відп: Topic",
+            "回复: Topic", "答复: Topic", "转发: Topic", "回覆： Topic", "轉寄: Topic",
+            "返信: Topic", "転送: Topic", "답장: Topic", "전달: Topic",
+            " [list] [announce] Re[2]: Antw: Topic ",
+        ].iter().enumerate() {
+            assert_eq!(save(i as u32 + 2, subject, "1@example.com"), thread, "{subject}");
+        }
+        for (i, subject) in [
+            "[list] Re[2]: Payroll", "Antw: Statement", "Review: Topic", "Re[x]: Topic",
+            "Re[]: Topic", "[list Topic", "[list]", "Topic [list]", "Unknown: Topic",
+        ].iter().enumerate() {
+            assert_ne!(save(i as u32 + 100, subject, "1@example.com"), thread, "{subject}");
+        }
+        assert_ne!(save(200, "Topic", ""), thread, "subject alone must not join messages with IDs");
+    }
+
+    #[test]
+    fn stored_subject_nodes_keep_their_form() {
+        // These strings are in the thread_links of existing stores.
+        let node = |subject: &str| nodes(&MessageSummary { subject: subject.into(), from_address: "a@example.com".into(), to: "b@example.com".into(), ..Default::default() });
+        assert_eq!(node("[list] Topic"), [r#"subject:["[list] topic",["a@example.com","b@example.com"]]"#]);
+        assert_eq!(node("Re: SV: [list] Topic"), node("[list] Topic"));
+        assert_eq!(node("Antw: Topic"), [r#"subject:["antw: topic",["a@example.com","b@example.com"]]"#]);
+        assert_ne!(node("[a] Status"), node("[b] Status"));
+        assert_ne!(node("R: statistics"), node("statistics"));
     }
 
     #[test]
