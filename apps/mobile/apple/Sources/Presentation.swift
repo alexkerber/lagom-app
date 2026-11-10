@@ -53,10 +53,11 @@ struct DateWords {
     }
 
     /// The reading pane's date, `mail::reading_date`: "Today 09:42", "Fri 09:42", "3 Nov, 09:42".
+    /// A date in the future, from a skewed sender clock, shows as a date.
     func readingDate(_ date: Date) -> String {
         let time = format(date, "jjmm")
         switch days(from: date) {
-        case ...0: return "Today \(time)"
+        case 0: return "Today \(time)"
         case 1...6: return "\(listTime(date)) \(time)"
         default:
             let thisYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)

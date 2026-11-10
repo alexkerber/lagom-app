@@ -32,7 +32,7 @@ struct IconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(Theme.secondary)
-            .frame(width: 32, height: 32)
+            .frame(minWidth: 32, minHeight: 32)
             .background(configuration.isPressed ? Theme.ink.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
             .opacity(enabled ? 1 : 0.4)
             .frame(minWidth: 44, minHeight: 44)
@@ -282,6 +282,11 @@ struct LagomBar: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(page == .mail && unread > 0 ? "Mail, \(unread) unread" : page.title)
                 .accessibilityAddTraits(active ? [.isSelected, .isButton] : .isButton)
+                // The bar stops growing at xxLarge; a long press shows the item large.
+                .accessibilityShowsLargeContentViewer {
+                    Icon(page.icon)
+                    Text(page.title)
+                }
             }
         }
         .dynamicTypeSize(...DynamicTypeSize.xxLarge)

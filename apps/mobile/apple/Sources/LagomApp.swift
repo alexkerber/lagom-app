@@ -56,6 +56,7 @@ struct MailView: View {
             } else {
                 NavigationStack {
                     inbox
+                        .background(SwipeBack())
                         .toolbar(.hidden, for: .navigationBar)
                         .navigationDestination(isPresented: Binding(get: { model.selectedID != nil }, set: { if !$0 { model.selectedID = nil } })) {
                             detail.toolbar(.hidden, for: .navigationBar)
@@ -84,17 +85,7 @@ struct MailView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    mailboxMenu
-                    HStack(spacing: 6) {
-                        Icon(model.syncing ? "cloud-syncing" : "cloud-synced", size: 16)
-                            .accessibilityLabel(model.syncing ? "Syncing" : "Synced").accessibilityHidden(false)
-                        if model.mailbox == .inbox && !model.accounts.isEmpty {
-                            Text("\(planner.inboxLeft(account: model.accountID)) left").lagomFont(.small).monospacedDigit()
-                        }
-                    }
-                    .foregroundStyle(Theme.secondary)
-                }
+                mailboxMenu
                 Spacer(minLength: 4)
                 if !model.accounts.isEmpty { FilterControl(unreadOnly: $unreadOnly) }
                 IconButton(title: "New message", icon: "compose") {
@@ -109,9 +100,12 @@ struct MailView: View {
         .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
     }
 
-    /// The title opens the mailboxes and accounts; the account filter also narrows Later, Sent, Done and Trash.
+    /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
+    /// also narrows Later, Sent, Done and Trash.
     private var mailboxMenu: some View {
-        Menu {
+        let name = model.searchText.isEmpty ? title : "Search"
+        let left = model.mailbox == .inbox && !model.accounts.isEmpty ? "\(planner.inboxLeft(account: model.accountID)) left" : nil
+        return Menu {
             Picker("Mailbox", selection: $model.mailbox) {
                 ForEach(MailboxChoice.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -124,13 +118,21 @@ struct MailView: View {
                 Button("Remove \(account.email)", role: .destructive) { removing = account }
             }
         } label: {
-            HStack(spacing: 4) {
-                Text(model.searchText.isEmpty ? title : "Search").lagomFont(.base, .bold).lineLimit(1)
-                Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(name).lagomFont(.base, .bold).lineLimit(1)
+                    Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
+                }
+                .foregroundStyle(Theme.ink)
+                HStack(spacing: 6) {
+                    Icon(model.syncing ? "cloud-syncing" : "cloud-synced", size: 16)
+                    if let left { Text(left).lagomFont(.small).monospacedDigit() }
+                }
+                .foregroundStyle(Theme.secondary)
             }
-            .foregroundStyle(Theme.ink)
+            .frame(minHeight: 44).contentShape(Rectangle())
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(model.searchText.isEmpty ? title : "Search"), mailboxes and accounts")
+            .accessibilityLabel([name, model.syncing ? "Syncing" : "Synced", left, "mailboxes and accounts"].compactMap { $0 }.joined(separator: ", "))
         }
     }
 
@@ -276,12 +278,21 @@ extension MailView {
     }
 }
 
-/// The message page hides the system bar for the desktop toolbar; the edge swipe back stays.
-extension UINavigationController: @retroactive UIGestureRecognizerDelegate {
-    override open func viewDidLoad() {
-        super.viewDidLoad()
-        interactivePopGestureRecognizer?.delegate = self
-    }
+/// The message page hides the system bar for the desktop toolbar; this keeps the edge swipe back
+/// on Mail's own stack, and never during a push or pop, which would freeze navigation.
+private struct SwipeBack: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Hook { Hook() }
+    func updateUIViewController(_ hook: Hook, context: Context) {}
 
-    public func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool { viewControllers.count > 1 }
+    final class Hook: UIViewController, UIGestureRecognizerDelegate {
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            navigationController?.interactivePopGestureRecognizer?.delegate = self
+        }
+
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let stack = navigationController else { return false }
+            return stack.viewControllers.count > 1 && stack.transitionCoordinator == nil
+        }
+    }
 }

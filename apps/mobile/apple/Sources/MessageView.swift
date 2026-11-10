@@ -65,13 +65,15 @@ struct MessageView: View {
                 .background(Theme.subtle, in: Circle())
                 .overlay(Circle().strokeBorder(Theme.line))
                 .accessibilityHidden(true)
+            // The full address wraps rather than truncates, so a look-alike sender stays visible.
             VStack(alignment: .leading, spacing: 2) {
-                Text(sender).lagomFont(.base, .semibold).lineLimit(1)
-                Text(row.senderAddress).lagomFont(.small).foregroundStyle(Theme.secondary).lineLimit(1).textSelection(.enabled)
+                Text(sender).lagomFont(.base, .semibold)
+                Text(row.senderAddress).lagomFont(.small).foregroundStyle(Theme.secondary).textSelection(.enabled)
+                Text(DateWords().readingDate(Date(timeIntervalSince1970: TimeInterval(row.dateUnix))))
+                    .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
             }
-            Spacer(minLength: 4)
-            Text(DateWords().readingDate(Date(timeIntervalSince1970: TimeInterval(row.dateUnix))))
-                .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary).fixedSize()
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
                 Button("Reply all") { Task { await model.prepareCompose(id: row.id, kind: .replyAll) } }
                 Button("Forward") { Task { await model.prepareCompose(id: row.id, kind: .forward) } }

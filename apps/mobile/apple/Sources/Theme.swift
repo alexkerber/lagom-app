@@ -51,7 +51,7 @@ enum Theme {
 /// smaller than an iOS point at phone distance, so every size is the desktop's × 1.15 (body 13 → 15),
 /// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.
 enum TextSize {
-    case small, snippet, base, body, title, subject, display
+    case small, snippet, base, body, title, subject
 
     var points: CGFloat {
         switch self {
@@ -61,7 +61,6 @@ enum TextSize {
         case .body: 16       // 14, message text
         case .title: 17      // 15
         case .subject: 23    // 20
-        case .display: 30    // 26
         }
     }
 
@@ -72,7 +71,6 @@ enum TextSize {
         case .base, .body: .body
         case .title: .headline
         case .subject: .title2
-        case .display: .largeTitle
         }
     }
 }
@@ -98,15 +96,19 @@ extension View {
 /// A desktop line icon (`apps/desktop/assets/icons`), 16 pt there, tinted by the foreground style.
 struct Icon: View {
     let name: String
+    /// What VoiceOver reads; without one the icon is decoration.
+    var label: String?
     @ScaledMetric private var side: CGFloat
 
-    init(_ name: String, size: CGFloat = 18) {
+    init(_ name: String, size: CGFloat = 18, label: String? = nil) {
         self.name = name
+        self.label = label
         _side = ScaledMetric(wrappedValue: size, relativeTo: .body)
     }
 
     var body: some View {
-        Image(name).renderingMode(.template).resizable().frame(width: side, height: side).accessibilityHidden(true)
+        let image = Image(name).renderingMode(.template).resizable().frame(width: side, height: side)
+        if let label { image.accessibilityLabel(label) } else { image.accessibilityHidden(true) }
     }
 }
 

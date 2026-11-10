@@ -18,13 +18,15 @@ struct ComposeView: View {
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Text(model.accounts.first { $0.id == draft.account }?.email ?? "").lineLimit(1)
+                            Text(from).lineLimit(1)
                             if draft.replyTo == nil { Icon("chevron", size: 14).foregroundStyle(Theme.secondary) }
                         }
                         .foregroundStyle(Theme.ink)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                     }
                     .disabled(draft.replyTo != nil)
                     .accessibilityLabel("From")
+                    .accessibilityValue(from)
                 }
                 FieldRow(label: "To") { address("To", $draft.to) }
                 FieldRow(label: "Cc") { address("Cc", $draft.cc) }
@@ -78,6 +80,8 @@ struct ComposeView: View {
         .disabled(sending)
         .interactiveDismissDisabled(sending)
     }
+
+    private var from: String { model.accounts.first { $0.id == draft.account }?.email ?? "" }
 
     private func address(_ label: String, _ text: Binding<String>) -> some View {
         TextField(label, text: text, prompt: Text(""))

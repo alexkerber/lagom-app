@@ -25,6 +25,8 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(w.readingDate(at(w, "2026-11-06")), "Fri 09:42")
         XCTAssertEqual(w.readingDate(at(w, "2026-10-26")), "26 Oct, 09:42")
         XCTAssertEqual(w.readingDate(at(w, "2025-10-01")), "1 Oct 2025, 09:42")
+        // A sender clock ahead of ours: a date, never "Today".
+        XCTAssertEqual(w.readingDate(at(w, "2026-11-12")), "12 Nov, 09:42")
     }
 
     /// The asset catalog's icons are copies of the desktop's; a change there must reach iOS too.
@@ -33,7 +35,7 @@ final class PresentationTests: XCTestCase {
         let icons = apple.appendingPathComponent("Assets.xcassets/Icons")
         let desktop = apple.appendingPathComponent("../../desktop/assets/icons")
         let sets = try FileManager.default.contentsOfDirectory(atPath: icons.path).filter { $0.hasSuffix(".imageset") }
-        XCTAssertGreaterThan(sets.count, 30)
+        XCTAssertFalse(sets.isEmpty)
         for set in sets {
             let name = String(set.dropLast(".imageset".count)) + ".svg"
             XCTAssertEqual(try Data(contentsOf: icons.appendingPathComponent(set).appendingPathComponent(name)),

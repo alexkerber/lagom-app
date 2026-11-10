@@ -141,7 +141,7 @@ private struct NowLine: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(now, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit().frame(width: 52, alignment: .leading)
+            Text(now, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit().fixedSize().frame(minWidth: 52, alignment: .leading)
             Capsule().frame(height: 2)
         }
         .foregroundStyle(Theme.now)
@@ -167,7 +167,7 @@ struct EventRow: View {
                 Circle().fill(accent ?? Theme.accent).frame(width: 5, height: 5)
             } else {
                 Text(start, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit()
-                    .foregroundStyle(Theme.secondary).frame(width: 52, alignment: .leading)
+                    .foregroundStyle(Theme.secondary).fixedSize().frame(minWidth: 52, alignment: .leading)
                 RoundedRectangle(cornerRadius: 1).fill(accent ?? Theme.accent).frame(width: 2, height: 28)
             }
             VStack(alignment: .leading, spacing: 1) {
@@ -211,7 +211,7 @@ struct TodoRow: View {
                 .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if todo.fromMail {
-                Icon("mail").foregroundStyle(Theme.secondary).accessibilityHidden(false).accessibilityLabel("From mail")
+                Icon("mail", label: "From mail").foregroundStyle(Theme.secondary)
             }
             if !todo.done, let due = todo.due.flatMap(words.due) {
                 Text(due.label).lagomFont(.small)
@@ -380,7 +380,7 @@ struct CalendarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(grouped(planner.agenda, by: \.day)) { day in
-                        DayHeader(day: words.day(day.title) ?? .now).padding(.top, 14).padding(.bottom, 2)
+                        DayHeader(title: day.title).padding(.top, 14).padding(.bottom, 2)
                         ForEach(Array(day.items.enumerated()), id: \.offset) { _, event in
                             EventRow(event: event, accent: accountAccent(model.accounts, event.account))
                         }
@@ -406,9 +406,10 @@ struct CalendarView: View {
 
 /// "Mon 9" as the desktop week's column heads, today's number in a filled accent circle.
 private struct DayHeader: View {
-    let day: Date
+    let title: String
 
     var body: some View {
+        let day = DateWords().day(title) ?? .now
         let today = Calendar.current.isDateInToday(day)
         HStack(spacing: 8) {
             Text(day, format: .dateTime.weekday(.abbreviated)).lagomFont(.base).foregroundStyle(Theme.secondary)
@@ -418,7 +419,7 @@ private struct DayHeader: View {
                 .background(today ? Theme.accent : .clear, in: Circle())
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(DateWords().dayTitle(DateWords().coreDay(day)))
+        .accessibilityLabel(DateWords().dayTitle(title))
         .accessibilityAddTraits(.isHeader)
     }
 }
