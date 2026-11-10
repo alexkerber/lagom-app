@@ -40,18 +40,17 @@ pub fn html_to_text(html: &str) -> String {
             let value = value.split('!').next().unwrap_or_default().trim();
             (name.trim().eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none"))
                 || (name.trim().eq_ignore_ascii_case("visibility") && value.eq_ignore_ascii_case("hidden"))
-                || (name.trim().eq_ignore_ascii_case("mso-hide") && value.eq_ignore_ascii_case("all"))
         });
         if hidden { node.remove(); }
     }
     clean_lines(&document.formatted_text())
 }
 
-/// Prefer the displayed HTML: older stored text has no record of how it was generated.
+/// Repair an older HTML fallback without replacing a sender's plain-text alternative.
 pub fn readable_text<'a>(text: &'a str, html: Option<&str>) -> std::borrow::Cow<'a, str> {
-    // Legacy parsing also put the first plain-text part in the HTML slot.
+    // shortcut: legacy rows lack provenance; repair exact converter matches until bodies can be re-fetched.
     match html {
-        Some(html) if !text.starts_with(html) => html_to_text(html).into(),
+        Some(html) if !text.starts_with(html) && text == mail_parser::decoders::html::html_to_text(html) => html_to_text(html).into(),
         _ => text.into(),
     }
 }
@@ -74,7 +73,10 @@ pub(crate) fn clean_lines(text: &str) -> String {
 /// The list preview, at most 200 characters on one line. From the HTML when there is one: text
 /// parts are often generated, with CSS and "[Image]" lines in them.
 pub fn snippet(text: &str, html: Option<&str>) -> String {
-    clean_snippet(&readable_text(text, html))
+    match html {
+        Some(html) => clean_snippet(&html_to_text(html)),
+        None => clean_snippet(text),
+    }
 }
 
 /// Invisible padding dropped, white space collapsed, cut at 200 characters. Also for snippets
@@ -160,6 +162,37 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
 mod tests {
     use super::*;
     #[test]
+    fn multipart_reply_keeps_plain_text_and_quote_levels() {
+        let plain = "My reply\n\n> Previous answer\n\nPlain-only detail";
+        let raw = format!("Content-Type: multipart/alternative; boundary=reply\r\n\r\n--reply\r\nContent-Type: text/plain\r\n\r\n{plain}\r\n--reply\r\nContent-Type: text/html\r\n\r\n<p>My reply</p><blockquote>Previous answer</blockquote>\r\n--reply--\r\n");
+        let m = parse(raw.as_bytes()).unwrap();
+        let text = readable_text(&m.body_text, m.body_html.as_deref());
+        assert_eq!(text, plain);
+        let quote = crate::compose::compose_body("", Some(crate::compose::Original {
+            from: "Sender", address: "sender@example.test", date: "", subject: "", to: "", text: &text,
+        }), crate::compose::ComposeKind::Reply);
+        assert!(quote.contains("> > Previous answer"), "{quote}");
+        assert!(quote.ends_with("> Plain-only detail"));
+    }
+
+    #[test]
+    fn outlook_button_keeps_non_outlook_text() {
+        let html = include_str!("../tests/fixtures/outlook-button.html");
+        let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
+        assert_eq!(m.body_text, "Read the update");
+        assert_eq!(m.summary.snippet, "Read the update");
+    }
+
+    #[test]
+    fn legacy_generated_text_is_cleaned_but_current_text_is_borrowed() {
+        let html = include_str!("../tests/fixtures/newsletter.html");
+        let legacy = mail_parser::decoders::html::html_to_text(html);
+        let clean = html_to_text(html);
+        assert_eq!(readable_text(&legacy, Some(html)), clean);
+        assert!(matches!(readable_text(&clean, Some(html)), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
     fn newsletter_body_has_only_visible_text() {
         let html = include_str!("../tests/fixtures/newsletter.html");
         let m = parse(format!("Content-Type: text/html; charset=utf-8\r\n\r\n{html}").as_bytes()).unwrap();
@@ -169,7 +202,7 @@ mod tests {
 
     #[test]
     fn html_text_keeps_visible_links_and_plain_mail() {
-        let html = "<title>Title</title><div hidden=false><p>Hidden</p></div><div style='mso-hide:ALL'>Hidden</div><!-- Hidden --><p>Read <a href='https://tracking.example.test' title='Hidden'>this &amp; that</a>.</p><p>https://visible.example.test</p>";
+        let html = "<title>Title</title><div hidden=false><p>Hidden</p></div><div style='mso-hide:ALL;display:none'>Hidden</div><!-- Hidden --><p>Read <a href='https://tracking.example.test' title='Hidden'>this &amp; that</a>.</p><p>https://visible.example.test</p>";
         assert_eq!(html_to_text(html), "Read this & that.\n\nhttps://visible.example.test");
         assert_eq!(html_to_text("<p>Keep</p><style>unclosed { color: red }"), "Keep");
         assert_eq!(html_to_text("<div hidden><span style='display:none'>Nested</span></div><p>Keep</p>"), "Keep");

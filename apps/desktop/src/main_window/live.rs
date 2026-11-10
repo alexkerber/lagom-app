@@ -831,11 +831,42 @@ impl MainWindow {
         if self.inbox.mail[id].body.is_empty() {
             self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?, live.store.inline_parts(store)?))) {
                 Ok((m, parts, inline)) => {
-                    let body = mail::paragraphs(&lagom_core::mime::readable_text(&m.body_text, m.body_html.as_deref()));
                     self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
-                    body
+                    if self.inbox.mail[id].text.is_none() {
+                        let (send, text) = tokio::sync::watch::channel(None);
+                        self.inbox.mail[id].text = Some(text.clone());
+                        if let Some(html) = self.inbox.mail[id].html.clone() {
+                            let source = live.store.clone();
+                            let read = cx.background_executor().spawn(async move {
+                                let text: std::sync::Arc<str> = lagom_core::mime::readable_text(&m.body_text, Some(&html)).into_owned().into();
+                                let body = mail::paragraphs(&text);
+                                let inline_referenced = !lagom_core::inline::referenced_ids(&html).is_empty();
+                                (text, body, inline_referenced)
+                            });
+                            cx.spawn(async move |this, cx| {
+                                let (ready, body, inline_referenced) = read.await;
+                                this.update(cx, |this, cx| {
+                                    if !this.live.as_ref().is_some_and(|live| Rc::ptr_eq(&live.store, &source)) { return; }
+                                    let Some(mail) = this.inbox.mail.get_mut(id).filter(|m| m.store == Some(store)
+                                        && m.text.as_ref().is_some_and(|current| current.same_channel(&text))) else { return };
+                                    mail.body = body;
+                                    mail.inline_referenced = inline_referenced;
+                                    send.send(Some(ready)).ok();
+                                    if let Some(body) = this.expanded.get(&id) {
+                                        body.update(cx, |body, cx| body.refresh(mail, cx));
+                                    }
+                                    this.open_message(id, false, cx);
+                                    cx.notify();
+                                }).ok();
+                            }).detach();
+                        } else {
+                            send.send(Some(m.body_text.into())).ok();
+                        }
+                    }
+                    let text = self.inbox.mail[id].text.as_ref().unwrap().borrow();
+                    text.as_deref().map(mail::paragraphs).unwrap_or_else(|| vec!["Loading message…".into()])
                 }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
@@ -843,7 +874,7 @@ impl MainWindow {
         if !self.inbox.mail[id].inline_pending
             && self.inbox.mail[id].inline_retry_after.is_none_or(|after| std::time::Instant::now() >= after)
             && live.store.inline_loaded(store).is_ok_and(|loaded| !loaded)
-            && self.inbox.mail[id].html.as_deref().is_some_and(|h| !lagom_core::inline::referenced_ids(h).is_empty()) {
+            && self.inbox.mail[id].inline_referenced {
             self.inbox.mail[id].inline_pending = live.bridge.send(Cmd::Inline(store));
         }
         // Reading a filtered list must not consume the next unread row on every reload.
@@ -1294,13 +1325,80 @@ mod tests {
     }
 
     #[gpui::test]
+    fn newsletter_text_yields_and_is_reused_for_reply(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let id = view.update(cx, |v, cx| {
+            let summary = incoming(v, 1);
+            let html = format!("{}<p>Full reply text</p>", "<div style='display:none'>Hidden preheader</div>".repeat(50_000));
+            let id = v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                summary, body_text: "Full reply text".into(), body_html: Some(html),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            let start = Instant::now();
+            v.open_message(v.inbox.single().unwrap(), false, cx);
+            eprintln!("newsletter open returned in {:?}", start.elapsed());
+            assert_ne!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Full reply text"], "HTML preparation must yield before conversion");
+            id
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Full reply text"]);
+            let db = rusqlite::Connection::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            db.execute("UPDATE messages SET body_text=x'ff',body_html=x'ff' WHERE id=?1", [id]).unwrap();
+            v.reload(cx);
+        });
+        cx.simulate_keystrokes("r");
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        assert!(quote.ends_with("> Full reply text"), "{quote:?}");
+    }
+
+    #[gpui::test]
+    fn pending_reply_uses_full_text_and_respects_newer_actions(cx: &mut TestAppContext) {
+        for action in ["reply", "forward", "compose", "page", "select"] {
+            let (view, cx, _rx) = window(cx);
+            view.update_in(cx, |v, window, cx| {
+                let summary = incoming(v, 1);
+                v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
+                    summary, body_text: format!("{}\nQuote tail", "x".repeat(100_001)), body_html: Some("<p>HTML alternative</p>".into()),
+                }).unwrap();
+                v.inbox = Inbox::live();
+                v.reload(cx);
+                v.inbox.select(0);
+                let kind = if action == "forward" { ComposeKind::Forward } else { ComposeKind::Reply };
+                v.compose_kind(v.inbox.single(), kind, window, cx);
+                assert!(v.compose.is_none(), "compose must wait for background text preparation");
+                match action {
+                    "compose" => v.compose_kind(None, ComposeKind::Reply, window, cx),
+                    "page" => v.set_page(Page::Home, cx),
+                    "select" => v.select(|inbox| inbox.select(0), cx),
+                    _ => {},
+                }
+            });
+            let newer = view.read_with(cx, |v, _| v.compose.as_ref().map(|c| c.entity_id()));
+            cx.run_until_parked();
+            view.read_with(cx, |v, cx| {
+                match action {
+                    "reply" | "forward" => {
+                        let body = v.compose.as_ref().unwrap().read(cx).body_text(cx);
+                        assert!(body.ends_with("> Quote tail"), "compose must keep text beyond the reading cap");
+                        assert!(!v.inbox.mail[v.inbox.single().unwrap()].body.join("\n").contains("Quote tail"));
+                    }
+                    _ => assert_eq!(v.compose.as_ref().map(|c| c.entity_id()), newer),
+                }
+            });
+        }
+    }
+
+    #[gpui::test]
     fn legacy_newsletter_reads_and_quotes_visible_text(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         view.update(cx, |v, cx| {
             let mut summary = incoming(v, 1);
             summary.from_address = "sender@example.test".into();
             v.live.as_ref().unwrap().store.save_message(&lagom_core::store::Message {
-                summary, body_text: "96 * * sup { font-size: 100% !important; }\n\n\nhttps://tracking.example.test/click".into(),
+                summary, body_text: "Hidden preheader and padding \u{34f}\u{200c}\u{a0} Hidden preview Invisible preview \u{a0}\n\nHello & welcome\n\u{a0}\nRead the news\n\u{a0}".into(),
                 body_html: Some(include_str!("../../../../crates/lagom-core/tests/fixtures/newsletter.html").into()),
             }).unwrap();
             v.inbox = Inbox::live();
@@ -1308,8 +1406,9 @@ mod tests {
             v.inbox.select(0);
             let selected = v.inbox.single().unwrap();
             v.open_message(selected, false, cx);
-            assert_eq!(v.inbox.mail[selected].body, ["Hello & welcome", "Read the news"]);
         });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Hello & welcome", "Read the news"]));
         cx.simulate_keystrokes("r");
         let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
         assert!(quote.ends_with("> Hello & welcome\n> \n> Read the news"), "{quote:?}");
@@ -1319,7 +1418,7 @@ mod tests {
     #[gpui::test]
     fn legacy_inline_failure_waits_before_retry_and_completion_survives_summary_reload(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
-        view.update_in(cx, |v, window, cx| {
+        let id = view.update(cx, |v, cx| {
             let store = v.live.as_ref().unwrap().store.clone();
             let mut summary = incoming(v, 1);
             summary.has_attachments = true;
@@ -1334,6 +1433,12 @@ mod tests {
             v.open_message(selected, false, cx);
             v.reload(cx);
             v.open_message(selected, false, cx);
+            assert!(rx.try_recv().is_err(), "CID scanning must also yield to the background executor");
+            id
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            let selected = v.inbox.single().unwrap();
             assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
             assert!(rx.try_recv().is_err());
             v.on_events(vec![Event::Inline { id, error: Some("offline".into()) }], window, cx);
@@ -2301,11 +2406,11 @@ mod tests {
             assert_ne!(v.inbox.current(), Some(selected));
             v.open_current(false, cx);
             assert_eq!(v.reading_thread, Some(selected));
-            assert_eq!(v.inbox.mail[selected].body, ["Body 2"]);
             assert_eq!(v.inbox.mail[selected].html.as_ref().map(|html| html.as_ref()), Some("<p>Body 2</p>"));
             cx.notify();
         });
         cx.run_until_parked();
+        view.read_with(cx, |v, _| assert_eq!(v.inbox.mail[v.reading_thread.unwrap()].body, ["Body 2"]));
         assert!(cx.debug_bounds("Reply").is_some());
     }
 

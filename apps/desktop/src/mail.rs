@@ -28,12 +28,15 @@ pub struct Mail {
     pub snippet: String,
     /// Paragraphs. Empty for store mail until the reading pane loads the body.
     pub body: Vec<String>,
+    /// Full text shared by reading and compose, prepared off the UI thread for HTML mail.
+    pub text: Option<tokio::sync::watch::Receiver<Option<std::sync::Arc<str>>>>,
     /// The HTML part, loaded with the body. Platforms with a web view render it.
     pub html: Option<gpui::SharedString>,
     /// "Load remote images" was clicked for this message.
     pub remote: bool,
     pub attachments: Vec<Attachment>,
     pub inline: std::sync::Arc<Vec<lagom_core::inline::InlinePart>>,
+    pub inline_referenced: bool,
     pub inline_pending: bool,
     pub inline_retry_after: Option<std::time::Instant>,
     pub unread: bool,
@@ -64,10 +67,12 @@ impl Mail {
             // Snippets stored before the core dropped invisible padding.
             snippet: lagom_core::mime::clean_snippet(&m.snippet),
             body: Vec::new(),
+            text: None,
             html: None,
             remote: false,
             attachments: Vec::new(),
             inline: Default::default(),
+            inline_referenced: false,
             inline_pending: false,
             inline_retry_after: None,
             unread: !m.seen,
