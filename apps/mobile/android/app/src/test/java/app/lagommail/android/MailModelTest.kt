@@ -221,6 +221,18 @@ class MailModelTest {
 }
 
 private class FakeCore : LagomCoreInterface {
+    // Planner screens are iOS-only so far; the mail model never calls these.
+    override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo = error("unused")
+    override suspend fun addTodoList(name: String): TodoList = error("unused")
+    override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> = emptyList()
+    override suspend fun calendarConnected(): Boolean = false
+    override suspend fun deleteTodo(id: Long) {}
+    override suspend fun mailCounts(): List<MailCounts> = emptyList()
+    override suspend fun setTodoDone(id: Long, done: Boolean) {}
+    override suspend fun today(unreadLimit: UInt): TodaySummary = error("unused")
+    override suspend fun todoLists(): List<TodoList> = emptyList()
+    override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> = emptyList()
+
     var mail = emptyList<MailRow>()
     var due: Long? = null
     var pageCalls = 0

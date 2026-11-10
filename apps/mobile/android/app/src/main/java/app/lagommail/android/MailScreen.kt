@@ -109,7 +109,7 @@ import java.time.format.FormatStyle
 }
 
 internal fun Mailbox.label(): String = when (this) {
-    Mailbox.INBOX -> "Inbox"; Mailbox.LATER -> "Later"; Mailbox.DONE -> "Done"; Mailbox.SENT -> "Sent"
+    Mailbox.INBOX -> "Inbox"; Mailbox.LATER -> "Later"; Mailbox.DONE -> "Done"; Mailbox.SENT -> "Sent"; Mailbox.TRASH -> "Trash"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

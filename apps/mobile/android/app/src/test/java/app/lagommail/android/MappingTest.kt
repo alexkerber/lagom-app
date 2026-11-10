@@ -30,7 +30,7 @@ class MappingTest {
         assertNull(ComposeDraft(reply.copy(replyTo = null)).replyTo)
     }
     @Test fun everyMailboxHasItsLabel() {
-        assertEquals(listOf("Inbox", "Later", "Done", "Sent"), Mailbox.entries.map { it.label() })
+        assertEquals(listOf("Inbox", "Later", "Done", "Sent", "Trash"), Mailbox.entries.map { it.label() })
     }
     @Test fun manualServerValidatesPortsAndMapsTransport() {
         assertEquals(993.toUShort(), server(" mail.example.test ", "993", " user ", true).port)

@@ -79,7 +79,7 @@ final class PresentationTests: XCTestCase {
         return todo
     }
     override func setTodoDone(id: Int64, done: Bool) async throws {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { throw MailError.Failed(message: "not found") }
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { throw MailError.Failed(reason: "not found") }
         tasks[index].done = done
     }
     override func today(unreadLimit: UInt32) async throws -> TodaySummary {
