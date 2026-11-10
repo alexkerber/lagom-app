@@ -56,9 +56,22 @@ and SMTP hosts, ports, usernames and TLS/STARTTLS. Gmail/iCloud need an
 app-specific password. Microsoft password authentication is commonly disabled;
 Google/Microsoft OAuth needs mobile client IDs and is outside this slice.
 
-The compact layout opens a message from its list. Regular width and height
-show accounts/mailboxes, list and message in three columns, including phones
-that report those size classes. Done archives on the server; Delete moves to
+The app has the desktop's four pages: Today, Mail, Calendar and Todo. Compact
+layouts use a tab bar; regular width and height (iPad, unfolded phones) use the
+desktop sidebar: the four pages, Mail's mailboxes with a per-account Inbox and
+account colour dots, then Accounts. The last page is restored on launch; Mail on
+first launch. In Mail, regular layouts show sidebar, list and message in three
+columns; compact layouts open a message from its list. The list groups mail
+under Today, Yesterday, this week's weekdays and Earlier, marks each account with
+its colour when several accounts exist, filters All/Unread on loaded rows and
+shows how much Inbox mail is left.
+
+Today shows today's cached events, the tasks core selects for today, and the
+newest unread Inbox mail. Todo lists, adds (with an optional due date),
+completes and deletes local tasks through core's task store. Calendar is a
+read-only agenda of the next 14 days of cached events. Mobile has no Google
+sign-in yet, so password accounts show an empty state that says the calendar
+needs a Google account. Done archives on the server; Delete moves to
 server Trash. Later is local and hides mail until tomorrow at 08:00 in the
 system time zone. A local foreground timer reloads at the next snooze deadline.
 Pull to refresh, launch and foreground entry sync all accounts.
@@ -77,11 +90,24 @@ opening compose. A fetch failure keeps the sheet closed and shows an error; olde
 messages without attachment metadata need a refresh first. Aliases beyond the
 account email and logins are not yet stored. Attachment picking is not included.
 
+## Demo data
+
+DEBUG builds launched with `-LagomDemo` open a seeded fixture store in the app's
+temporary directory (two sample accounts, mail, tasks and today's events) and
+skip network sync. Real accounts and the Keychain are never touched. Add
+`-lagom.section today` (or `mail`, `calendar`, `todo`) to open a page:
+
+```sh
+xcrun simctl launch <your-simulator-udid> com.alexkerber.lagom -LagomDemo -lagom.section today
+```
+
 HTML uses a nonpersistent WKWebView, JavaScript disabled, and the same CSP and
 resource-hint blocking policy as desktop. Remote images remain blocked; a
 plain-text toggle is available. Attachment metadata is displayed; opening
 attachments and picking new files are outside this slice. Compose text is held in the sheet until Send;
-draft autosave/restoration is not implemented. Calendar, todos, push and background fetch are outside both mobile slices.
+draft autosave/restoration is not implemented. Push and background fetch are outside both
+mobile slices; Android has no calendar or todos yet. iOS cannot create events or edit task
+titles and due dates after creation yet.
 
 ## Verify without opening an app
 
@@ -99,10 +125,11 @@ IMAP/SMTP fixtures. They cover global paging/ties, account isolation, Later,
 message/attachment mapping, read-status refusal, archive/Trash, verified account
 creation, durable replies, recovery and shared HTML privacy policy. Existing
 GreenMail tests remain opt-in. `LagomTests` is a hostless XCTest bundle: it compiles
-the model, presentation and bindings directly, so it never launches the mail app or opens its store. Its nine
+the model, presentation and bindings directly, so it never launches the mail app or opens its store. Its
 network-free tests cover mapping plus reply/forward preparation, stale selection,
 duplicate actions, preserved edits, Cc, attachments and enqueue failures using a
-fake core. `build-for-testing` only compiles tests. Execute them with
+fake core, plus list dates, date groups, due chips, stored page names and the
+Today/Todo model (blank titles, local due days, completion) against a fake core. `build-for-testing` only compiles tests. Execute them with
 `xcodebuild test-without-building` on a disposable simulator you create, targeting
 only its UDID, then delete that simulator. Never target someone else's device.
 Rust fixtures additionally cover reply-all identities, quoted originals, signatures,
