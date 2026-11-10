@@ -69,3 +69,35 @@ jobs:
             -lresolv -liconv -o target/mobile-model-tests
           target/mobile-model-tests
           target/mobile-model-tests --wake
+
+  android:
+    name: Android native libraries and app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+          sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Test Android build orchestration
+        run: python3 scripts/test-build-android.py
+      - name: Build Android libraries and Kotlin bindings
+        run: scripts/build-android.sh
+      - name: Assemble Android app
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleDebug
+      - name: Run fixture-only JVM tests
+        working-directory: apps/mobile/android
+        run: ./gradlew testDebugUnitTest

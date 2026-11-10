@@ -7,7 +7,7 @@ repository.workspace = true
 publish = false
 
 [lib]
-crate-type = ["lib", "staticlib"]
+crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]
 bindgen = ["uniffi/cli"]
@@ -24,8 +24,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 zeroize = "1"
 chrono = "0.4"
+keyring = "3.6"
 
 [dev-dependencies]
 tempfile = "3"
-keyring = "3.6"
 rusqlite = "0.37"

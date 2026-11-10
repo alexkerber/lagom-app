@@ -1,0 +1,171 @@
+package app.lagommail.android
+
+import app.lagommail.core.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.*
+import org.junit.After
+import org.junit.Assert.*
+import org.junit.Before
+import org.junit.Test
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class MailModelTest {
+    private val dispatcher = StandardTestDispatcher()
+    @Before fun setup() { Dispatchers.setMain(dispatcher) }
+    @After fun teardown() { Dispatchers.resetMain() }
+    private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
+        open = { core }, tomorrow = { 86_400 }, recipients = { it.split(',').map(String::trim).filter(String::isNotEmpty) }, now = now)
+
+    @Test fun refreshRetainsLoadedPagesAndScopeChangeResetsThem() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = (1L..250L).reversed().map { row(it) } }
+        val model = model(core)
+        model.start()
+        assertEquals(100, model.rows.size)
+        model.reload(more = true)
+        assertEquals(200, model.rows.size)
+        model.sync()
+        assertEquals(200, model.rows.size)
+        model.reload(more = true)
+        assertEquals(250, model.rows.size)
+        assertFalse(model.hasMore)
+        model.changeScope("other", Mailbox.SENT)
+        assertTrue(model.rows.isEmpty())
+        assertEquals("other", model.accountId)
+        assertEquals(Mailbox.SENT, model.mailbox)
+    }
+    @Test fun staleReloadCannotReplaceNewScope() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>()
+        core.pageGate = gate
+        val old = async { model.reload() }; runCurrent()
+        core.pageGate = null
+        model.changeScope("other", Mailbox.INBOX)
+        gate.complete(Unit); old.await()
+        assertTrue(model.rows.isEmpty())
+    }
+    @Test fun lateMessageCannotReplaceNewSelectionAndReadFailureKeepsCachedBody() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2, unread = true)) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>()
+        core.messageGate = gate
+        val first = async { model.select(1) }; runCurrent()
+        core.messageGate = null
+        core.rejectRead = true
+        try { model.select(2); fail("expected refusal") } catch (_: IllegalStateException) { }
+        gate.complete(Unit); first.await()
+        assertEquals(2L, model.message?.row?.id)
+        assertTrue(model.message!!.row.unread)
+        assertEquals("body", model.message?.textBody)
+    }
+    @Test fun sendDismissesOnlyAfterDurableEnqueueAndDoesNotRequeueOnSyncFailure() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core); model.start()
+        val draft = ComposeDraft("fixture", "to@example.test", "cc@example.test", "Subject", "**body**", 42)
+        model.draft = draft
+        core.rejectSend = true
+        try { model.send(); fail("expected refusal") } catch (_: IllegalStateException) { }
+        assertEquals(draft, model.draft)
+        assertFalse(model.sending)
+        core.rejectSend = false; core.rejectSync = true
+        model.send()
+        assertNull(model.draft)
+        assertEquals(1, core.sent.size)
+        assertEquals(draft, core.sent.single())
+        assertNotNull(model.error)
+        model.sync()
+        assertEquals(1, core.sent.size)
+    }
+    @Test fun cachedReadsAndSendRemainAvailableDuringSync() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.syncGate = gate
+        val sync = async { model.sync() }; runCurrent()
+        model.select(1)
+        model.draft = ComposeDraft("fixture", "to@example.test")
+        model.send()
+        assertNull(model.draft)
+        assertEquals(1L, model.message?.row?.id)
+        assertEquals(1, core.sent.size)
+        core.syncGate = null; gate.complete(Unit); sync.await()
+        assertFalse(model.syncing)
+    }
+    @Test fun laterWakesInForegroundAndStopsInBackground() = runTest(dispatcher) {
+        val core = FakeCore().apply { due = 10 }
+        val model = model(core) { testScheduler.currentTime }
+        model.setForeground(true)
+        val initial = core.pageCalls
+        core.due = null
+        advanceTimeBy(10_001); runCurrent()
+        assertTrue(core.pageCalls > initial)
+        core.due = 20
+        model.reload()
+        model.setForeground(false)
+        val stopped = core.pageCalls
+        advanceTimeBy(20_000); runCurrent()
+        assertEquals(stopped, core.pageCalls)
+    }
+    @Test fun actionsKeepSelectionOnFailureAndUseCoreSnoozeDeadline() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = model(core); model.start(); model.select(1)
+        core.rejectAction = true
+        try { model.act(MailAction.Done, 1); fail("expected refusal") } catch (_: IllegalStateException) { }
+        assertEquals(1L, model.selectedId)
+        assertFalse(model.working)
+        core.rejectAction = false
+        model.act(MailAction.Later, 1)
+        assertEquals(listOf(1L) to 86_400L, core.snoozed)
+        assertNull(model.selectedId)
+    }
+}
+
+private class FakeCore : LagomCoreInterface {
+    var mail = emptyList<MailRow>()
+    var due: Long? = null
+    var pageCalls = 0
+    var pageGate: CompletableDeferred<Unit>? = null
+    var messageGate: CompletableDeferred<Unit>? = null
+    var syncGate: CompletableDeferred<Unit>? = null
+    var rejectRead = false
+    var rejectSend = false
+    var rejectSync = false
+    var rejectAction = false
+    val sent = mutableListOf<ComposeDraft>()
+    var snoozed: Pair<List<Long>, Long>? = null
+    override suspend fun accounts() = listOf(MailAccount("fixture", "fixture@example.test", "Fixture"))
+    override suspend fun mailbox(accountId: String?, mailbox: Mailbox, limit: UInt, offset: UInt): List<MailRow> {
+        pageCalls++
+        val snapshot = mail.filter { accountId == null || accountId == it.account }.drop(offset.toInt()).take(limit.toInt())
+        pageGate?.await()
+        return snapshot
+    }
+    override suspend fun inbox(limit: UInt, offset: UInt) = mailbox(null, Mailbox.INBOX, limit, offset)
+    override suspend fun nextSnooze() = due
+    override suspend fun sendFailures() = emptyList<SendFailure>()
+    override suspend fun syncAll() { syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
+    override suspend fun sync(accountId: String) = syncAll()
+    override suspend fun message(id: Long): MailMessage {
+        val result = MailMessage(mail.first { it.id == id }, "body", null, emptyList())
+        messageGate?.await(); return result
+    }
+    override suspend fun markRead(id: Long, read: Boolean) {
+        check(!rejectRead) { "Fixture read refused" }
+        mail = mail.map { if (it.id == id) it.copy(unread = !read) else it }
+    }
+    override suspend fun send(accountId: String, to: List<String>, cc: List<String>, subject: String, bodyMarkdown: String, replyTo: Long?): String {
+        check(!rejectSend) { "Fixture enqueue refused" }
+        sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo)
+        return "queued"
+    }
+    override suspend fun later(ids: List<Long>, untilUnix: Long) { check(!rejectAction); snoozed = ids to untilUnix }
+    override suspend fun done(ids: List<Long>) { check(!rejectAction) }
+    override suspend fun delete(ids: List<Long>) { check(!rejectAction) }
+    override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
+    override suspend fun retrySend(id: String) = Unit
+    override suspend fun replyDraft(id: Long) = ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "Re: Subject", "> body", id)
+    override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
+    override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
+}
