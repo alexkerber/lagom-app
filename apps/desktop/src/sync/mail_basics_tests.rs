@@ -4,6 +4,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn forward_downloads_once_and_read_flags_reach_the_server() {
+    // SQLite migrations must not consume the protocol hang guard on slow disks.
+    let path = std::env::temp_dir().join(format!("lagom-mail-basics-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let mut store = Store::open(&path).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
@@ -37,8 +40,6 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
             assert_eq!(downloads, 1);
             assert_eq!(flags, ["UID STORE 1 -FLAGS.SILENT (\\Seen)", "UID STORE 1 +FLAGS.SILENT (\\Seen)", "UID STORE 1 -FLAGS.SILENT (\\Seen)"]);
         });
-        let path = std::env::temp_dir().join(format!("lagom-mail-basics-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let mut store = Store::open(&path).unwrap();
         store.save_account(&account).unwrap();
         let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
         store.reset_uidvalidity(folder, 7).unwrap();
@@ -82,10 +83,13 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
 
 #[tokio::test]
 async fn review_two_rejected_toggles_keep_last_confirmed_flags() {
+    // SQLite migrations must not consume the protocol hang guard on slow disks.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+    let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+    let path = std::env::temp_dir().join(format!("lagom-queued-read-{}.db", account.id));
+    let mut store = Store::open(&path).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
-        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
         let server = tokio::spawn(async move {
             for (seen, status) in [(false, "NO"), (true, "BAD")] {
                 let (socket, _) = listener.accept().await.unwrap();
@@ -109,8 +113,6 @@ async fn review_two_rejected_toggles_keep_last_confirmed_flags() {
                 }
             }
         });
-        let path = std::env::temp_dir().join(format!("lagom-queued-read-{}.db", account.id));
-        let mut store = Store::open(&path).unwrap();
         store.save_account(&account).unwrap();
         let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
         store.reset_uidvalidity(folder, 7).unwrap();

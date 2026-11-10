@@ -118,9 +118,10 @@ async fn replies_queue_markdown_durably_without_network_or_cross_account_sends()
 
 #[tokio::test]
 async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (_dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (_dir, core) = fixture();
         let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
         let server = tokio::spawn(async move {
             let mut flags = 0;
@@ -172,10 +173,11 @@ async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
 
 #[tokio::test]
 async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        for all in [false, true] {
+    for all in [false, true] {
+        // Each independent fixture gets a protocol budget after its SQLite migrations.
+        let (_dir, core) = fixture();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-            let (_dir, core) = fixture();
             let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
             let server = tokio::spawn(async move {
                 let mut selected = Vec::new();
@@ -222,8 +224,8 @@ async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders()
             assert_eq!(core.message(inbox[0].id).await.unwrap().text_body, "body");
             assert_eq!(core.mailbox(Some(a.id), Mailbox::Sent, 10, 0).await.unwrap().len(), 1);
             assert_eq!(server.await.unwrap(), [(0, "\"INBOX\"".into()), (0, "\"Archive\"".into()), (1, "\"Sent\"".into())]);
-        }
-    }).await.unwrap();
+        }).await.unwrap();
+    }
 }
 
 #[test]
@@ -256,9 +258,10 @@ fn html_privacy_and_recipients_share_core_policy() {
 
 #[tokio::test]
 async fn done_and_delete_move_through_imap_without_crossing_accounts() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (_dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (_dir, core) = fixture();
         let (a, other, id, untouched) = {
             let mut s = core.stores.local.lock().unwrap();
             let a = fixture_account(&s, "moving@example.test", listener.local_addr().unwrap().port());
@@ -321,8 +324,9 @@ async fn done_and_delete_move_through_imap_without_crossing_accounts() {
 
 #[tokio::test]
 async fn manual_add_verifies_both_servers_before_saving() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (_dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let (_dir, core) = fixture();
         for accepted in [false, true] {
             let imap = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let smtp = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -560,9 +564,10 @@ async fn forward_refuses_unknown_or_unavailable_attachments_instead_of_dropping_
 
 #[tokio::test]
 async fn forward_fetches_only_missing_parts_and_reuses_the_cache() {
+    // SQLite migrations are setup, not part of the protocol hang guard.
+    let (dir, core) = fixture();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (dir, core) = fixture();
         let id = {
             let mut s = core.stores.local.lock().unwrap();
             let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());

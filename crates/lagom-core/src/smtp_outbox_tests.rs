@@ -94,7 +94,9 @@ async fn retry(reject_smtp: bool) {
     let id = store.enqueue(&account, &mail, 0).unwrap();
     assert!(store.claim_send(&id, 0).unwrap());
     let pending = store.pending(&id).unwrap();
-    let result = send_queued(&account, "fixture", &pending, &mut store).await;
+    // Bound each protocol attempt, not synchronous SQLite setup or reopening the store.
+    let result = tokio::time::timeout(Duration::from_secs(10), send_queued(&account, "fixture", &pending, &mut store))
+        .await.expect("first send attempt completes");
     assert!(result.is_err());
     assert_eq!(matches!(result, Err(Error::SentCopy)), !reject_smtp);
     assert_eq!(store.pending(&id).unwrap().submitted, !reject_smtp);
@@ -105,7 +107,8 @@ async fn retry(reject_smtp: bool) {
     assert!(store.due_outbox(&account.id, 0).unwrap().is_empty());
     for id in store.due_outbox(&account.id, i64::MAX).unwrap() {
         assert!(store.claim_send(&id, i64::MAX).unwrap());
-        send_queued(&account, "fixture", &store.pending(&id).unwrap(), &mut store).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), send_queued(&account, "fixture", &store.pending(&id).unwrap(), &mut store))
+            .await.expect("retry completes").unwrap();
     }
     assert!(matches!(store.pending(&id), Err(Error::NotFound)));
     assert_eq!(submissions.lock().unwrap().len(), if reject_smtp { 2 } else { 1 });
@@ -121,12 +124,12 @@ async fn retry(reject_smtp: bool) {
 
 #[tokio::test]
 async fn outbox_retries_refused_smtp_after_reopen() {
-    tokio::time::timeout(Duration::from_secs(10), retry(true)).await.unwrap();
+    retry(true).await;
 }
 
 #[tokio::test]
 async fn outbox_retries_sent_copy_without_resubmitting_smtp() {
-    tokio::time::timeout(Duration::from_secs(10), retry(false)).await.unwrap();
+    retry(false).await;
 }
 
 #[tokio::test]
