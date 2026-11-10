@@ -1,6 +1,7 @@
 //! async-imap provides CONDSTORE and cancellable IDLE without a dedicated polling
 //! thread; Tokio/rustls also shares the desktop's existing runtime dependencies.
 mod guard;
+mod drafts;
 mod inline;
 mod mailbox;
 pub(crate) use mailbox::decode as decode_mailbox;
@@ -197,6 +198,13 @@ impl ImapSync {
         if limit == 0 {
             return Err(Error::Invalid("sync limit must be positive"));
         }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        for id in store.due_drafts(&self.account.id, now)? {
+            if let Err(error) = self.sync_draft(store, &id, now).await {
+                store.draft_sync_failed(&id, &error, now)?;
+                return Err(error);
+            }
+        }
         for folder in self.list_folders(store).await? {
             // Stop here: after an error this session may hold a half-read response.
             self.sync_folder(store, folder.id, limit).await.map_err(|e| match e {
@@ -228,10 +236,13 @@ impl ImapSync {
         Ok((store.folder(id)?, mailbox))
     }
     async fn all_uids(&mut self) -> Result<HashSet<u32>> {
+        self.search_uids("ALL").await
+    }
+    async fn search_uids(&mut self, query: &str) -> Result<HashSet<u32>> {
         use async_imap::imap_proto::{MailboxDatum, Response, Status};
         // async-imap's search parser discards the tagged status, even after partial results.
         tokio::time::timeout(TIMEOUT, async {
-            let tag = self.session.run_command("UID SEARCH ALL").await
+            let tag = self.session.run_command(format!("UID SEARCH {query}")).await
                 .map_err(|_| Error::Network("IMAP operation failed"))?;
             let mut uids = HashSet::new();
             loop {
@@ -253,6 +264,9 @@ impl ImapSync {
             return Err(Error::Invalid("sync limit must be positive"));
         }
         let (folder, mailbox) = self.select(store, id).await?;
+        if folder.role == FolderRole::Drafts {
+            return self.read_drafts(store, &folder, limit).await;
+        }
         let present = self.all_uids().await?;
         let mut sorted: Vec<_> = present.iter().copied().filter(|u| *u > 0).collect();
         sorted.sort_unstable();
@@ -876,6 +890,8 @@ mod tests {
     #[test]
     fn roles_and_input() {
         assert_eq!(role("Localized", &[NameAttribute::Sent]), FolderRole::Sent);
+        assert_eq!(role("Localized", &[NameAttribute::Drafts]), FolderRole::Drafts);
+        for name in ["Drafts", "Draft", "[Gmail]/Drafts"] { assert_eq!(role(name, &[]), FolderRole::Drafts); }
         assert_eq!(role("Archive", &[]), FolderRole::Archive);
         assert!(validate_folder("bad\r\nDELETE").is_err());
         assert_eq!(uid_set(&[1, 5, 9]), "1,5,9");

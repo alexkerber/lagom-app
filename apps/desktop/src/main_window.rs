@@ -185,6 +185,7 @@ mod agenda;
 mod week;
 mod new_event;
 mod home;
+mod drafts;
 pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
@@ -201,6 +202,7 @@ const SECTIONS: [(&str, &str, &str); 4] = [
 /// What fills the main panel.
 enum Page {
     Mail,
+    Drafts,
     Home,
     Calendar,
     Todo,
@@ -283,6 +285,9 @@ pub struct MainWindow {
     compose: Option<gpui::Entity<Compose>>,
     // Saved drafts, newest last. R and C reopen the newest.
     drafts: Vec<gpui::Entity<Compose>>,
+    draft_rows: Vec<lagom_core::outbox::DraftSummary>,
+    draft_read: Option<Task<()>>,
+    draft_open: Option<Task<()>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
@@ -401,6 +406,9 @@ impl MainWindow {
             palette: None,
             compose: None,
             drafts: Vec::new(),
+            draft_rows: Vec::new(),
+            draft_read: None,
+            draft_open: None,
             sending: Vec::new(),
             live,
             demo,
@@ -663,6 +671,7 @@ impl MainWindow {
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+        self.draft_open = None;
         self.release(false, cx);
         self.toast = None;
         let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
@@ -735,7 +744,11 @@ impl MainWindow {
         }
         for compose in self.drafts.iter().chain(self.compose.iter()) {
             if compose.read(cx).is_modal() || compose.read(cx).keeps_draft() {
-                saved &= compose.update(cx, |c, cx| c.save(cx));
+                saved &= compose.update(cx, |c, cx| {
+                    let saved = c.save(cx);
+                    if saved { c.sync_draft(cx); }
+                    saved
+                });
             }
         }
         if !saved { self.notify("Could not save local edits. Check local storage before closing.", cx); }
@@ -750,6 +763,7 @@ impl MainWindow {
                     this.drafts.push(compose.clone());
                 }
             }
+            this.reload_draft_rows(cx);
             this.sending.retain(|c| c != compose);
             if this.compose.is_none() && this.palette.is_none() {
                 window.focus(&this.focus);
@@ -761,6 +775,12 @@ impl MainWindow {
             match e {
                 // The sheet leaves the modal slot but stays alive for its Undo window. The inbox
                 // takes the keys meanwhile.
+                ComposeEvent::DraftsChanged(account) => {
+                    if let Some(live) = &this.live {
+                        if !live.bridge.send(Cmd::Drafts(account.clone())) { this.worker_gone(cx); }
+                    }
+                    this.reload_draft_rows(cx);
+                }
                 ComposeEvent::Sending => {
                     if this.compose.as_ref() == Some(compose) {
                         this.compose = None;
@@ -1386,11 +1406,11 @@ impl MainWindow {
             Some(live) => live.accounts.iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == live.current)).collect(),
             None => mail::demo_accounts().iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == 0)).collect(),
         };
-        let on_mail = matches!(self.page, Page::Mail);
+        let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
         let fade = self.sidebar_fade.map(|at| ease_out_quint()((at.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.))).unwrap_or(1.);
         let show_mail = on_mail || self.sidebar_fade.is_some();
         let unread = if self.live.is_none() { self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count() } else { self.today.unread };
-        let open_kind = |kind| on_mail && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
+        let open_kind = |kind| matches!(self.page, Page::Mail) && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
         for (i, (name, address, active)) in accounts.into_iter().enumerate() {
             account_rows = account_rows.child(div().flex().flex_col()
@@ -1451,7 +1471,7 @@ impl MainWindow {
                     .gap(px(2.))
                     .flex_shrink_0()
                     .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
-                        let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
+                        let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
                         // Unread mail is a filled badge, so it never reads as a shortcut; every row keeps its ⌘ key.
                         sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
@@ -1465,14 +1485,17 @@ impl MainWindow {
                     })))
                 .when(show_mail, |d| d.child(div().id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
                     .flex().flex_col().gap(px(2.)).opacity(if on_mail { fade } else { 1. - fade })
-                    .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
-                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail) { cx.stop_propagation(); } }))
+                    .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } }))
+                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } }))
                     .child(self.mailbox_row(0, cx))
                     .child(nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
-                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Later, cx); })))
+                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Later, cx); })))
                     .child(self.mailbox_row(2, cx))
                     .child(self.mailbox_row(1, cx))
-                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail) { this.open_kind(Kind::Trash, cx); })))
+                    .child(nav("icons/edit-draft.svg", "Drafts", Some(self.draft_rows.len()), matches!(self.page, Page::Drafts))
+                        .debug_selector(|| "nav-Drafts".into())
+                        .on_click(cx.listener(|this, _, window, cx| this.show_drafts(window, cx))))
+                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Trash, cx); })))
                 .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(200.)))
                 .child(account_rows.mt(px(18.))))))
             .child(
@@ -2175,6 +2198,7 @@ impl Render for MainWindow {
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
+            Page::Drafts => "Drafts".into(),
             Page::Home => "Today".into(),
             Page::Todo => "Todo".into(),
             Page::Calendar => "Calendar".into(),
@@ -2188,11 +2212,12 @@ impl Render for MainWindow {
         let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && self.inbox.account_filter.is_none() && !self.inbox.unread_only;
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
-        let on_mail = matches!(self.page, Page::Mail);
+        let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
         if self.sidebar_mail != on_mail { self.sidebar_mail = on_mail; self.sidebar_fade = Some(Instant::now()); }
         if self.sidebar_fade.is_some_and(|at| at.elapsed() < MOTION) { window.request_animation_frame(); }
         else { self.sidebar_fade = None; }
         let panel = match &self.page {
+            Page::Drafts => self.drafts_view(cx),
             Page::Home | Page::Todo => self.tasks_view(window, cx),
             Page::Calendar => self.week_view(window, cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
@@ -3625,7 +3650,9 @@ mod dispatch {
         view.update(cx, |v, cx| v.undo(cx));
         frame(cx);
         // A late frame must reveal the restored last row even if its motion has ended.
-        view.update(cx, |v, _| v.entering[0].at = Instant::now() - SPRING);
+        view.update(cx, |v, _| {
+            if let Some(row) = v.entering.first_mut() { row.at = Instant::now() - SPRING; }
+        });
         frame(cx);
         selected_in_view(&view, cx);
         view.update(cx, |v, cx| v.open_box(Some(0), cx));
@@ -3647,7 +3674,10 @@ mod dispatch {
         });
         for released in [false, true] {
             view.update(cx, |v, cx| {
-                if released { v.release(false, cx); }
+                if released {
+                    v.release(false, cx);
+                    v.spring.as_mut().unwrap().2 = at;
+                }
                 let layout = v.row_layout(at + Duration::from_millis(70));
                 assert!((layout.bottom() - layout.y(9999) - ROW_H).abs() < 0.1,
                     "a swiped or springing row renders at full height after Undo");
