@@ -198,7 +198,8 @@ final class MailModel {
     }
 
     func setRead(id: Int64, read: Bool) async {
-        guard let core, actingID != id, !readingIDs.contains(id) else { return }
+        // Demo accounts have no server or password; opening an unread message must not raise a keychain error.
+        guard let core, !Storage.demo, actingID != id, !readingIDs.contains(id) else { return }
         readingIDs.insert(id)
         defer { readingIDs.remove(id) }
         do {
