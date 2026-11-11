@@ -137,3 +137,46 @@ func grouped<Item>(_ items: [Item], by key: (Item) -> String) -> [RowGroup<Item>
     }
     return groups
 }
+
+/// A timed event placed on the week grid, desktop `week::layout`: minutes from midnight, and its lane among overlaps.
+struct WeekBlock: Equatable {
+    let index: Int
+    let start: Double
+    let end: Double
+    var lane = 0
+    var lanes = 1
+}
+
+/// Timed events on `day` as blocks at least 36 minutes tall; overlapping events share the width in lanes.
+func weekBlocks(_ events: [AgendaItem], day: Date, calendar: Calendar = .current) -> [WeekBlock] {
+    let midnight = calendar.startOfDay(for: day)
+    guard let next = calendar.date(byAdding: .day, value: 1, to: midnight) else { return [] }
+    let (from, to) = (Int64(midnight.timeIntervalSince1970), Int64(next.timeIntervalSince1970))
+    func minute(_ unix: Int64) -> Double {
+        let c = calendar.dateComponents([.hour, .minute, .second], from: Date(timeIntervalSince1970: TimeInterval(unix)))
+        return Double(c.hour ?? 0) * 60 + Double(c.minute ?? 0) + Double(c.second ?? 0) / 60
+    }
+    // shortcut: a repeated DST hour shares one wall-clock row, as on desktop.
+    var blocks = events.enumerated().filter { !$0.element.allDay && $0.element.startUnix < to && $0.element.endUnix > from }.map { i, e in
+        let top = e.startUnix <= from ? 0 : minute(e.startUnix)
+        let bottom = e.endUnix >= to ? 1440 : minute(e.endUnix)
+        // A late event keeps its 36 minutes by starting earlier, so it never draws flat at the bottom.
+        let start = min(top, 1440 - 36)
+        return WeekBlock(index: i, start: start, end: min(max(bottom, start + 36), 1440))
+    }
+    blocks.sort { ($0.start, $0.end, $0.index) < ($1.start, $1.end, $1.index) }
+    var group = 0, until = 0.0, lanes: [Double] = []
+    for i in blocks.indices {
+        if blocks[i].start >= until {
+            for j in group..<i { blocks[j].lanes = lanes.count }
+            group = i
+            lanes.removeAll()
+        }
+        let lane = lanes.firstIndex { $0 <= blocks[i].start } ?? lanes.count
+        if lane == lanes.count { lanes.append(blocks[i].end) } else { lanes[lane] = blocks[i].end }
+        blocks[i].lane = lane
+        until = group == i ? blocks[i].end : max(until, blocks[i].end)
+    }
+    for j in group..<blocks.count { blocks[j].lanes = lanes.count }
+    return blocks
+}

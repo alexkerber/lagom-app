@@ -82,6 +82,27 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(groups.map(\.items), [["a1", "a2"], ["b1"], ["a3"]])
     }
 
+    func testWeekBlocksShareOverlapsInLanesAsOnDesktop() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let day = calendar.date(from: DateComponents(year: 2026, month: 11, day: 10))!
+        let at = { (hour: Double) in Int64(day.timeIntervalSince1970 + hour * 3600) }
+        func event(_ from: Double, _ to: Double, allDay: Bool = false) -> AgendaItem {
+            AgendaItem(day: "2026-11-10", account: "a", calendar: "c", title: "", startUnix: at(from), endUnix: at(to), allDay: allDay, location: nil, joinUrl: nil)
+        }
+        let events = [event(9, 10), event(9.5, 11), event(10, 10.25), event(12, 12.1), event(-2, 1), event(23, 26), event(0, 24, allDay: true), event(23.98, 24)]
+        let blocks = weekBlocks(events, day: day, calendar: calendar)
+        XCTAssertEqual(blocks.map(\.index), [4, 0, 1, 2, 3, 5, 7], "all-day events stay off the grid")
+        XCTAssertEqual(blocks.map(\.lane), [0, 0, 1, 0, 0, 0, 1], "the 10:00 event reuses the lane the 9:00 one left")
+        XCTAssertEqual(blocks.map(\.lanes), [1, 2, 2, 2, 1, 2, 2])
+        XCTAssertEqual(blocks[6].end - blocks[6].start, 36, "a 23:59 event moves up to stay 36 minutes tall")
+        XCTAssertEqual(blocks[0].start, 0, "yesterday's overnight event starts at the top")
+        XCTAssertEqual(blocks[4].end, 12 * 60 + 36, "a six-minute event draws 36 minutes tall")
+        XCTAssertEqual(blocks[5].end, 1440, "an event past midnight ends at the bottom")
+        XCTAssertEqual(PlannerModel.monday(day.addingTimeInterval(5 * 86400 + 3600), calendar: calendar),
+                       calendar.date(from: DateComponents(year: 2026, month: 11, day: 9)), "Sunday belongs to the week before")
+    }
+
     func testSectionsKeepTheirStoredNames() {
         // `@AppStorage` restores these strings; renaming one would reset the user's last page.
         XCTAssertEqual(AppSection.allCases.map(\.rawValue), ["today", "mail", "calendar", "todo"])

@@ -364,12 +364,19 @@ struct NewTaskView: View {
 }
 
 /// Cached events by day under the desktop's month title; each day headed as the desktop week's columns.
+/// iPad shows the desktop's week grid instead.
 struct CalendarView: View {
     let planner: PlannerModel
     let model: MailModel
+    @Environment(\.horizontalSizeClass) private var width
     private let words = DateWords()
 
     var body: some View {
+        // A landscape Pro Max is regular width too; only iPad gets the grid.
+        if width == .regular && UIDevice.current.userInterfaceIdiom == .pad { WeekGrid(planner: planner, model: model) } else { list }
+    }
+
+    private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Text(Date.now, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
@@ -421,5 +428,231 @@ private struct DayHeader: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(DateWords().dayTitle(title))
         .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The desktop week (`week::week_view`): day columns on an hour grid, all-day events above, the now line across.
+private struct WeekGrid: View {
+    let planner: PlannerModel
+    let model: MailModel
+    private static let hour: CGFloat = 60
+    private static let gutter: CGFloat = 48
+    private let calendar = Calendar.current
+    @State private var position = ScrollPosition(edge: .top)
+    @State private var allDayHeight: CGFloat = 0
+
+    var body: some View {
+        let days = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: planner.weekStart) }
+        let byDay = Dictionary(grouping: planner.week, by: \.day)
+        let words = DateWords()
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            if !planner.calendarConnected && planner.week.isEmpty {
+                EmptyState(icon: "calendar", title: "Calendar needs a Google account",
+                           detail: "lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar.")
+                    .frame(maxHeight: .infinity)
+            } else {
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: Self.gutter, height: 1)
+                    ForEach(days, id: \.self) { WeekDayHead(day: $0).frame(maxWidth: .infinity, alignment: .leading) }
+                }
+                let allDay = days.map { day in (byDay[words.coreDay(day)] ?? []).filter(\.allDay) }
+                if allDay.contains(where: { !$0.isEmpty }) {
+                    let row = HStack(alignment: .top, spacing: 0) {
+                        Text("All day").lagomFont(.small).foregroundStyle(Theme.secondary).frame(width: Self.gutter, alignment: .leading)
+                        ForEach(allDay.indices, id: \.self) { i in
+                            VStack(spacing: 3) {
+                                ForEach(Array(zip(eventKeys(allDay[i]), allDay[i])), id: \.0) { _, event in
+                                    WeekEvent(event: event, accent: accountAccent(model.accounts, event.account), compact: true)
+                                }
+                            }
+                            .padding(.horizontal, 2).frame(maxWidth: .infinity, alignment: .top)
+                        }
+                    }
+                    // Many all-day events scroll in a band, as desktop's 150 px strip, so the hours stay visible.
+                    ScrollView { row.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { allDayHeight = $0 } }
+                        .frame(height: min(allDayHeight, 110)).scrollBounceBehavior(.basedOnSize)
+                }
+                grid(days: days, byDay: byDay)
+            }
+        }
+        .padding(.horizontal, 24).padding(.top, 8)
+        .background(Theme.background)
+        .task { await planner.reloadWeek() }
+    }
+
+    private var header: some View {
+        // The month a week belongs to is its Thursday's, as ISO weeks count.
+        let thursday = calendar.date(byAdding: .day, value: 3, to: planner.weekStart) ?? planner.weekStart
+        return HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text(thursday, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
+                Text(thursday, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
+            }
+            .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            IconButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
+            Button("Today") { Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
+            IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+        }
+        .frame(minHeight: 44)
+    }
+
+    private func grid(days: [Date], byDay: [String: [AgendaItem]]) -> some View {
+        let words = DateWords()
+        let blocks = days.map { weekBlocks(byDay[words.coreDay($0)] ?? [], day: $0, calendar: calendar) }
+        // Opens at the week's first event, or 08:00 on an empty week.
+        let first = blocks.joined().map(\.start).min().map { max(0, Int($0 / 60) - 1) } ?? 8
+        return ScrollView {
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(0..<24, id: \.self) { hour in
+                            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                                Text(String(format: "%02d", hour)).lagomFont(.base).foregroundStyle(Theme.ink)
+                                Text("00").lagomFont(.small).foregroundStyle(Theme.secondary)
+                            }
+                            .monospacedDigit().padding(.trailing, 8)
+                            .frame(width: Self.gutter, height: Self.hour, alignment: .topTrailing).offset(y: -8)
+                        }
+                    }
+                    .accessibilityHidden(true)
+                    ForEach(days.indices, id: \.self) { i in
+                        column(day: days[i], events: byDay[words.coreDay(days[i])] ?? [], blocks: blocks[i])
+                    }
+                }
+                .padding(.top, 12)
+                .overlay(alignment: .topLeading) { NowLine24(days: days, hour: Self.hour, gutter: Self.gutter).padding(.top, 12) }
+        }
+        .scrollPosition($position)
+        .task(id: "\(planner.weekStart) \(first)") { position.scrollTo(y: CGFloat(first) * Self.hour) }
+        .refreshable { await planner.reloadAgenda() }
+    }
+
+    private func column(day: Date, events: [AgendaItem], blocks: [WeekBlock]) -> some View {
+        let weekend = (calendar.component(.weekday, from: day) + 5) % 7 >= 5
+        let fill = calendar.isDateInToday(day) ? Theme.accent.opacity(0.06) : weekend ? Theme.subtle : Theme.background
+        let keys = eventKeys(events)
+        return GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                fill
+                ForEach(0..<24, id: \.self) { hour in
+                    Rectangle().fill(Theme.line).frame(height: 1).offset(y: CGFloat(hour) * Self.hour)
+                }
+                Rectangle().fill(Theme.line).frame(width: 1)
+                // Keyed by the event, not its position, so an open popover stays on its event across a refresh.
+                ForEach(Array(zip(blocks.map { keys[$0.index] }, blocks)), id: \.0) { _, block in
+                    let width = (geo.size.width - 3) / CGFloat(block.lanes)
+                    WeekEvent(event: events[block.index], accent: accountAccent(model.accounts, events[block.index].account),
+                              compact: block.end - block.start < 45)
+                        .frame(width: width - 2, height: CGFloat(block.end - block.start) * Self.hour / 60 - 2)
+                        .offset(x: 3 + CGFloat(block.lane) * width, y: CGFloat(block.start) * Self.hour / 60 + 1)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity).frame(height: 24 * Self.hour)
+    }
+}
+
+/// ForEach keys from everything the grid shows of an event, not where it sits. Copies that differ in
+/// nothing shown are numbered to stay unique; if they swap numbers, the popover still shows the same content.
+private func eventKeys(_ events: [AgendaItem]) -> [[String?]] {
+    var seen: [[String?]: Int] = [:]
+    return events.map { e in
+        let key: [String?] = [e.account, e.calendar, "\(e.startUnix)", "\(e.endUnix)", e.title, e.location, e.joinUrl]
+        seen[key, default: 0] += 1
+        return key + ["\(seen[key]!)"]
+    }
+}
+
+/// "Mon 9", weekends quieter, today in the accent circle.
+private struct WeekDayHead: View {
+    let day: Date
+
+    var body: some View {
+        let today = Calendar.current.isDateInToday(day)
+        let weekend = (Calendar.current.component(.weekday, from: day) + 5) % 7 >= 5
+        HStack(spacing: 6) {
+            Text(day, format: .dateTime.weekday(.abbreviated)).lagomFont(.base).foregroundStyle(Theme.secondary)
+            Text(day, format: .dateTime.day()).lagomFont(.title)
+                .foregroundStyle(today ? Theme.accentInk : weekend ? Theme.secondary : Theme.ink)
+                .frame(minWidth: 32, minHeight: 32)
+                .background(today ? Theme.accent : .clear, in: Circle())
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// An event on the grid, desktop `event_block`: the account's tint and bar, the title, then the time. Tap shows its details.
+private struct WeekEvent: View {
+    let event: AgendaItem
+    let accent: Color?
+    let compact: Bool
+    @State private var shown = false
+
+    var body: some View {
+        let tint = accent ?? Theme.accent
+        let start = Date(timeIntervalSince1970: TimeInterval(event.startUnix))
+        let end = Date(timeIntervalSince1970: TimeInterval(event.endUnix))
+        let title = event.title.isEmpty ? "(No title)" : event.title
+        Button { shown = true } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(compact && !event.allDay ? "\(title) · \(start.formatted(.dateTime.hour().minute()))" : title)
+                    .lagomFont(.small, .medium).foregroundStyle(Theme.ink).lineLimit(compact ? 1 : 2)
+                if !compact && !event.allDay {
+                    Text(start.formatted(.dateTime.hour().minute())).lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary).lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .frame(maxWidth: .infinity, maxHeight: event.allDay ? nil : .infinity, alignment: .topLeading)
+            .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+            .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 2) }
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel([event.allDay ? "All day" : nil, title, event.location].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: ", "))
+        .accessibilityValue(event.allDay ? "" : (start..<max(start, end)).formatted(.interval.hour().minute()))
+        .popover(isPresented: $shown) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).lagomFont(.title, .semibold)
+                Text(event.allDay ? "All day" : (start..<max(start, end)).formatted(.interval.weekday().day().month().hour().minute()))
+                    .lagomFont(.small).foregroundStyle(Theme.secondary)
+                if let location = event.location, !location.isEmpty { Text(location).lagomFont(.base) }
+                Text(event.calendar).lagomFont(.small).foregroundStyle(Theme.secondary)
+                if let link = event.joinUrl.flatMap(URL.init(string:)), ["https", "http"].contains(link.scheme?.lowercased() ?? "") {
+                    Link(destination: link) { ButtonLabel(title: "Join meeting", icon: "video") }.buttonStyle(HouseButtonStyle())
+                }
+            }
+            .padding(16).frame(minWidth: 280, alignment: .leading)
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// The now line across the week, desktop `current-time`: the time in the gutter, a dot on today's column.
+private struct NowLine24: View {
+    let days: [Date]
+    let hour: CGFloat
+    let gutter: CGFloat
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            if let today = days.firstIndex(where: { Calendar.current.isDate($0, inSameDayAs: context.date) }) {
+                let c = Calendar.current.dateComponents([.hour, .minute], from: context.date)
+                let y = (CGFloat(c.hour ?? 0) + CGFloat(c.minute ?? 0) / 60) * hour
+                GeometryReader { geo in
+                    let column = (geo.size.width - gutter) / CGFloat(days.count)
+                    Rectangle().fill(Theme.now).frame(height: 1.5).padding(.leading, gutter).offset(y: y)
+                    Circle().fill(Theme.now).frame(width: 7, height: 7).offset(x: gutter + CGFloat(today) * column - 3, y: y - 2.75)
+                    Text(context.date, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit().foregroundStyle(Theme.accentInk)
+                        .frame(width: gutter - 4).background(Theme.now, in: RoundedRectangle(cornerRadius: 4)).offset(y: y - 9)
+                }
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Now, \(context.date.formatted(.dateTime.hour().minute()))")
+            }
+        }
     }
 }
