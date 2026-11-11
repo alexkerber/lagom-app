@@ -10,6 +10,10 @@ final class PlannerModel {
     /// Each list's tasks, open first, as core orders them.
     var todos: [Int64: [Todo]] = [:]
     var agenda: [AgendaItem] = []
+    /// iPad Calendar's week: its Monday and that week's events.
+    // shortcut: a time zone change keeps the old Monday's instant until Today is tapped; re-anchor on NSSystemTimeZoneDidChange if travellers report it.
+    var weekStart = PlannerModel.monday(Date())
+    var week: [AgendaItem] = []
     var calendarConnected = false
     var counts: [MailCounts] = []
     var error: String?
@@ -62,6 +66,32 @@ final class PlannerModel {
             calendarConnected = try await core.calendarConnected()
             self.agenda = agenda
         } catch { self.error = error.localizedDescription }
+        await reloadWeek()
+    }
+
+    private var weekLoad = 0
+
+    func reloadWeek() async {
+        guard let core else { return }
+        weekLoad += 1
+        let load = weekLoad
+        do {
+            let week = try await core.agenda(startDay: DateWords().coreDay(weekStart), days: 7)
+            if load == weekLoad { self.week = week } // only the latest request lands
+        } catch { if load == weekLoad { self.error = error.localizedDescription } }
+    }
+
+    /// Moves the week by `weeks`; 0 goes back to this week.
+    func showWeek(_ weeks: Int) async {
+        weekStart = weeks == 0 ? Self.monday(Date()) : Calendar.current.date(byAdding: .day, value: 7 * weeks, to: weekStart) ?? weekStart
+        week = []
+        await reloadWeek()
+    }
+
+    nonisolated static func monday(_ date: Date, calendar: Calendar = .current) -> Date {
+        let day = calendar.startOfDay(for: date)
+        let sinceMonday = (calendar.component(.weekday, from: day) + 5) % 7
+        return calendar.date(byAdding: .day, value: -sinceMonday, to: day) ?? day
     }
 
     /// Returns false, without asking core, for a blank title.
