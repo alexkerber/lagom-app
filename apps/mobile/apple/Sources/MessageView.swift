@@ -1,58 +1,133 @@
 import SwiftUI
 import WebKit
 
+/// The desktop reading pane: the subject, then the message card (sender, date, actions menu, body,
+/// attachments), then the reply box.
 struct MessageView: View {
     let message: MailMessage
     let model: MailModel
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.horizontalSizeClass) private var width
     @State private var showText = false
-    @ScaledMetric(relativeTo: .title2) private var subjectSize = 20.0
-    @ScaledMetric(relativeTo: .body) private var bodySize = 14.0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(message.row.subject).font(.system(size: subjectSize, weight: .semibold))
-                Text(message.row.senderName).fontWeight(.medium)
-                Text(message.row.senderAddress).font(.callout).foregroundStyle(Theme.secondary).textSelection(.enabled)
-                Text(Date(timeIntervalSince1970: TimeInterval(message.row.dateUnix)), style: .date)
-                    .font(.caption).foregroundStyle(Theme.secondary)
-                if message.htmlBody != nil {
-                    Toggle("Plain text", isOn: $showText).font(.caption)
-                    if model.remoteImagesID != message.row.id {
-                        Button("Load images") { model.loadRemoteImages(id: message.row.id) }.font(.caption)
-                        Text("Remote images are blocked").font(.caption).foregroundStyle(Theme.secondary)
+        let row = message.row
+        let pad: CGFloat = width == .regular ? 24 : 16
+        VStack(alignment: .leading, spacing: 16) {
+            Text(RowPresentation(row).subject).lagomFont(.subject, .semibold).lineLimit(3).textSelection(.enabled)
+                .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                if message.htmlBody != nil && !showText && model.remoteImagesID != row.id {
+                    HStack(spacing: 10) {
+                        HouseButton(title: "Load remote images", icon: "image") { model.loadRemoteImages(id: row.id) }
+                        Text("Remote images are blocked").lagomFont(.small).foregroundStyle(Theme.secondary)
                     }
                 }
-            }.padding(.horizontal)
-            if let html = message.htmlBody, !showText {
-                if let core = model.core {
-                    MailHTML(document: mailDocument(html: html, dark: scheme == .dark, messageId: message.row.id,
-                                                    remote: model.remoteImagesID == message.row.id),
-                             messageID: message.row.id, core: core)
-                        .id("\(message.row.id)-\(model.inlineRevision)")
-                }
-            } else {
-                ScrollView {
-                    Text(message.textBody).font(.system(size: bodySize)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-                }
+                content
+                if !message.attachments.isEmpty { attachments }
             }
-            // shortcut: attachment metadata only in v1; add downloads when mobile file handling is implemented.
-            if !message.attachments.isEmpty {
-                ScrollView(.horizontal) {
-                    HStack {
-                        ForEach(message.attachments, id: \.section) { part in
-                            Label("\(part.filename) · \(ByteCountFormatter.string(fromByteCount: Int64(part.size), countStyle: .file))", systemImage: "paperclip")
-                                .font(.caption).padding(8).background(Theme.subtle, in: RoundedRectangle(cornerRadius: 10))
-                        }
-                    }.padding(.horizontal)
-                }.accessibilityLabel("Attachment information")
+            .padding(width == .regular ? 20 : 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.line))
+            Button { Task { await model.prepareCompose(id: row.id, kind: .reply) } } label: {
+                HStack(spacing: 8) {
+                    Icon("reply")
+                    Text("Reply to \(RowPresentation(row).sender)").lagomFont(.base).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if model.preparingCompose { ProgressView().accessibilityLabel("Preparing message") }
+                }
+                .foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(model.preparingCompose)
+        }
+        .padding(pad)
+        .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(Theme.ink)
+        .onChange(of: message.row.id) { _, _ in showText = false }
+    }
+
+    /// Initials, sender, address and date, with the desktop's message menu.
+    private var header: some View {
+        let row = message.row
+        let sender = RowPresentation(row).sender
+        let initials = sender.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        return HStack(spacing: 12) {
+            Text(initials).lagomFont(.small, .semibold)
+                .frame(width: 36, height: 36)
+                .background(Theme.subtle, in: Circle())
+                .overlay(Circle().strokeBorder(Theme.line))
+                .accessibilityHidden(true)
+            // The address wraps, and a very long one keeps its domain, so a look-alike sender stays visible.
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sender).lagomFont(.base, .semibold).lineLimit(2)
+                Text(row.senderAddress).lagomFont(.small).foregroundStyle(Theme.secondary)
+                    .lineLimit(4).truncationMode(.middle).textSelection(.enabled)
+                Text(DateWords().readingDate(Date(timeIntervalSince1970: TimeInterval(row.dateUnix))))
+                    .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Menu {
+                Button("Reply all") { Task { await model.prepareCompose(id: row.id, kind: .replyAll) } }
+                Button("Forward") { Task { await model.prepareCompose(id: row.id, kind: .forward) } }
+                Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: row.id, read: row.unread) } }
+                if message.htmlBody != nil {
+                    Button(showText ? "Show formatted" : "Show plain text") { showText.toggle() }
+                }
+            } label: { Icon("more") }
+                .menuStyle(.button).buttonStyle(IconButtonStyle())
+                .accessibilityLabel("Message actions")
+                .padding(.trailing, -10)
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        if let html = message.htmlBody, !showText {
+            if let core = model.core {
+                MailHTML(document: mailDocument(html: html, dark: scheme == .dark, messageId: message.row.id,
+                                                remote: model.remoteImagesID == message.row.id),
+                         messageID: message.row.id, core: core)
+                    .id("\(message.row.id)-\(model.inlineRevision)")
+            }
+        } else {
+            ScrollView {
+                Text(message.textBody.isEmpty ? message.row.preview : message.textBody)
+                    .lagomFont(.body).lineSpacing(3)
+                    .foregroundStyle(message.textBody.isEmpty ? Theme.secondary : Theme.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(.top).foregroundStyle(Theme.ink).background(Theme.raised)
-        .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: message.row.id) { _, _ in showText = false }
+    }
+
+    /// Desktop attachment chips. shortcut: metadata only in v1; add downloads when mobile file handling is implemented.
+    private var attachments: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(message.attachments, id: \.section) { part in
+                    HStack(spacing: 12) {
+                        Icon("attachment").foregroundStyle(Theme.secondary)
+                        Text(part.filename).lagomFont(.snippet, .medium).lineLimit(1).truncationMode(.middle)
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(part.size), countStyle: .file))
+                            .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.attachment))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.attachment).strokeBorder(Theme.line))
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityLabel("Attachments")
     }
 }
 

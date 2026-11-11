@@ -19,51 +19,62 @@ struct AddAccountView: View {
     @State private var error: String?
 
     var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Email", text: $email).textContentType(.emailAddress).keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                if passwordStep {
-                    SecureField("Password", text: $password).textContentType(.password)
-                    Text("Gmail and iCloud require an app-specific password. Microsoft accounts may require OAuth, which is not available in this version.")
-                        .font(.footnote).foregroundStyle(Theme.secondary)
-                    // shortcut: Google/Microsoft OAuth on iOS needs per-platform client IDs; v1 uses passwords.
-                    Toggle("Advanced", isOn: $advanced)
-                    if advanced {
-                        Section("IMAP") {
-                            serverFields(host: $imapHost, port: $imapPort, username: $imapUser, tls: $imapTLS)
+        SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() }) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    FieldRow(label: "Email") {
+                        TextField("you@example.com", text: $email).textContentType(.emailAddress).keyboardType(.emailAddress)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
+                    }
+                    if passwordStep {
+                        FieldRow(label: "Password") {
+                            SecureField("App password", text: $password).textContentType(.password).accessibilityLabel("Password")
                         }
-                        Section("SMTP") {
-                            serverFields(host: $smtpHost, port: $smtpPort, username: $smtpUser, tls: $smtpTLS)
+                        Text("Gmail and iCloud require an app-specific password. Microsoft accounts may require OAuth, which is not available in this version.")
+                            .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.vertical, 12)
+                        // shortcut: Google/Microsoft OAuth on iOS needs per-platform client IDs; v1 uses passwords.
+                        Toggle("Advanced", isOn: $advanced).lagomFont(.base).frame(minHeight: 44)
+                        if advanced {
+                            server("IMAP", host: $imapHost, port: $imapPort, username: $imapUser, tls: $imapTLS)
+                            server("SMTP", host: $smtpHost, port: $smtpPort, username: $smtpUser, tls: $smtpTLS)
                         }
                     }
+                    if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(.vertical, 12) }
                 }
-                if let error { Text(error).foregroundStyle(Theme.danger) }
-                if connecting { ProgressView("Connecting…") }
+                .padding(.horizontal, 16)
             }
-            .navigationTitle("Add account")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { password = ""; dismiss() }.disabled(connecting) }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(passwordStep ? "Connect" : "Continue") {
-                        if passwordStep { Task { await connect() } }
-                        else { passwordStep = true; imapUser = email; smtpUser = email }
-                    }.disabled(email.isEmpty || connecting || (passwordStep && password.isEmpty))
-                }
+        } footer: {
+            HouseButton(title: passwordStep ? "Connect" : "Continue", icon: "account-add", primary: true) {
+                if passwordStep { Task { await connect() } }
+                else { passwordStep = true; imapUser = email; smtpUser = email }
             }
-            .disabled(connecting)
-            .interactiveDismissDisabled(connecting)
+            .disabled(email.isEmpty || connecting || (passwordStep && password.isEmpty))
+            if connecting {
+                ProgressView()
+                Text("Connecting…").lagomFont(.small).foregroundStyle(Theme.secondary)
+            }
+            Spacer(minLength: 0)
         }
+        .disabled(connecting)
+        .interactiveDismissDisabled(connecting)
     }
 
-    private func serverFields(host: Binding<String>, port: Binding<String>, username: Binding<String>, tls: Binding<Bool>) -> some View {
-        Group {
-            TextField("Host", text: host).textInputAutocapitalization(.never).autocorrectionDisabled()
-            TextField("Port", text: port).keyboardType(.numberPad)
-            TextField("Username", text: username).textInputAutocapitalization(.never).autocorrectionDisabled()
-            Picker("Security", selection: tls) {
-                Text("TLS").tag(true)
-                Text("STARTTLS").tag(false)
+    private func server(_ title: String, host: Binding<String>, port: Binding<String>, username: Binding<String>, tls: Binding<Bool>) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            GroupHeader(title: title).padding(.horizontal, -10)
+            FieldRow(label: "Host") {
+                TextField("", text: host).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("\(title) host")
+            }
+            FieldRow(label: "Port") { TextField("", text: port).keyboardType(.numberPad).accessibilityLabel("\(title) port") }
+            FieldRow(label: "Username") {
+                TextField("", text: username).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("\(title) username")
+            }
+            FieldRow(label: "Security") {
+                Picker("\(title) security", selection: tls) {
+                    Text("TLS").tag(true)
+                    Text("STARTTLS").tag(false)
+                }
+                .pickerStyle(.segmented).fixedSize()
             }
         }
     }
