@@ -553,11 +553,12 @@ private struct WeekGrid: View {
     }
 }
 
-/// ForEach keys from what an event is, not where it sits; identical copies are numbered so keys stay unique.
+/// ForEach keys from everything the grid shows of an event, not where it sits. Copies that differ in
+/// nothing shown are numbered to stay unique; if they swap numbers, the popover still shows the same content.
 private func eventKeys(_ events: [AgendaItem]) -> [String] {
     var seen: [String: Int] = [:]
     return events.map { e in
-        let key = "\(e.account)|\(e.calendar)|\(e.startUnix)|\(e.endUnix)|\(e.title)"
+        let key = "\(e.account)|\(e.calendar)|\(e.startUnix)|\(e.endUnix)|\(e.title)|\(e.location ?? "")|\(e.joinUrl ?? "")"
         seen[key, default: 0] += 1
         return "\(key)#\(seen[key]!)"
     }
