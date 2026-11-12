@@ -1155,7 +1155,7 @@ impl MainWindow {
         .detach();
         cx.subscribe(&add, |this, add, e: &crate::accounts::SignIn, cx| {
             let cmd = match e {
-                crate::accounts::SignIn::Start => Cmd::SignIn(lagom_core::oauth::Provider::Google),
+                crate::accounts::SignIn::Start(provider) => Cmd::SignIn(*provider),
                 crate::accounts::SignIn::Cancel => Cmd::CancelSignIn,
             };
             let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(cmd));

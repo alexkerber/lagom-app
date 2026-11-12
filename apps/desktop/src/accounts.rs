@@ -8,6 +8,7 @@ use gpui::{
     Focusable, FontWeight, KeyDownEvent, SharedString, Subscription, Window,
 };
 use lagom_core::account::{Account, Security, ServerConfig};
+use lagom_core::oauth;
 use zeroize::Zeroizing;
 
 use crate::main_window::{button, icon, icon_button, mono, pressable};
@@ -60,7 +61,7 @@ impl Provider {
 
     pub fn note(self) -> &'static str {
         match self {
-            Provider::Outlook => "Outlook.com needs Microsoft sign-in (OAuth2), which lagom does not have yet. An app password works only where Microsoft still allows IMAP with one.",
+            Provider::Outlook => "Outlook.com needs Microsoft sign-in. An app password works only where Microsoft still allows IMAP with one.",
             Provider::Other => "Your provider's IMAP and SMTP servers. Use an app password if the provider offers one.",
             Provider::Gmail => "Gmail needs an app password, not your Google password. It needs 2-step verification.",
             Provider::ICloud | Provider::Fastmail => "Use an app password, not your normal password.",
@@ -152,7 +153,7 @@ enum State {
     Pick,
     Form,
     Connecting,
-    /// Google sign-in runs in the browser.
+    /// Google or Microsoft sign-in runs in the browser.
     SigningIn,
     /// Esc was pressed; the worker has not confirmed the cancel yet.
     Cancelling,
@@ -162,8 +163,8 @@ enum State {
 /// "Connect": the worker verifies and saves the account.
 pub struct Connect(pub Box<Account>, pub Zeroizing<String>);
 
-/// Start or cancel Google sign-in in the browser; the worker saves the account.
-pub enum SignIn { Start, Cancel }
+/// Start or cancel Google or Microsoft sign-in in the browser; the worker saves the account.
+pub enum SignIn { Start(oauth::Provider), Cancel }
 
 pub struct AddAccount {
     state: State,
@@ -171,10 +172,10 @@ pub struct AddAccount {
     /// Accounts exist, so Cancel can go back to the inbox.
     can_cancel: bool,
     advanced: bool,
-    /// Gmail with Google sign-in available: show the app-password fields only on request.
+    /// Browser sign-in available: show the app-password fields only on request.
     app_password: bool,
-    /// This build has a Google client for browser sign-in.
-    google_client: bool,
+    /// Which OAuth clients this build has.
+    available: fn(oauth::Provider) -> bool,
     focus: FocusHandle,
     email: Entity<TextInput>,
     password: Entity<TextInput>,
@@ -222,7 +223,7 @@ impl AddAccount {
             can_cancel,
             advanced: false,
             app_password: false,
-            google_client: lagom_core::oauth::available(lagom_core::oauth::Provider::Google),
+            available: oauth::available,
             focus,
             email,
             password,
@@ -246,7 +247,7 @@ impl AddAccount {
         }
         (self.imap_security, self.smtp_security) = (s.imap_security, s.smtp_security);
         self.state = State::Form;
-        window.focus(&if self.google() { self.focus.clone() } else { self.email.focus_handle(cx) });
+        window.focus(&if self.oauth().is_some() { self.focus.clone() } else { self.email.focus_handle(cx) });
         cx.notify();
     }
 
@@ -272,7 +273,7 @@ impl AddAccount {
     }
 
     pub fn connect(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.state, State::Connecting | State::SigningIn | State::Cancelling | State::Pick) || self.google() {
+        if matches!(self.state, State::Connecting | State::SigningIn | State::Cancelling | State::Pick) || self.oauth().is_some() {
             return;
         }
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
@@ -286,15 +287,21 @@ impl AddAccount {
         cx.notify();
     }
 
-    /// Gmail shows Google sign-in first when this build has a Google client.
-    fn google(&self) -> bool {
-        self.provider == Provider::Gmail && !self.app_password && self.google_client
+    /// Gmail and Outlook show browser sign-in first when this build has the provider's client.
+    fn oauth(&self) -> Option<oauth::Provider> {
+        let p = match self.provider {
+            Provider::Gmail => oauth::Provider::Google,
+            Provider::Outlook => oauth::Provider::Microsoft,
+            _ => return None,
+        };
+        (!self.app_password && (self.available)(p)).then_some(p)
     }
 
     pub fn sign_in(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.state, State::Form | State::Failed(_)) || !self.google() { return; }
+        let Some(p) = self.oauth() else { return };
+        if !matches!(self.state, State::Form | State::Failed(_)) { return; }
         self.state = State::SigningIn;
-        cx.emit(SignIn::Start);
+        cx.emit(SignIn::Start(p));
         cx.notify();
     }
 
@@ -347,7 +354,7 @@ impl AddAccount {
         let k = &e.keystroke;
         match k.key.as_str() {
             "escape" => self.back(window, cx),
-            "enter" if crate::shortcuts::submit().matches(k) && self.google() => self.sign_in(cx),
+            "enter" if crate::shortcuts::submit().matches(k) && self.oauth().is_some() => self.sign_in(cx),
             "enter" if crate::shortcuts::submit().matches(k) => self.connect(cx),
             n if self.state == State::Pick && !k.modifiers.platform => {
                 let Some(p) = n.parse::<usize>().ok().and_then(|i| Provider::ALL.get(i.wrapping_sub(1))) else { return };
@@ -439,14 +446,18 @@ impl AddAccount {
                     .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
             )
             .child(headline(p.name()));
-        if self.google() {
+        if let Some(provider) = self.oauth() {
+            let (name, start, wait) = match provider {
+                oauth::Provider::Google => ("Google", "Sign in with Google", "Waiting for Google"),
+                oauth::Provider::Microsoft => ("Microsoft", "Sign in with Microsoft", "Waiting for Microsoft"),
+            };
             return top
                 .child(div().pt(px(20.)).border_t_1().border_color(t.line).text_size(px(size::TITLE)).text_color(t.ink2).line_height(relative(1.4))
-                    .child("lagom opens Google in your browser. Sign in there, then come back here."))
+                    .child(format!("lagom opens {name} in your browser. Sign in there, then come back here.")))
                 .child(
                     div().flex().items_center().gap(px(16.))
-                        .child(button(t, if self.state == State::SigningIn { "Waiting for Google" } else { "Sign in with Google" }, Some(t.accent))
-                            .id("google-sign-in")
+                        .child(button(t, if self.state == State::SigningIn { wait } else { start }, Some(t.accent))
+                            .id("oauth-sign-in")
                             .on_click(cx.listener(|this, _, _, cx| this.sign_in(cx))))
                         .children(status),
                 )
@@ -584,14 +595,14 @@ mod tests {
 
     #[gpui::test]
     fn google_sign_in_starts_and_esc_cancels_it(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(|window, cx| AddAccount { google_client: true, ..AddAccount::new(true, window, cx) });
+        let (view, cx) = cx.add_window_view(|window, cx| AddAccount { available: |_| true, ..AddAccount::new(true, window, cx) });
         view.update(cx, |v, cx| v.sign_in(cx));
         assert!(view.read_with(cx, |v, _| v.state == State::Pick), "no sign-in from the provider list");
         view.update_in(cx, |v, window, cx| v.pick(Provider::Gmail, window, cx));
-        assert!(view.update_in(cx, |v, window, _| v.focus.is_focused(window) && v.google()));
+        assert!(view.update_in(cx, |v, window, _| v.focus.is_focused(window) && v.oauth().is_some()));
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let log = sent.clone();
-        cx.update(|_, cx| cx.subscribe(&view, move |_, e: &SignIn, _| log.borrow_mut().push(matches!(e, SignIn::Start))).detach());
+        cx.update(|_, cx| cx.subscribe(&view, move |_, e: &SignIn, _| log.borrow_mut().push(matches!(e, SignIn::Start(oauth::Provider::Google)))).detach());
         view.update(cx, |v, cx| { v.sign_in(cx); v.sign_in(cx); v.connect(cx); });
         assert!(view.read_with(cx, |v, _| v.state == State::SigningIn));
         view.update_in(cx, |v, window, cx| { v.back(window, cx); v.back(window, cx); v.sign_in(cx); v.failed("late".into(), cx); });
@@ -600,6 +611,10 @@ mod tests {
         assert_eq!(*sent.borrow(), [true, false, true]);
         view.update(cx, |v, cx| v.failed("denied".into(), cx));
         assert!(view.read_with(cx, |v, _| v.state == State::Failed("denied".into())));
+        view.update_in(cx, |v, window, cx| v.pick(Provider::Outlook, window, cx));
+        assert_eq!(view.read_with(cx, |v, _| v.oauth()), Some(oauth::Provider::Microsoft));
+        view.update(cx, |v, _| v.available = |p| p == oauth::Provider::Google);
+        assert_eq!(view.read_with(cx, |v, _| v.oauth()), None, "no Microsoft client: the app-password form stays");
     }
 
     #[gpui::test]
