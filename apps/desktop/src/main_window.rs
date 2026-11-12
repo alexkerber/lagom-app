@@ -286,7 +286,7 @@ pub struct MainWindow {
     toast: Option<(SharedString, bool, Task<()>)>,
     palette: Option<gpui::Entity<CommandPalette>>,
     compose: Option<gpui::Entity<Compose>>,
-    // Saved drafts, newest last. R and C reopen the newest.
+    // Saved drafts, newest last. R reopens the selected message's, C the newest new message.
     drafts: Vec<gpui::Entity<Compose>>,
     draft_rows: Vec<lagom_core::outbox::DraftSummary>,
     draft_read: Option<Task<()>>,
@@ -653,8 +653,8 @@ impl MainWindow {
         }
     }
 
-    /// `reply`: to the selected message. One draft at a time: R and C bring back a draft that
-    /// Esc closed, whichever message is selected.
+    /// `reply`: to the selected message. R brings back the draft Esc closed on this message,
+    /// C the newest closed new message; anything else starts a fresh draft.
     fn open_compose(&mut self, reply: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.compose_for(self.inbox.single().filter(|_| reply), window, cx);
     }
@@ -681,7 +681,14 @@ impl MainWindow {
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.draft_open = None;
-        if kind != ComposeKind::Reply || self.drafts.is_empty() {
+        let saved = (kind == ComposeKind::Reply).then(|| {
+            let parent = reply.map(|id| mail::reply_headers(&self.inbox.mail[id].message_id, &self.inbox.mail[id].thread_key).0);
+            // A message without a Message-ID cannot be told apart, so it always gets a fresh reply.
+            if matches!(parent, Some(None)) { return None; }
+            let parent = parent.flatten();
+            self.drafts.iter().rposition(|c| c.read(cx).in_reply_to() == parent.as_deref())
+        }).flatten();
+        if saved.is_none() {
             if let Some(id) = reply.filter(|&id| self.live.is_some() && self.inbox.mail[id].store.is_some()) {
                 self.open_message(id, false, cx);
                 let Some(mut text) = self.inbox.mail[id].text.clone() else {
@@ -706,7 +713,7 @@ impl MainWindow {
         }
         self.release(false, cx);
         self.toast = None;
-        let saved = if kind == ComposeKind::Reply { self.drafts.pop() } else { None };
+        let saved = saved.map(|ix| self.drafts.remove(ix));
         let compose = match saved {
             Some(compose) => {
                 compose.update(cx, |c, cx| c.reopen(window, cx));
@@ -4117,6 +4124,19 @@ mod dispatch {
         assert_eq!(inbox_len(&view, cx), n);
         cx.simulate_keystrokes("r");
         assert_eq!(body(&view, cx), quote);
+        // A closed reply to one message never answers another: R on the next message starts its own.
+        let subject = |view: &Entity<MainWindow>, cx: &mut VisualTestContext| {
+            let c = view.read_with(cx, |v, _| v.compose.clone()).expect("compose open");
+            c.read_with(cx, |c, cx| c.outgoing(cx).subject)
+        };
+        let first = subject(&view, cx);
+        cx.simulate_input("Draft");
+        cx.simulate_keystrokes("escape down r");
+        assert_ne!(subject(&view, cx), first);
+        assert!(!body(&view, cx).starts_with("Draft"));
+        cx.simulate_keystrokes("escape up r");
+        assert_eq!(subject(&view, cx), first);
+        assert!(body(&view, cx).starts_with("Draft"));
     }
 
     #[gpui::test]

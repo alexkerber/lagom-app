@@ -5157,7 +5157,8 @@ mod tests {
             v.drafts.clear();
             v.restore_drafts(window, cx);
         });
-        cx.simulate_keystrokes("c");
+        // The restored reply answers the selected message, so R brings it back.
+        cx.simulate_keystrokes("r");
         assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
         cx.simulate_keystrokes("cmd-backspace");
         assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
