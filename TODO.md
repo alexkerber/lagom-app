@@ -98,6 +98,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 ## Product line
 
+- [ ] Mobile parity (Alex 2026-11-13): iOS and Android lag far behind desktop. Parity table and ranked gaps first, then close the daily-mail gaps.
+- [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
+- [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, HTML mail on Linux, a hand test of each.
+
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
 
@@ -142,7 +146,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Desktop Add account: Gmail offers "Sign in with Google" first when the build has a Google client; Esc cancels the browser flow and "Use an app password instead" keeps the IMAP form. Headless test covers start, cancel and restart; live Google sign-in from a fresh install remains unverified.
 - [x] Desktop Add account, email first: type the address and the worker looks up the provider; Google and Microsoft go to a browser step, others to the password form with servers filled in. "Continue with Google/Microsoft" (provider logos) skips the lookup; "Choose your provider instead" lists providers in plain words. Duplicate addresses stop in the form and in the worker. Plain-language copy: "Sign in" instead of "Connect", server fields under "Advanced", friendlier login and send errors. Headless tests cover discovery routing, stale answers, duplicates and cancel; native visual layout not verified.
 - [x] Settings: an account list with a detail page per account (name, signature, sign in again, remove), in plain words.
-- [ ] Settings: change the password of an email-and-password account on its page.
+- [x] Settings: change the password of an email-and-password account on its page. lagom saves it only after IMAP and SMTP accept it; a late reply answers only its own attempt. Worker failure path tested; the form in the running app and a real server change are not verified.
 - [ ] Plain language everywhere: review remaining technical words in errors, sync status and Settings (IMAP, SMTP, OAuth, TLS).
 - [ ] Microsoft OAuth2: flow, XOAUTH2 and the desktop "Sign in with Microsoft" button for Outlook are implemented; configure the Entra app registration (`LAGOM_MICROSOFT_CLIENT_ID` in `.env.oauth`) and verify provider acceptance.
 - [ ] JMAP.

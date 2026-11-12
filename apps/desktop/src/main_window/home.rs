@@ -14,6 +14,8 @@ impl Page {
 impl MainWindow {
     pub(super) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.draft_open = None;
+        // A half-typed new password stays only on its own account's page.
+        if !matches!(&page, Page::Settings(Some(id)) if self.new_password.as_ref().is_some_and(|p| &p.id == id)) { self.new_password = None; }
         self.page = page;
         if self.demo { return; }
         let saved = match self.page {

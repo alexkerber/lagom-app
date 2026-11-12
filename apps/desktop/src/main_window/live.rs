@@ -2,6 +2,7 @@
 //! The UI reads mail and commits compose edits locally; it never waits on the network.
 
 use super::*;
+use zeroize::Zeroizing;
 
 /// What an in-flight worker command needs when it finishes.
 enum Op {
@@ -291,6 +292,7 @@ impl MainWindow {
         if matches!(&self.page, Page::Settings(Some(id)) if !live.accounts.iter().any(|a| &a.id == id)) {
             self.page = Page::Settings(None);
             self.confirm_remove_account = false;
+            self.new_password = None;
         }
         live.failed = live.store.failed_outbox().unwrap_or_default();
         self.drafts.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
@@ -410,6 +412,20 @@ impl MainWindow {
                         if live.sync.get(&account) == Some(&SyncState::SigningIn) { live.sync.insert(account, SyncState::Syncing); }
                     }
                     if let Some(error) = error { self.notify(format!("Could not sign in: {error}"), cx); }
+                }
+                Event::PasswordChanged { account, attempt, result } => {
+                    let Some(form) = self.new_password.as_mut().filter(|p| p.id == account && p.checking && p.attempt == attempt) else {
+                        if result.is_ok() { self.notify("Password changed", cx); }
+                        continue;
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.new_password = None;
+                            window.focus(&self.focus);
+                            self.notify("Password changed", cx);
+                        }
+                        Err(e) => { form.checking = false; form.error = Some(e); }
+                    }
                 }
                 Event::EventCreated { op, error } => {
                     self.event_created(op, error, window, cx);
@@ -1259,6 +1275,45 @@ impl MainWindow {
             Ok(()) => *account = changed,
             Err(e) => return self.notify(format!("Could not save your name: {e}"), cx),
         }
+        cx.notify();
+    }
+
+    pub(crate) fn start_password_change(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| TextInput::new(window, cx).bordered().masked().placeholder("New password"));
+        cx.subscribe_in(&input, window, |this, _, e: &TextInputEvent, window, cx| match e {
+            TextInputEvent::Enter => this.save_password(window, cx),
+            TextInputEvent::Escape => this.cancel_password_change(window, cx),
+            // Typing during the check stops waiting for it: the field now holds a password nobody sent.
+            TextInputEvent::Changed => if let Some(form) = &mut this.new_password { form.error = None; form.checking = false; },
+        }).detach();
+        window.focus(&input.read(cx).focus_handle(cx));
+        self.new_password = Some(crate::settings::NewPassword { id, input, checking: false, attempt: 0, error: None });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_password_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_password = None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// The worker tries the password with both servers and saves it only when they accept it.
+    pub(crate) fn save_password(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.new_password else { return };
+        if form.checking { return; }
+        let password = Zeroizing::new(form.input.read(cx).text().to_string());
+        if password.is_empty() {
+            form.error = Some("Type the new password first.".into());
+            return cx.notify();
+        }
+        let Some(live) = &self.live else { return };
+        static ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        form.attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !live.bridge.send(Cmd::ChangePassword(form.id.clone(), form.attempt, password)) {
+            return self.worker_gone(cx);
+        }
+        form.checking = true;
+        form.error = None;
         cx.notify();
     }
 

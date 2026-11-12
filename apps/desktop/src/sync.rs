@@ -58,6 +58,9 @@ pub enum Cmd {
     #[allow(dead_code)]
     Discover(String),
     AddAccount(Box<Account>, Zeroizing<String>),
+    /// A new password for an email-and-password account; saved only after the servers accept it.
+    /// The number lets the page tell its own attempt from an older one.
+    ChangePassword(String, u64, Zeroizing<String>),
     RemoveAccount(String),
     /// One account, or all of them.
     Sync(Option<String>),
@@ -107,6 +110,7 @@ pub enum Event {
     Reauthenticated { account: String, result: Result<(), String> },
     /// A voluntary sign-in on a working account stopped; the account keeps working. `None` means cancelled.
     SignInStopped { account: String, error: Option<String> },
+    PasswordChanged { account: String, attempt: u64, result: Result<(), String> },
     /// The store changed: read it again.
     Changed,
     CalendarSync(String, SyncState),
@@ -309,6 +313,7 @@ impl Worker {
     async fn handle(&mut self, cmd: Cmd, rx: &mut UnboundedReceiver<Cmd>) {
         match cmd {
             Cmd::AddAccount(account, password) => self.add(*account, password, rx).await,
+            Cmd::ChangePassword(id, attempt, password) => self.change_password(id, attempt, password, rx).await,
             Cmd::RemoveAccount(id) => self.remove(&id),
             Cmd::Sync(only) => {
                 for account in self.store.accounts().unwrap_or_default().into_iter().filter(|a| only.as_ref().is_none_or(|id| *id == a.id)) {
@@ -574,6 +579,27 @@ impl Worker {
                 self.sync(Some(account.id), false, rx).await;
             }
             Err(e) => self.emit(Event::Added(Err(e.to_string()))),
+        }
+    }
+
+    async fn change_password(&mut self, id: String, attempt: u64, password: Zeroizing<String>, rx: &mut UnboundedReceiver<Cmd>) {
+        let result = async {
+            let account = self.account(&id)?;
+            if account.auth != lagom_core::account::Auth::Password { return Err(Error::Invalid("this account signs in with the browser")); }
+            let session = ImapSync::login(&account, &password).await?;
+            smtp::verify(&account, &password).await?;
+            account.set_password(&password)?;
+            Ok((account, session))
+        }
+        .await;
+        match result {
+            Ok((account, session)) => {
+                self.sessions.insert(id.clone(), session);
+                self.watch(&account);
+                self.emit(Event::PasswordChanged { account: id.clone(), attempt, result: Ok(()) });
+                self.sync(Some(id), false, rx).await;
+            }
+            Err(e) => self.emit(Event::PasswordChanged { account: id, attempt, result: Err(e.to_string()) }),
         }
     }
 
@@ -1754,6 +1780,11 @@ mod tests {
         worker.add(again, Zeroizing::new("pw".into()), &mut rx).await;
         assert!(matches!(out.recv().await, Some(Event::Added(Err(e))) if e == "ME@example.com is already in lagom."));
         assert_eq!(worker.store.accounts().unwrap().len(), 1);
+        // A server that never accepts the new password, or an unknown account, reports an error to the page.
+        for id in [existing.id.clone(), "gone".into()] {
+            worker.change_password(id.clone(), 7, Zeroizing::new("new".into()), &mut rx).await;
+            assert!(matches!(out.recv().await, Some(Event::PasswordChanged { account, attempt: 7, result: Err(_) }) if account == id));
+        }
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }
