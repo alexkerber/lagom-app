@@ -2,6 +2,7 @@
 //! The UI reads mail and commits compose edits locally; it never waits on the network.
 
 use super::*;
+use zeroize::Zeroizing;
 
 /// What an in-flight worker command needs when it finishes.
 enum Op {

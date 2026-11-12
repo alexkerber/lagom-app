@@ -1779,6 +1779,11 @@ mod tests {
         worker.add(again, Zeroizing::new("pw".into()), &mut rx).await;
         assert!(matches!(out.recv().await, Some(Event::Added(Err(e))) if e == "ME@example.com is already in lagom."));
         assert_eq!(worker.store.accounts().unwrap().len(), 1);
+        // A server that never accepts the new password, or an unknown account, reports an error to the page.
+        for id in [existing.id.clone(), "gone".into()] {
+            worker.change_password(id.clone(), Zeroizing::new("new".into()), &mut rx).await;
+            assert!(matches!(out.recv().await, Some(Event::PasswordChanged { account, result: Err(_) }) if account == id));
+        }
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }
