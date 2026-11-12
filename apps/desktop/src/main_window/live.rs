@@ -5141,6 +5141,7 @@ mod tests {
             let id = v.inbox.current().unwrap();
             v.inbox.mail[id].message_id = "<parent@example.com>".into();
             v.inbox.mail[id].thread_key = "<root@example.com>".into();
+            v.inbox.mail[id].account = v.live.as_ref().unwrap().accounts[0].id.clone();
         });
         cx.simulate_keystrokes("r");
         cx.simulate_input("Draft **body**");
@@ -5160,8 +5161,26 @@ mod tests {
         // The restored reply answers the selected message, so R brings it back.
         cx.simulate_keystrokes("r");
         assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
+        // The same message in another account gets its own reply, not this account's draft.
+        cx.simulate_keystrokes("escape");
+        view.update(cx, |v, _| {
+            let live = v.live.as_mut().unwrap();
+            let config = live.accounts[0].imap.clone();
+            let other = Account::new("other@example.com".into(), config.clone(), config).unwrap();
+            live.store.save_account(&other).unwrap();
+            live.accounts.push(other.clone());
+            let id = v.inbox.current().unwrap();
+            v.inbox.mail[id].account = other.id;
+        });
+        cx.simulate_keystrokes("r");
+        assert_ne!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx).text), original.text);
+        cx.simulate_keystrokes("escape");
+        view.update(cx, |v, _| { let id = v.inbox.current().unwrap(); v.inbox.mail[id].account = v.live.as_ref().unwrap().accounts[0].id.clone(); });
+        cx.simulate_keystrokes("r");
+        assert_eq!(view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx)), original);
         cx.simulate_keystrokes("cmd-backspace");
-        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().is_empty()));
+        // Only the other account's reply stays saved.
+        assert!(view.read_with(cx, |v, _| v.live.as_ref().unwrap().store.drafts().unwrap().iter().all(|d| d.text != original.text)));
     }
 
     #[gpui::test]

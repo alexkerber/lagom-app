@@ -682,11 +682,17 @@ impl MainWindow {
         if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
         self.draft_open = None;
         let saved = (kind == ComposeKind::Reply).then(|| {
-            let parent = reply.map(|id| mail::reply_headers(&self.inbox.mail[id].message_id, &self.inbox.mail[id].thread_key).0);
+            let parent = reply.map(|id| (mail::reply_headers(&self.inbox.mail[id].message_id, &self.inbox.mail[id].thread_key).0, &self.inbox.mail[id].account));
             // A message without a Message-ID cannot be told apart, so it always gets a fresh reply.
-            if matches!(parent, Some(None)) { return None; }
-            let parent = parent.flatten();
-            self.drafts.iter().rposition(|c| c.read(cx).in_reply_to() == parent.as_deref())
+            if matches!(parent, Some((None, _))) { return None; }
+            self.drafts.iter().rposition(|c| {
+                let c = c.read(cx);
+                match &parent {
+                    // The same message can arrive in two accounts; each copy has its own reply.
+                    Some((parent, account)) => c.in_reply_to() == parent.as_deref() && c.account_id().is_none_or(|a| a == account.as_str()),
+                    None => c.in_reply_to().is_none(),
+                }
+            })
         }).flatten();
         if saved.is_none() {
             if let Some(id) = reply.filter(|&id| self.live.is_some() && self.inbox.mail[id].store.is_some()) {
