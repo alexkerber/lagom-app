@@ -382,7 +382,9 @@ impl MainWindow {
                 Event::SignInCancelled => {
                     if let Page::AddAccount(add) = &self.page { add.update(cx, |add, cx| add.cancelled(cx)); }
                 }
-                Event::Discovered { .. } => {},
+                Event::Discovered { email, discovery } => {
+                    if let Page::AddAccount(add) = &self.page { add.update(cx, |add, cx| add.discovered(&email, discovery, window, cx)); }
+                }
                 Event::ReauthRequired(account) => {
                     if let Some(live) = &mut self.live {
                         live.sync.insert(account, SyncState::ReauthRequired);
@@ -1145,9 +1147,17 @@ impl MainWindow {
             return self.notify("Demo mode: start without LAGOM_DEMO to add an account", cx);
         }
         let can_cancel = self.live.as_ref().is_some_and(|l| !l.accounts.is_empty());
-        let add = cx.new(|cx| AddAccount::new(can_cancel, window, cx));
+        let existing = self.live.as_ref().map(|l| l.accounts.iter().map(|a| a.email.clone()).collect()).unwrap_or_default();
+        let add = cx.new(|cx| AddAccount::new(can_cancel, existing, window, cx));
         cx.subscribe(&add, |this, add, Connect(account, password): &Connect, cx| {
             let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::AddAccount(account.clone(), password.clone())));
+            if !sent {
+                add.update(cx, |add, cx| add.failed("Mail stopped working. Restart lagom.".into(), cx));
+            }
+        })
+        .detach();
+        cx.subscribe(&add, |this, add, crate::accounts::Discover(email): &crate::accounts::Discover, cx| {
+            let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::Discover(email.clone())));
             if !sent {
                 add.update(cx, |add, cx| add.failed("Mail stopped working. Restart lagom.".into(), cx));
             }

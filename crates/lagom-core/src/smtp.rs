@@ -241,7 +241,7 @@ async fn submit_within(account: &Account, password: &str, message: &Message, raw
                 Ok(Ok(true)) => {},
                 Ok(Err(e)) if auth_failure(&e) => return Err(Error::Authentication),
                 Ok(Err(e)) if e.is_permanent() => return Err(Error::Rejected),
-                _ => return Err(Error::Network("could not reach the SMTP server")),
+                _ => return Err(Error::Network("could not reach your mail provider to send")),
             }
             match timeout(submit, transport.send_raw(message.envelope(), raw)).await {
                 Err(_) => Err(Error::MaybeSent),
@@ -307,7 +307,7 @@ fn submission_error(e: lettre::transport::smtp::Error) -> Error {
     if e.is_permanent() {
         Error::Rejected
     } else if e.status().is_some() {
-        Error::Network("the SMTP server refused the message")
+        Error::Network("your mail provider refused to send the message")
     } else {
         Error::MaybeSent
     }
@@ -318,7 +318,7 @@ pub async fn verify(account: &Account, password: &str) -> Result<()> {
     let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
     for attempt in 0..2 {
         let Ok(result) = timeout(LOGIN_DEADLINE, transport(account, &credential)?.test_connection()).await else {
-            return Err(Error::Network("SMTP server timed out"));
+            return Err(Error::Network("your mail provider did not answer in time"));
         };
         match result {
             Ok(true) => return Ok(()),
@@ -326,10 +326,10 @@ pub async fn verify(account: &Account, password: &str) -> Result<()> {
                 credential = crate::oauth::access_token(account, Some(&credential)).await?;
             }
             Err(e) if auth_failure(&e) && oauth => return Err(Error::Authentication),
-            Err(e) if e.is_permanent() => return Err(Error::Network("SMTP login rejected: check the address and app password")),
+            Err(e) if e.is_permanent() => return Err(Error::Network("Sending is not allowed with this email address and password")),
             Err(e) if e.is_tls() => return Err(Error::Network("SMTP TLS handshake failed")),
-            Err(e) if e.is_timeout() => return Err(Error::Network("SMTP server timed out")),
-            _ => return Err(Error::Network("could not reach the SMTP server")),
+            Err(e) if e.is_timeout() => return Err(Error::Network("your mail provider did not answer in time")),
+            _ => return Err(Error::Network("could not reach your mail provider to send")),
         }
     }
     Err(Error::Authentication)

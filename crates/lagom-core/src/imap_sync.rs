@@ -93,7 +93,7 @@ async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
 async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<Session<Bounded<Wire>>> {
     config.validate()?;
     let socket = net_as(
-        "could not reach the IMAP server",
+        "could not reach your mail provider",
         TcpStream::connect((config.host.as_str(), config.port)),
     )
     .await?;
@@ -133,7 +133,7 @@ async fn connect(config: &ServerConfig, password: &str, oauth: bool) -> Result<S
                 _ => Error::Network("IMAP authentication failed"),
             })
     } else {
-        net_as("IMAP login rejected: check the address and app password", client.login(&config.username, password)).await
+        net_as("The email address or password was not accepted", client.login(&config.username, password)).await
     }
 }
 fn xoauth2(email: &str, token: &str) -> zeroize::Zeroizing<String> {

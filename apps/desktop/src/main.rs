@@ -130,6 +130,8 @@ impl AssetSource for Assets {
             "icons/list-bullets.svg" => include_bytes!("../assets/icons/list-bullets.svg"),
             "icons/list-numbers.svg" => include_bytes!("../assets/icons/list-numbers.svg"),
             "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
+            "logos/google.svg" => include_bytes!("../assets/logos/google.svg"),
+            "logos/microsoft.svg" => include_bytes!("../assets/logos/microsoft.svg"),
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(bytes)))
@@ -204,7 +206,7 @@ mod action_icon_tests {
         let labels = ["Reply", "Reply all", "Forward", "Later", "Done", "New event", "New task", "Day", "Week", "Month", "Today",
             "Join", "Save event", "Open in Google Calendar", "Cancel", "Add list", "Rename", "Delete list", "Open mail",
             "Move", "Move to Inbox", "Mark read", "Mark unread", "Undo", "Send", "Load remote images", "Load more",
-            "Add account", "Connect", "Allow Google Tasks access"];
+            "Add account", "Sign in", "Allow Google Tasks access"];
         let mut paths = std::collections::HashSet::new();
         for label in labels {
             let path = main_window::action_icon(label).expect("action icon");

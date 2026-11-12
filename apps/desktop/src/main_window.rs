@@ -1238,7 +1238,7 @@ pub(crate) fn icon(path: &'static str, color: Rgba, s: f32) -> gpui::Svg {
     icon
 }
 
-fn app_mark(size: f32) -> gpui::Img {
+pub(crate) fn app_mark(size: f32) -> gpui::Img {
     // The app icon as the Dock shows it. Its plate fills 824 of 1024 px, so 20 px draws a ~16 px tile.
     // Named as embedded: GPUI would read the bare string "app-icon.png" as a URI host and fetch it.
     gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded("app-icon.png".into())))
@@ -1288,7 +1288,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
             underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
         }))))
-        .tooltip(move |_, cx| cx.new(|_| Tip(theme, if matches!(label, "Send" | "Connect") {
+        .tooltip(move |_, cx| cx.new(|_| Tip(theme, if matches!(label, "Send" | "Sign in") {
             format!("{label} · {}", crate::shortcuts::submit().hint).into()
         } else { label.into() })).into());
     match fill {

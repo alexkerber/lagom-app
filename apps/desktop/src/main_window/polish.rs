@@ -201,8 +201,8 @@ pub(crate) fn action_icon(label: &str) -> Option<&'static str> {
         "Add account" => "icons/account-add.svg", "Remove" => "icons/account-remove.svg", "Keep" | "Cancel sign-in" => "icons/close.svg",
         "Show your Google Calendar" | "Allow Google Tasks access" => "icons/access.svg",
         "Send" => "icons/send.svg", "New message" => "icons/compose.svg", "Insert file…" => "icons/insert-file.svg",
-        "Sync now" => "icons/cloud-syncing.svg", "Settings" => "icons/settings.svg", "Connect" => "icons/connect.svg",
-        "Connecting" => "icons/cloud-syncing.svg",
+        "Sync now" => "icons/cloud-syncing.svg", "Settings" => "icons/settings.svg", "Sign in" => "icons/connect.svg",
+        "Signing in" => "icons/cloud-syncing.svg",
         "TLS" | "STARTTLS" => "icons/access.svg", "None" => "icons/close.svg",
         _ => return None,
     })
@@ -236,7 +236,7 @@ mod tests {
         for label in ["Reply", "Reply all", "Forward", "Later", "Done", "Move to Inbox", "Move", "Mark unread", "Mark read",
             "Copy address", "Load remote images", "Load more", "Delete", "Empty Trash", "Undo", "Send again", "Edit draft",
             "New task", "Add list", "Rename", "Delete list", "Open mail", "Today", "Join", "Open in Google Calendar", "Close",
-            "Add account", "Remove", "Show your Google Calendar", "Send", "New message", "Insert file…", "Sync now", "Settings", "Connect"] {
+            "Add account", "Remove", "Show your Google Calendar", "Send", "New message", "Insert file…", "Sync now", "Settings", "Sign in"] {
             let path = action_icon(label).unwrap();
             assert!(paths.insert(path), "{label} must have its own meaning");
             let bytes = crate::Assets.load(path).unwrap().unwrap();

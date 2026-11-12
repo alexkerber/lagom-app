@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn action_icons_are_embedded_at_house_stroke_and_have_distinct_meanings() {
         use gpui::AssetSource;
-        let actions = ["Reply", "Forward", "Later", "Done", "New event", "New task", "New list", "Rename", "Delete", "Move", "Join", "Undo", "Connect", "Add account", "Load remote images", "Load more", "Mark read", "Mark unread"];
+        let actions = ["Reply", "Forward", "Later", "Done", "New event", "New task", "New list", "Rename", "Delete", "Move", "Join", "Undo", "Sign in", "Add account", "Load remote images", "Load more", "Mark read", "Mark unread"];
         let mut icons = HashSet::new();
         for label in actions {
             let path = action_icon(label).expect("action icon");
