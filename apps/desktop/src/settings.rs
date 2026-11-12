@@ -33,6 +33,16 @@ pub struct Data<'a> {
     pub default_list: Option<i64>,
     pub names: &'a HashMap<String, Entity<TextInput>>,
     pub signatures: &'a HashMap<String, Entity<TextInput>>,
+    pub password: Option<&'a NewPassword>,
+}
+
+/// A new password on its way to the provider.
+pub struct NewPassword {
+    pub id: String,
+    pub input: Entity<TextInput>,
+    /// The worker tries it with the servers now.
+    pub checking: bool,
+    pub error: Option<String>,
 }
 
 /// How the account signs in, in the words people use.
@@ -202,11 +212,34 @@ fn account_page(t: &Theme, d: &Data, ix: usize, cx: &mut Context<MainWindow>) ->
             .when(oauth, |p| p.child(div().flex().child(
                 // The label changes while the browser is open; the stable wrapper keeps the keys.
                 stop(t, div().id("sign-in-again").rounded(px(radius::CONTROL)).child(button(t, if signing_in { "Cancel sign-in" } else { "Sign in again" }, None)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.sign_in_again(&again, cx)))))))
+                    .on_click(cx.listener(move |this, _, _, cx| this.sign_in_again(&again, cx))))))
+            .when(!oauth, |p| p.child(password_form(t, &id, d.password.filter(|p| p.id == id), cx))))
         .child(plate(t).p(px(16.)).child(remove))
 }
 
 /// A setting with a macOS-style switch. The whole row toggles, so the target is large.
+/// "Change password", then the field: lagom saves the password only after the provider accepts it.
+fn password_form(t: &Theme, id: &str, form: Option<&NewPassword>, cx: &mut Context<MainWindow>) -> Div {
+    let Some(form) = form else {
+        let id = id.to_string();
+        return div().flex().child(stop(t, button(t, "Change password", None))
+            .on_click(cx.listener(move |this, _, window, cx| this.start_password_change(id.clone(), window, cx))));
+    };
+    let note = match &form.error {
+        Some(e) => div().text_color(t.danger).child(e.clone()),
+        None => div().text_color(t.ink2).child("lagom checks it with your provider before it saves it."),
+    };
+    let save = if form.checking { "Checking…" } else { "Save password" };
+    div().flex().flex_col().gap(px(8.))
+        .child(div().text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).child("New password"))
+        .child(form.input.clone())
+        .child(note.text_size(px(size::SNIPPET)).line_height(relative(1.4)))
+        .child(div().flex().gap(px(8.))
+            .child(stop(t, div().id("save-password").rounded(px(radius::CONTROL)).child(button(t, save, Some(t.accent))))
+                .on_click(cx.listener(|this, _, window, cx| this.save_password(window, cx))))
+            .child(stop(t, button(t, "Cancel", None)).on_click(cx.listener(|this, _, window, cx| this.cancel_password_change(window, cx)))))
+}
+
 pub(crate) fn toggle_row(t: &Theme, label: &'static str, on: bool) -> Stateful<Div> {
     div().id(label).debug_selector(move || label.into()).flex().items_center().justify_between().min_h(px(32.))
         .child(label)

@@ -305,6 +305,8 @@ pub struct MainWindow {
     names: HashMap<String, Entity<TextInput>>,
     /// The open account's Remove waits for a yes.
     confirm_remove_account: bool,
+    /// "Change password" on an email-and-password account's page.
+    new_password: Option<crate::settings::NewPassword>,
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
     message_menu: Option<usize>,
@@ -426,6 +428,7 @@ impl MainWindow {
             signatures: HashMap::new(),
             names: HashMap::new(),
             confirm_remove_account: false,
+            new_password: None,
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
             message_menu: None,
@@ -2302,6 +2305,7 @@ impl Render for MainWindow {
                     default_list: self.today.default,
                     names: &self.names,
                     signatures: &self.signatures,
+                    password: self.new_password.as_ref(),
                 }, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
