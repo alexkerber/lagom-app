@@ -14,6 +14,7 @@
 //! nowhere.
 
 use gpui::{Bounds, Pixels, Rgba};
+use std::sync::Arc;
 
 use super::*;
 
@@ -145,6 +146,18 @@ pub(super) struct Web {
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
     place: Rc<std::cell::Cell<Option<Placement>>>,
+    /// The page as it looked when an overlay hid the view, for the document it was taken of.
+    cover: Rc<std::cell::RefCell<Option<(Key, Arc<gpui::Image>)>>>,
+    /// The document a snapshot was asked for during this overlay.
+    asked: Option<Key>,
+}
+
+/// What stands in for the web view while an overlay hides it.
+pub(super) enum Cover {
+    /// A picture of the page, so the mail looks unchanged under the overlay.
+    Picture(Arc<gpui::Image>),
+    /// The picture is on its way; draw nothing rather than switch to text for a frame.
+    Pending,
 }
 
 /// A window with a mail web view: the main window and each message window.
@@ -241,8 +254,58 @@ impl Web {
             self.ready &= self.visible.get();
         }
         self.drawable.set(self.ready && !overlay);
+        self.snapshot(overlay, cx);
         // Native children outside the scroll viewport must stay hidden until their slot is painted.
         self.set_visible(false);
+    }
+
+    /// While an overlay is open, ask once for a picture of the page the reader was looking at.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
+    fn snapshot<T: WebHost>(&mut self, overlay: bool, cx: &mut Context<T>) {
+        if !overlay {
+            self.asked = None;
+            self.cover.borrow_mut().take();
+            return;
+        }
+        // `visible`: the view was on screen in the last frame, so the picture matches what was seen.
+        if self.asked.is_some() || !self.visible.get() { return; }
+        let Some(key) = self.shown else { return };
+        self.asked = Some(key);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(view) = &self.view {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            view.snapshot(move |png| { let _ = tx.send(png); });
+            let cover = self.cover.clone();
+            cx.spawn(async move |this, cx| {
+                let png = rx.await.ok().flatten();
+                this.update(cx, |this, cx| {
+                    match png {
+                        Some(png) => *cover.borrow_mut() = Some((key, Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)))),
+                        // No picture (Windows, or WebKit failed): the text part stands in, as before.
+                        None => if this.web().asked == Some(key) { this.web().asked = None; },
+                    }
+                    cx.notify();
+                }).ok();
+            }).detach();
+        }
+    }
+
+    /// The body area: the web view's slot, or its picture while an overlay hides it.
+    pub(super) fn surface(&self) -> gpui::AnyElement {
+        match self.cover() {
+            Some(Cover::Picture(picture)) => gpui::img(picture).size_full().into_any_element(),
+            Some(Cover::Pending) => div().into_any_element(),
+            None => self.slot().into_any_element(),
+        }
+    }
+
+    /// What to draw in the web view's place while an overlay hides it; `None` means the text part.
+    pub(super) fn cover(&self) -> Option<Cover> {
+        let asked = self.asked?;
+        Some(match &*self.cover.borrow() {
+            Some((key, picture)) if *key == asked => Cover::Picture(picture.clone()),
+            _ => Cover::Pending,
+        })
     }
 
     fn set_visible(&mut self, visible: bool) {
@@ -411,6 +474,20 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[test]
+    fn cover_shows_only_the_picture_of_the_document_asked_for() {
+        let mut web = Web::default();
+        assert!(web.cover().is_none(), "no overlay: the slot or the text");
+        let (shown, other) = ((1, 10, false, true, 0), (2, 10, false, true, 0));
+        web.asked = Some(shown);
+        assert!(matches!(web.cover(), Some(Cover::Pending)));
+        let picture = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![]));
+        *web.cover.borrow_mut() = Some((other, picture.clone()));
+        assert!(matches!(web.cover(), Some(Cover::Pending)), "another message's picture never shows");
+        *web.cover.borrow_mut() = Some((shown, picture));
+        assert!(matches!(web.cover(), Some(Cover::Picture(_))));
+    }
 
     #[gpui::test]
     fn html_slot_stays_inside_the_reading_card(cx: &mut gpui::TestAppContext) {

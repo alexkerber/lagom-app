@@ -33,6 +33,34 @@ impl View {
         Some(Self { web })
     }
 
+    /// The page as it looks now, as PNG, through `done` on the main thread. GPUI draws it while an
+    /// overlay hides the view. `None` where the platform has no snapshot yet (Windows).
+    pub(super) fn snapshot(&self, done: impl FnOnce(Option<Vec<u8>>) + 'static) {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2::{msg_send, rc::Retained, runtime::AnyObject};
+            use objc2_app_kit::NSImage;
+            use objc2_foundation::{NSData, NSError};
+            use wry::WebViewExtMacOS;
+            fn png(image: &NSImage) -> Option<Vec<u8>> {
+                let tiff: Option<Retained<NSData>> = unsafe { msg_send![image, TIFFRepresentation] };
+                let rep: Option<Retained<AnyObject>> = unsafe { msg_send![objc2::class!(NSBitmapImageRep), imageRepWithData: &*tiff?] };
+                let properties: Retained<AnyObject> = unsafe { msg_send![objc2::class!(NSDictionary), new] };
+                // 4 is NSBitmapImageFileTypePNG.
+                let data: Option<Retained<NSData>> = unsafe { msg_send![&*rep?, representationUsingType: 4usize, properties: &*properties] };
+                Some(data?.to_vec())
+            }
+            let done = std::cell::Cell::new(Some(done));
+            let block = block2::RcBlock::new(move |image: *mut NSImage, _: *mut NSError| {
+                if let Some(done) = done.take() { done(unsafe { image.as_ref() }.and_then(png)); }
+            });
+            let native = self.web.webview();
+            let _: () = unsafe { msg_send![&*native, takeSnapshotWithConfiguration: std::ptr::null::<AnyObject>(), completionHandler: &*block] };
+        }
+        #[cfg(target_os = "windows")]
+        done(None);
+    }
+
     pub(super) fn set_visible(&self, visible: bool) -> wry::Result<()> {
         #[cfg(target_os = "macos")]
         self.clip.setHidden(!visible);

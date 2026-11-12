@@ -2045,9 +2045,10 @@ impl MainWindow {
         let on_download = move |section, _: &mut Window, cx: &mut App| {
             this.update(cx, |this, cx| this.download_attachment(id, section, cx)).ok();
         };
-        // HTML mail: the web view covers only the body. The text shows while an overlay hides it.
+        // HTML mail: the web view covers only the body. While an overlay hides it, a picture of the
+        // page stands in; the text shows only where there is no picture (Windows, a page not yet shown).
         let web = html::SUPPORTED && m.html.is_some();
-        let text = !web || self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some();
+        let text = !web || (self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some()) && self.web.cover().is_none();
         // Toasts sit just above the reply field; the web view would cover them.
         let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count()
             + self.live.as_ref().map_or(0, |live| live.failed.len());
@@ -2086,7 +2087,7 @@ impl MainWindow {
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
-            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.slot(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
     }
 }
 
