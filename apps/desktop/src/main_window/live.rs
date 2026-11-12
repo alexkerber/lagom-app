@@ -413,8 +413,8 @@ impl MainWindow {
                     }
                     if let Some(error) = error { self.notify(format!("Could not sign in: {error}"), cx); }
                 }
-                Event::PasswordChanged { account, result } => {
-                    let Some(form) = self.new_password.as_mut().filter(|p| p.id == account) else {
+                Event::PasswordChanged { account, attempt, result } => {
+                    let Some(form) = self.new_password.as_mut().filter(|p| p.id == account && p.checking && p.attempt == attempt) else {
                         if result.is_ok() { self.notify("Password changed", cx); }
                         continue;
                     };
@@ -1283,10 +1283,11 @@ impl MainWindow {
         cx.subscribe_in(&input, window, |this, _, e: &TextInputEvent, window, cx| match e {
             TextInputEvent::Enter => this.save_password(window, cx),
             TextInputEvent::Escape => this.cancel_password_change(window, cx),
-            TextInputEvent::Changed => if let Some(form) = &mut this.new_password { form.error = None; },
+            // Typing during the check stops waiting for it: the field now holds a password nobody sent.
+            TextInputEvent::Changed => if let Some(form) = &mut this.new_password { form.error = None; form.checking = false; },
         }).detach();
         window.focus(&input.read(cx).focus_handle(cx));
-        self.new_password = Some(crate::settings::NewPassword { id, input, checking: false, error: None });
+        self.new_password = Some(crate::settings::NewPassword { id, input, checking: false, attempt: 0, error: None });
         cx.notify();
     }
 
@@ -1306,7 +1307,9 @@ impl MainWindow {
             return cx.notify();
         }
         let Some(live) = &self.live else { return };
-        if !live.bridge.send(Cmd::ChangePassword(form.id.clone(), password)) {
+        static ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        form.attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !live.bridge.send(Cmd::ChangePassword(form.id.clone(), form.attempt, password)) {
             return self.worker_gone(cx);
         }
         form.checking = true;

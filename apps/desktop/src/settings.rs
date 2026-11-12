@@ -42,6 +42,8 @@ pub struct NewPassword {
     pub input: Entity<TextInput>,
     /// The worker tries it with the servers now.
     pub checking: bool,
+    /// The attempt this form waits for; a reply to any other attempt only shows a notice.
+    pub attempt: u64,
     pub error: Option<String>,
 }
 
