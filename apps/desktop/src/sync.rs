@@ -491,6 +491,12 @@ impl Worker {
             Err(error) => { self.emit(Event::SignedIn(Err(error.to_string()))); return; }
         };
         let account = signed.account;
+        if self.duplicate(&account) {
+            // The new sign-in's secret is stored under its own id; the existing account keeps its own.
+            let _ = account.delete_password();
+            self.emit(Event::SignedIn(Err(format!("{} is already in lagom.", account.email))));
+            return;
+        }
         if let Err(error) = self.store.save_authorized_account(&account, &signed.scopes) {
             let _ = account.delete_password();
             self.emit(Event::SignedIn(Err(error.to_string())));
@@ -524,7 +530,16 @@ impl Worker {
         }
     }
 
+    /// Another account row already has this address.
+    fn duplicate(&self, account: &Account) -> bool {
+        self.store.accounts().is_ok_and(|all| all.iter().any(|a| a.id != account.id && a.email.eq_ignore_ascii_case(&account.email)))
+    }
+
     async fn add(&mut self, account: Account, password: Zeroizing<String>, rx: &mut UnboundedReceiver<Cmd>) {
+        if self.duplicate(&account) {
+            self.emit(Event::Added(Err(format!("{} is already in lagom.", account.email))));
+            return;
+        }
         let result = async {
             let session = ImapSync::login(&account, &password).await?;
             smtp::verify(&account, &password).await?;
@@ -1697,6 +1712,18 @@ mod tests {
         assert!(worker.store.accounts().unwrap().is_empty());
         worker.signed_in(Err(Error::Network("test error")));
         assert!(matches!(out.recv().await, Some(Event::SignedIn(Err(_)))));
+        // The same address twice, in any case, stops before any login or keychain write.
+        let config = lagom_core::account::ServerConfig { host: "127.0.0.1".into(), port: 1, security: lagom_core::account::Security::Plain, username: "me@example.com".into() };
+        let existing = Account::new("me@example.com".into(), config.clone(), config).unwrap();
+        worker.store.save_account(&existing).unwrap();
+        let mut again = existing.clone();
+        again.id = "another".into();
+        again.email = "ME@example.com".into();
+        assert!(worker.duplicate(&again) && !worker.duplicate(&existing), "a password update for the same row is not a duplicate");
+        let (_tx, mut rx) = unbounded_channel();
+        worker.add(again, Zeroizing::new("pw".into()), &mut rx).await;
+        assert!(matches!(out.recv().await, Some(Event::Added(Err(e))) if e == "ME@example.com is already in lagom."));
+        assert_eq!(worker.store.accounts().unwrap().len(), 1);
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }

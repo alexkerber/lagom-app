@@ -34,7 +34,7 @@ pub enum Error {
     Network(&'static str),
     #[error("message sent, but the Sent copy could not be saved; do not resend")]
     SentCopy,
-    #[error("the SMTP server permanently refused the message")]
+    #[error("your mail provider refused to send the message")]
     Rejected,
     #[error("sign in again")]
     ReauthRequired,

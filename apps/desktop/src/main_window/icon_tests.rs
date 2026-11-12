@@ -41,7 +41,7 @@ impl Render for ActionButton {
 
 #[gpui::test]
 fn action_buttons_render_their_own_icons(cx: &mut TestAppContext) {
-    for label in ["Connect", "Connecting", "TLS", "STARTTLS", "None", "Add account", "Remove", "Keep", "Send", "Save event", "Saving…"] {
+    for label in ["Sign in", "Signing in", "TLS", "STARTTLS", "None", "Add account", "Remove", "Keep", "Send", "Save event", "Saving…"] {
         let (_, cx) = cx.add_window_view(|_, _| ActionButton(label));
         cx.run_until_parked();
         let control = cx.debug_bounds(label).unwrap();
