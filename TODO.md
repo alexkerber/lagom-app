@@ -139,6 +139,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] `lagom-cli` and disposable GreenMail integration coverage.
 - [x] Outbox in the store: persist drafts and pending sends; retry temporary failures on sync with exponential backoff (1 min–1 h), stop permanent failures, and require deliberate retry for uncertain delivery. Failed sends offer Send again and atomic return to draft. Checkpoint SMTP and Sent APPEND separately; CLI sends leave no queue entries. Quit needs no network wait or unsent-mail warning.
 - [x] Google OAuth2 (XOAUTH2), including same-account re-login from the sidebar/account rows, refresh-token replacement and sync/outbox resumption. OAuth continues during other accounts' syncs and remains cancellable, covered by fixture tests. Release client IDs can be embedded with `scripts/build-release.sh` and git-ignored `.env.oauth`; malformed assignments stop the build even before later valid lines, tested on Bash 3.2 and 5.
+- [x] Desktop Add account: Gmail offers "Sign in with Google" first when the build has a Google client; Esc cancels the browser flow and "Use an app password instead" keeps the IMAP form. Headless test covers start, cancel and restart; live Google sign-in from a fresh install remains unverified.
 - [ ] Microsoft OAuth2: flow and XOAUTH2 implemented; configure the Entra app registration and verify provider acceptance.
 - [ ] JMAP.
 - [ ] Push beyond IMAP IDLE.

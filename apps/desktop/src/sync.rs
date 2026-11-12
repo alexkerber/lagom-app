@@ -332,6 +332,8 @@ impl Worker {
                 resume.recv().expect("resume fixture worker");
             }
             Cmd::SignIn(provider) => {
+                // A replaced add-account flow ends silently: its cancel event would reset the new attempt's form.
+                if self.reauth.is_none() { if let Some(flow) = self.sign_in.take() { flow.abort(); } }
                 self.cancel_sign_in();
                 let events = self.events.clone();
                 self.start_sign_in(oauth::sign_in(provider, move |url| {
@@ -1671,6 +1673,8 @@ mod tests {
         assert!(matches!(out.recv().await, Some(Event::Downloaded(Err(_)))));
         worker.quick(Cmd::SignIn(Provider::Google)).await;
         assert!(worker.sign_in.is_some());
+        worker.quick(Cmd::SignIn(Provider::Google)).await;
+        assert!(out.try_recv().is_err(), "a replaced sign-in sends no cancel");
         worker.quick(Cmd::CancelSignIn).await;
         assert!(worker.sign_in.is_none());
         assert!(matches!(out.recv().await, Some(Event::SignInCancelled)));
