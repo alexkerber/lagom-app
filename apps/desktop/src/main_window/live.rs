@@ -379,7 +379,10 @@ impl MainWindow {
                     Ok(path) => cx.reveal_path(&path),
                     Err(error) => self.notify(format!("Could not download attachment: {error}"), cx),
                 },
-                Event::Discovered { .. } | Event::SignInCancelled => {},
+                Event::SignInCancelled => {
+                    if let Page::AddAccount(add) = &self.page { add.update(cx, |add, cx| add.cancelled(cx)); }
+                }
+                Event::Discovered { .. } => {},
                 Event::ReauthRequired(account) => {
                     if let Some(live) = &mut self.live {
                         live.sync.insert(account, SyncState::ReauthRequired);
@@ -1147,6 +1150,18 @@ impl MainWindow {
             let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::AddAccount(account.clone(), password.clone())));
             if !sent {
                 add.update(cx, |add, cx| add.failed("Mail stopped working. Restart lagom.".into(), cx));
+            }
+        })
+        .detach();
+        cx.subscribe(&add, |this, add, e: &crate::accounts::SignIn, cx| {
+            let cmd = match e {
+                crate::accounts::SignIn::Start => Cmd::SignIn(lagom_core::oauth::Provider::Google),
+                crate::accounts::SignIn::Cancel => Cmd::CancelSignIn,
+            };
+            let sent = this.live.as_ref().is_some_and(|live| live.bridge.send(cmd));
+            if !sent {
+                // No worker means no cancel confirmation: leave Cancelling here so the error shows.
+                add.update(cx, |add, cx| { add.cancelled(cx); add.failed("Mail stopped working. Restart lagom.".into(), cx) });
             }
         })
         .detach();

@@ -152,11 +152,18 @@ enum State {
     Pick,
     Form,
     Connecting,
+    /// Google sign-in runs in the browser.
+    SigningIn,
+    /// Esc was pressed; the worker has not confirmed the cancel yet.
+    Cancelling,
     Failed(String),
 }
 
 /// "Connect": the worker verifies and saves the account.
 pub struct Connect(pub Box<Account>, pub Zeroizing<String>);
+
+/// Start or cancel Google sign-in in the browser; the worker saves the account.
+pub enum SignIn { Start, Cancel }
 
 pub struct AddAccount {
     state: State,
@@ -164,6 +171,10 @@ pub struct AddAccount {
     /// Accounts exist, so Cancel can go back to the inbox.
     can_cancel: bool,
     advanced: bool,
+    /// Gmail with Google sign-in available: show the app-password fields only on request.
+    app_password: bool,
+    /// This build has a Google client for browser sign-in.
+    google_client: bool,
     focus: FocusHandle,
     email: Entity<TextInput>,
     password: Entity<TextInput>,
@@ -177,6 +188,7 @@ pub struct AddAccount {
 }
 
 impl EventEmitter<Connect> for AddAccount {}
+impl EventEmitter<SignIn> for AddAccount {}
 impl EventEmitter<DismissEvent> for AddAccount {}
 
 impl Focusable for AddAccount {
@@ -209,6 +221,8 @@ impl AddAccount {
             provider: Provider::Gmail,
             can_cancel,
             advanced: false,
+            app_password: false,
+            google_client: lagom_core::oauth::available(lagom_core::oauth::Provider::Google),
             focus,
             email,
             password,
@@ -225,13 +239,14 @@ impl AddAccount {
     pub fn pick(&mut self, p: Provider, window: &mut Window, cx: &mut Context<Self>) {
         self.provider = p;
         self.advanced = p == Provider::Other;
+        self.app_password = false;
         let s = Servers::for_provider(p);
         for (field, text) in [(&self.imap_host, &s.imap_host), (&self.imap_port, &s.imap_port), (&self.smtp_host, &s.smtp_host), (&self.smtp_port, &s.smtp_port)] {
             field.update(cx, |f, cx| f.set_text(text, cx));
         }
         (self.imap_security, self.smtp_security) = (s.imap_security, s.smtp_security);
         self.state = State::Form;
-        window.focus(&self.email.focus_handle(cx));
+        window.focus(&if self.google() { self.focus.clone() } else { self.email.focus_handle(cx) });
         cx.notify();
     }
 
@@ -257,7 +272,7 @@ impl AddAccount {
     }
 
     pub fn connect(&mut self, cx: &mut Context<Self>) {
-        if self.state == State::Connecting || self.state == State::Pick {
+        if matches!(self.state, State::Connecting | State::SigningIn | State::Cancelling | State::Pick) || self.google() {
             return;
         }
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
@@ -271,8 +286,31 @@ impl AddAccount {
         cx.notify();
     }
 
+    /// Gmail shows Google sign-in first when this build has a Google client.
+    fn google(&self) -> bool {
+        self.provider == Provider::Gmail && !self.app_password && self.google_client
+    }
+
+    pub fn sign_in(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.state, State::Form | State::Failed(_)) || !self.google() { return; }
+        self.state = State::SigningIn;
+        cx.emit(SignIn::Start);
+        cx.notify();
+    }
+
+    /// The worker confirmed that the browser sign-in ended without an account.
+    // shortcut: events carry no attempt id, so leaving the page while Cancelling and starting again can still be reset by the late confirm; add an id if that shows up.
+    pub fn cancelled(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.state, State::SigningIn | State::Cancelling) {
+            self.state = State::Form;
+            cx.notify();
+        }
+    }
+
     /// The worker could not log in.
     pub fn failed(&mut self, error: String, cx: &mut Context<Self>) {
+        // The worker still confirms a pending cancel; leaving Cancelling now would let that reset a new attempt.
+        if self.state == State::Cancelling { return; }
         self.state = State::Failed(error);
         cx.notify();
     }
@@ -290,7 +328,12 @@ impl AddAccount {
     pub(crate) fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.state {
             State::Pick if self.can_cancel => cx.emit(DismissEvent),
-            State::Pick | State::Connecting => {}
+            State::Pick | State::Connecting | State::Cancelling => {}
+            State::SigningIn => {
+                self.state = State::Cancelling;
+                cx.emit(SignIn::Cancel);
+                cx.notify();
+            }
             _ => {
                 self.state = State::Pick;
                 window.focus(&self.focus);
@@ -304,6 +347,7 @@ impl AddAccount {
         let k = &e.keystroke;
         match k.key.as_str() {
             "escape" => self.back(window, cx),
+            "enter" if crate::shortcuts::submit().matches(k) && self.google() => self.sign_in(cx),
             "enter" if crate::shortcuts::submit().matches(k) => self.connect(cx),
             n if self.state == State::Pick && !k.modifiers.platform => {
                 let Some(p) = n.parse::<usize>().ok().and_then(|i| Provider::ALL.get(i.wrapping_sub(1))) else { return };
@@ -380,11 +424,13 @@ impl AddAccount {
         };
         let status = match &self.state {
             State::Connecting => Some(mono(format!("Connecting to {}…", self.imap_host.read(cx).text()), t.ink2)),
+            State::SigningIn => Some(mono("Finish in your browser · esc cancels", t.ink2)),
+            State::Cancelling => Some(mono("Cancelling…", t.ink2)),
             State::Failed(e) => Some(div().text_size(px(size::SNIPPET)).text_color(t.danger).child(e.clone())),
             _ => None,
         };
 
-        div()
+        let top = div()
             .flex()
             .flex_col()
             .gap(px(20.))
@@ -392,7 +438,31 @@ impl AddAccount {
                 icon_button(t, "back", "icons/previous.svg", "Back to providers · Esc")
                     .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
             )
-            .child(headline(p.name()))
+            .child(headline(p.name()));
+        if self.google() {
+            return top
+                .child(div().pt(px(20.)).border_t_1().border_color(t.line).text_size(px(size::TITLE)).text_color(t.ink2).line_height(relative(1.4))
+                    .child("lagom opens Google in your browser. Sign in there, then come back here."))
+                .child(
+                    div().flex().items_center().gap(px(16.))
+                        .child(button(t, if self.state == State::SigningIn { "Waiting for Google" } else { "Sign in with Google" }, Some(t.accent))
+                            .id("google-sign-in")
+                            .on_click(cx.listener(|this, _, _, cx| this.sign_in(cx))))
+                        .children(status),
+                )
+                .child(
+                    div().id("use-app-password").text_size(px(size::SNIPPET)).text_color(t.ink2).cursor_pointer().hover(|s| s.underline())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if matches!(this.state, State::SigningIn | State::Cancelling) { return; }
+                            this.app_password = true;
+                            this.state = State::Form;
+                            window.focus(&this.email.focus_handle(cx));
+                            cx.notify();
+                        }))
+                        .child("Use an app password instead"),
+                );
+        }
+        top
             .child(
                 div()
                     .flex()
@@ -510,6 +580,26 @@ mod tests {
             smtp_port: "3025".into(),
             smtp_security: Security::Plain,
         }
+    }
+
+    #[gpui::test]
+    fn google_sign_in_starts_and_esc_cancels_it(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| AddAccount { google_client: true, ..AddAccount::new(true, window, cx) });
+        view.update(cx, |v, cx| v.sign_in(cx));
+        assert!(view.read_with(cx, |v, _| v.state == State::Pick), "no sign-in from the provider list");
+        view.update_in(cx, |v, window, cx| v.pick(Provider::Gmail, window, cx));
+        assert!(view.update_in(cx, |v, window, _| v.focus.is_focused(window) && v.google()));
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = sent.clone();
+        cx.update(|_, cx| cx.subscribe(&view, move |_, e: &SignIn, _| log.borrow_mut().push(matches!(e, SignIn::Start))).detach());
+        view.update(cx, |v, cx| { v.sign_in(cx); v.sign_in(cx); v.connect(cx); });
+        assert!(view.read_with(cx, |v, _| v.state == State::SigningIn));
+        view.update_in(cx, |v, window, cx| { v.back(window, cx); v.back(window, cx); v.sign_in(cx); v.failed("late".into(), cx); });
+        assert!(view.read_with(cx, |v, _| v.state == State::Cancelling), "a new attempt waits for the worker's cancel");
+        view.update(cx, |v, cx| { v.cancelled(cx); v.sign_in(cx); });
+        assert_eq!(*sent.borrow(), [true, false, true]);
+        view.update(cx, |v, cx| v.failed("denied".into(), cx));
+        assert!(view.read_with(cx, |v, _| v.state == State::Failed("denied".into())));
     }
 
     #[gpui::test]
