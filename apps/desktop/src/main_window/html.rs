@@ -146,10 +146,12 @@ pub(super) struct Web {
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
     place: Rc<std::cell::Cell<Option<Placement>>>,
-    /// The page as it looked when an overlay hid the view, for the document it was taken of.
-    cover: Rc<std::cell::RefCell<Option<(Key, Arc<gpui::Image>)>>>,
-    /// The document a snapshot was asked for during this overlay.
-    asked: Option<Key>,
+    /// The page as it looked when an overlay hid the view, with the request it answers.
+    cover: Rc<std::cell::RefCell<Option<(u64, Arc<gpui::Image>)>>>,
+    /// The document a snapshot was asked for during this overlay, and that request's number.
+    asked: Option<(Key, u64)>,
+    /// Snapshot requests so far: a late answer to an earlier overlay never shows in a later one.
+    asks: u64,
 }
 
 /// What stands in for the web view while an overlay hides it.
@@ -270,19 +272,22 @@ impl Web {
         // `visible`: the view was on screen in the last frame, so the picture matches what was seen.
         if self.asked.is_some() || !self.visible.get() { return; }
         let Some(key) = self.shown else { return };
-        self.asked = Some(key);
+        self.asks += 1;
+        let ask = self.asks;
+        self.asked = Some((key, ask));
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(view) = &self.view {
             let (tx, rx) = tokio::sync::oneshot::channel();
             view.snapshot(move |png| { let _ = tx.send(png); });
-            let cover = self.cover.clone();
             cx.spawn(async move |this, cx| {
                 let png = rx.await.ok().flatten();
                 this.update(cx, |this, cx| {
+                    let web = this.web();
+                    if web.asked.map(|(_, a)| a) != Some(ask) { return; }
                     match png {
-                        Some(png) => *cover.borrow_mut() = Some((key, Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)))),
+                        Some(png) => *web.cover.borrow_mut() = Some((ask, Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)))),
                         // No picture (Windows, or WebKit failed): the text part stands in, as before.
-                        None => if this.web().asked == Some(key) { this.web().asked = None; },
+                        None => web.asked = None,
                     }
                     cx.notify();
                 }).ok();
@@ -301,9 +306,11 @@ impl Web {
 
     /// What to draw in the web view's place while an overlay hides it; `None` means the text part.
     pub(super) fn cover(&self) -> Option<Cover> {
-        let asked = self.asked?;
+        let (key, ask) = self.asked?;
+        // Another message or theme under the same overlay: no picture of it exists, so the text.
+        if self.shown != Some(key) { return None; }
         Some(match &*self.cover.borrow() {
-            Some((key, picture)) if *key == asked => Cover::Picture(picture.clone()),
+            Some((answer, picture)) if *answer == ask => Cover::Picture(picture.clone()),
             _ => Cover::Pending,
         })
     }
@@ -479,14 +486,17 @@ mod tests {
     fn cover_shows_only_the_picture_of_the_document_asked_for() {
         let mut web = Web::default();
         assert!(web.cover().is_none(), "no overlay: the slot or the text");
-        let (shown, other) = ((1, 10, false, true, 0), (2, 10, false, true, 0));
-        web.asked = Some(shown);
+        let (shown, dark) = ((1, 10, false, true, 0), (1, 10, false, false, 0));
+        web.shown = Some(shown);
+        web.asked = Some((shown, 2));
         assert!(matches!(web.cover(), Some(Cover::Pending)));
         let picture = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![]));
-        *web.cover.borrow_mut() = Some((other, picture.clone()));
-        assert!(matches!(web.cover(), Some(Cover::Pending)), "another message's picture never shows");
-        *web.cover.borrow_mut() = Some((shown, picture));
+        *web.cover.borrow_mut() = Some((1, picture.clone()));
+        assert!(matches!(web.cover(), Some(Cover::Pending)), "an earlier overlay's picture never shows");
+        *web.cover.borrow_mut() = Some((2, picture));
         assert!(matches!(web.cover(), Some(Cover::Picture(_))));
+        web.shown = Some(dark);
+        assert!(web.cover().is_none(), "a theme or message change under the overlay falls back to text");
     }
 
     #[gpui::test]
