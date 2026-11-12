@@ -260,6 +260,9 @@ impl Compose {
 
     pub(crate) fn draft_id(&self) -> &str { &self.message_id }
 
+    /// The Message-ID this draft answers; `None` for a new message or a forward.
+    pub(crate) fn in_reply_to(&self) -> Option<&str> { self.reply.as_ref().and_then(|(id, _)| id.as_deref()) }
+
     pub(crate) fn sync_draft(&self, cx: &mut Context<Self>) {
         if let Some((store, account)) = &self.store {
             if store.flush_draft(&self.message_id).is_ok() { cx.emit(ComposeEvent::DraftsChanged(account.id.clone())); }
