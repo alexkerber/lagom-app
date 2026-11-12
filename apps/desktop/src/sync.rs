@@ -105,6 +105,8 @@ pub enum Event {
     Discovered { email: String, discovery: Discovery },
     ReauthRequired(String),
     Reauthenticated { account: String, result: Result<(), String> },
+    /// A voluntary sign-in on a working account stopped; the account keeps working. `None` means cancelled.
+    SignInStopped { account: String, error: Option<String> },
     /// The store changed: read it again.
     Changed,
     CalendarSync(String, SyncState),
@@ -454,9 +456,13 @@ impl Worker {
     fn signed_in(&mut self, result: lagom_core::Result<SignedIn>) {
         if let Some(id) = self.reauth.take() {
             let calendar_consent = std::mem::take(&mut self.calendar_consent);
+            let healthy = !self.reauth_required.contains(&id);
             let result = result.and_then(|signed| {
                 let account = self.account(&id)?;
-                if signed.account != account { return Err(Error::Invalid("account changed during sign-in")); }
+                // The name may change on the account page while the browser is open; the rest may not.
+                let mut before = signed.account.clone();
+                before.display_name = account.display_name.clone();
+                if before != account { return Err(Error::Invalid("account changed during sign-in")); }
                 self.store.set_account_scopes(&id, &signed.scopes)?;
                 self.store.resume_outbox(&id, chrono::Local::now().timestamp_millis())?;
                 self.reauth_required.remove(&id);
@@ -476,6 +482,14 @@ impl Worker {
                 };
                 self.emit(Event::CalendarSync(id.clone(), state));
                 if result.is_err() { return; }
+            }
+            if let (Err(e), true) = (&result, healthy) {
+                // A voluntary sign-in that did not finish keeps the working credentials.
+                if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(id.clone())); }
+                self.deferred.push_back(Cmd::Sync(Some(id.clone())));
+                let error = (!matches!(e, Error::Cancelled)).then(|| e.to_string());
+                self.emit(Event::SignInStopped { account: id, error });
+                return;
             }
             if result.is_err() { self.require_reauth(&id); }
             let result = match result {
@@ -1632,6 +1646,18 @@ mod tests {
         account.auth = Auth::OAuth(Provider::Google);
         worker.store.save_account(&account).unwrap();
         let folder = worker.store.save_folder(&account.id, "INBOX", Some("/"), FolderRole::Inbox).unwrap();
+        // A voluntary sign-in on a working account that stops keeps the account working.
+        for stop in [Error::Cancelled, Error::Network("sign-in timed out")] {
+            worker.quick(Cmd::Reauthenticate(account.id.clone())).await;
+            assert!(matches!(out.try_recv().unwrap(), Event::Sync(id, SyncState::SigningIn) if id == account.id));
+            worker.sign_in.take().unwrap().abort();
+            let cancelled = matches!(stop, Error::Cancelled);
+            worker.signed_in(Err(stop));
+            assert!(matches!(out.try_recv().unwrap(), Event::SignInStopped { account: a, error } if a == account.id && error.is_none() == cancelled));
+            assert!(out.try_recv().is_err(), "a working account must not ask to sign in again");
+            assert!(!worker.reauth_required.contains(&account.id));
+            assert!(matches!(worker.deferred.pop_front(), Some(Cmd::Sync(Some(id))) if id == account.id));
+        }
         let mail = lagom_core::smtp::Outgoing { to: vec!["recipient@example.com".into()], ..Default::default() };
         let id = worker.store.enqueue(&account, &mail, 0).unwrap();
         worker.store.claim_send(&id, 0).unwrap();
@@ -1665,7 +1691,11 @@ mod tests {
         worker.quick(Cmd::Reauthenticate(account.id.clone())).await;
         out.try_recv().unwrap();
         worker.sign_in.take().unwrap().abort();
-        worker.signed_in(Ok(SignedIn { email: account.email.clone(), display_name: account.display_name.clone(), account: account.clone(), scopes: String::new() }));
+        // A new name while the browser is open still finishes the sign-in.
+        let before = account.clone();
+        account.display_name = "Fixture Name".into();
+        worker.store.save_account(&account).unwrap();
+        worker.signed_in(Ok(SignedIn { email: before.email.clone(), display_name: before.display_name.clone(), account: before, scopes: String::new() }));
         worker.idle.remove(&account.id).unwrap().abort();
         assert!(matches!(out.try_recv().unwrap(), Event::Changed));
         assert!(matches!(out.try_recv().unwrap(), Event::Reauthenticated { account: id, result: Ok(()) } if id == account.id));

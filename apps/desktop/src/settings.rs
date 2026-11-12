@@ -1,80 +1,81 @@
-//! Notification preference and accounts. Remove asks inside the app, not in a
-//! system dialog, and deletes the saved password and the local mail; the server keeps its mail.
+//! Settings: accounts first, as a list that opens a page per account (name, signature,
+//! sign-in, remove), then general switches and the default task list. Remove asks inside the
+//! app, not in a system dialog, and deletes the saved password and the local mail; the server
+//! keeps its mail.
 
 use std::time::Duration;
 
-use gpui::{div, point, prelude::*, px, Animation, AnimationExt, BoxShadow, Context, Div, FontWeight, Rgba, SharedString, Stateful};
-use lagom_core::account::Account;
+use std::collections::HashMap;
 
-use crate::main_window::{button, icon, icon_button, mono, MainWindow, OneLine};
+use gpui::{div, point, prelude::*, px, relative, Animation, AnimationExt, BoxShadow, Context, Div, Entity, FontWeight, Rgba, SharedString, Stateful};
+use lagom_core::account::{Account, Auth};
+use lagom_core::oauth::Provider;
+
+use crate::main_window::{button, icon, icon_button, pressable, MainWindow, OneLine};
+use crate::text_input::TextInput;
 use crate::motion::spring;
 use crate::theme::{radius, size, Theme};
 
-/// `confirm`: the id of the account whose removal waits for a yes.
-pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool, notifications: bool, task_lists: &[lagom_core::tasks::TaskList], default_list: Option<i64>, signatures: &std::collections::HashMap<String, gpui::Entity<crate::text_input::TextInput>>, cx: &mut Context<MainWindow>) -> Div {
-    let mut list = div().flex().flex_col().pt(px(20.)).border_t_1().border_color(t.line);
-    for a in accounts {
-        let id = a.id.clone();
-        let asking = confirm == Some(a.id.as_str());
-        let row = div()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .min_h(px(48.))
-            .border_b_1()
-            .border_color(t.line)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .flex()
-                    .flex_col()
-                    .child(div().font_weight(FontWeight::MEDIUM).one_line().child(a.email.clone()))
-                    .child(mono(format!("{} · {}", a.imap.host, a.smtp.host), t.ink2).one_line()),
-            );
-        let row = if asking {
-            row.child(div().text_size(px(size::SNIPPET)).text_color(t.danger).child("Remove the password and local mail?"))
-                .child(button(t, "Remove", Some(t.danger)).on_click(cx.listener(move |this, _, _, cx| this.remove_account(id.clone(), cx))))
-                .child(button(t, "Keep", None).on_click(cx.listener(|this, _, _, cx| this.confirm_remove(None, cx))))
-        } else {
-            row.child(icon_button(t, "Remove", "icons/account-remove.svg", "Remove account").on_click(cx.listener(move |this, _, _, cx| this.confirm_remove(Some(id.clone()), cx))))
-        };
-        list = list.child(row).children(signatures.get(&a.id).map(|input|
-            div().debug_selector({ let id = a.id.clone(); move || format!("signature-{id}") })
-                .flex().flex_col().gap(px(6.)).py(px(12.)).child(mono("Signature", t.ink2))
-                .child(div().h(px(72.)).child(input.clone()))
-        ));
+/// What the Settings page shows.
+pub struct Data<'a> {
+    pub accounts: &'a [Account],
+    /// Each account's colour, as in the sidebar and the calendar.
+    pub colors: Vec<Rgba>,
+    /// The account whose page is open; `None` shows the list.
+    pub open: Option<&'a str>,
+    /// Remove waits for a yes on the open account.
+    pub confirm: bool,
+    /// Accounts whose browser sign-in runs now.
+    pub signing_in: Vec<String>,
+    pub group: bool,
+    pub notifications: bool,
+    pub task_lists: &'a [lagom_core::tasks::TaskList],
+    pub default_list: Option<i64>,
+    pub names: &'a HashMap<String, Entity<TextInput>>,
+    pub signatures: &'a HashMap<String, Entity<TextInput>>,
+}
+
+/// How the account signs in, in the words people use.
+fn sign_in_words(a: &Account) -> (&'static str, &'static str) {
+    match a.auth {
+        Auth::OAuth(Provider::Google) => ("Google account", "Signed in with Google."),
+        Auth::OAuth(Provider::Microsoft) => ("Microsoft account", "Signed in with Microsoft."),
+        Auth::Password => ("Email and password", "Signed in with your email address and password."),
     }
-    let content = div()
-        .w_full()
-        .max_w(px(640.))
-        .flex()
-        .flex_col()
-        .gap(px(16.))
-        // A window-title-sized heading, as in System Settings panes.
-        .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
-        .when(accounts.is_empty(), |d| d.child(icon("icons/account-add.svg", t.ink2, 32.)))
-        .child(div().text_color(t.ink2).child(SharedString::from(match accounts.len() {
-            0 => "No accounts.".to_string(),
-            1 => "One account.".to_string(),
-            n => format!("{n} accounts."),
-        })))
-        .child(toggle_row(t, "Group by conversation", group).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
-        .child(toggle_row(t, "Notifications for new mail", notifications).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
-        .when(!task_lists.is_empty(), |d| d.child(div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(8.)).child("Default task list")
-            .children(task_lists.iter().map(|list| {
-                let id = list.id;
-                div().flex().items_center().gap(px(8.)).px(px(10.)).py(px(6.)).rounded(px(radius::CONTROL))
-                    .when(default_list == Some(id), |d| d.bg(t.sel))
-                    .child(div().flex_1().min_w(px(0.)).one_line().child(list.name.clone()))
-                    .child(icon_button(t, "default-task-list", if default_list == Some(id) { "icons/complete-task.svg" } else { "icons/open-task.svg" },
-                        if default_list == Some(id) { "Default task list" } else { "Set as default task list" })
-                        .id(("default-task-list", id as usize)).debug_selector(move || format!("default-task-list-{id}"))
-                        .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); })))
-            }))))
-        .child(list)
-        .child(div().flex().child(button(t, "Add account", None).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))
-        .child(mono("Removing an account keeps its mail on the server.", t.ink2));
+}
+
+/// A round mark with the account's initial in its colour.
+fn avatar(a: &Account, color: Rgba, s: f32) -> Div {
+    let name = if a.display_name.trim().is_empty() { &a.email } else { &a.display_name };
+    let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    div().flex_shrink_0().size(px(s)).rounded_full().flex().items_center().justify_center()
+        .bg(Rgba { a: 0.18, ..color }).text_color(color).font_weight(FontWeight::SEMIBOLD).text_size(px(s * 0.42))
+        .child(initial)
+}
+
+/// A titled group: heading, an optional line under it, then its content.
+fn section(t: &Theme, title: &'static str, note: Option<&'static str>) -> Div {
+    div().flex().flex_col().gap(px(4.))
+        .child(div().text_size(px(size::TITLE)).font_weight(FontWeight::SEMIBOLD).child(title))
+        .children(note.map(|n| div().text_size(px(size::SNIPPET)).text_color(t.ink2).line_height(relative(1.4)).child(n)))
+}
+
+/// Rows on one raised plate, as in System Settings.
+/// Tab reaches it; Enter or Space presses it.
+fn stop<E: StatefulInteractiveElement>(t: &Theme, el: E) -> E {
+    let ring = t.accent;
+    el.focusable().tab_stop(true).focus(move |s| s.border_1().border_color(ring))
+}
+
+fn plate(t: &Theme) -> Div {
+    div().flex().flex_col().rounded(px(radius::PANEL)).bg(t.subtle).border_1().border_color(t.line).overflow_hidden()
+}
+
+pub fn view(t: &Theme, d: Data, cx: &mut Context<MainWindow>) -> Div {
+    let content = match d.open.and_then(|id| d.accounts.iter().position(|a| a.id == id)) {
+        Some(ix) => account_page(t, &d, ix, cx),
+        None => main_page(t, &d, cx),
+    };
     div().flex_1().min_w(px(0.)).flex().child(
         div()
             .id("settings-page")
@@ -83,10 +84,126 @@ pub fn view(t: &Theme, accounts: &[Account], confirm: Option<&str>, group: bool,
             .flex()
             .justify_center()
             .px(px(24.))
-            .py(px(24.))
+            .py(px(32.))
             .rounded(px(radius::PANEL))
             .child(content),
     )
+}
+
+fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
+    let mut rows = plate(t);
+    for (ix, a) in d.accounts.iter().enumerate() {
+        let id = a.id.clone();
+        let named = a.display_name.trim() != a.email && !a.display_name.trim().is_empty();
+        let (kind, _) = sign_in_words(a);
+        rows = rows.child(
+            stop(t, pressable(div().id(("account", ix)), t, false))
+                .debug_selector({ let id = a.id.clone(); move || format!("account-{id}") })
+                .flex().items_center().gap(px(12.)).px(px(14.)).py(px(10.))
+                .when(ix > 0, |r| r.border_t_1().border_color(t.line))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| this.open_account_settings(id.clone(), window, cx)))
+                .child(avatar(a, d.colors[ix], 32.))
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col()
+                    .child(div().font_weight(FontWeight::MEDIUM).one_line().child(a.email.clone()))
+                    .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).one_line()
+                        .child(if named { format!("{} · {kind}", a.display_name.trim()) } else { kind.to_string() })))
+                .child(icon("icons/chevron-right.svg", t.ink2, 16.)),
+        );
+    }
+    let accounts = div().flex().flex_col().gap(px(12.))
+        .child(div().flex().items_start().justify_between().gap(px(16.))
+            .child(section(t, "Accounts", Some("The email addresses in lagom. Only you see them.")))
+            .child(stop(t, button(t, "Add account", None)).on_click(cx.listener(|this, _, window, cx| this.settings_add(window, cx)))))
+        .when(d.accounts.is_empty(), |s| s.child(div().text_color(t.ink2).child("No accounts yet.")))
+        .when(!d.accounts.is_empty(), |s| s.child(rows));
+    let general = div().flex().flex_col().gap(px(12.))
+        .child(section(t, "General", None))
+        .child(plate(t).px(px(14.)).py(px(6.))
+            .child(stop(t, toggle_row(t, "Group by conversation", d.group)).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
+            .child(stop(t, toggle_row(t, "Notifications for new mail", d.notifications)).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx)))));
+    let lists = (!d.task_lists.is_empty()).then(|| div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(12.))
+        .child(section(t, "Default task list", Some("New tasks go here.")))
+        .child(plate(t).p(px(4.)).children(d.task_lists.iter().map(|list| {
+            let id = list.id;
+            let on = d.default_list == Some(id);
+            div().flex().items_center().gap(px(8.)).px(px(10.)).py(px(6.)).rounded(px(radius::CONTROL))
+                .when(on, |d| d.bg(t.sel))
+                .child(div().flex_1().min_w(px(0.)).one_line().child(list.name.clone()))
+                .child(stop(t, icon_button(t, "default-task-list", if on { "icons/complete-task.svg" } else { "icons/open-task.svg" },
+                    if on { "Default task list" } else { "Set as default task list" })
+                    .id(("default-task-list", id as usize)).debug_selector(move || format!("default-task-list-{id}")))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.save_task(crate::main_window::TaskChange::DefaultList(id), cx); })))
+        }))));
+    div()
+        .w_full()
+        .max_w(px(600.))
+        .flex()
+        .flex_col()
+        .gap(px(32.))
+        // A window-title-sized heading, as in System Settings panes.
+        .child(div().text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).child("Settings"))
+        .child(accounts)
+        .child(general)
+        .children(lists)
+}
+
+fn account_page(t: &Theme, d: &Data, ix: usize, cx: &mut Context<MainWindow>) -> Div {
+    let a = &d.accounts[ix];
+    let id = a.id.clone();
+    let (kind, signed) = sign_in_words(a);
+    let field = |label: &'static str, note: &'static str, input: Option<&Entity<TextInput>>, h: Option<f32>| {
+        div().flex().flex_col().gap(px(6.))
+            .child(div().text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).child(label))
+            .children(input.map(|i| div().when_some(h, |d, h| d.h(px(h))).child(i.clone())))
+            .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).line_height(relative(1.4)).child(note))
+    };
+    let signing_in = d.signing_in.contains(&a.id);
+    let oauth = matches!(a.auth, Auth::OAuth(_));
+    let remove = if d.confirm {
+        let yes = id.clone();
+        div().flex().flex_col().gap(px(12.))
+            .child(div().text_color(t.danger).line_height(relative(1.4))
+                .child(format!("Remove {} from lagom? Your mail stays with your provider.", a.email)))
+            .child(div().flex().gap(px(8.))
+                .child(stop(t, button(t, "Remove", Some(t.danger))).on_click(cx.listener(move |this, _, window, cx| this.remove_account(yes.clone(), window, cx))))
+                .child(stop(t, button(t, "Keep", None)).on_click(cx.listener(|this, _, window, cx| this.confirm_remove(None, window, cx)))))
+    } else {
+        let ask = id.clone();
+        div().flex().flex_col().gap(px(12.))
+            .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).line_height(relative(1.4))
+                .child("Removes the account and its saved mail from this Mac. Your mail stays with your provider."))
+            .child(div().flex().child(stop(t, button(t, "Remove account", None)).text_color(t.danger)
+                .on_click(cx.listener(move |this, _, window, cx| this.confirm_remove(Some(ask.clone()), window, cx)))))
+    };
+    let again = id.clone();
+    div()
+        .w_full()
+        .max_w(px(600.))
+        .flex()
+        .flex_col()
+        .gap(px(28.))
+        .child(div().flex().items_center().gap(px(4.)).ml(px(-6.))
+            .child(stop(t, icon_button(t, "back", "icons/previous.svg", "Back to Settings · Esc"))
+                .on_click(cx.listener(|this, _, window, cx| this.close_account_settings(window, cx))))
+            .child(div().text_color(t.ink2).child("Settings")))
+        .child(div().flex().items_center().gap(px(14.))
+            .child(avatar(a, d.colors[ix], 48.))
+            .child(div().min_w(px(0.)).flex().flex_col().gap(px(2.))
+                .child(div().text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).one_line().child(a.email.clone()))
+                .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(kind))))
+        .child(plate(t).p(px(16.)).gap(px(20.))
+            .child(field("Your name", "Shown to the people you write to, and in the sidebar.", d.names.get(&a.id), None))
+            .child(field("Signature", "Added to new mail, replies and forwards.", d.signatures.get(&a.id), Some(88.))
+                .debug_selector({ let id = a.id.clone(); move || format!("signature-{id}") })))
+        .child(plate(t).p(px(16.)).gap(px(12.))
+            .child(div().text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).child("Sign-in"))
+            .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(signed))
+            .when(oauth, |p| p.child(div().flex().child(
+                // The label changes while the browser is open; the stable wrapper keeps the keys.
+                stop(t, div().id("sign-in-again").rounded(px(radius::CONTROL)).child(button(t, if signing_in { "Cancel sign-in" } else { "Sign in again" }, None)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.sign_in_again(&again, cx)))))))
+        .child(plate(t).p(px(16.)).child(remove))
 }
 
 /// A setting with a macOS-style switch. The whole row toggles, so the target is large.

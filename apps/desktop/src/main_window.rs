@@ -71,6 +71,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("alt-secondary-s", ToggleSidebar, ctx),
         KeyBinding::new("escape", Cancel, keys),
+        KeyBinding::new("tab", crate::text_input::FocusNext, Some("Settings && !TextInput")),
+        KeyBinding::new("shift-tab", crate::text_input::FocusPrev, Some("Settings && !TextInput")),
         KeyBinding::new("secondary-o", OpenInWindow, ctx),
     ]);
     // A message window takes the keys that act on its message. Esc does nothing there.
@@ -299,6 +301,10 @@ pub struct MainWindow {
     week: week::Week,
     task_undo: Option<i64>,
     signatures: HashMap<String, Entity<TextInput>>,
+    /// "Your name" on each account's Settings page.
+    names: HashMap<String, Entity<TextInput>>,
+    /// The open account's Remove waits for a yes.
+    confirm_remove_account: bool,
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
     message_menu: Option<usize>,
@@ -418,6 +424,8 @@ impl MainWindow {
             week: week::Week::default(),
             task_undo: None,
             signatures: HashMap::new(),
+            names: HashMap::new(),
+            confirm_remove_account: false,
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
             message_menu: None,
@@ -639,7 +647,7 @@ impl MainWindow {
                 }
             }
             Run::Sync => self.sync_now(),
-            Run::Settings => self.open_settings(cx),
+            Run::Settings => self.open_settings(window, cx),
             Run::AddAccount => self.add_account(window, cx),
             Run::Open(id) => self.open_found(id, cx),
         }
@@ -773,7 +781,7 @@ impl MainWindow {
         }
         match &self.page {
             Page::AddAccount(add) => { add.update(cx, |add, cx| add.back(window, cx)); }
-            Page::Settings(Some(_)) => { self.set_page(Page::Settings(None), cx); cx.notify(); }
+            Page::Settings(Some(_)) => self.close_account_settings(window, cx),
             Page::Settings(None) => self.show_section(1, window, cx),
             _ => hide_main_window(window),
         }
@@ -1559,7 +1567,7 @@ impl MainWindow {
                     .rounded(px(radius::CONTROL))
                     .text_color(t.ink)
                     .when(in_settings, |d| d.bg(t.sel))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
                     .gap(px(8.)).child(icon("icons/settings.svg", if in_settings { active_icon } else { t.ink2 }, 16.)
                         .when(!in_settings, |icon| icon.group_hover("settings", { let ink = t.ink; move |s| s.text_color(ink) })))
                     .child("Settings"),
@@ -2278,9 +2286,23 @@ impl Render for MainWindow {
             Page::Home | Page::Todo => self.tasks_view(window, cx),
             Page::Calendar => self.week_view(window, cx),
             Page::AddAccount(add) => div().flex_1().min_w(px(0.)).child(add.clone()),
-            Page::Settings(confirm) => {
+            Page::Settings(open) => {
                 let demo = mail::demo_accounts();
-                crate::settings::view(&t, self.live.as_ref().map_or(&demo[..], |l| &l.accounts), confirm.as_deref(), self.panes.group_conversations, self.panes.notifications, &self.today.lists, self.today.default, &self.signatures, cx)
+                let accounts = self.live.as_ref().map_or(&demo[..], |l| &l.accounts);
+                let signing_in = self.signing_in_accounts();
+                crate::settings::view(&t, crate::settings::Data {
+                    accounts,
+                    colors: (0..accounts.len()).map(|ix| self.account_accent(ix)).collect(),
+                    open: open.as_deref(),
+                    confirm: self.confirm_remove_account,
+                    signing_in,
+                    group: self.panes.group_conversations,
+                    notifications: self.panes.notifications,
+                    task_lists: &self.today.lists,
+                    default_list: self.today.default,
+                    names: &self.names,
+                    signatures: &self.signatures,
+                }, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
             Page::Mail if empty => crate::empty_inbox::view(&t, self.sync_icon(), self.sync_line().unwrap_or_else(|| "Personal · synced 10:12".into())),
@@ -2307,8 +2329,10 @@ impl Render for MainWindow {
         let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
         if welcome || self.panes.sidebar_hidden { self.glass.hide(); }
         div()
-            .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", _ => "MainWindow" })
+            .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", Page::Settings(_) => "MainWindow Settings", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
+            .on_action(|_: &crate::text_input::FocusNext, window, _| window.focus_next())
+            .on_action(|_: &crate::text_input::FocusPrev, window, _| window.focus_prev())
             .on_action(cx.listener(|this, _: &ShowHome, window, cx| this.show_section(0, window, cx)))
             .on_action(cx.listener(|this, _: &ShowMail, window, cx| this.show_section(1, window, cx)))
             .on_action(cx.listener(|this, _: &ShowCalendar, window, cx| this.show_section(2, window, cx)))
@@ -2356,14 +2380,17 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &Reply, window, cx| if !this.overlay_open(cx) { this.open_compose(true, window, cx) }))
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
             .on_action(cx.listener(|this, _: &OpenInWindow, window, cx| if !this.overlay_open(cx) { this.open_popout(window, cx) }))
-            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(cx) }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(window, cx) }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
                 this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
                 this.save_panes(cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Cancel, _, cx| if !this.overlay_open(cx) {
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| if matches!(this.page, Page::Settings(Some(_))) && this.palette.is_none() {
+                // Esc on an account's Settings page goes back to the list.
+                this.close_account_settings(window, cx);
+            } else if !this.overlay_open(cx) {
                 this.message_menu = None;
                 this.select(|inbox| inbox.select(inbox.selected), cx);
                 this.confirm_empty_trash = false;
@@ -4279,9 +4306,12 @@ mod dispatch {
         let (view, cx) = open(cx);
         cx.simulate_keystrokes("secondary-,");
         frame(cx);
-        assert!(cx.debug_bounds("signature-personal").is_some());
-        assert!(cx.debug_bounds("signature-work").is_some());
+        assert!(cx.debug_bounds("account-personal").is_some() && cx.debug_bounds("account-work").is_some());
         for id in ["personal", "work"] {
+            // Each account's signature is on its own page.
+            view.update_in(cx, |v, window, cx| v.open_account_settings(id.into(), window, cx));
+            frame(cx);
+            assert!(cx.debug_bounds(format!("signature-{id}").leak()).is_some());
             view.update_in(cx, |v, window, cx| window.focus(&v.signatures[id].read(cx).focus_handle(cx)));
             cx.simulate_input(id);
             cx.simulate_keystrokes("enter");

@@ -288,6 +288,10 @@ impl MainWindow {
         if self.inbox.account_filter.as_ref().is_some_and(|id| !live.accounts.iter().any(|a| &a.id == id)) {
             self.inbox.account_filter = None;
         }
+        if matches!(&self.page, Page::Settings(Some(id)) if !live.accounts.iter().any(|a| &a.id == id)) {
+            self.page = Page::Settings(None);
+            self.confirm_remove_account = false;
+        }
         live.failed = live.store.failed_outbox().unwrap_or_default();
         self.drafts.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
         self.sending.retain(|c| c.read(cx).account_id().is_none_or(|id| live.accounts.iter().any(|a| a.id == id)));
@@ -399,6 +403,13 @@ impl MainWindow {
                         Ok(()) => read = true,
                         Err(error) => self.notify(format!("Could not sign in: {error}"), cx),
                     }
+                }
+                Event::SignInStopped { account, error } => {
+                    if let Some(live) = &mut self.live {
+                        // The worker syncs the account again; Syncing lets its result through.
+                        if live.sync.get(&account) == Some(&SyncState::SigningIn) { live.sync.insert(account, SyncState::Syncing); }
+                    }
+                    if let Some(error) = error { self.notify(format!("Could not sign in: {error}"), cx); }
                 }
                 Event::EventCreated { op, error } => {
                     self.event_created(op, error, window, cx);
@@ -1189,6 +1200,11 @@ impl MainWindow {
     pub(super) fn prepare_signatures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let demo = mail::demo_accounts();
         let accounts = self.live.as_ref().map_or(&demo[..], |live| &live.accounts);
+        // A removed account's field may hold the keys; hand them back to the window first.
+        let gone = |id: &String| !accounts.iter().any(|a| &a.id == id);
+        if self.signatures.iter().chain(&self.names).any(|(id, i)| gone(id) && i.read(cx).focus_handle(cx).is_focused(window)) {
+            window.focus(&self.focus);
+        }
         self.signatures.retain(|id, _| accounts.iter().any(|a| &a.id == id));
         for account in accounts {
             if self.signatures.contains_key(&account.id) { continue; }
@@ -1207,24 +1223,95 @@ impl MainWindow {
                     }
                 }
             }).detach();
+            cx.subscribe_in(&input, window, Self::escape_to_settings).detach();
             self.signatures.insert(account.id.clone(), input);
+        }
+        self.names.retain(|id, _| accounts.iter().any(|a| &a.id == id));
+        for account in accounts {
+            if self.names.contains_key(&account.id) { continue; }
+            // A new account's name is its address; show the field empty until the person names it.
+            let text = if account.display_name == account.email { "" } else { account.display_name.as_str() };
+            let input = cx.new(|cx| TextInput::new(window, cx).bordered().placeholder("Your name").with_text(text));
+            let id = account.id.clone();
+            let focus = input.read(cx).focus_handle(cx);
+            cx.on_blur(&focus, window, move |this, _, cx| this.save_name(&id, cx)).detach();
+            cx.subscribe_in(&input, window, Self::escape_to_settings).detach();
+            self.names.insert(account.id.clone(), input);
         }
     }
 
-    pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
+    /// Esc in an account page's field goes back to the list, like Esc outside it.
+    fn escape_to_settings(&mut self, _: &Entity<TextInput>, e: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(e, TextInputEvent::Escape) && matches!(self.page, Page::Settings(Some(_))) { self.close_account_settings(window, cx); }
+    }
+
+    /// Saves "Your name" when its field loses focus. An empty name falls back to the address.
+    fn save_name(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(input) = self.names.get(id) else { return };
+        let name = input.read(cx).text().trim().to_string();
+        let Some(live) = &mut self.live else { return };
+        let Some(account) = live.accounts.iter_mut().find(|a| a.id == id) else { return };
+        let name = if name.is_empty() { account.email.clone() } else { name };
+        if account.display_name == name { return; }
+        let mut changed = account.clone();
+        changed.display_name = name;
+        match live.store.with_short_lock_wait(|store| store.save_account(&changed)) {
+            Ok(()) => *account = changed,
+            Err(e) => return self.notify(format!("Could not save your name: {e}"), cx),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An account page's controls leave the screen; the window keeps the keys.
+        window.focus(&self.focus);
         self.release(false, cx);
         self.confirm_empty_trash = false;
         self.set_page(Page::Settings(None), cx);
         cx.notify();
     }
 
-    pub(crate) fn confirm_remove(&mut self, id: Option<String>, cx: &mut Context<Self>) {
-        self.set_page(Page::Settings(id), cx);
+    /// `Some`: Remove on that account's page waits for a yes; `None`: Keep.
+    pub(crate) fn confirm_remove(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // The pressed button leaves the screen; the window keeps the keys.
+        window.focus(&self.focus);
+        self.confirm_remove_account = id.is_some();
+        if let Some(id) = id { self.set_page(Page::Settings(Some(id)), cx); }
         cx.notify();
     }
 
+    pub(crate) fn open_account_settings(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_remove_account = false;
+        self.prepare_signatures(window, cx);
+        // The row that opened the page leaves the screen; the window keeps the keys.
+        window.focus(&self.focus);
+        self.set_page(Page::Settings(Some(id)), cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_account_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_remove_account = false;
+        self.set_page(Page::Settings(None), cx);
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Accounts whose browser sign-in runs now.
+    pub(super) fn signing_in_accounts(&self) -> Vec<String> {
+        self.live.as_ref().map(|l| l.sync.iter().filter(|(_, s)| matches!(s, SyncState::SigningIn)).map(|(id, _)| id.clone()).collect()).unwrap_or_default()
+    }
+
+    /// "Sign in again" on a Google or Microsoft account's page, or its cancel while the browser is open.
+    pub(crate) fn sign_in_again(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return self.notify("Demo mode: nothing to sign in to", cx) };
+        let cmd = if matches!(live.sync.get(id), Some(SyncState::SigningIn)) { Cmd::CancelSignIn } else { Cmd::Reauthenticate(id.into()) };
+        if !live.bridge.send(cmd) { self.worker_gone(cx); }
+    }
+
     /// Deletes the keychain secret and every local row of the account. The server keeps its mail.
-    pub(crate) fn remove_account(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn remove_account(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        self.confirm_remove_account = false;
         let Some(live) = &mut self.live else { return };
         if !live.bridge.send(Cmd::RemoveAccount(id.clone())) {
             return self.worker_gone(cx);
@@ -2166,7 +2253,7 @@ mod tests {
         let (view, cx, _rx) = window(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        let (store, first, second) = view.update(cx, |v, cx| {
+        let (store, first, second) = view.update_in(cx, |v, window, cx| {
             let live = v.live.as_mut().unwrap();
             let first = live.accounts[0].id.clone();
             let config = live.accounts[0].imap.clone();
@@ -2176,19 +2263,29 @@ mod tests {
             live.store.set_signature(&other.id, "Second").unwrap();
             live.accounts.push(other.clone());
             let store = live.store.clone();
-            v.open_settings(cx);
+            v.open_settings(window, cx);
             (store, first, other.id)
         });
-        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        draw(cx);
         for id in [&first, &second] {
-            assert!(cx.debug_bounds(format!("signature-{id}").leak()).is_some());
+            assert!(cx.debug_bounds(format!("account-{id}").leak()).is_some());
         }
+        view.update_in(cx, |v, window, cx| v.open_account_settings(first.clone(), window, cx));
+        draw(cx);
+        assert!(cx.debug_bounds(format!("signature-{first}").leak()).is_some());
         view.update_in(cx, |v, window, cx| window.focus(&v.signatures[&first].read(cx).focus_handle(cx)));
         cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("First edited");
         cx.simulate_keystrokes("enter");
         cx.simulate_input("Team");
         assert_eq!(store.signature(&first).unwrap(), "First");
+        // Esc in the field goes back to the list and saves on blur; the other account's page then opens.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        view.update_in(cx, |v, window, cx| v.open_account_settings(second.clone(), window, cx));
+        draw(cx);
         view.update_in(cx, |v, window, cx| window.focus(&v.signatures[&second].read(cx).focus_handle(cx)));
         cx.run_until_parked();
         assert_eq!(store.signature(&first).unwrap(), "First edited\nTeam");
@@ -2209,11 +2306,79 @@ mod tests {
     }
 
     #[gpui::test]
+    fn account_page_saves_the_name_asks_before_remove_and_signs_in_again(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let id = view.update_in(cx, |v, window, cx| {
+            let id = v.live.as_ref().unwrap().accounts[0].id.clone();
+            v.open_settings(window, cx);
+            v.open_account_settings(id.clone(), window, cx);
+            id
+        });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds(format!("signature-{id}").leak()).is_some());
+        let email = view.read_with(cx, |v, cx| {
+            let a = &v.live.as_ref().unwrap().accounts[0];
+            assert_eq!(v.names[&a.id].read(cx).text(), "", "an unnamed account shows an empty name field");
+            a.email.clone()
+        });
+        // A name saves on blur; an empty one falls back to the address.
+        for (typed, saved) in [("  Alex  ", "Alex"), ("", email.as_str())] {
+            view.update_in(cx, |v, window, cx| {
+                window.focus(&v.names[&id].read(cx).focus_handle(cx));
+                v.names[&id].update(cx, |f, cx| f.set_text(typed, cx));
+            });
+            cx.run_until_parked();
+            view.update_in(cx, |v, window, _| window.focus(&v.focus));
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                let live = v.live.as_ref().unwrap();
+                assert_eq!(live.accounts[0].display_name, saved);
+                assert_eq!(live.store.accounts().unwrap().into_iter().find(|a| a.id == id).unwrap().display_name, saved);
+            });
+        }
+        // Remove asks first; Keep stays on the page; Esc goes back to the list.
+        view.update_in(cx, |v, window, cx| { window.focus(&v.names[&id].read(cx).focus_handle(cx)); v.confirm_remove(Some(id.clone()), window, cx) });
+        assert!(cx.update(|window, cx| view.read(cx).focus.is_focused(window)), "the pressed button leaves; the window keeps the keys");
+        assert!(view.read_with(cx, |v, _| v.confirm_remove_account && matches!(&v.page, Page::Settings(Some(open)) if *open == id)));
+        view.update_in(cx, |v, window, cx| v.confirm_remove(None, window, cx));
+        assert!(view.read_with(cx, |v, _| !v.confirm_remove_account && matches!(&v.page, Page::Settings(Some(_)))));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        // Sign in again asks the worker; while the browser is open it cancels instead.
+        while rx.try_recv().is_ok() {}
+        view.update(cx, |v, cx| v.sign_in_again(&id, cx));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Reauthenticate(a) if a == id));
+        view.update(cx, |v, cx| { v.live.as_mut().unwrap().sync.insert(id.clone(), SyncState::SigningIn); v.sign_in_again(&id, cx); });
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::CancelSignIn));
+        assert_eq!(view.read_with(cx, |v, _| v.signing_in_accounts()), std::slice::from_ref(&id));
+        // A stopped sign-in on a working account clears "Cancel sign-in" and lets the next sync show.
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::SignInStopped { account: id.clone(), error: None }], window, cx));
+        assert!(view.read_with(cx, |v, _| v.signing_in_accounts().is_empty() && v.live.as_ref().unwrap().sync[&id] == SyncState::Syncing));
+        // Tab reaches Add account, then the account; Enter (on release) opens it.
+        let draw = |cx: &mut VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        draw(cx);
+        cx.simulate_keystrokes("tab tab");
+        draw(cx);
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
+        assert!(view.read_with(cx, |v, _| matches!(&v.page, Page::Settings(Some(open)) if *open == id)));
+        assert!(cx.update(|window, cx| view.read(cx).focus.is_focused(window)));
+        // A removed account's page falls back to the list, with the keys on the window.
+        draw(cx);
+        view.update_in(cx, |v, window, cx| window.focus(&v.names[&id].read(cx).focus_handle(cx)));
+        view.update(cx, |v, cx| { v.live.as_ref().unwrap().store.delete_account(&id).unwrap(); v.reload(cx); });
+        draw(cx);
+        view.read_with(cx, |v, _| assert!(matches!(v.page, Page::Settings(None)) && !v.confirm_remove_account && !v.names.contains_key(&id)));
+        assert!(cx.update(|window, cx| view.read(cx).focus.is_focused(window)));
+    }
+
+    #[gpui::test]
     fn signature_settings_and_reply_all_use_the_message_account(cx: &mut TestAppContext) {
         let (view, cx, _rx) = window(cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        view.update_in(cx, |v, window, cx| {
+        let m = view.update_in(cx, |v, window, cx| {
             let m = incoming(v, 1);
             let live = v.live.as_ref().unwrap();
             let mut message = live.store.message(m.id).unwrap();
@@ -2225,8 +2390,11 @@ mod tests {
             let other = Account::new("other@example.com".into(), config.clone(), config).unwrap();
             live.store.save_account(&other).unwrap();
             live.store.set_signature(&other.id, "Other signature").unwrap();
-            v.open_settings(cx);
-            v.prepare_signatures(window, cx);
+            v.open_account_settings(m.account.clone(), window, cx);
+            m
+        });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        view.update_in(cx, |v, window, cx| {
             window.focus(&v.signatures[&m.account].read(cx).focus_handle(cx));
             v.signatures[&m.account].update(cx, |input, cx| input.set_text("Team", cx));
         });
@@ -3817,7 +3985,7 @@ mod tests {
     fn notification_click_switches_account_pins_old_message_and_summary_opens_inbox(cx: &mut TestAppContext) {
         use crate::notifications::Target;
         let (view, cx, _rx) = window(cx);
-        let target = view.update(cx, |v, cx| {
+        let target = view.update_in(cx, |v, window, cx| {
             let live = v.live.as_mut().unwrap();
             let a = live.accounts[0].clone();
             let second = Account::new("other@example.test".into(), a.imap, a.smtp).unwrap();
@@ -3827,7 +3995,7 @@ mod tests {
             let first = incoming(v, 1).id;
             for uid in 2..=210 { incoming(v, uid); }
             v.live.as_mut().unwrap().current = 0;
-            v.open_settings(cx);
+            v.open_settings(window, cx);
             Target { account: second.id, message: Some(first) }
         });
         view.update_in(cx, |v, window, cx| {

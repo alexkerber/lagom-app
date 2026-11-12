@@ -216,7 +216,7 @@ mod tests {
             assert_eq!(saved.start_page, page);
             assert!(!saved.group_conversations);
         }
-        view.update(cx, |v, cx| v.open_settings(cx));
+        view.update_in(cx, |v, window, cx| v.open_settings(window, cx));
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(_))));
         assert!(matches!(Page::restore(Panes::load(&path, 1440.).unwrap().start_page), Page::Mail));
@@ -247,7 +247,7 @@ mod tests {
         for section in [0, 2, 3, 1] {
             view.update_in(cx, |v, window, cx| v.show_section(section, window, cx));
         }
-        view.update(cx, |v, cx| v.open_settings(cx));
+        view.update_in(cx, |v, window, cx| v.open_settings(window, cx));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         std::fs::remove_file(&path).unwrap();
         view.update_in(cx, |v, window, cx| v.show_section(2, window, cx));
