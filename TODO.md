@@ -98,6 +98,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 ## Product line
 
+- [ ] Mobile parity (Alex 2026-11-13): iOS and Android lag far behind desktop. Parity table and ranked gaps first, then close the daily-mail gaps.
+- [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
+- [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, HTML mail on Linux, a hand test of each.
+
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
 
