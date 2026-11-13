@@ -22,7 +22,69 @@ class MailModelTest {
     @Before fun setup() { Dispatchers.setMain(dispatcher) }
     @After fun teardown() { Dispatchers.resetMain() }
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
-        open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = { 86_400 }, now = now)
+        open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = now)
+
+    @Test fun undoRestoresDraftAndExpirySyncsOnlyInForeground() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.setForeground(true)
+        val initialSyncs = core.syncs
+        val draft = ComposeDraft("fixture", to = "to@example.test", body = "keep edits",
+            attachments = listOf(SendAttachment("a.bin", "application/octet-stream", byteArrayOf(1, 2))))
+        model.draft = draft; model.send(); runCurrent()
+        assertEquals("Sending…", model.notice); assertEquals(draft.id, model.undoSendId)
+        advanceTimeBy(4999); runCurrent()
+        assertEquals(initialSyncs, core.syncs)
+        model.undoSend()
+        assertEquals(draft.id, model.draft?.id); assertEquals(draft.body, model.draft?.body)
+        assertEquals(draft.attachments, model.draft?.attachments); assertNull(model.undoSendId)
+        advanceTimeBy(1); runCurrent()
+        assertEquals(initialSyncs + 1, core.syncs)
+        model.send(); runCurrent(); core.queued.clear(); model.undoSend()
+        assertEquals("Already sent", model.notice); assertNull(model.draft)
+        model.setForeground(false)
+        advanceTimeBy(5000); runCurrent()
+        assertEquals(initialSyncs + 1, core.syncs)
+        model.setForeground(true)
+        assertEquals(initialSyncs + 2, core.syncs)
+        model.draft = draft.copy(id = "next"); model.send(); runCurrent()
+        advanceTimeBy(5000); runCurrent()
+        assertNull(model.undoSendId); assertNull(model.notice)
+        assertEquals(initialSyncs + 3, core.syncs)
+    }
+
+    @Test fun resendingRestoredDraftGetsItsOwnFullUndoWindow() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.setForeground(true)
+        model.draft = ComposeDraft("fixture", to = "to@example.test", body = "same Message-ID")
+        model.send(); runCurrent()
+        advanceTimeBy(1000); model.undoSend()
+        val id = model.draft!!.id
+        model.send(); runCurrent()
+        advanceTimeBy(4000); runCurrent()
+        assertEquals(id, model.undoSendId); assertEquals("Sending…", model.notice)
+        advanceTimeBy(1000); runCurrent()
+        assertNull(model.undoSendId); assertNull(model.notice)
+    }
+
+    @Test fun undoPreservesAnEditorOpenedDuringRestoration() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        val original = ComposeDraft("fixture", to = "to@example.test", body = "original")
+        model.draft = original; model.send()
+        val newer = ComposeDraft("fixture", body = "new editor")
+        core.onRestore = { model.draft = newer }
+        model.undoSend()
+        assertEquals(newer, model.draft)
+        assertEquals(original.body, core.saved[original.id]?.body)
+        core.onRestore = null
+    }
+
+    @Test fun laterUsesEveryCoreChoiceAndTomorrowForSwipe() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }; val model = model(core); model.start()
+        for (choice in core.laterChoices()) {
+            model.act(MailAction.Later, 1, until = choice.untilUnix)
+            assertEquals(listOf(1L) to choice.untilUnix, core.snoozed)
+        }
+        model.act(MailAction.Later, 1)
+        assertEquals(listOf(1L) to 86_400L, core.snoozed)
+    }
 
     @Test fun conversationExpansionReadStateAndRemoteConsentArePerMessage() = runTest(dispatcher) {
         val core = FakeCore().apply {
@@ -453,23 +515,6 @@ class MailModelTest {
         assertSame(main, core.markReadThread)
         assertFalse(model.message!!.row.unread)
     }
-    @Test fun laterComputesDeadlineOffMainAndReturnsToMain() = runTest(dispatcher) {
-        val main = Thread.currentThread()
-        var deadlineThread: Thread? = null
-        val core = FakeCore().apply { mail = listOf(row(1)) }
-        val model = MailModel(open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = {
-            deadlineThread = Thread.currentThread()
-            86_400
-        })
-        model.start()
-        model.perform { model.act(MailAction.Later, 1) }.join()
-        assertNull(model.error)
-        assertNotNull(deadlineThread)
-        assertNotSame(main, deadlineThread)
-        assertSame(main, core.laterThread)
-        assertEquals(listOf(1L) to 86_400L, core.snoozed)
-        assertFalse(model.working)
-    }
     @Test fun explicitReadStateUsesConfirmedFlagsAndRetainsMessageOnFailure() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1)) }
         val model = model(core); model.start(); model.select(1); model.unreadOnly = true
@@ -648,7 +693,7 @@ class MailModelTest {
     }
     @Test fun sendDismissesOnlyAfterDurableEnqueueAndDoesNotRequeueOnSyncFailure() = runTest(dispatcher) {
         val core = FakeCore()
-        val model = model(core); model.start()
+        val model = model(core); model.setForeground(true)
         val draft = ComposeDraft("fixture", "to@example.test", "cc@example.test", "Subject", "**body**", 42)
         model.draft = draft
         core.rejectSend = true
@@ -662,6 +707,7 @@ class MailModelTest {
         assertEquals(draft.account, core.sent.single().account)
         assertEquals(draft.body, core.sent.single().body)
         assertEquals(draft.replyTo, core.sent.single().replyTo)
+        runCurrent(); advanceTimeBy(5000); runCurrent()
         assertNotNull(model.error)
         model.sync()
         assertEquals(1, core.sent.size)
@@ -746,6 +792,14 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun todoLists(): List<TodoList> = emptyList()
     override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> = emptyList()
 
+    override fun laterChoices() = listOf(LaterChoice("Later: this evening 18:00", 18_000),
+        LaterChoice("Later: tomorrow 08:00", 86_400), LaterChoice("Later: next week, Monday 08:00", 604_800))
+    val queued = mutableMapOf<String, LocalDraft>()
+    override suspend fun undoSend(id: String): Boolean {
+        val restored = queued.remove(id) ?: return false
+        saved[id] = restored
+        return true
+    }
     val saved = mutableMapOf<String, LocalDraft>()
     val replyIds = mutableMapOf<String, Long?>()
     var saveCalls = 0
@@ -760,7 +814,11 @@ private class FakeCore : LagomCoreInterface {
         check(!rejectDraftList) { "draft list failed" }
         return rows
     }
-    override suspend fun localDraft(id: String): LocalDraft = saved[id] ?: throw MailException.NotFound()
+    var onRestore: (() -> Unit)? = null
+    override suspend fun localDraft(id: String): LocalDraft {
+        onRestore?.invoke()
+        return saved[id] ?: throw MailException.NotFound()
+    }
     override suspend fun savedReply(id: Long): LocalDraft? = saved.values.firstOrNull {
         it.account == mail.first { row -> row.id == id }.account && it.inReplyTo == "<${id}>"
     }
@@ -778,6 +836,7 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun sendDraft(id: String): String {
         val draft = saved.getValue(id)
         val result = send(draft.account, listOf(draft.to), listOf(draft.cc), draft.subject, draft.body, replyIds[id], draft.attachments)
+        queued[id] = draft
         saved.remove(id)
         return result
     }
@@ -817,7 +876,8 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun sendFailures() = emptyList<SendFailure>()
     override fun cancelBackgroundSync() {}
     override suspend fun backgroundSync(): List<MailRow> { syncAll(); return emptyList() }
-    override suspend fun syncAll() { syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
+    var syncs = 0
+    override suspend fun syncAll() { syncs++; syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
     override suspend fun sync(accountId: String) = syncAll()
     var conversationIds = emptyList<Long>()
     override suspend fun conversation(messageId: Long) = (conversationIds.ifEmpty { listOf(messageId) }).map { message(it) }

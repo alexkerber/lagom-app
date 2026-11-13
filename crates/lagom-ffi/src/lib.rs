@@ -454,7 +454,7 @@ impl LagomCore {
                     outgoing.references.push(outgoing.in_reply_to.clone().unwrap_or_default());
                 }
             }
-            s.enqueue(&a, &outgoing, milliseconds())
+            s.enqueue(&a, &outgoing, milliseconds() + 5000)
         }).await
     }
     pub async fn send_failures(&self) -> Result<Vec<SendFailure>> {
@@ -487,12 +487,21 @@ impl LagomCore {
     }
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LaterChoice {
+    pub label: String,
+    pub until_unix: i64,
+}
+
 #[uniffi::export]
-pub fn tomorrow_at_eight() -> Result<i64> {
-    use chrono::{Local, TimeZone};
-    let tomorrow = Local::now().date_naive().succ_opt().and_then(|date| date.and_hms_opt(8, 0, 0))
-        .ok_or_else(|| failure("tomorrow is outside the calendar range"))?;
-    Local.from_local_datetime(&tomorrow).earliest().map(|t| t.timestamp()).ok_or_else(|| failure("08:00 does not exist in the local time zone"))
+impl LagomCore {
+    /// Local times, ordered evening, tomorrow (the swipe default), next Monday.
+    pub fn later_choices(&self) -> Vec<LaterChoice> {
+        use lagom_core::later::LaterWhen;
+        let now = chrono::Local::now();
+        [LaterWhen::Evening, LaterWhen::Tomorrow, LaterWhen::NextWeek].into_iter()
+            .map(|when| LaterChoice { label: when.label().into(), until_unix: when.at(now).timestamp() }).collect()
+    }
 }
 
 mod planner;

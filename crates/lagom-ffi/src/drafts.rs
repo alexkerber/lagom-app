@@ -104,6 +104,10 @@ impl LagomCore {
         self.run(move |s| s.delete_draft(&id)).await
     }
 
+    pub async fn undo_send(&self, id: String) -> Result<bool> {
+        self.run(move |s| s.undo_send(&id)).await
+    }
+
     /// Enqueue consumes the saved Message-ID and deletes its draft in one core transaction.
     pub async fn send_draft(&self, id: String) -> Result<String> {
         self.run(move |s| {
@@ -113,7 +117,7 @@ impl LagomCore {
             let [to, cc] = draft.recipient_tokens.unwrap_or_else(|| [split_recipients(draft.to), split_recipients(draft.cc)]);
             let (in_reply_to, references) = draft.reply.unwrap_or_default();
             s.enqueue(&a, &Outgoing { to, cc, bcc: split_recipients(draft.bcc), subject: draft.subject, text: draft.text,
-                message_id: Some(id), in_reply_to, references, attachments: draft.attachments }, milliseconds())
+                message_id: Some(id), in_reply_to, references, attachments: draft.attachments }, milliseconds() + 5000)
         }).await
     }
 }

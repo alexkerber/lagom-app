@@ -264,7 +264,11 @@ async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders()
 #[test]
 fn local_later_is_tomorrow_at_eight() {
     use chrono::{Local, TimeZone, Timelike};
-    let timestamp = tomorrow_at_eight().unwrap();
+    let (_dir, core) = fixture();
+    let choices = core.later_choices();
+    assert_eq!(choices.len(), 3);
+    assert_eq!(choices[1].label, "Later: tomorrow 08:00");
+    let timestamp = choices[1].until_unix;
     let next = Local.timestamp_opt(timestamp, 0).unwrap();
     assert_eq!(next.date_naive(), Local::now().date_naive().succ_opt().unwrap());
     assert_eq!((next.hour(), next.minute(), next.second()), (8, 0, 0));
@@ -853,7 +857,22 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     assert_eq!(pending.mail.references, first.references);
     assert_eq!(pending.mail.attachments[0].data, [0, 255]);
     assert!(core.send_draft(id.clone()).await.is_err());
-    assert!(core.save_draft(id, a.id, "".into(), "".into(), "".into(), "late".into(), None, vec![]).await.is_err());
+    assert!(core.save_draft(id.clone(), a.id.clone(), "".into(), "".into(), "".into(), "late".into(), None, vec![]).await.is_err());
+    {
+        let s = core.stores.local.lock().unwrap();
+        assert!(s.due_outbox(&a.id, milliseconds()).unwrap().is_empty());
+        assert!(!s.claim_send(&id, milliseconds()).unwrap());
+    }
+    assert!(core.undo_send(id.clone()).await.unwrap());
+    assert_eq!(core.stores.local.lock().unwrap().draft(&id).unwrap().text, "latest edits");
+    assert!(matches!(core.stores.local.lock().unwrap().pending(&id), Err(lagom_core::Error::NotFound)));
+    let restored = core.local_draft(id.clone()).await.unwrap();
+    assert_eq!(restored.references, first.references);
+    assert_eq!(restored.attachments[0].data, [0, 255]);
+    core.send_draft(id.clone()).await.unwrap();
+    assert!(core.stores.local.lock().unwrap().claim_send(&id, i64::MAX).unwrap());
+    assert!(!core.undo_send(id.clone()).await.unwrap());
+    assert!(core.local_drafts().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1001,12 +1020,18 @@ async fn background_sync_reports_new_unseen_mail_once_and_survives_a_locked_acco
         });
         // The foreground sync makes the Inbox known; background sync only refreshes known Inboxes.
         let _ = core.sync_all().await;
+        let queued = core.stores.local.lock().unwrap().enqueue(&a, &Outgoing {
+            to: vec!["recipient@example.test".into()], text: "background must not send".into(), ..Default::default()
+        }, 0).unwrap();
         let rows = core.background_sync().await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].account.as_str(), rows[0].subject.as_str(), rows[0].unread), (a.id.as_str(), "Mail 2", true));
         assert_eq!(core.inbox(10, 0).await.unwrap().len(), 3, "seen mail still syncs");
         assert!(core.background_sync().await.unwrap().is_empty(), "no duplicate notice");
         assert!(core.background_sync().await.unwrap().is_empty(), "UIDVALIDITY reset is silent");
+        let s = core.stores.local.lock().unwrap();
+        assert!(s.due_outbox(&a.id, milliseconds()).unwrap().contains(&queued));
+        assert!(!s.pending(&queued).unwrap().submitted);
         server.await.unwrap();
     }).await.unwrap();
 }
