@@ -34,6 +34,12 @@ internal fun safeAttachmentName(filename: String): String {
     return name.takeUnless { it.isEmpty() || it == "." || it == ".." } ?: "attachment"
 }
 
+/** Total size above which compose shows a one-line warning; many servers refuse mail near 25 MB. */
+internal const val ATTACHMENT_WARNING_BYTES = 20 * 1024 * 1024
+
+internal fun pickedAttachment(name: String?, mimeType: String?, data: ByteArray) =
+    SendAttachment(safeAttachmentName(name.orEmpty()), mimeType ?: "application/octet-stream", data)
+
 // Same boundaries as core split_recipients; desktop keeps the unfinished token in its input.
 internal fun recipientToken(value: String, recipient: String? = null): String {
     var quoted = false; var escaped = false; var angle = false
@@ -70,6 +76,7 @@ internal data class ComposeDraft(
         id = saved.id, attachments = saved.attachments, restored = true, isReply = saved.inReplyTo != null || saved.references.isNotEmpty(),
         title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft")
     val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || subject.isNotEmpty() || body.isNotEmpty() || attachments.isNotEmpty()
+    val attachmentsTooLarge get() = attachments.sumOf { it.data.size.toLong() } > ATTACHMENT_WARNING_BYTES
 }
 internal enum class MailAction { Done, Later, Delete }
 
@@ -130,6 +137,17 @@ internal class MailModel(
                 perform { persist(old) }
             }
         }
+    var attaching by mutableStateOf(false); private set
+    /** Reads picked files off the main thread and adds them to the draft they were picked for. */
+    suspend fun attach(read: () -> List<SendAttachment>) {
+        val id = draft?.id ?: return
+        attaching = true
+        try {
+            val files = withContext(Dispatchers.IO) { read() }
+            draft?.takeIf { it.id == id }?.let { draft = it.copy(attachments = it.attachments + files) }
+        } finally { attaching = false }
+    }
+    fun removeAttachment(index: Int) { draft?.let { draft = it.copy(attachments = it.attachments.filterIndexed { at, _ -> at != index }) } }
     var accountForm by mutableStateOf<AccountForm?>(null)
     private var revision = 0
     private var appliedRevision = 0

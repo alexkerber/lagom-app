@@ -328,6 +328,7 @@ struct ModelChecks {
         try await attachments()
         try await draftReload()
         try await draftLifecycle()
+        try await pickedAttachments()
         await openingDuringArchive()
         let core = FixtureCore(noHandle: .init())
         let model = MailModel()
@@ -392,6 +393,33 @@ struct ModelChecks {
         await model.openDraft(row)
         precondition(model.drafts.isEmpty && model.composeDraft == nil)
         print("MailModel: Message-ID, isolated draft reload, discard race and missing draft passed")
+    }
+
+    @MainActor static func pickedAttachments() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pdf = folder.appendingPathComponent(" report.pdf"), odd = folder.appendingPathComponent("notes.zzz")
+        try Data([1, 2, 3]).write(to: pdf); try Data([4]).write(to: odd)
+        let files = try [pdf, odd].map(readAttachment)
+        precondition(files.map(\.filename) == ["report.pdf", "notes.zzz"] && files[0].data == Data([1, 2, 3]))
+        precondition(files.map(\.mimeType) == ["application/pdf", "application/octet-stream"])
+        let core = DraftFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.attachments += files
+        precondition(model.composeDraft?.attachmentsTooLarge == false)
+        model.composeDraft?.attachments.append(SendAttachment(filename: "big.bin", mimeType: "application/octet-stream", data: Data(count: attachmentWarningBytes)))
+        precondition(model.composeDraft?.attachmentsTooLarge == true, "over 20 MB in total must warn")
+        model.composeDraft?.attachments.remove(at: 2)
+        precondition(model.composeDraft?.attachmentsTooLarge == false)
+        for _ in 0..<50 where core.drafts.values.first?.attachments != files { try await Task.sleep(for: .milliseconds(100)) }
+        precondition(core.drafts.values.first?.attachments == files, "picked files must autosave")
+        try await model.closeCompose(discard: false)
+        await model.openDraft(core.drafts.values.first!.row)
+        precondition(model.composeDraft?.attachments == files, "a restored draft keeps picked files")
+        try await model.closeCompose(discard: true)
+        print("MailModel: picked attachments read, warn, remove, autosave and restore passed")
     }
 
     @MainActor static func draftLifecycle() async throws {

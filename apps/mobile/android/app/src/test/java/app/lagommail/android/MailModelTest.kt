@@ -209,6 +209,26 @@ class MailModelTest {
         }
         assertEquals(120, safeAttachmentName("x".repeat(121)).length)
     }
+    @Test fun pickedAttachmentsWarnRemoveAutosaveAndRestore() = runTest(dispatcher) {
+        val file = pickedAttachment("../ report.pdf", "application/pdf", byteArrayOf(1, 2))
+        assertEquals("report.pdf", file.filename)
+        assertEquals("application/octet-stream", pickedAttachment(null, null, byteArrayOf()).mimeType)
+        assertEquals("attachment", pickedAttachment(null, null, byteArrayOf()).filename)
+        val core = FakeCore(); val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture")
+        model.attach { listOf(file, SendAttachment("big.bin", "application/octet-stream", ByteArray(ATTACHMENT_WARNING_BYTES))) }
+        assertFalse(model.attaching)
+        assertTrue(model.draft!!.attachmentsTooLarge)
+        model.removeAttachment(1)
+        assertFalse(model.draft!!.attachmentsTooLarge)
+        advanceTimeBy(500); runCurrent()
+        assertEquals(listOf(file), core.saved.values.single().attachments)
+        model.closeCompose(discard = false)
+        model.attach { error("a closed composer must not read") }
+        assertNull(model.draft)
+        model.showDrafts(); model.openDraft(model.drafts.single())
+        assertEquals(listOf(file), model.draft?.attachments)
+    }
     @Test fun attachmentClearsOldCacheWritesBytesAndBlocksDoubleTaps() = runTest(dispatcher) {
         val directory = temporary.newFolder("attachments")
         val old = File(directory, "old.txt").apply { writeText("old") }

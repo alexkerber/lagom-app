@@ -1,17 +1,27 @@
 package app.lagommail.android
 
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -39,6 +49,11 @@ import kotlinx.coroutines.CancellationException
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { contactsError = "Could not load contacts. Enter an address to continue." }
     }
+    val resolver = LocalContext.current.contentResolver
+    val add = { uris: List<Uri> -> if (uris.isNotEmpty()) model.perform { model.attach { uris.map { resolver.attachment(it) } } } }
+    val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
+    val media = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { add(it) }
+    var attachMenu by remember { mutableStateOf(false) }
     BackHandler { if (!model.sending) cancelling = true }
     if (cancelling) {
         AlertDialog(onDismissRequest = { cancelling = false }, title = { Text("Save draft?") },
@@ -52,7 +67,17 @@ import kotlinx.coroutines.CancellationException
     Scaffold(topBar = {
         TopAppBar(title = { Text(draft.title) },
             navigationIcon = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = { cancelling = true }) { Text("Cancel") } },
-            actions = { TextButton(enabled = !model.sending && (draft.to.isNotBlank() || draft.cc.isNotBlank()) && draft.account.isNotBlank(),
+            actions = {
+                Box {
+                    TextButton(enabled = !model.sending && !model.attaching, modifier = Modifier.heightIn(min = 48.dp), onClick = { attachMenu = true }) { Text("Attach") }
+                    DropdownMenu(attachMenu, { attachMenu = false }) {
+                        DropdownMenuItem(text = { Text("Files") }, onClick = { attachMenu = false; files.launch(arrayOf("*/*")) })
+                        DropdownMenuItem(text = { Text("Photos") }, onClick = {
+                            attachMenu = false; media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                        })
+                    }
+                }
+                TextButton(enabled = !model.sending && !model.attaching && (draft.to.isNotBlank() || draft.cc.isNotBlank()) && draft.account.isNotBlank(),
                 modifier = Modifier.heightIn(min = 48.dp), onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -71,13 +96,30 @@ import kotlinx.coroutines.CancellationException
             RecipientField("Cc", draft.cc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { model.draft = draft.copy(cc = it) }
             contactsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Field("Subject", draft.subject, !model.sending) { model.draft = draft.copy(subject = it) }
-            if (draft.attachments.isNotEmpty()) {
-                Text(draft.attachments.joinToString(", ") { it.filename }, style = MaterialTheme.typography.bodySmall)
+            if (draft.attachments.isNotEmpty() || model.attaching) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    draft.attachments.forEachIndexed { index, file ->
+                        InputChip(selected = false, enabled = !model.sending, onClick = { model.removeAttachment(index) },
+                            label = { Text(file.filename, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, modifier = Modifier.widthIn(max = 180.dp)) },
+                            trailingIcon = { Text("✕") },
+                            modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "Remove ${file.filename}" })
+                    }
+                    if (model.attaching) CircularProgressIndicator(Modifier.size(24.dp))
+                }
+                if (draft.attachmentsTooLarge) Text("Over 20 MB. Some mail servers refuse mail this large.", maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
             }
             OutlinedTextField(draft.body, { model.draft = draft.copy(body = it) }, enabled = !model.sending,
                 label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
         }
     }
+}
+
+// shortcut: reads the whole file into memory with no cap, add a hard limit if people pick very large videos.
+private fun ContentResolver.attachment(uri: Uri): SendAttachment {
+    val name = query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null }
+    val data = requireNotNull(openInputStream(uri)) { "Could not open the file" }.use { it.readBytes() }
+    return pickedAttachment(name, getType(uri), data)
 }
 
 @Composable private fun RecipientField(label: String, value: String, enabled: Boolean, core: LagomCoreInterface?, account: String,
