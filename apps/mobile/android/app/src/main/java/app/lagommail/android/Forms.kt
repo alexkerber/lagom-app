@@ -29,7 +29,7 @@ import app.lagommail.core.*
             }) { Text("Discard") } })
     }
     Scaffold(topBar = {
-        TopAppBar(title = { Text(if (draft.isReply) "Reply" else if (draft.restored) "Draft" else "New message") },
+        TopAppBar(title = { Text(draft.title) },
             navigationIcon = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = { cancelling = true }) { Text("Cancel") } },
             actions = { TextButton(enabled = !model.sending && (draft.to.isNotBlank() || draft.cc.isNotBlank()) && draft.account.isNotBlank(),
                 modifier = Modifier.heightIn(min = 48.dp), onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
@@ -49,7 +49,9 @@ import app.lagommail.core.*
             Field("To", draft.to, !model.sending, KeyboardType.Email) { model.draft = draft.copy(to = it) }
             Field("Cc", draft.cc, !model.sending, KeyboardType.Email) { model.draft = draft.copy(cc = it) }
             Field("Subject", draft.subject, !model.sending) { model.draft = draft.copy(subject = it) }
-            if (draft.attachments.isNotEmpty()) Text("Attachments: ${draft.attachments.joinToString { it.filename }}")
+            if (draft.attachments.isNotEmpty()) {
+                Text(draft.attachments.joinToString(", ") { it.filename }, style = MaterialTheme.typography.bodySmall)
+            }
             OutlinedTextField(draft.body, { model.draft = draft.copy(body = it) }, enabled = !model.sending,
                 label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
         }

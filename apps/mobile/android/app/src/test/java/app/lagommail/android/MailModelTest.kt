@@ -186,6 +186,82 @@ class MailModelTest {
         gate.complete(Unit); old.await()
         assertTrue(model.rows.isEmpty())
     }
+    @Test fun searchPagesCachedMailAcrossAccountsAndResetsOnQueryAndScopeChanges() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = (1L..250L).map { row(it, account = if (it % 2L == 0L) "second" else "fixture").copy(subject = "Meeting") } +
+                row(251).copy(subject = "Receipt")
+        }
+        val model = model(core); model.start(); model.select(1)
+        model.changeSearch("  Meeting \n")
+        assertNull(model.selectedId)
+        assertEquals(100, model.rows.size)
+        assertEquals(Triple(null, "Meeting", 0u), core.searchCalls.last())
+        model.reload(more = true)
+        assertEquals(200, model.rows.size)
+        model.sync()
+        assertEquals(200, model.rows.size)
+        model.reload(more = true)
+        assertEquals(250, model.rows.size)
+        assertFalse(model.hasMore)
+        model.changeScope("second", Mailbox.SENT)
+        assertEquals(100, model.rows.size)
+        assertEquals(Triple("second", "Meeting", 0u), core.searchCalls.last())
+        assertTrue(model.rows.all { it.account == "second" })
+        model.reload(more = true)
+        assertEquals(125, model.rows.size)
+        model.changeSearch("Receipt")
+        assertTrue(model.rows.isEmpty())
+        model.changeScope(null, Mailbox.INBOX)
+        assertEquals(listOf(251L), model.rows.map { it.id })
+        val searches = core.searchCalls.size
+        model.changeSearch(" \n")
+        assertEquals(100, model.rows.size)
+        assertEquals(searches, core.searchCalls.size)
+        assertTrue(model.hasMore)
+    }
+    @Test fun staleSearchCannotReplaceAnotherQueryOrAccountOrClearedSearch() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1).copy(subject = "Old"), row(2).copy(subject = "New")) }
+        val model = model(core); model.start()
+        for (change in listOf<suspend () -> Unit>(
+            { model.changeSearch("New") },
+            { model.changeScope("other", Mailbox.INBOX) },
+            { model.changeSearch("") },
+        )) {
+            model.changeScope(null, Mailbox.INBOX); model.changeSearch("")
+            val gate = CompletableDeferred<Unit>(); core.searchGate = gate
+            val old = async { model.changeSearch("Old") }; runCurrent()
+            core.searchGate = null
+            change()
+            val expected = model.rows
+            gate.complete(Unit); old.await()
+            assertEquals(expected, model.rows)
+        }
+    }
+    @Test fun unreadFilterKeepsUnfilteredPagingOffsetsAndLoadMoreAvailable() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = (1L..150L).map { row(it, unread = it > 100).copy(subject = "Match") } }
+        val model = model(core); model.start()
+        model.changeSearch("Match"); model.unreadOnly = true
+        assertTrue(model.visibleRows.isEmpty())
+        assertTrue(model.hasMore)
+        model.reload(more = true)
+        assertEquals(Triple(null, "Match", 100u), core.searchCalls.last())
+        assertEquals((101L..150L).toList(), model.visibleRows.map { it.id })
+        assertFalse(model.hasMore)
+        model.unreadOnly = false
+        assertEquals(core.mail, model.visibleRows)
+    }
+    @Test fun staleSearchErrorsAreIgnoredButCurrentErrorsAreReported() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core); model.start()
+        core.rejectSearch = true
+        val gate = CompletableDeferred<Unit>(); core.searchGate = gate
+        val old = model.perform { model.changeSearch("Old") }; runCurrent()
+        model.changeSearch("")
+        gate.complete(Unit); old.join()
+        assertNull(model.error)
+        model.perform { model.changeSearch("New") }.join()
+        assertEquals("Fixture search refused", model.error)
+    }
     @Test fun paginationDuringActionRefreshKeepsRemovedMailOutAndDoesNotSkipRows() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = (1L..250L).reversed().map { row(it) } }
         val model = model(core); model.start()
@@ -231,6 +307,77 @@ class MailModelTest {
         assertEquals(listOf(1L) to 86_400L, core.snoozed)
         assertFalse(model.working)
     }
+    @Test fun explicitReadStateUsesConfirmedFlagsAndRetainsMessageOnFailure() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = model(core); model.start(); model.select(1); model.unreadOnly = true
+        model.setRead(1, false)
+        assertTrue(model.message!!.row.unread)
+        assertEquals(listOf(1L), model.visibleRows.map { it.id })
+        core.rejectRead = true
+        model.perform { model.setRead(1, true) }.join()
+        assertEquals("Fixture read refused", model.error)
+        assertTrue(model.message!!.row.unread)
+        assertTrue(model.rows.single().unread)
+        assertFalse(model.working)
+        core.rejectRead = false
+        model.setRead(1, true)
+        assertFalse(model.message!!.row.unread)
+        assertTrue(model.visibleRows.isEmpty())
+        assertEquals("body", model.message!!.textBody)
+        assertEquals(listOf(1L to false, 1L to true, 1L to true), core.readCalls)
+    }
+    @Test fun pendingReadDoesNotOverwriteNewSelectionOrAcceptDuplicateAction() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2, unread = true)) }
+        val model = model(core); model.start(); model.select(1)
+        val gate = CompletableDeferred<Unit>(); core.readGate = gate
+        val read = async { model.setRead(1, false) }; runCurrent()
+        assertTrue(model.working)
+        model.setRead(1, false)
+        model.act(MailAction.Delete, 1)
+        assertEquals(listOf(1L to false), core.readCalls)
+        assertTrue(core.deleted.isEmpty())
+        core.readGate = null
+        model.select(2)
+        assertFalse(model.message!!.row.unread)
+        gate.complete(Unit); read.await()
+        assertEquals(2L, model.message!!.row.id)
+        assertFalse(model.message!!.row.unread)
+        assertTrue(model.rows.first { it.id == 1L }.unread)
+        assertFalse(model.working)
+    }
+    @Test fun pendingDeleteAllowsAnotherMessageToBeMarkedReadAndRetainsSelectionOnFailure() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2, unread = true)) }
+        val model = model(core); model.start(); model.select(1)
+        core.rejectAction = true
+        model.perform { model.act(MailAction.Delete, 1) }.join()
+        assertEquals(1L, model.selectedId)
+        assertEquals(2, model.rows.size)
+        core.rejectAction = false
+        val gate = CompletableDeferred<Unit>(); core.actionGate = gate
+        val action = async { model.act(MailAction.Delete, 1) }; runCurrent()
+        model.setRead(1, false)
+        assertTrue(core.readCalls.isEmpty())
+        model.select(2)
+        assertFalse(model.message!!.row.unread)
+        gate.complete(Unit); action.await()
+        assertEquals(2L, model.selectedId)
+        assertEquals(listOf(2L), model.rows.map { it.id })
+        assertEquals(listOf(1L), core.deleted)
+        assertFalse(model.working)
+    }
+    @Test fun delayedReadRefreshCannotReplaceNewMessage() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = model(core); model.start(); model.select(1)
+        val gate = CompletableDeferred<Unit>(); core.messageGate = gate
+        val started = CompletableDeferred<Unit>(); core.messageStarted = started
+        val read = async { model.setRead(1, false) }; started.await()
+        core.messageGate = null
+        model.select(2)
+        gate.complete(Unit); read.await()
+        assertEquals(2L, model.message!!.row.id)
+        assertFalse(model.message!!.row.unread)
+        assertTrue(model.rows.first { it.id == 1L }.unread)
+    }
     @Test fun lateMessageCannotReplaceNewSelectionAndReadFailureKeepsCachedBody() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1), row(2, unread = true)) }
         val model = model(core); model.start()
@@ -266,12 +413,48 @@ class MailModelTest {
         val core = FakeCore().apply { mail = listOf(row(1)) }
         val model = model(core); model.start(); model.select(1)
         val gate = CompletableDeferred<Unit>(); core.replyGate = gate
-        val reply = async { model.reply(1) }; runCurrent()
+        val reply = async { model.reply(1, ComposeKind.FORWARD) }; runCurrent()
         model.draft = ComposeDraft("fixture")
         model.draft = model.draft!!.copy(body = "Unsent text")
         val edited = model.draft
         gate.complete(Unit); reply.await()
         assertEquals(edited, model.draft)
+    }
+    @Test fun replyAllAndForwardKeepPreparedFieldsAndAttachmentsThroughEditsAndRetry() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(42, account = "second-account"))
+            preparedAttachments = listOf(SendAttachment("report.txt", "text/plain", byteArrayOf(1, 2, 3)))
+        }
+        val model = model(core); model.start()
+        for (kind in listOf(ComposeKind.REPLY_ALL, ComposeKind.FORWARD)) {
+            model.reply(42, kind)
+            val prepared = model.draft!!
+            assertEquals(kind, core.composeKinds.last())
+            assertEquals("second-account", prepared.account)
+            assertEquals(if (kind == ComposeKind.FORWARD) "Forward" else "Reply all", prepared.title)
+            assertEquals(if (kind == ComposeKind.FORWARD) null else 42L, prepared.replyTo)
+            assertEquals(if (kind == ComposeKind.FORWARD) "" else "copy@example.test", prepared.cc)
+            assertEquals(core.preparedAttachments, prepared.attachments)
+            model.draft = prepared.copy(to = "recipient@example.test", body = "Edited quote")
+            val edited = model.draft!!
+            core.rejectSend = true
+            try { model.send(); fail("expected refusal") } catch (_: IllegalStateException) { }
+            assertEquals(edited, model.draft)
+            core.rejectSend = false
+            model.send()
+            assertNull(model.draft)
+            val sent = core.sent.last()
+            assertEquals(edited.copy(id = sent.id, title = sent.title), sent)
+            assertArrayEquals(byteArrayOf(1, 2, 3), sent.attachments.single().data)
+        }
+    }
+    @Test fun failedForwardPreparationDoesNotOpenAnIncompleteDraft() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)); rejectCompose = true }
+        val model = model(core); model.start()
+        model.perform { model.reply(1, ComposeKind.FORWARD) }.join()
+        assertNull(model.draft)
+        assertEquals("Fixture attachment fetch refused", model.error)
+        assertTrue(core.sent.isEmpty())
     }
     @Test fun delayedReplyStaysDismissedAfterComposeClosesOrSelectionChanges() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
@@ -366,7 +549,17 @@ class MailModelTest {
 private class FakeCore : LagomCoreInterface {
     override suspend fun inlineResource(id: Long, request: String): InlineResource = error("unused")
     override suspend fun loadInline(id: Long): Unit = error("unused")
-    override suspend fun search(accountId: String?, query: String, limit: UInt, offset: UInt): List<MailRow> = error("unused")
+    val searchCalls = mutableListOf<Triple<String?, String, UInt>>()
+    var searchGate: CompletableDeferred<Unit>? = null
+    var rejectSearch = false
+    override suspend fun search(accountId: String?, query: String, limit: UInt, offset: UInt): List<MailRow> {
+        searchCalls += Triple(accountId, query, offset)
+        val snapshot = mail.filter { (accountId == null || accountId == it.account) && it.subject.contains(query) }
+            .drop(offset.toInt()).take(limit.toInt())
+        searchGate?.await()
+        check(!rejectSearch) { "Fixture search refused" }
+        return snapshot
+    }
     // Planner screens are iOS-only so far; the mail model never calls these.
     override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo = error("unused")
     override suspend fun addTodoList(name: String): TodoList = error("unused")
@@ -422,8 +615,15 @@ private class FakeCore : LagomCoreInterface {
     var messageStarted: CompletableDeferred<Unit>? = null
     val messageThreads = mutableListOf<Thread>()
     var markReadThread: Thread? = null
+    var readGate: CompletableDeferred<Unit>? = null
+    val readCalls = mutableListOf<Pair<Long, Boolean>>()
+    var actionGate: CompletableDeferred<Unit>? = null
+    val deleted = mutableListOf<Long>()
     var laterThread: Thread? = null
     var replyGate: CompletableDeferred<Unit>? = null
+    var preparedAttachments = emptyList<SendAttachment>()
+    val composeKinds = mutableListOf<ComposeKind>()
+    var rejectCompose = false
     var syncGate: CompletableDeferred<Unit>? = null
     var rejectRead = false
     var rejectSend = false
@@ -454,13 +654,14 @@ private class FakeCore : LagomCoreInterface {
     }
     override suspend fun markRead(id: Long, read: Boolean) {
         markReadThread = Thread.currentThread()
+        readCalls += id to read
+        readGate?.await()
         check(!rejectRead) { "Fixture read refused" }
         mail = mail.map { if (it.id == id) it.copy(unread = !read) else it }
     }
     override suspend fun send(accountId: String, to: List<String>, cc: List<String>, subject: String, bodyMarkdown: String, replyTo: Long?, attachments: List<SendAttachment>): String {
-        check(attachments.isEmpty())
         check(!rejectSend) { "Fixture enqueue refused" }
-        sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo)
+        sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo, attachments = attachments)
         return "queued"
     }
     override suspend fun later(ids: List<Long>, untilUnix: Long) {
@@ -468,14 +669,24 @@ private class FakeCore : LagomCoreInterface {
         check(!rejectAction); snoozed = ids to untilUnix
     }
     override suspend fun done(ids: List<Long>) { check(!rejectAction); mail = mail.filterNot { it.id in ids } }
-    override suspend fun delete(ids: List<Long>) { check(!rejectAction) }
+    override suspend fun delete(ids: List<Long>) {
+        actionGate?.await()
+        check(!rejectAction)
+        deleted += ids
+        mail = mail.filterNot { it.id in ids }
+    }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit
     override suspend fun replyDraft(id: Long): ReplyDraft = error("Reply must use composeDraft")
     override suspend fun composeDraft(id: Long, kind: ComposeKind): ReplyDraft {
-        check(kind == ComposeKind.REPLY)
+        composeKinds += kind
         replyGate?.await()
-        return ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "", "Re: Subject", "\n\n-- \nSignature\n\n> body", id, emptyList())
+        check(!rejectCompose) { "Fixture attachment fetch refused" }
+        return ReplyDraft(mail.first { it.id == id }.account,
+            if (kind == ComposeKind.FORWARD) "" else "sender@example.test",
+            if (kind == ComposeKind.REPLY_ALL) "copy@example.test" else "",
+            if (kind == ComposeKind.FORWARD) "Fwd: Subject" else "Re: Subject",
+            "\n\n-- \nSignature\n\n> body", if (kind == ComposeKind.FORWARD) null else id, preparedAttachments)
     }
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
