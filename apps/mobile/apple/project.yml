@@ -39,6 +39,10 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         BGTaskSchedulerPermittedIdentifiers: [app.lagommail.refresh]
         UIBackgroundModes: [fetch]
+        # mailto links; the system sends them here only with the com.apple.developer.mail-client entitlement.
+        CFBundleURLTypes:
+          - CFBundleURLName: mailto
+            CFBundleURLSchemes: [mailto]
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

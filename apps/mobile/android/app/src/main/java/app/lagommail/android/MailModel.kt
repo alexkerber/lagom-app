@@ -71,6 +71,31 @@ internal data class ComposeDraft(
         title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft")
     val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || subject.isNotEmpty() || body.isNotEmpty() || attachments.isNotEmpty()
 }
+/** A mailto link or a share from another app, with the shared files. */
+internal data class SharedMail(val mail: Mailto, val attachments: List<SendAttachment> = emptyList())
+
+private fun headerText(value: String) = value.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
+
+/** `parse` is the core mailto parser; extras fill what the link leaves empty. `null`: not mail to open. */
+internal fun sharedMail(action: String?, data: String?, email: List<String>, cc: List<String>, bcc: List<String>,
+    subject: String?, text: String?, parse: (String) -> Mailto?): Mailto? {
+    val link = when (action) {
+        "android.intent.action.SENDTO", "android.intent.action.VIEW" -> parse(data ?: return null) ?: return null
+        "android.intent.action.SEND", "android.intent.action.SEND_MULTIPLE" -> Mailto(emptyList(), emptyList(), emptyList(), "", "")
+        else -> return null
+    }
+    // Extras come from any app, so they get the same CRLF rule as mailto headers.
+    fun addresses(values: List<String>) = values.map(::headerText).filter { it.isNotEmpty() }
+    return Mailto(link.to + addresses(email), link.cc + addresses(cc), link.bcc + addresses(bcc),
+        link.subject.ifEmpty { headerText(subject.orEmpty()) },
+        link.body.ifEmpty { text.orEmpty().replace("\r\n", "\n").replace('\r', '\n') })
+}
+
+/** Bcc is left out: mobile Compose has no Bcc field, and a hidden recipient must never be sent unseen. */
+internal fun sharedDraft(account: String, email: String, shared: SharedMail) = ComposeDraft(account,
+    shared.mail.to.joinToString(", "), shared.mail.cc.joinToString(", "), shared.mail.subject, shared.mail.body,
+    id = draftMessageId(email), attachments = shared.attachments)
+
 internal enum class MailAction { Done, Later, Delete }
 
 internal class MailModel(
@@ -203,6 +228,7 @@ internal class MailModel(
             rows = (if (append) old + page else page).distinctBy { it.id }
             this.hasMore = hasMore
             appliedRevision = request
+            openPendingShare()
             wake?.cancel()
             wake = if (foreground && due != null) viewModelScope.launch {
                 delay(maxOf(1, due * 1000 - now()))
@@ -220,6 +246,19 @@ internal class MailModel(
             savedDraftIds = savedDraftIds + drafts.map { it.id }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == revision) error = e.mailMessage() }
+    }
+    /** Waits for the store and the accounts; `reload` opens it. */
+    private var pendingShare: SharedMail? = null
+    suspend fun openShared(shared: SharedMail) { pendingShare = shared; reload() }
+    private suspend fun openPendingShare() {
+        val shared = pendingShare ?: return
+        pendingShare = null
+        val account = accountId ?: accounts.firstOrNull()?.id ?: run { error = "Add an account, then open the link again."; return }
+        closeCompose(discard = false)
+        if (draft != null) { error = "Finish the open message first."; return }
+        accountForm = null
+        draft = sharedDraft(account, accounts.firstOrNull { it.id == account }?.email.orEmpty(), shared)
+        if (shared.mail.bcc.isNotEmpty()) notice = "The link's Bcc was left out."
     }
     suspend fun openNotification(target: MailTarget) {
         closeCompose(discard = false)

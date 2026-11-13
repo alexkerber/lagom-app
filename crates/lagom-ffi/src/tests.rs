@@ -291,6 +291,9 @@ fn html_privacy_and_recipients_share_core_policy() {
         assert!(document.contains("system-ui,-apple-system,sans-serif"));
     }
     assert_eq!(split_recipients("\"Example, Sender\" <sender@example.test>, next@example.test".into()), ["\"Example, Sender\" <sender@example.test>", "next@example.test"]);
+    assert_eq!(parse_mailto("mailto:a@example.test?cc=b@example.test&subject=Hi".into()), Some(Mailto { to: vec!["a@example.test".into()],
+        cc: vec!["b@example.test".into()], bcc: vec![], subject: "Hi".into(), body: String::new() }));
+    assert_eq!(parse_mailto("https://example.test".into()), None);
 }
 
 #[tokio::test]

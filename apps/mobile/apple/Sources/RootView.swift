@@ -58,6 +58,13 @@ struct RootView: View {
             // A newer scope change cancels this task; never open the message in another scope.
             if let id, model.mailbox == .inbox, model.accountID == nil, model.searchText.isEmpty { model.selectedID = id }
         }
+        // Opens only while lagom is the default mail app, which needs Apple's mail-client entitlement.
+        .onOpenURL { url in
+            guard url.scheme?.lowercased() == "mailto" else { return }
+            addAccount = false
+            section = .mail
+            Task { await model.openMailto(url.absoluteString) }
+        }
         .onChange(of: model.notificationRevision, initial: true) { _, _ in
             if model.notificationTarget != nil {
                 addAccount = false

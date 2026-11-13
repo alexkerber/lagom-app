@@ -319,6 +319,8 @@ pub struct MainWindow {
     names: HashMap<String, Entity<TextInput>>,
     /// The open account's Remove waits for a yes.
     confirm_remove_account: bool,
+    /// macOS: whether lagom opens mailto links, read when Settings opens. `None`: not shown.
+    default_mail: Option<bool>,
     /// "Change password" on an email-and-password account's page.
     new_password: Option<crate::settings::NewPassword>,
     mailbox_expanded: [bool; 3],
@@ -443,6 +445,7 @@ impl MainWindow {
             signatures: HashMap::new(),
             names: HashMap::new(),
             confirm_remove_account: false,
+            default_mail: None,
             new_password: None,
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
@@ -697,9 +700,21 @@ impl MainWindow {
     }
 
     fn compose_kind(&mut self, reply: Option<usize>, kind: ComposeKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) { return; }
+        self.compose_with(reply, kind, None, window, cx);
+    }
+
+    /// A new message from a mailto link, never a reopened draft.
+    pub(crate) fn compose_mailto(&mut self, link: lagom_core::compose::Mailto, window: &mut Window, cx: &mut Context<Self>) {
+        self.compose_with(None, ComposeKind::Reply, Some(link), window, cx);
+    }
+
+    fn compose_with(&mut self, reply: Option<usize>, kind: ComposeKind, link: Option<lagom_core::compose::Mailto>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) {
+            if link.is_some() { self.notify("Close the open message, then open the link again", cx); }
+            return;
+        }
         self.draft_open = None;
-        let saved = (kind == ComposeKind::Reply).then(|| {
+        let saved = (kind == ComposeKind::Reply && link.is_none()).then(|| {
             let parent = reply.map(|id| (mail::reply_headers(&self.inbox.mail[id].message_id, &self.inbox.mail[id].thread_key).0, &self.inbox.mail[id].account));
             // A message without a Message-ID cannot be told apart, so it always gets a fresh reply.
             if matches!(parent, Some((None, _))) { return None; }
@@ -753,7 +768,7 @@ impl MainWindow {
                     }
                 };
                 let from = account.as_ref().map_or("you@home.example", |a| a.email.as_str());
-                let (to, cc) = match (m, kind) {
+                let (to, cc) = if let Some(link) = &link { (link.to.join(", "), link.cc.join(", ")) } else { match (m, kind) {
                     (Some(m), ComposeKind::ReplyAll) => {
                         // shortcut: own addresses are the account email and logins; include aliases when accounts store them.
                         let own = account.as_ref().map(|a| vec![a.email.as_str(), a.imap.username.as_str(), a.smtp.username.as_str()]).unwrap_or_default();
@@ -761,8 +776,8 @@ impl MainWindow {
                     }
                     (Some(m), ComposeKind::Reply) => (m.address.clone(), String::new()),
                     _ => (String::new(), String::new()),
-                };
-                let subject = m.map_or(String::new(), |m| if kind == ComposeKind::Forward { mail::forward_subject(&m.subject) } else { mail::reply_subject(&m.subject) });
+                } };
+                let subject = if let Some(link) = &link { link.subject.clone() } else { m.map_or(String::new(), |m| if kind == ComposeKind::Forward { mail::forward_subject(&m.subject) } else { mail::reply_subject(&m.subject) }) };
                 let headers = m.filter(|_| kind != ComposeKind::Forward).map(|m| mail::reply_headers(&m.message_id, &m.thread_key));
                 let signature = match (&self.live, &account) {
                     (Some(live), Some(account)) => match live.store.signature(&account.id) {
@@ -775,10 +790,12 @@ impl MainWindow {
                 };
                 let original = m.map(|m| m.text.as_ref().and_then(|text| text.borrow().clone())
                     .unwrap_or_else(|| m.body.join("\n\n").into()));
-                let body = mail::compose_body(&signature, m.zip(original.as_deref()), kind);
+                let mut body = mail::compose_body(&signature, m.zip(original.as_deref()), kind);
+                if let Some(link) = &link { body.insert_str(0, &link.body); }
                 let source = m.filter(|_| kind == ComposeKind::Forward).and_then(|m| m.store);
                 let compose = cx.new(|cx| Compose::new(from, &to, &subject, headers, window, cx));
-                compose.update(cx, |c, cx| c.initialize(&cc, &body, source, cx));
+                let bcc = link.as_ref().map_or_else(String::new, |l| l.bcc.join(", "));
+                compose.update(cx, |c, cx| c.initialize(&cc, &bcc, &body, source, cx));
                 if let (Some(live), Some(account)) = (&self.live, account) {
                     compose.update(cx, |c, cx| c.persist(live.store.clone(), account, cx));
                 }
@@ -2391,6 +2408,7 @@ impl Render for MainWindow {
                     colors: (0..accounts.len()).map(|ix| self.account_accent(ix)).collect(),
                     open: open.as_deref(),
                     confirm: self.confirm_remove_account,
+                    default_mail: self.default_mail,
                     signing_in,
                     group: self.panes.group_conversations,
                     notifications: self.panes.notifications,
@@ -3566,6 +3584,22 @@ mod dispatch {
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
         view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    #[gpui::test]
+    fn mailto_opens_a_filled_new_message(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let link = lagom_core::compose::parse_mailto("mailto:a@example.test?cc=c@example.test&bcc=b@example.test&subject=Hi&body=Line%201%0D%0ALine%202").unwrap();
+        view.update_in(cx, |v, window, cx| v.compose_mailto(link.clone(), window, cx));
+        let compose = view.read_with(cx, |v, _| v.compose.clone()).expect("compose opens");
+        let mail = compose.read_with(cx, |c, cx| c.outgoing(cx));
+        assert_eq!((mail.to, mail.cc, mail.bcc), (vec!["a@example.test".into()], vec!["c@example.test".into()], vec!["b@example.test".into()]));
+        assert_eq!(mail.subject, "Hi");
+        assert!(mail.text.starts_with("Line 1\nLine 2"), "{:?}", mail.text);
+        assert!(mail.in_reply_to.is_none());
+        // A second link never replaces the open message.
+        view.update_in(cx, |v, window, cx| v.compose_mailto(lagom_core::compose::Mailto::default(), window, cx));
+        assert!(view.read_with(cx, |v, _| v.compose.as_ref() == Some(&compose)));
     }
 
     #[gpui::test]

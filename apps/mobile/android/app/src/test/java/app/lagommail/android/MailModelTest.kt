@@ -53,6 +53,21 @@ class MailModelTest {
         assertEquals(initialSyncs + 3, core.syncs)
     }
 
+    @Test fun sharedMailWaitsForTheStoreThenOpensANewDraft() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core)
+        val shared = SharedMail(Mailto(listOf("a@example.test"), listOf("c@example.test"), listOf("hidden@example.test"), "Hi", "Body"))
+        model.openShared(shared)
+        assertNull(model.draft)
+        model.setForeground(true)
+        assertEquals("fixture", model.draft?.account)
+        assertEquals("a@example.test", model.draft?.to); assertEquals("c@example.test", model.draft?.cc)
+        assertEquals("Hi", model.draft?.subject); assertEquals("Body", model.draft?.body)
+        assertEquals("The link's Bcc was left out.", model.notice)
+        val opened = model.draft?.id
+        model.reload()
+        assertEquals("a later reload must not open the link again", opened, model.draft?.id)
+    }
+
     @Test fun leavingInsideUndoWindowHandsSendToWorkManager() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.setForeground(true)
         model.draft = ComposeDraft("fixture", to = "to@example.test", body = "leave now"); model.send(); runCurrent()
