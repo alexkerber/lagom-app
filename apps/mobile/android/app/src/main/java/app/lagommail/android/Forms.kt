@@ -19,7 +19,7 @@ import app.lagommail.core.*
     val draft = model.draft ?: return
     BackHandler { if (!model.sending) model.draft = null }
     Scaffold(topBar = {
-        TopAppBar(title = { Text(if (draft.replyTo == null) "New message" else "Reply") },
+        TopAppBar(title = { Text(draft.title) },
             navigationIcon = { TextButton(enabled = !model.sending, onClick = { model.draft = null }) { Text("Cancel") } },
             actions = { TextButton(enabled = !model.sending && draft.to.isNotBlank() && draft.account.isNotBlank(),
                 onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
@@ -39,6 +39,9 @@ import app.lagommail.core.*
             Field("To", draft.to, !model.sending, KeyboardType.Email) { model.draft = draft.copy(to = it) }
             Field("Cc", draft.cc, !model.sending, KeyboardType.Email) { model.draft = draft.copy(cc = it) }
             Field("Subject", draft.subject, !model.sending) { model.draft = draft.copy(subject = it) }
+            if (draft.attachments.isNotEmpty()) {
+                Text(draft.attachments.joinToString(", ") { it.filename }, style = MaterialTheme.typography.bodySmall)
+            }
             OutlinedTextField(draft.body, { model.draft = draft.copy(body = it) }, enabled = !model.sending,
                 label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
         }

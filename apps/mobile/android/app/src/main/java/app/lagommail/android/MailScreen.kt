@@ -197,6 +197,10 @@ internal fun Mailbox.label(): String = when (this) {
         }
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id) } }) { Text("Reply") }
+            TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id, ComposeKind.REPLY_ALL) } },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Reply all" }) { Text("Reply all") }
+            TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id, ComposeKind.FORWARD) } },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Forward" }) { Text("Forward") }
             TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Later, message.row.id) } }) { Text("Later") }
             TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id) } }) { Text("Delete") }
             Button(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Done, message.row.id) } }) { Text("Done") }

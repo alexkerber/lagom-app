@@ -22,8 +22,12 @@ internal data class RowPresentation(val row: MailRow) {
 internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
     val body: String = "", val replyTo: Long? = null,
+    val attachments: List<SendAttachment> = emptyList(),
+    val title: String = if (replyTo == null) "New message" else "Reply",
 ) {
-    constructor(reply: ReplyDraft) : this(reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo)
+    constructor(reply: ReplyDraft, kind: ComposeKind = ComposeKind.REPLY) : this(
+        reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, reply.attachments,
+        when (kind) { ComposeKind.REPLY -> "Reply"; ComposeKind.REPLY_ALL -> "Reply all"; ComposeKind.FORWARD -> "Forward" })
 }
 internal enum class MailAction { Done, Later, Delete }
 
@@ -165,13 +169,13 @@ internal class MailModel(
         core?.removeAccount(account.id)
         changeScope(if (accountId == account.id) null else accountId, mailbox)
     }
-    suspend fun reply(id: Long) {
+    suspend fun reply(id: Long, kind: ComposeKind = ComposeKind.REPLY) {
         val core = core ?: return
         if (draft != null) return
         val request = ++composeRevision
         val selection = selectionRevision
-        val reply = core.composeDraft(id, ComposeKind.REPLY)
-        if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply)
+        val reply = core.composeDraft(id, kind)
+        if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply, kind)
     }
     suspend fun send() {
         val core = core ?: return
@@ -179,7 +183,7 @@ internal class MailModel(
         if (sending) return
         sending = true
         try {
-            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo, emptyList())
+            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo, draft.attachments)
             this.draft = null
             notice = "Queued for sending"
         } finally { sending = false }

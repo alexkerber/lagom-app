@@ -125,12 +125,48 @@ class MailModelTest {
         val core = FakeCore().apply { mail = listOf(row(1)) }
         val model = model(core); model.start(); model.select(1)
         val gate = CompletableDeferred<Unit>(); core.replyGate = gate
-        val reply = async { model.reply(1) }; runCurrent()
+        val reply = async { model.reply(1, ComposeKind.FORWARD) }; runCurrent()
         model.draft = ComposeDraft("fixture")
         model.draft = model.draft!!.copy(body = "Unsent text")
         val edited = model.draft
         gate.complete(Unit); reply.await()
         assertEquals(edited, model.draft)
+    }
+    @Test fun replyAllAndForwardKeepPreparedFieldsAndAttachmentsThroughEditsAndRetry() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(42, account = "second-account"))
+            preparedAttachments = listOf(SendAttachment("report.txt", "text/plain", byteArrayOf(1, 2, 3)))
+        }
+        val model = model(core); model.start()
+        for (kind in listOf(ComposeKind.REPLY_ALL, ComposeKind.FORWARD)) {
+            model.reply(42, kind)
+            val prepared = model.draft!!
+            assertEquals(kind, core.composeKinds.last())
+            assertEquals("second-account", prepared.account)
+            assertEquals(if (kind == ComposeKind.FORWARD) "Forward" else "Reply all", prepared.title)
+            assertEquals(if (kind == ComposeKind.FORWARD) null else 42L, prepared.replyTo)
+            assertEquals(if (kind == ComposeKind.FORWARD) "" else "copy@example.test", prepared.cc)
+            assertEquals(core.preparedAttachments, prepared.attachments)
+            model.draft = prepared.copy(to = "recipient@example.test", body = "Edited quote")
+            val edited = model.draft!!
+            core.rejectSend = true
+            try { model.send(); fail("expected refusal") } catch (_: IllegalStateException) { }
+            assertEquals(edited, model.draft)
+            core.rejectSend = false
+            model.send()
+            assertNull(model.draft)
+            val sent = core.sent.last()
+            assertEquals(edited.copy(title = sent.title), sent)
+            assertArrayEquals(byteArrayOf(1, 2, 3), sent.attachments.single().data)
+        }
+    }
+    @Test fun failedForwardPreparationDoesNotOpenAnIncompleteDraft() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)); rejectCompose = true }
+        val model = model(core); model.start()
+        model.perform { model.reply(1, ComposeKind.FORWARD) }.join()
+        assertNull(model.draft)
+        assertEquals("Fixture attachment fetch refused", model.error)
+        assertTrue(core.sent.isEmpty())
     }
     @Test fun delayedReplyStaysDismissedAfterComposeClosesOrSelectionChanges() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
@@ -246,6 +282,9 @@ private class FakeCore : LagomCoreInterface {
     var markReadThread: Thread? = null
     var laterThread: Thread? = null
     var replyGate: CompletableDeferred<Unit>? = null
+    var preparedAttachments = emptyList<SendAttachment>()
+    val composeKinds = mutableListOf<ComposeKind>()
+    var rejectCompose = false
     var syncGate: CompletableDeferred<Unit>? = null
     var rejectRead = false
     var rejectSend = false
@@ -280,9 +319,8 @@ private class FakeCore : LagomCoreInterface {
         mail = mail.map { if (it.id == id) it.copy(unread = !read) else it }
     }
     override suspend fun send(accountId: String, to: List<String>, cc: List<String>, subject: String, bodyMarkdown: String, replyTo: Long?, attachments: List<SendAttachment>): String {
-        check(attachments.isEmpty())
         check(!rejectSend) { "Fixture enqueue refused" }
-        sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo)
+        sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo, attachments)
         return "queued"
     }
     override suspend fun later(ids: List<Long>, untilUnix: Long) {
@@ -295,9 +333,14 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun retrySend(id: String) = Unit
     override suspend fun replyDraft(id: Long): ReplyDraft = error("Reply must use composeDraft")
     override suspend fun composeDraft(id: Long, kind: ComposeKind): ReplyDraft {
-        check(kind == ComposeKind.REPLY)
+        composeKinds += kind
         replyGate?.await()
-        return ReplyDraft(mail.first { it.id == id }.account, "sender@example.test", "", "Re: Subject", "\n\n-- \nSignature\n\n> body", id, emptyList())
+        check(!rejectCompose) { "Fixture attachment fetch refused" }
+        return ReplyDraft(mail.first { it.id == id }.account,
+            if (kind == ComposeKind.FORWARD) "" else "sender@example.test",
+            if (kind == ComposeKind.REPLY_ALL) "copy@example.test" else "",
+            if (kind == ComposeKind.FORWARD) "Fwd: Subject" else "Re: Subject",
+            "\n\n-- \nSignature\n\n> body", if (kind == ComposeKind.FORWARD) null else id, preparedAttachments)
     }
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
