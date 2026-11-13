@@ -108,8 +108,8 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 - Build the installer on `windows-latest` from the tag. Set `FILEVERSION`/`PRODUCTVERSION` in
   `apps/desktop/lagom.rc` from `LAGOM_VERSION` at build time.
-- Upload to the same draft release with `gh release upload --clobber`, after
-  `gh release view || gh release create --draft`, as `package-macos.yml` does.
+- Upload to the same draft release with `gh release upload --clobber`. Create the draft when it is missing and stop when the release is already published,
+  as `package-macos.yml` does.
 - Human step: get a code signing service. Azure Trusted Signing (Artifact Signing) is the cheapest
   route for an individual. An OV or EV certificate on a hardware token also works. Unsigned installers
   get a SmartScreen warning. Signed ones still warn until the publisher earns reputation.

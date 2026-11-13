@@ -126,6 +126,10 @@ jobs:
         run: |
           prerelease=()
           [[ $TAG != *-* ]] || prerelease=(--prerelease)
-          gh release view "$TAG" >/dev/null 2>&1 ||
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            # A rerun must not swap files under a release people already download.
+            [[ $draft == true ]] || { echo "::error::$TAG is published; upload by hand if you mean it."; exit 1; }
+          else
             gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag --title "lagom ${TAG#v}" --generate-notes
+          fi
           gh release upload "$TAG" "$DMG" --clobber
