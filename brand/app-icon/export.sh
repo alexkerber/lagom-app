@@ -2,7 +2,7 @@
 # Rebuild platform assets from the layered Skymning Blender renders on macOS.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-mkdir -p brand/app-icon/export
+mkdir -p brand/app-icon/export brand/store
 mkdir -p target
 scratch=$(mktemp -d "$PWD/target/icon-export.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
@@ -12,6 +12,7 @@ import ImageIO
 import UniformTypeIdentifiers
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let dest = root.appendingPathComponent("brand/app-icon/export")
+let store = root.appendingPathComponent("brand/store")
 let scratch = URL(fileURLWithPath: CommandLine.arguments[1])
 func source(_ name: String) -> NSImage {
     NSImage(contentsOf: root.appendingPathComponent("brand/app-icon/skymning/3d/" + name + ".png"))!
@@ -57,7 +58,12 @@ for i in stride(from: 0, to: 1024 * 1024 * 4, by: 4) {
     pixels[i] = pixels[i+3]; pixels[i+1] = pixels[i+3]; pixels[i+2] = pixels[i+3]
 }
 let silhouette = NSImage(cgImage: probe.makeImage()!, size: NSSize(width: 1024, height: 1024))
-func png(_ image: NSImage, _ size: Int, _ name: String, background: NSColor? = nil, subjectScale: CGFloat = 1) throws {
+func write(_ image: CGImage, _ url: URL) {
+    let output = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
+    CGImageDestinationAddImage(output, image, nil)
+    assert(CGImageDestinationFinalize(output))
+}
+func png(_ image: NSImage, _ size: Int, _ name: String, background: NSColor? = nil, subjectScale: CGFloat = 1, folder: URL = dest) throws {
     let space = CGColorSpace(name: CGColorSpace.sRGB)!
     let alpha: CGImageAlphaInfo = background == nil ? .premultipliedLast : .noneSkipLast
     let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
@@ -70,10 +76,7 @@ func png(_ image: NSImage, _ size: Int, _ name: String, background: NSColor? = n
     context.draw(source, in: rect.insetBy(dx: inset, dy: inset))
     let result = context.makeImage()!
     assert(result.width == size && result.alphaInfo == alpha)
-    let output = CGImageDestinationCreateWithURL(dest.appendingPathComponent(name) as CFURL,
-        UTType.png.identifier as CFString, 1, nil)!
-    CGImageDestinationAddImage(output, result, nil)
-    assert(CGImageDestinationFinalize(output))
+    write(result, folder.appendingPathComponent(name))
 }
 try FileManager.default.createDirectory(at: dest.appendingPathComponent("AppIcon.iconset"), withIntermediateDirectories: true)
 for size in [16,32,128,256,512] {
@@ -86,10 +89,26 @@ try png(silhouette,1024,"ios-tinted.png")
 try png(subject,432,"android-foreground.png",subjectScale:adaptiveScale)
 try png(silhouette,432,"android-monochrome.png",subjectScale:adaptiveScale)
 try png(source("layer-bg"),432,"android-background.png",background:color(0))
-try png(light,512,"play-store-512.png")
 try png(light,512,"lagom-512.png")
+for size in [16,24,32,48,64,128,256,512] {
+    let folder = dest.appendingPathComponent("hicolor/\(size)x\(size)/apps")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try png(light,size,"lagom.png",folder:folder)
+}
 try png(light,32,"favicon-32.png")
-try png(light,180,"apple-touch-icon-180.png")
+// iOS fills transparent touch-icon pixels with black, so use the opaque full-bleed composite.
+try png(composite(dark: false),180,"apple-touch-icon-180.png",background:color(0))
+// Google Play applies its own mask and wants a full-bleed square as 32-bit PNG, so keep alpha (all opaque).
+try png(composite(dark: false),512,"play-icon-512.png",folder:store)
+// Play feature graphic: the vertical dusk background squashed to 500 px, envelope centred at icon scale.
+let feature = CGContext(data: nil, width: 1024, height: 500, bitsPerComponent: 8, bytesPerRow: 4096,
+    space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+feature.interpolationQuality = .high
+feature.draw(source("layer-bg").cgImage(forProposedRect: nil, context: nil, hints: nil)!,
+    in: CGRect(x: 0, y: 0, width: 1024, height: 500))
+feature.draw(subject.cgImage(forProposedRect: nil, context: nil, hints: nil)!,
+    in: CGRect(x: 262, y: 0, width: 500, height: 500))
+write(feature.makeImage()!, store.appendingPathComponent("play-feature-1024x500.png"))
 for size in [16,24,32,48,64,128,256] { try png(light,size,"windows-\(size).png") }
 SWIFT
 # Keep the Swift interpreter's temp files and module cache inside the scratch folder.
@@ -103,7 +122,7 @@ import zlib
 def chunk(kind, data):
     return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
 
-for path in [*Path('brand/app-icon/export').rglob('*.png'),
+for path in [*Path('brand/app-icon/export').rglob('*.png'), *Path('brand/store').glob('*.png'),
              *Path('brand/app-icon/skymning/3d').glob('*.png')]:
     original = path.read_bytes()
     assert original[:8] == b'\x89PNG\r\n\x1a\n'
@@ -145,3 +164,11 @@ for size in sizes: (folder/f'windows-{size}.png').unlink()
 PY
 cp brand/app-icon/export/favicon-32.png site/favicon-32.png
 cp brand/app-icon/export/apple-touch-icon-180.png site/apple-touch-icon-180.png
+# App Store Connect takes the icon from the build; this opaque copy is for listings and press.
+cp brand/app-icon/export/ios-light.png brand/store/app-store-1024.png
+for variant in light dark tinted; do
+    cp "brand/app-icon/export/ios-$variant.png" "apps/mobile/apple/Assets.xcassets/AppIcon.appiconset/ios-$variant.png"
+done
+for layer in background foreground monochrome; do
+    cp "brand/app-icon/export/android-$layer.png" "apps/mobile/android/app/src/main/res/drawable-nodpi/icon_$layer.png"
+done
