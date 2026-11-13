@@ -296,7 +296,7 @@ impl MainWindow {
         div().absolute().inset_0().flex().items_center().justify_center().occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(sheet.with_animation("new-event-arrive", Animation::new(Duration::from_millis(200)), |d, v|
-                d.mt(px(12. * (1. - spring(v)))).opacity(ease_out_quint()(v))))
+                d.mt(px(crate::motion::travel(12.) * (1. - spring(v)))).opacity(ease_out_quint()(v))))
     }
 }
 

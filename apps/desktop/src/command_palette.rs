@@ -454,7 +454,7 @@ impl Render for CommandPalette {
             // docs/motion.md asks for scale 0.98 → 1, but GPUI divs have no scale transform:
             // the dialog drops 8 px into place on a spring instead, and fades in.
             .with_animation("command-palette-in", Animation::new(Duration::from_millis(120)), |el, d| {
-                el.opacity(ease_out_quint()(d)).pt(px(104. + 8. * spring(d)))
+                el.opacity(ease_out_quint()(d)).pt(px(112. - crate::motion::travel(8.) * (1. - spring(d))))
             })
     }
 }

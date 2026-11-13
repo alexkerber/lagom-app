@@ -21,6 +21,8 @@ pub struct Live {
     pub(super) accounts: Vec<Account>,
     pub(super) current: usize,
     sync: HashMap<String, SyncState>,
+    /// A sync that started after a finished one: when, and that finish, shown until `CALM` passes.
+    quiet: HashMap<String, (std::time::Instant, i64)>,
     ops: HashMap<u64, Op>,
     next_op: Rc<std::cell::Cell<u64>>,
     pending: Rc<std::cell::RefCell<HashMap<u64, Option<String>>>>,
@@ -42,6 +44,9 @@ pub struct Live {
     /// Wakes the window when the next message on Later is due.
     due: Option<(i64, Task<()>)>,
 }
+
+/// The body of a message whose text is still being read.
+pub(super) const LOADING: &str = "Loading message…";
 
 /// Rows per page of a list.
 const PAGE: u32 = 200;
@@ -154,6 +159,7 @@ impl Live {
             store,
             current: 0,
             sync: HashMap::new(),
+            quiet: HashMap::new(),
             ops: HashMap::new(),
             next_op: mail.next_op.clone(),
             pending: mail.pending.clone(),
@@ -186,6 +192,15 @@ impl Live {
                 .map(|m| (m.id, format!("{} · {}", if m.from_name.is_empty() { &m.from_address } else { &m.from_name }, m.subject)))
                 .collect()
         }))
+    }
+
+    /// The sync state to draw: a sync shorter than `motion::CALM` keeps the last finished one up,
+    /// so a quick sync never flashes "syncing…".
+    fn shown_sync(&self, account: &str) -> Option<SyncState> {
+        match (self.sync.get(account), self.quiet.get(account)) {
+            (Some(SyncState::Syncing), Some(&(since, at))) if since.elapsed() < crate::motion::CALM => Some(SyncState::Synced(at)),
+            (state, _) => state.cloned(),
+        }
     }
 
     pub(super) fn event_op(&self) -> u64 {
@@ -277,6 +292,7 @@ impl MainWindow {
     /// Reads the store for the account and list on screen. Waits while moves are in flight, so
     /// a read never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        let before = self.list_before();
         self.reload_draft_rows(cx);
         self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
@@ -334,6 +350,7 @@ impl MainWindow {
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
                 let want = live.want.take();
                 self.wake_at(due, cx);
+                self.settle_list(before);
                 if let Some(want) = want {
                     self.select_found(want, cx);
                 }
@@ -372,6 +389,8 @@ impl MainWindow {
 
     fn on_events(&mut self, events: Vec<Event>, window: &mut Window, cx: &mut Context<Self>) {
         let mut read = false;
+        // A sync started: draw "syncing…" once it has run for CALM, unless it finished by then.
+        let mut calm = false;
         let mut new_mail = Vec::new();
         for event in events {
             match event {
@@ -463,6 +482,14 @@ impl MainWindow {
                 Event::Sync(account, state) => {
                     if let Some(live) = &mut self.live {
                         if state == SyncState::SigningIn || !matches!(live.sync.get(&account), Some(SyncState::ReauthRequired | SyncState::SigningIn)) {
+                            match (&state, live.sync.get(&account)) {
+                                (SyncState::Syncing, Some(SyncState::Synced(at))) => {
+                                    live.quiet.insert(account.clone(), (std::time::Instant::now(), *at));
+                                    calm = true;
+                                }
+                                (SyncState::Syncing, Some(SyncState::Syncing)) => {}
+                                _ => { live.quiet.remove(&account); }
+                            }
                             live.sync.insert(account, state);
                         }
                     }
@@ -560,6 +587,12 @@ impl MainWindow {
             self.move_message(store, window, cx);
         }
         self.notify_mail(new_mail, window, cx);
+        if calm {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::motion::CALM).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }).detach();
+        }
         cx.notify();
     }
 
@@ -893,7 +926,7 @@ impl MainWindow {
                         }
                     }
                     let text = self.inbox.mail[id].text.as_ref().unwrap().borrow();
-                    text.as_deref().map(mail::paragraphs).unwrap_or_else(|| vec!["Loading message…".into()])
+                    text.as_deref().map(mail::paragraphs).unwrap_or_else(|| vec![LOADING.into()])
                 }
                 Err(_) => vec!["This message is no longer in the local store.".into()],
             };
@@ -1010,14 +1043,14 @@ impl MainWindow {
 
     pub(super) fn sync_icon(&self) -> &'static str {
         let Some(live) = &self.live else { return "icons/cloud-synced.svg" };
-        live.account().and_then(|a| live.sync.get(&a.id)).map_or("icons/cloud-syncing.svg", polish::sync_icon)
+        live.account().and_then(|a| live.shown_sync(&a.id)).as_ref().map_or("icons/cloud-syncing.svg", polish::sync_icon)
     }
 
     /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
     pub(super) fn sync_state(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
         let account = live.account()?;
-        let state = match live.sync.get(&account.id) {
+        let state = match live.shown_sync(&account.id).as_ref() {
             None | Some(SyncState::Syncing) => "syncing…".to_string(),
             Some(SyncState::Synced(at)) => {
                 let at = chrono::DateTime::from_timestamp(*at, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
@@ -2776,6 +2809,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_quick_sync_keeps_the_last_synced_status(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            let id = v.live.as_ref().unwrap().accounts[0].id.clone();
+            v.on_events(vec![Event::Sync(id.clone(), SyncState::Synced(0))], window, cx);
+            let synced = v.sync_state().unwrap();
+            assert!(synced.starts_with("synced"), "{synced}");
+            v.on_events(vec![Event::Sync(id.clone(), SyncState::Syncing)], window, cx);
+            assert_eq!(v.sync_state().unwrap(), synced, "a sync shorter than CALM shows nothing new");
+            assert_eq!(v.sync_icon(), "icons/cloud-synced.svg");
+            v.on_events(vec![Event::Sync(id.clone(), SyncState::Syncing)], window, cx);
+            assert_eq!(v.sync_state().unwrap(), synced, "a repeated start keeps the first start time");
+            let live = v.live.as_mut().unwrap();
+            live.quiet.get_mut(&id).unwrap().0 -= crate::motion::CALM;
+            assert_eq!(v.sync_state().unwrap().as_ref(), "syncing…");
+            v.on_events(vec![Event::Sync(id.clone(), SyncState::Synced(60))], window, cx);
+            assert!(v.live.as_ref().unwrap().quiet.is_empty());
+            // A first sync, with nothing finished before it, shows at once.
+            v.live.as_mut().unwrap().sync.clear();
+            v.on_events(vec![Event::Sync(id, SyncState::Syncing)], window, cx);
+            assert_eq!(v.sync_state().unwrap().as_ref(), "syncing…");
+        });
+    }
+
+    #[gpui::test]
+    fn new_mail_from_a_store_read_grows_in_instead_of_popping(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update(cx, |v, cx| {
+            for uid in 1..=3 { incoming(v, uid); }
+            v.reload(cx);
+            assert_eq!(v.inbox.list().len(), 3);
+            assert!(v.entering.is_empty(), "the first read of a list draws at once");
+            let new = incoming(v, 4);
+            v.reload(cx);
+            let id = v.inbox.by_store[&new.id];
+            assert_eq!(v.inbox.list()[0], id, "newest first");
+            assert!(v.entering.iter().any(|g| g.id == id && g.what == ARRIVE));
+            let layout = v.row_layout(v.entering[0].at);
+            assert!((layout.y(1) - layout.y(0)).abs() < 0.1, "the new row starts with no height");
+        });
+    }
+
+    #[gpui::test]
     fn mail_sync_status_has_distinct_embedded_icons(cx: &mut TestAppContext) {
         use gpui::AssetSource;
         let (view, cx, _rx) = window(cx);
@@ -3525,6 +3601,7 @@ mod tests {
             accounts: store.accounts().unwrap(),
             current: 0,
             sync: HashMap::new(),
+            quiet: HashMap::new(),
             ops: HashMap::new(),
             next_op: Rc::new(std::cell::Cell::new(0)),
             pending: Default::default(),
