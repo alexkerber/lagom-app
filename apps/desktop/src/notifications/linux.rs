@@ -43,8 +43,11 @@ pub struct Service {
 
 impl Service {
     pub fn new(events: UnboundedSender<Event>) -> Self {
+        // zbus lets a later process take the name by default; then the first one's clicks would
+        // reach the second. Keep the name with the first lagom.
         let bus = zbus::block_on(zbus::connection::Builder::session()
-            .name(APP_ID).serve_at(PATH, Application(events.clone())).build()).ok();
+            .name(APP_ID).allow_name_replacements(false).replace_existing_names(false)
+            .serve_at(PATH, Application(events.clone())).build()).ok();
         Self { events, bus, next: AtomicU64::new(0) }
     }
 
