@@ -15,7 +15,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -82,16 +84,24 @@ import kotlinx.coroutines.CancellationException
                                       contactsReady: Boolean, change: (String) -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
-    val query = recipientToken(value)
+    // The String overload keeps the old caret after a pick; own the selection so it moves to the end.
+    var field by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    if (field.text != value) field = TextFieldValue(value, TextRange(value.length))
+    // Suggestions follow the caret: editing an earlier recipient must not complete the last one.
+    val atEnd = field.selection.collapsed && field.selection.end == field.text.length
+    val query = if (atEnd) recipientToken(value) else ""
     Column {
-        Field(label, value, enabled, KeyboardType.Email,
-            Modifier.focusRequester(focus).onFocusChanged { focused = it.isFocused }, change)
+        OutlinedTextField(field, { field = it; if (it.text != value) change(it.text) }, enabled = enabled, label = { Text(label) }, singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, autoCorrectEnabled = false),
+            modifier = Modifier.focusRequester(focus).onFocusChanged { focused = it.isFocused }.fillMaxWidth())
         if (focused && enabled && contactsReady && query.isNotEmpty()) {
             core?.suggestContacts(account, query)?.forEach { contact ->
                 Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     .semantics(mergeDescendants = true) { contentDescription = "${contact.name}, ${contact.address}" }
                     .clickable(role = Role.Button, onClickLabel = "Add recipient") {
-                        change(recipientToken(value, contact.recipient))
+                        val next = recipientToken(value, contact.recipient)
+                        field = TextFieldValue(next, TextRange(next.length))
+                        change(next)
                         focus.requestFocus()
                     }.padding(vertical = 6.dp), verticalArrangement = Arrangement.Center) {
                     if (contact.name.isNotEmpty()) Text(contact.name)
@@ -179,12 +189,11 @@ internal class AccountForm {
     }
 }
 
-@Composable private fun Field(label: String, value: String, enabled: Boolean = true, keyboard: KeyboardType = KeyboardType.Text,
-                             modifier: Modifier = Modifier, change: (String) -> Unit) {
+@Composable private fun Field(label: String, value: String, enabled: Boolean = true, keyboard: KeyboardType = KeyboardType.Text, change: (String) -> Unit) {
     OutlinedTextField(value, change, enabled = enabled, label = { Text(label) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = false),
         visualTransformation = if (keyboard == KeyboardType.Password) PasswordVisualTransformation() else VisualTransformation.None,
-        modifier = modifier.fillMaxWidth())
+        modifier = Modifier.fillMaxWidth())
 }
 @Composable private fun SecurityChoice(tls: Boolean, enabled: Boolean, change: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

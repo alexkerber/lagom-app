@@ -10,6 +10,8 @@ struct ComposeView: View {
     @State private var contactsAccount: String?
     @State private var contactsError: String?
     @FocusState private var addressFocus: String?
+    // Suggestions follow the caret: editing an earlier recipient must not complete the last one.
+    @State private var addressSelection: [String: TextSelection] = [:]
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -139,7 +141,7 @@ struct ComposeView: View {
     }
 
     private func address(_ label: String, _ text: Binding<String>) -> some View {
-        TextField(label, text: text, prompt: Text(""))
+        TextField(label, text: text, selection: Binding(get: { addressSelection[label] }, set: { addressSelection[label] = $0 }), prompt: Text(""))
             .textContentType(.emailAddress).keyboardType(.emailAddress)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
             .focused($addressFocus, equals: label)
@@ -147,7 +149,12 @@ struct ComposeView: View {
     }
 
     @ViewBuilder private func suggestions(_ label: String, _ text: Binding<String>) -> some View {
-        let query = recipientToken(text.wrappedValue)
+        let atEnd: Bool = {
+            guard let selection = addressSelection[label] else { return true }
+            if case .selection(let range) = selection.indices { return range.isEmpty && range.lowerBound == text.wrappedValue.endIndex }
+            return false
+        }()
+        let query = atEnd ? recipientToken(text.wrappedValue) : ""
         if addressFocus == label, !query.isEmpty, contactsAccount == draft.account, let core = model.core {
             let matches = core.suggestContacts(accountId: draft.account, query: query)
             if !matches.isEmpty {
@@ -155,7 +162,9 @@ struct ComposeView: View {
                     VStack(spacing: 0) {
                         ForEach(matches, id: \.address) { contact in
                             Button {
-                                text.wrappedValue = recipientToken(text.wrappedValue, replacingWith: contact.recipient)
+                                let next = recipientToken(text.wrappedValue, replacingWith: contact.recipient)
+                                text.wrappedValue = next
+                                addressSelection[label] = TextSelection(insertionPoint: next.endIndex)
                                 addressFocus = label
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
