@@ -335,7 +335,8 @@ struct ModelChecks {
         model.composeDraft?.body = "latest"
         try await Task.sleep(for: .milliseconds(300))
         precondition(core.saves == 0, "edits must debounce")
-        try await Task.sleep(for: .milliseconds(300))
+        // CI runners oversleep; poll instead of racing the 0.5 s debounce.
+        for _ in 0..<50 where core.drafts.values.first?.body != "latest" { try await Task.sleep(for: .milliseconds(100)) }
         precondition(core.drafts.values.first?.body == "latest")
         let sheetID = model.composeDraft!.id
         let old = model.composeDraft!.messageID

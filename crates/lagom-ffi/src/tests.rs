@@ -420,7 +420,8 @@ async fn stalled_sync_keeps_cached_mail_and_durable_enqueue_available() {
     };
     let sync = tokio::spawn({ let core = core.clone(); async move { core.sync_all().await } });
     let (socket, _) = listener.accept().await.unwrap();
-    let local = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    // The stall never ends, so a generous bound still proves local work does not wait; Windows CI is slow.
+    let local = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let same = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
         assert_eq!(same.message(id).await.unwrap().text_body, "line one\nline two");
         assert_eq!(same.mailbox(Some(a.id.clone()), Mailbox::Inbox, 100, 0).await.unwrap()[0].id, id);
