@@ -169,6 +169,12 @@ impl Hidden {
         own && !open(end_scope(hidden)) || parent
     }
 
+    /// Text and start tags open closed formatting elements again, as the tree builder does.
+    fn reopen(&mut self) {
+        if self.foreign > 0 { return; }
+        for (name, hides) in std::mem::take(&mut self.lingering) { self.push(&name, hides); }
+    }
+
     fn push(&mut self, name: &LocalName, hides: bool) {
         let Some(inside) = &mut self.inside else { return };
         if inside.len() < HIDDEN_DEPTH {
@@ -359,6 +365,7 @@ impl TextState {
             if html { hidden.inside = None; }
         }
         if let Some(hidden) = &mut self.hidden {
+            if start { hidden.reopen(); }
             if hidden.closed_by(name, start, opens, hides, &mut self.containers, &self.scopes_at) {
                 let own = !start && (hidden.name == *name || heading(&hidden.name) && heading(name));
                 // The sibling start tag that closed it opens in a revived element.
@@ -442,6 +449,7 @@ impl TextState {
         {
             self.close_hidden(None);
         }
+        if let Some(hidden) = self.hidden.as_mut().filter(|_| !self.raw) { hidden.reopen(); }
         let chars = if std::mem::take(&mut self.skip_newline) { chars.strip_prefix('\n').unwrap_or(chars) } else { chars };
         if self.pre > 0 {
             self.text.push_str(chars);
@@ -933,6 +941,7 @@ mod tests {
             ("<div hidden><p><i hidden>x</p></div>Secret", ""),
             ("<span hidden><b hidden><font hidden></span></b>Secret", ""),
             ("<b hidden/><dd style='display:none'><b/></dd></b>Secret", ""),
+            ("<div hidden><p><b hidden></p><b></b></div>Secret", ""),
             // `</form>` takes only the form off the stack.
             ("<form hidden><div></form>Secret</div>", ""),
             ("<li hidden/><form><ul></form></ul>Secret", ""),
