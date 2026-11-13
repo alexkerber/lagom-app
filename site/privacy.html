@@ -75,8 +75,8 @@
       <p>lagom connects only to the services below. Each connection goes directly from your device. Nothing goes through a server of ours.</p>
       <ul>
         <li><strong>Your mail provider</strong>, over IMAP and SMTP, to fetch, send, move and delete your mail. Your password or sign-in token goes only to that provider.</li>
-        <li><strong>Google</strong>, if you add a Google account: Google sign-in, Gmail over IMAP and SMTP, and the Google Calendar and Google Tasks APIs if you allow calendar and tasks.</li>
-        <li><strong>Microsoft</strong>, if you add a Microsoft account: Microsoft sign-in and Outlook mail over IMAP and SMTP.</li>
+        <li><strong>Google</strong>, if you add a Google account: Gmail over IMAP and SMTP. If you sign in with Google, also Google sign-in, and the Google Calendar and Google Tasks APIs if you allow calendar and tasks.</li>
+        <li><strong>Microsoft</strong>, if you add a Microsoft account: Outlook mail over IMAP and SMTP. If you sign in with Microsoft, also Microsoft sign-in.</li>
         <li><strong>Setup lookups.</strong> When you add an account, lagom looks up your mail server. It asks your normal DNS resolver for the domain's mail servers (not on iPhone and iPad). If it still has no answer, it asks Mozilla's Thunderbird autoconfig service (<span class="mono">autoconfig.thunderbird.net</span>). These lookups send only the domain, for example <span class="mono">example.com</span>. They never send your full address or password.</li>
         <li><strong>Remote images</strong> in an email are blocked. lagom loads them only when you tap "Load remote images" for that email. Then the sender's image servers can see that you opened it, and your IP address.</li>
       </ul>
@@ -91,7 +91,7 @@
       </ul>
 
       <h2 id="google">Google user data</h2>
-      <p>If you add a Google account, lagom asks for these permissions:</p>
+      <p>If you sign in with Google, lagom asks for these permissions:</p>
       <ul>
         <li><span class="mono">https://mail.google.com/</span>: read, send, move and delete your Gmail over IMAP and SMTP.</li>
         <li><span class="mono">calendar.events</span> and <span class="mono">calendar.calendarlist.readonly</span>: show your calendars, and create and change events. Only if you allow calendar.</li>
@@ -104,7 +104,9 @@
 
       <h2>Deleting your data</h2>
       <ul>
-        <li><strong>Remove an account</strong> (see <a href="support.html#remove">how</a>). lagom deletes that account's mail, events, tasks and drafts from the device, and its password or token from secure storage. Your mail on the server stays as it is.</li>
+        <li><strong>Remove an account</strong> (see <a href="support.html#remove">how</a>). lagom deletes that account's mail, events and drafts from the device, and its password or token from secure storage. Your mail on the server stays as it is.</li>
+        <li><strong>Tasks stay.</strong> When you remove an account, its tasks stay on the device as local tasks, so you do not lose them. Delete them in Todo if you want them gone.</li>
+        <li><strong>On phones</strong>, attachments you opened stay in a cache until lagom starts again.</li>
         <li><strong>On Android</strong>, uninstall lagom to remove everything else.</li>
         <li><strong>On iPhone and iPad</strong>, uninstall lagom to remove the database. iOS can keep Keychain items after an uninstall, so remove your accounts first.</li>
         <li><strong>On macOS, Windows and Linux</strong>, uninstalling leaves the database in place. Remove your accounts first, then delete the folder: <span class="mono">~/Library/Application Support/lagom</span> on macOS, <span class="mono">%APPDATA%\lagom</span> on Windows, <span class="mono">~/.local/share/lagom</span> on Linux.</li>
