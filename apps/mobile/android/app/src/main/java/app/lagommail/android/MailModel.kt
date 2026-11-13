@@ -22,8 +22,12 @@ internal data class RowPresentation(val row: MailRow) {
 internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
     val body: String = "", val replyTo: Long? = null,
+    val attachments: List<SendAttachment> = emptyList(),
+    val title: String = if (replyTo == null) "New message" else "Reply",
 ) {
-    constructor(reply: ReplyDraft) : this(reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo)
+    constructor(reply: ReplyDraft, kind: ComposeKind = ComposeKind.REPLY) : this(
+        reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, reply.attachments,
+        when (kind) { ComposeKind.REPLY -> "Reply"; ComposeKind.REPLY_ALL -> "Reply all"; ComposeKind.FORWARD -> "Forward" })
 }
 internal enum class MailAction { Done, Later, Delete }
 
@@ -39,11 +43,16 @@ internal class MailModel(
     var failures by mutableStateOf<List<SendFailure>>(emptyList()); private set
     var accountId by mutableStateOf<String?>(null); private set
     var mailbox by mutableStateOf(Mailbox.INBOX); private set
+    var searchText by mutableStateOf(""); private set
+    var unreadOnly by mutableStateOf(false)
+    val visibleRows: List<MailRow> get() = if (unreadOnly) rows.filter { it.unread } else rows
     var selectedId by mutableStateOf<Long?>(null); private set
     var message by mutableStateOf<MailMessage?>(null); private set
     var hasMore by mutableStateOf(false); private set
     var syncing by mutableStateOf(false); private set
-    var working by mutableStateOf(false); private set
+    private var actingId by mutableStateOf<Long?>(null)
+    private var readingIds by mutableStateOf<Set<Long>>(emptySet())
+    val working: Boolean get() = actingId != null || readingIds.isNotEmpty()
     var sending by mutableStateOf(false); private set
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
@@ -80,39 +89,51 @@ internal class MailModel(
         // Pending reloads may have changed the rows before the pagination offset.
         val append = more && revision == appliedRevision
         val request = ++revision
-        val old = rows
-        val offset = if (append) old.size else 0
-        val account = accountId
-        val box = mailbox
-        val due = core.nextSnooze()
-        val accounts = core.accounts()
-        val page = mutableListOf<MailRow>()
-        val count = maxOf(100, old.size + if (more) 100 else 0) - offset
-        var hasMore: Boolean
-        do {
-            val batch = core.mailbox(account, box, 100u, (offset + page.size).toUInt())
-            page += batch
-            hasMore = batch.size == 100
-        } while (hasMore && page.size < count)
-        val failures = core.sendFailures()
-        if (request != revision) return
-        this.accounts = accounts
-        this.failures = failures
-        rows = (if (append) old + page else page).distinctBy { it.id }
-        this.hasMore = hasMore
-        appliedRevision = request
-        wake?.cancel()
-        wake = if (foreground && due != null) viewModelScope.launch {
-            delay(maxOf(1, due * 1000 - now()))
-            wake = null
-            try { reload() } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = e.mailMessage() }
-        } else null
+        try {
+            val old = rows
+            val offset = if (append) old.size else 0
+            val account = accountId
+            val box = mailbox
+            val query = searchText.trim()
+            val due = core.nextSnooze()
+            val accounts = core.accounts()
+            val page = mutableListOf<MailRow>()
+            val count = maxOf(100, old.size + if (more) 100 else 0) - offset
+            var hasMore: Boolean
+            do {
+                val batch = if (query.isEmpty()) core.mailbox(account, box, 100u, (offset + page.size).toUInt())
+                    else core.search(account, query, 100u, (offset + page.size).toUInt())
+                page += batch
+                hasMore = batch.size == 100
+            } while (hasMore && page.size < count)
+            val failures = core.sendFailures()
+            if (request != revision) return
+            this.accounts = accounts
+            this.failures = failures
+            rows = (if (append) old + page else page).distinctBy { it.id }
+            this.hasMore = hasMore
+            appliedRevision = request
+            wake?.cancel()
+            wake = if (foreground && due != null) viewModelScope.launch {
+                delay(maxOf(1, due * 1000 - now()))
+                wake = null
+                try { reload() } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { error = e.mailMessage() }
+            } else null
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (request == revision) throw e }
     }
     suspend fun changeScope(account: String?, box: Mailbox) {
         revision++
         clearSelection()
         accountId = account; mailbox = box; rows = emptyList(); hasMore = false
+        reload()
+    }
+    suspend fun changeSearch(text: String) {
+        if (searchText == text) return
+        revision++
+        clearSelection()
+        searchText = text; rows = emptyList(); hasMore = false
         reload()
     }
     fun clearSelection() { selectionRevision++; selectedId = null; message = null }
@@ -124,16 +145,22 @@ internal class MailModel(
             val loaded = withContext(Dispatchers.IO) { core.message(id) }
             if (request != selectionRevision) return
             message = loaded
-            if (loaded.row.unread) {
-                core.markRead(id, true)
-                if (request != selectionRevision) return
-                val read = withContext(Dispatchers.IO) { core.message(id) }
-                if (request != selectionRevision) return
-                message = read
-                reload()
-            }
+            if (loaded.row.unread) setRead(id, true)
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == selectionRevision) throw e }
+    }
+    suspend fun setRead(id: Long, read: Boolean) {
+        val core = core ?: return
+        if (actingId == id || id in readingIds) return
+        readingIds += id
+        try {
+            core.markRead(id, read)
+            if (selectedId == id) {
+                val selection = selectionRevision
+                val updated = withContext(Dispatchers.IO) { core.message(id) }
+                if (selectedId == id && selection == selectionRevision) message = updated
+            }
+        } finally { readingIds -= id; reload() }
     }
     suspend fun sync() {
         val core = core ?: return
@@ -151,7 +178,7 @@ internal class MailModel(
     suspend fun act(action: MailAction, id: Long) {
         val core = core ?: return
         if (working) return
-        working = true
+        actingId = id
         try {
             when (action) {
                 MailAction.Done -> core.done(listOf(id))
@@ -159,19 +186,19 @@ internal class MailModel(
                 MailAction.Delete -> core.delete(listOf(id))
             }
             if (selectedId == id) clearSelection()
-        } finally { working = false; reload() }
+        } finally { actingId = null; reload() }
     }
     suspend fun remove(account: MailAccount) {
         core?.removeAccount(account.id)
         changeScope(if (accountId == account.id) null else accountId, mailbox)
     }
-    suspend fun reply(id: Long) {
+    suspend fun reply(id: Long, kind: ComposeKind = ComposeKind.REPLY) {
         val core = core ?: return
         if (draft != null) return
         val request = ++composeRevision
         val selection = selectionRevision
-        val reply = core.composeDraft(id, ComposeKind.REPLY)
-        if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply)
+        val reply = core.composeDraft(id, kind)
+        if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply, kind)
     }
     suspend fun send() {
         val core = core ?: return
@@ -179,7 +206,7 @@ internal class MailModel(
         if (sending) return
         sending = true
         try {
-            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo, emptyList())
+            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo, draft.attachments)
             this.draft = null
             notice = "Queued for sending"
         } finally { sending = false }
