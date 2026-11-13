@@ -19,6 +19,46 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, tomorrow = { 86_400 }, now = now)
 
+    @Test fun messageIdUsesLastDomainAndCompactLowercaseUuid() {
+        for ((email, domain) in listOf("name@earlier@example.test" to "example.test", "missing" to "localhost")) {
+            val id = draftMessageId(email)
+            assertTrue(id.matches(Regex("<[0-9a-f]{32}@${Regex.escape(domain)}>")))
+            assertNotEquals(id, draftMessageId(email))
+        }
+    }
+    @Test fun inboxReloadSurvivesDraftListFailure() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)); rejectDraftList = true }
+        val model = model(core); model.start()
+        assertEquals(listOf(1L), model.rows.map { it.id })
+        assertNotNull(model.error)
+    }
+    @Test fun discardDuringDraftListLoadDropsStaleRows() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1)) }
+        val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "saved")
+        model.closeCompose(discard = false)
+        model.openDraft(model.drafts.single())
+        val gate = CompletableDeferred<Unit>(); core.draftListGate = gate
+        val load = async { model.reload() }; runCurrent()
+        assertFalse(load.isCompleted)
+        model.closeCompose(discard = true)
+        gate.complete(Unit); load.await()
+        assertTrue(model.drafts.isEmpty())
+        assertTrue(model.savedDraftIds.isEmpty())
+        assertEquals(listOf(1L), model.rows.map { it.id })
+    }
+    @Test fun openingDeletedDraftRemovesListRow() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "saved")
+        model.closeCompose(discard = false)
+        val row = model.drafts.single()
+        core.saved.clear()
+        model.openDraft(row)
+        assertTrue(model.drafts.isEmpty())
+        assertNull(model.draft)
+        assertNull(model.error)
+    }
+
     @Test fun editsDebounceAndKeepFlushesBeforeClosingAndRestores() = runTest(dispatcher) {
         val core = FakeCore()
         val model = model(core); model.start()
@@ -66,7 +106,7 @@ class MailModelTest {
     @Test fun replyRestoresOnlyMatchingAccountAndSendConsumesSavedDraft() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(42, account = "source")) }
         val model = model(core); model.start()
-        core.saved["other"] = LocalDraft("other", "another", "other@example.test", "", "wrong", "wrong", "<42>", emptyList(), emptyList(), 1)
+        core.saved["other"] = LocalDraft("other", "another", "other@example.test", "", "wrong", "wrong", "<42>", emptyList(), emptyList())
         model.reply(42)
         assertFalse(model.draft!!.restored)
         model.draft = model.draft!!.copy(body = "answer")
@@ -85,7 +125,7 @@ class MailModelTest {
         model.draft = ComposeDraft("fixture", body = "before")
         model.closeCompose(discard = false)
         val stale = model.drafts.single()
-        core.saved[stale.id] = stale.copy(body = "latest on disk")
+        core.saved[stale.id] = core.saved.getValue(stale.id).copy(body = "latest on disk")
         model.openDraft(stale)
         assertEquals("latest on disk", model.draft?.body)
         model.closeCompose(discard = true)
@@ -345,19 +385,27 @@ private class FakeCore : LagomCoreInterface {
     var saveGate: CompletableDeferred<Unit>? = null
     var rejectSave = false
     var rejectDelete = false
-    override suspend fun localDrafts() = saved.values.toList()
+    var rejectDraftList = false
+    var draftListGate: CompletableDeferred<Unit>? = null
+    override suspend fun localDrafts(): List<DraftRow> {
+        val rows = saved.values.map { it.row() }
+        draftListGate?.await()
+        check(!rejectDraftList) { "draft list failed" }
+        return rows
+    }
+    override suspend fun localDraft(id: String): LocalDraft = saved[id] ?: throw MailException.NotFound()
     override suspend fun savedReply(id: Long): LocalDraft? = saved.values.firstOrNull {
         it.account == mail.first { row -> row.id == id }.account && it.inReplyTo == "<${id}>"
     }
     override suspend fun saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
-        replyTo: Long?, attachments: List<SendAttachment>): LocalDraft {
+        replyTo: Long?, attachments: List<SendAttachment>): DraftRow {
         saveCalls++
         saveGate?.await()
         check(!rejectSave) { "Fixture save refused" }
         replyIds[id] = replyTo ?: replyIds[id]
-        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments, 42)
+        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments)
         saved[id] = value
-        return value
+        return value.row()
     }
     override suspend fun deleteDraft(id: String) { check(!rejectDelete) { "Fixture discard refused" }; saved.remove(id) }
     override suspend fun sendDraft(id: String): String {
@@ -432,3 +480,5 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
 }
+
+private fun LocalDraft.row() = DraftRow(id, account, to, subject, 42)

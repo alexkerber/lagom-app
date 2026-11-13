@@ -91,7 +91,8 @@ struct MailView: View {
                 Spacer(minLength: 4)
                 if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
                 IconButton(title: "New message", icon: "compose") {
-                    model.composeDraft = ComposeDraft(account: model.accountID ?? model.accounts.first?.id ?? "")
+                    let account = model.accountID ?? model.accounts.first?.id ?? ""
+                    model.composeDraft = ComposeDraft(account: account, email: model.accounts.first { $0.id == account }?.email ?? "")
                 }
                 .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
                 .padding(.trailing, -6)

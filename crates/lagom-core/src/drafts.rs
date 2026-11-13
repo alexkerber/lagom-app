@@ -1,4 +1,4 @@
-use crate::{outbox::Draft, store::Store, Error, Result};
+use crate::{outbox::{Draft, OwnedDraft}, store::Store, Error, Result};
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 
@@ -59,7 +59,26 @@ pub(crate) struct Copy {
     pub revision: String,
 }
 
+const OWNED_ROWS: &str = "SELECT d.id,d.account,json_extract(d.content,'$.to'),json_extract(d.content,'$.subject'),
+    d.updated,json_extract(d.content,'$.reply[0]') FROM drafts d JOIN draft_sync s ON s.id=d.id
+    WHERE s.owned=1 AND (?1 IS NULL OR d.id=?1) ORDER BY d.updated DESC,d.rowid DESC";
+
+fn owned_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OwnedDraft> {
+    Ok(OwnedDraft { id: r.get(0)?, account: r.get(1)?, to: r.get(2)?, subject: r.get(3)?, updated: r.get(4)?, in_reply_to: r.get(5)? })
+}
+
 impl Store {
+    /// Extract only list fields in SQLite; attachment bytes never enter Rust.
+    pub fn owned_draft_rows(&self) -> Result<Vec<OwnedDraft>> {
+        let mut query = self.db.prepare(OWNED_ROWS)?;
+        let rows = query.query_map([None::<&str>], owned_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn draft_row(&self, id: &str) -> Result<OwnedDraft> {
+        self.db.query_row(OWNED_ROWS, [id], owned_row).optional()?.ok_or(Error::NotFound)
+    }
+
     pub(crate) fn draft_exists(&self, id: &str) -> Result<bool> {
         Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM drafts WHERE id=?1)", [id], |r| r.get(0))?)
     }
@@ -215,5 +234,83 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_rows_timestamp_edits_and_sort_without_decoding_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("mail.db")).unwrap();
+        let (imap, smtp) = crate::presets::servers("sender@gmail.com").unwrap();
+        let account = crate::account::Account::new("sender@gmail.com".into(), imap, smtp).unwrap();
+        store.save_account(&account).unwrap();
+        let mut draft = Draft { id: "first".into(), account: account.id.clone(), to: "recipient".into(),
+            subject: "subject".into(), reply: Some((Some("<parent>".into()), vec![])), ..Default::default() };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        store.save_draft(&draft).unwrap();
+        assert!(store.draft_row(&draft.id).unwrap().updated >= now);
+        store.db.execute("UPDATE drafts SET updated=1 WHERE id=?1", [&draft.id]).unwrap();
+        store.save_draft(&draft).unwrap();
+        store.autosave_draft(&draft, &store.draft_revision(&draft.id).unwrap()).unwrap();
+        assert_eq!(store.draft_row(&draft.id).unwrap().updated, 1);
+        draft.text = "changed".into();
+        store.autosave_draft(&draft, &store.draft_revision(&draft.id).unwrap()).unwrap();
+        assert!(store.draft_row(&draft.id).unwrap().updated >= now);
+        draft.id = "second".into();
+        store.save_draft(&draft).unwrap();
+        store.db.execute("UPDATE drafts SET updated=10", []).unwrap();
+        let ids = || store.owned_draft_rows().unwrap().into_iter().map(|d| d.id).collect::<Vec<_>>();
+        assert_eq!(ids(), ["second", "first"]);
+        store.db.execute("UPDATE drafts SET updated=11 WHERE id='first'", []).unwrap();
+        assert_eq!(ids(), ["first", "second"]);
+        // Valid JSON but invalid Draft attachments prove these queries do not deserialize Draft.
+        store.db.execute("UPDATE drafts SET content=json_set(content,'$.attachments','not an array') WHERE id='first'", []).unwrap();
+        assert!(store.draft("first").is_err());
+        let row = store.draft_row("first").unwrap();
+        assert_eq!((row.account, row.to, row.subject, row.in_reply_to),
+            (account.id, "recipient".into(), "subject".into(), Some("<parent>".into())));
+        assert_eq!(ids(), ["first", "second"]);
+        store.db.execute("UPDATE draft_sync SET owned=0 WHERE id='first'", []).unwrap();
+        assert_eq!(ids(), ["second"]);
+        assert!(matches!(store.draft_row("first"), Err(Error::NotFound)));
+    }
+
+    #[test]
+    fn v17_drafts_migrate_with_unknown_edit_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"),
+            include_str!("schema_v4.sql"), include_str!("schema_v5.sql"), include_str!("schema_v6.sql"),
+            include_str!("schema_v7.sql"), include_str!("schema_v8.sql"), include_str!("schema_v9.sql"),
+            include_str!("schema_v10.sql"), include_str!("schema_v11.sql"), include_str!("schema_v12.sql"),
+            include_str!("schema_v13.sql"), include_str!("schema_v14.sql"), include_str!("schema_v15.sql"),
+            include_str!("schema_v16.sql"), include_str!("schema_v17.sql")] {
+            db.execute_batch(schema).unwrap();
+        }
+        let store = Store { db };
+        let (imap, smtp) = crate::presets::servers("sender@gmail.com").unwrap();
+        let account = crate::account::Account::new("sender@gmail.com".into(), imap, smtp).unwrap();
+        store.save_account(&account).unwrap();
+        store.db.execute_batch("CREATE TABLE mobile_draft_times (id TEXT PRIMARY KEY REFERENCES drafts(id) ON DELETE CASCADE, updated INTEGER NOT NULL);
+            CREATE TRIGGER mobile_draft_insert AFTER INSERT ON drafts BEGIN
+                INSERT INTO mobile_draft_times VALUES (new.id,unixepoch());
+            END;
+            CREATE TRIGGER mobile_draft_update AFTER UPDATE OF content ON drafts BEGIN
+                UPDATE mobile_draft_times SET updated=unixepoch() WHERE id=new.id;
+            END;").unwrap();
+        let draft = Draft { id: "old".into(), account: account.id, text: "keep me".into(), ..Default::default() };
+        store.save_draft(&draft).unwrap();
+        drop(store);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN
+            ('mobile_draft_times','mobile_draft_insert','mobile_draft_update')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(store.draft_row("old").unwrap().updated, 0);
+        assert_eq!(store.draft("old").unwrap(), draft);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 18);
     }
 }

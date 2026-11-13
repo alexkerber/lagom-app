@@ -62,7 +62,8 @@ import java.time.format.FormatStyle
                 }
             }, actions = {
                 TextButton(enabled = model.accounts.isNotEmpty(), onClick = {
-                    model.draft = ComposeDraft(model.accountId ?: model.accounts.first().id)
+                    val account = model.accountId ?: model.accounts.first().id
+                    model.draft = ComposeDraft(account, id = draftMessageId(model.accounts.firstOrNull { it.id == account }?.email.orEmpty()))
                 }) { Text("Compose") }
             })
         }) { padding ->

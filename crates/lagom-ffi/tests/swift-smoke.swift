@@ -14,9 +14,8 @@ struct Smoke {
         do {
             _ = try await core.message(id: -1)
             preconditionFailure("missing message did not throw")
-        } catch let error as MailError {
-            precondition(error.localizedDescription.contains("not found"))
-        }
+        } catch MailError.NotFound { }
+
         let recipients = splitRecipients(value: "\"Example, Sender\" <sender@example.test>, next@example.test")
         precondition(recipients.count == 2)
         let tomorrow = try tomorrowAtEight()

@@ -33,6 +33,15 @@ pub struct DraftSummary {
     pub snippet: String,
 }
 
+pub struct OwnedDraft {
+    pub id: String,
+    pub account: String,
+    pub to: String,
+    pub subject: String,
+    pub updated: i64,
+    pub in_reply_to: Option<String>,
+}
+
 pub struct Pending {
     pub id: String,
     pub account: String,

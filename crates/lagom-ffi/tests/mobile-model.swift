@@ -12,7 +12,7 @@ import Foundation
     }
     override func accounts() async throws -> [MailAccount] { [] }
     override func sendFailures() async throws -> [SendFailure] { [] }
-    override func localDrafts() async throws -> [LocalDraft] { [] }
+    override func localDrafts() async throws -> [DraftRow] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
         reads += 1
         precondition(limit <= 500)
@@ -46,17 +46,35 @@ import Foundation
     var suspendSave = false
     var fail = false
     var sent: LocalDraft?
-    override func localDrafts() async throws -> [LocalDraft] { Array(drafts.values) }
+    var failDraftList = false
+    var suspendDraftList = false
+    var draftListGate: CheckedContinuation<Void, Never>?
+    override func accounts() async throws -> [MailAccount] { [] }
+    override func nextSnooze() async throws -> Int64? { nil }
+    override func sendFailures() async throws -> [SendFailure] { [] }
+    override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
+        [MailRow(id: 1, account: "fixture", senderName: "Sender", senderAddress: "s@example.test", subject: "Inbox", preview: "", dateUnix: 0, unread: false, hasAttachments: false)]
+    }
+    override func localDrafts() async throws -> [DraftRow] {
+        let rows = drafts.values.map(\.row)
+        if suspendDraftList { await withCheckedContinuation { draftListGate = $0 } }
+        if failDraftList { throw MailError.Failed(reason: "draft list failed") }
+        return rows
+    }
+    override func localDraft(id: String) async throws -> LocalDraft {
+        guard let draft = drafts[id] else { throw MailError.NotFound }
+        return draft
+    }
     override func savedReply(id: Int64) async throws -> LocalDraft? { drafts.values.first }
     override func saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
-                            replyTo: Int64?, attachments: [SendAttachment]) async throws -> LocalDraft {
+                            replyTo: Int64?, attachments: [SendAttachment]) async throws -> DraftRow {
         saves += 1
         if suspendSave { await withCheckedContinuation { gate = $0 } }
         if fail { throw MailError.Failed(reason: "save refused") }
         let saved = LocalDraft(id: id, account: accountId, to: to, cc: cc, subject: subject, body: body,
-                              inReplyTo: nil, references: [], attachments: attachments, updatedUnix: 42)
+                              inReplyTo: nil, references: [], attachments: attachments)
         drafts[id] = saved
-        return saved
+        return saved.row
     }
     override func deleteDraft(id: String) async throws {
         if fail { throw MailError.Failed(reason: "discard refused") }
@@ -76,6 +94,7 @@ struct ModelChecks {
             await wake()
             return
         }
+        try await draftReload()
         try await draftLifecycle()
         await openingDuringArchive()
         let core = FixtureCore(noHandle: .init())
@@ -107,6 +126,42 @@ struct ModelChecks {
         print("MailModel: pagination regression passed")
     }
 
+    @MainActor static func draftReload() async throws {
+        for (email, domain) in [("name@earlier@example.test", "example.test"), ("missing", "localhost")] {
+            let id = draftMessageID(email: email)
+            precondition(id.hasSuffix("@\(domain)>"))
+            precondition(id.dropFirst().prefix(32).allSatisfy { "0123456789abcdef".contains($0) })
+            precondition(id.count == 35 + domain.count)
+        }
+        let core = DraftFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        core.failDraftList = true
+        await model.reload()
+        precondition(model.rows.map(\.id) == [1] && model.error != nil)
+        core.failDraftList = false
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "saved"
+        try await model.closeCompose(discard: false)
+        await model.openDraft(model.drafts[0])
+        core.suspendDraftList = true
+        let load = Task { await model.reload() }
+        while core.draftListGate == nil { await Task.yield() }
+        try await model.closeCompose(discard: true)
+        core.draftListGate?.resume()
+        await load.value
+        precondition(model.drafts.isEmpty && model.savedDraftIDs.isEmpty)
+        precondition(model.rows.map(\.id) == [1])
+        core.suspendDraftList = false
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "deleted elsewhere"
+        try await model.closeCompose(discard: false)
+        let row = model.drafts[0]
+        core.drafts = [:]
+        await model.openDraft(row)
+        precondition(model.drafts.isEmpty && model.composeDraft == nil)
+        print("MailModel: Message-ID, isolated draft reload, discard race and missing draft passed")
+    }
+
     @MainActor static func draftLifecycle() async throws {
         let core = DraftFixtureCore(noHandle: .init())
         let model = MailModel(); model.core = core
@@ -118,9 +173,11 @@ struct ModelChecks {
         precondition(core.saves == 0, "edits must debounce")
         try await Task.sleep(for: .milliseconds(300))
         precondition(core.drafts.values.first?.body == "latest")
-        let old = model.composeDraft!.id
+        let sheetID = model.composeDraft!.id
+        let old = model.composeDraft!.messageID
         try await model.changeComposeAccount("second")
-        precondition(model.composeDraft!.id != old && core.drafts.count == 1)
+        precondition(model.composeDraft!.messageID != old && core.drafts.count == 1)
+        precondition(model.composeDraft!.id == sheetID, "account change replaced sheet identity")
         precondition(core.drafts.values.first?.account == "second" && core.drafts.values.first?.body == "latest")
         model.composeDraft?.body = ""
         try await Task.sleep(for: .milliseconds(600))
@@ -145,7 +202,7 @@ struct ModelChecks {
         model.composeDraft = nil
         try await Task.sleep(for: .milliseconds(100))
         precondition(core.drafts.values.first?.body == "dismissed", "dismissal must flush")
-        let stale = core.drafts.values.first!
+        let stale = core.drafts.values.first!.row
         core.drafts[stale.id]?.body = "latest on disk"
         await model.openDraft(stale)
         precondition(model.composeDraft?.body == "latest on disk", "opening must not restore an old list snapshot")
@@ -215,4 +272,8 @@ struct ModelChecks {
         precondition(core.reads == afterCancel, "removing a snooze must cancel its wake")
         print("MailModel: foreground wake regression passed")
     }
+}
+
+private extension LocalDraft {
+    var row: DraftRow { DraftRow(id: id, account: account, to: to, subject: subject, updatedUnix: 42) }
 }

@@ -24,14 +24,17 @@ internal data class RowPresentation(val row: MailRow) {
     val subject = row.subject.ifEmpty { "(No subject)" }
     val date: Instant = Instant.ofEpochSecond(row.dateUnix)
 }
+internal fun draftMessageId(email: String): String =
+    "<${UUID.randomUUID().toString().replace("-", "")}@${email.substringAfterLast('@', "localhost")}>"
+
 internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
     val body: String = "", val replyTo: Long? = null,
-    val id: String = "<${UUID.randomUUID()}@draft.lagommail.app>",
+    val id: String = draftMessageId(""),
     val attachments: List<SendAttachment> = emptyList(), val restored: Boolean = false,
     val isReply: Boolean = replyTo != null,
 ) {
-    constructor(reply: ReplyDraft) : this(reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, attachments = reply.attachments)
+    constructor(reply: ReplyDraft, email: String = "") : this(reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, id = draftMessageId(email), attachments = reply.attachments)
     constructor(saved: LocalDraft) : this(saved.account, saved.to, saved.cc, saved.subject, saved.body,
         id = saved.id, attachments = saved.attachments, restored = true, isReply = saved.inReplyTo != null || saved.references.isNotEmpty())
     val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || subject.isNotEmpty() || body.isNotEmpty() || attachments.isNotEmpty()
@@ -58,9 +61,10 @@ internal class MailModel(
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
-    var drafts by mutableStateOf<List<LocalDraft>>(emptyList()); private set
+    var drafts by mutableStateOf<List<DraftRow>>(emptyList()); private set
     var showingDrafts by mutableStateOf(false); private set
     var savedDraftIds by mutableStateOf<Set<String>>(emptySet()); private set
+    private var draftRevision = 0
     private val draftLock = Mutex()
     private var autosave: Job? = null
     private var endingCompose = false
@@ -122,12 +126,9 @@ internal class MailModel(
             hasMore = batch.size == 100
         } while (hasMore && page.size < count)
         val failures = core.sendFailures()
-        val drafts = core.localDrafts()
         if (request != revision) return
         this.accounts = accounts
         this.failures = failures
-        this.drafts = drafts
-        savedDraftIds = savedDraftIds + drafts.map { it.id }
         rows = (if (append) old + page else page).distinctBy { it.id }
         this.hasMore = hasMore
         appliedRevision = request
@@ -138,6 +139,14 @@ internal class MailModel(
             try { reload() } catch (e: CancellationException) { throw e }
             catch (e: Exception) { error = e.mailMessage() }
         } else null
+        val draftRequest = draftRevision
+        try {
+            val drafts = core.localDrafts()
+            if (request != revision || draftRequest != draftRevision) return
+            this.drafts = drafts
+            savedDraftIds = savedDraftIds + drafts.map { it.id }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (request == revision) error = e.mailMessage() }
     }
     suspend fun changeScope(account: String?, box: Mailbox) {
         showingDrafts = false
@@ -202,7 +211,10 @@ internal class MailModel(
         val request = ++composeRevision
         val selection = selectionRevision
         val saved = core.savedReply(id)
-        val prepared = if (saved != null) ComposeDraft(saved) else ComposeDraft(core.composeDraft(id, ComposeKind.REPLY))
+        val prepared = if (saved != null) ComposeDraft(saved) else {
+            val reply = core.composeDraft(id, ComposeKind.REPLY)
+            ComposeDraft(reply, accounts.firstOrNull { it.id == reply.account }?.email.orEmpty())
+        }
         if (request == composeRevision && selection == selectionRevision) {
             if (saved != null) { savedDraftIds = savedDraftIds + saved.id; finishedDrafts.remove(saved.id) }
             draft = prepared
@@ -213,10 +225,15 @@ internal class MailModel(
         showingDrafts = true
         reload()
     }
-    suspend fun openDraft(row: LocalDraft) = draftLock.withLock {
+    suspend fun openDraft(row: DraftRow) = draftLock.withLock {
         val core = core ?: return@withLock
         if (draft != null) return@withLock
-        val saved = core.localDrafts().firstOrNull { it.id == row.id } ?: return@withLock
+        val saved = try { core.localDraft(row.id) } catch (e: MailException.NotFound) {
+            draftRevision++
+            drafts = drafts.filterNot { it.id == row.id }
+            savedDraftIds = savedDraftIds - row.id
+            return@withLock
+        }
         if (draft != null) return@withLock
         savedDraftIds = savedDraftIds + saved.id
         finishedDrafts.remove(saved.id)
@@ -230,6 +247,7 @@ internal class MailModel(
             try {
                 val saved = core.saveDraft(snapshot.id, snapshot.account, snapshot.to, snapshot.cc, snapshot.subject,
                     snapshot.body, snapshot.replyTo, snapshot.attachments)
+                draftRevision++
                 savedDraftIds = savedDraftIds + saved.id
                 drafts = listOf(saved) + drafts.filterNot { it.id == saved.id }
             } catch (e: Exception) {
@@ -251,14 +269,16 @@ internal class MailModel(
             autosave?.cancelAndJoin()
             draftLock.withLock {
                 withContext(NonCancellable) {
-                    val replacement = old.copy(id = "<${UUID.randomUUID()}@draft.lagommail.app>", account = account)
+                    val replacement = old.copy(id = draftMessageId(accounts.firstOrNull { it.id == account }?.email.orEmpty()), account = account)
                     if (old.hasContent || old.id in savedDraftIds) {
                         // Save the replacement first so a failed account change cannot lose the original.
                         val saved = core.saveDraft(replacement.id, account, old.to, old.cc, old.subject, old.body, null, old.attachments)
+                        draftRevision++
                         drafts = listOf(saved) + drafts
                         savedDraftIds = savedDraftIds + saved.id
                         core.deleteDraft(old.id)
                     }
+                    draftRevision++
                     drafts = drafts.filterNot { it.id == old.id }
                     savedDraftIds = savedDraftIds - old.id
                     finishedDrafts += old.id
@@ -281,6 +301,7 @@ internal class MailModel(
                 withContext(NonCancellable) {
                     if (discard) {
                         core.deleteDraft(snapshot.id)
+                        draftRevision++
                         drafts = drafts.filterNot { it.id == snapshot.id }
                         savedDraftIds = savedDraftIds - snapshot.id
                     }
@@ -306,6 +327,7 @@ internal class MailModel(
             draftLock.withLock {
                 withContext(NonCancellable) {
                     core.sendDraft(snapshot.id)
+                    draftRevision++
                     drafts = drafts.filterNot { it.id == snapshot.id }
                     savedDraftIds = savedDraftIds - snapshot.id
                     finishCompose(snapshot.id)
