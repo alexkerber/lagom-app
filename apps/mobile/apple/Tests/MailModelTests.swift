@@ -47,6 +47,55 @@ final class MailModelTests: XCTestCase {
     var reply = ReplyDraft(account: "source-account", to: "sender@example.test", cc: "copy@example.test",
                            subject: "Re: Fixture", body: "\n\n> Original", replyTo: 42, attachments: [])
 
+    var saved: [LocalDraft] = []
+    var saveCalls = 0
+    var saveGate: CheckedContinuation<Void, Never>?
+    var suspendSave = false
+    var restoredReply: LocalDraft?
+    var failDraftList = false
+    var suspendDraftList = false
+    var draftListGate: CheckedContinuation<Void, Never>?
+    override func accounts() async throws -> [MailAccount] { [] }
+    override func nextSnooze() async throws -> Int64? { nil }
+    override func sendFailures() async throws -> [SendFailure] { [] }
+    override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
+        [MailRow(id: 1, account: "fixture", senderName: "Sender", senderAddress: "s@example.test", subject: "Inbox", preview: "", dateUnix: 0, unread: false, hasAttachments: false)]
+    }
+    override func localDrafts() async throws -> [DraftRow] {
+        let rows = saved.map(\.row)
+        if suspendDraftList { await withCheckedContinuation { draftListGate = $0 } }
+        if failDraftList { throw MailError.Failed(reason: "draft list failed") }
+        return rows
+    }
+    override func localDraft(id: String) async throws -> LocalDraft {
+        guard let draft = saved.first(where: { $0.id == id }) else { throw MailError.NotFound }
+        return draft
+    }
+    override func savedReply(id: Int64) async throws -> LocalDraft? { restoredReply }
+    override func saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
+                            replyTo: Int64?, attachments: [SendAttachment]) async throws -> DraftRow {
+        saveCalls += 1
+        if suspendSave { await withCheckedContinuation { saveGate = $0 } }
+        if fail { throw MailError.Failed(reason: "fixture failure") }
+        let draft = LocalDraft(id: id, account: accountId, to: to, cc: cc, subject: subject, body: body,
+                               inReplyTo: replyTo.map { "<\($0)>" }, references: [], attachments: attachments)
+        saved.removeAll { $0.id == id }
+        saved.append(draft)
+        return draft.row
+    }
+    override func deleteDraft(id: String) async throws {
+        if fail { throw MailError.Failed(reason: "fixture failure") }
+        saved.removeAll { $0.id == id }
+    }
+    override func sendDraft(id: String) async throws -> String {
+        if fail { throw MailError.Failed(reason: "fixture failure") }
+        let draft = saved.first { $0.id == id }!
+        let queued = try await send(accountId: draft.account, to: splitRecipients(value: draft.to), cc: splitRecipients(value: draft.cc),
+            subject: draft.subject, bodyMarkdown: draft.body, replyTo: draft.inReplyTo == nil ? nil : 42, attachments: draft.attachments)
+        saved.removeAll { $0.id == id }
+        return queued
+    }
+
     override func composeDraft(id: Int64, kind: ComposeKind) async throws -> ReplyDraft {
         calls.append((id, kind))
         if fail { throw MailError.Failed(reason: "fixture failure") }
@@ -184,6 +233,7 @@ extension MailModelTests {
 
     override func accounts() async throws -> [MailAccount] { [] }
     override func sendFailures() async throws -> [SendFailure] { [] }
+    override func localDrafts() async throws -> [DraftRow] { [] }
     override func nextSnooze() async throws -> Int64? { nil }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
         Array(mail.dropFirst(Int(offset)).prefix(Int(limit)))
@@ -430,4 +480,150 @@ extension MailModelTests {
         XCTAssertEqual(core.flags.count, 1)
     }
 
+}
+
+extension MailModelTests {
+    @MainActor func testDraftAutosaveDebouncesAndKeepFlushesLatestEdit() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "first"
+        try await Task.sleep(for: .milliseconds(300))
+        model.composeDraft?.body = "latest"
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(core.saveCalls, 0)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(core.saved.first?.body, "latest")
+        model.composeDraft?.subject = "Last edit"
+        try await model.closeCompose(discard: false)
+        XCTAssertNil(model.composeDraft)
+        XCTAssertEqual(core.saved.first?.subject, "Last edit")
+        await model.openDraft(try XCTUnwrap(core.saved.first).row)
+        XCTAssertEqual(model.composeDraft?.body, "latest")
+        XCTAssertEqual(model.composeDraft?.subject, "Last edit")
+    }
+
+    @MainActor func testOpeningAStaleDraftRowReadsTheLatestSavedBody() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "before"
+        try await model.closeCompose(discard: false)
+        let stale = try XCTUnwrap(core.saved.first).row
+        core.saved[0].body = "latest on disk"
+        await model.openDraft(stale)
+        XCTAssertEqual(model.composeDraft?.body, "latest on disk")
+        try await model.closeCompose(discard: true)
+    }
+
+    @MainActor func testChangingSenderKeepsEditsAndClearingTheBodyAutosaves() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "first")
+        model.composeDraft?.body = "keep edits"
+        try await Task.sleep(for: .milliseconds(600))
+        let sheetID = model.composeDraft?.id
+        let old = model.composeDraft?.messageID
+        try await model.changeComposeAccount("second")
+        XCTAssertNotEqual(model.composeDraft?.messageID, old)
+        XCTAssertEqual(model.composeDraft?.id, sheetID)
+        XCTAssertEqual(core.saved.count, 1)
+        XCTAssertEqual(core.saved.first?.account, "second")
+        XCTAssertEqual(core.saved.first?.body, "keep edits")
+        model.composeDraft?.body = ""
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertEqual(core.saved.first?.body, "")
+        try await model.closeCompose(discard: true)
+    }
+
+    @MainActor func testDiscardWaitsForInflightSaveAndCannotResurrectDraft() async throws {
+        let core = ComposeFixtureCore(noHandle: .init()); core.suspendSave = true
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "discard me"
+        while core.saveGate == nil { await Task.yield() }
+        let close = Task { try await model.closeCompose(discard: true) }
+        await Task.yield()
+        XCTAssertNotNil(model.composeDraft)
+        core.saveGate?.resume()
+        try await close.value
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertNil(model.composeDraft)
+        XCTAssertTrue(core.saved.isEmpty)
+    }
+
+    @MainActor func testDraftFailuresRetainComposerAndReplyRestoresSavedFields() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "keep me"
+        core.fail = true
+        for discard in [false, true] {
+            do { try await model.closeCompose(discard: discard); XCTFail("Expected failure") } catch { }
+            XCTAssertEqual(model.composeDraft?.body, "keep me")
+        }
+        core.fail = false
+        try await model.closeCompose(discard: false)
+        core.restoredReply = core.saved.first
+        model.selectedID = 42
+        await model.prepareCompose(id: 42, kind: .reply)
+        XCTAssertEqual(model.composeDraft?.body, "keep me")
+        XCTAssertTrue(core.calls.isEmpty)
+        XCTAssertTrue(model.composeDraft?.restored == true)
+        try await model.closeCompose(discard: true)
+    }
+}
+
+private extension LocalDraft {
+    var row: DraftRow { DraftRow(id: id, account: account, to: to, subject: subject, updatedUnix: 42) }
+}
+
+extension MailModelTests {
+    func testDraftMessageIDUsesLastDomainAndCompactLowercaseUUID() {
+        for (email, domain) in [("name@earlier@example.test", "example.test"), ("missing", "localhost")] {
+            let id = draftMessageID(email: email)
+            XCTAssertNotNil(id.range(of: "^<[0-9a-f]{32}@" + domain.replacingOccurrences(of: ".", with: "\\.") + ">$", options: .regularExpression))
+            XCTAssertNotEqual(id, draftMessageID(email: email))
+        }
+    }
+
+    @MainActor func testDraftListFailureDoesNotFailInboxReload() async {
+        let core = ComposeFixtureCore(noHandle: .init()); core.failDraftList = true
+        let model = MailModel(); model.core = core
+        await model.reload()
+        XCTAssertEqual(model.rows.map(\.id), [1])
+        XCTAssertNotNil(model.error)
+    }
+
+    @MainActor func testDiscardDuringDraftListLoadDropsStaleRows() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "saved"
+        try await model.closeCompose(discard: false)
+        await model.openDraft(try XCTUnwrap(model.drafts.first))
+        core.suspendDraftList = true
+        let load = Task { await model.reload() }
+        while core.draftListGate == nil { await Task.yield() }
+        try await model.closeCompose(discard: true)
+        core.draftListGate?.resume()
+        await load.value
+        XCTAssertTrue(model.drafts.isEmpty)
+        XCTAssertTrue(model.savedDraftIDs.isEmpty)
+        XCTAssertEqual(model.rows.map(\.id), [1])
+    }
+
+    @MainActor func testOpeningDeletedDraftRemovesListRow() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.body = "saved"
+        try await model.closeCompose(discard: false)
+        let row = try XCTUnwrap(model.drafts.first)
+        core.saved = []
+        await model.openDraft(row)
+        XCTAssertTrue(model.drafts.isEmpty)
+        XCTAssertNil(model.composeDraft)
+        XCTAssertNil(model.error)
+    }
 }

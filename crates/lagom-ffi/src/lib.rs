@@ -7,17 +7,23 @@ use zeroize::Zeroizing;
 uniffi::setup_scaffolding!();
 
 mod secret_store;
+mod drafts;
+pub use drafts::{DraftRow, LocalDraft};
 
 type Result<T> = std::result::Result<T, MailError>;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MailError {
+    #[error("not found")]
+    NotFound,
     // Kotlin exceptions already own message; the payload needs a distinct name.
     #[error("{reason}")]
     Failed { reason: String },
 }
 impl From<lagom_core::Error> for MailError {
-    fn from(error: lagom_core::Error) -> Self { failure(error.to_string()) }
+    fn from(error: lagom_core::Error) -> Self {
+        match error { lagom_core::Error::NotFound => Self::NotFound, error => failure(error.to_string()) }
+    }
 }
 fn failure(message: impl Into<String>) -> MailError { MailError::Failed { reason: message.into() } }
 fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64 }

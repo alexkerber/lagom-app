@@ -748,3 +748,148 @@ async fn inline_loading_fetches_legacy_mail_and_reuses_cache() {
         assert_eq!(core.inline_resource(id, lagom_core::inline::url(id, "logo", false)).await.unwrap().data, b"\0\xffhi");
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() {
+    let (dir, core) = fixture();
+    let (a, b, source, other) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let b = fixture_account(&s, "b@example.test", 1);
+        let source = mail(&mut s, &a, 1, 1);
+        let other = mail(&mut s, &b, 1, 1);
+        (a, b, source, other)
+    };
+    let id = smtp::message_id(&a.email);
+    let save = |body: &str, reply| core.save_draft(id.clone(), a.id.clone(), "\"Doe, Jo\" <jo@example.test>".into(),
+        "copy@example.test".into(), "Re: Hello".into(), body.into(), reply,
+        vec![SendAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }]);
+    let first = save("unfinished", Some(source)).await.unwrap();
+    assert!(first.updated_unix >= now() - 1);
+    let first = core.local_draft(id.clone()).await.unwrap();
+    assert_eq!(first.in_reply_to.as_deref(), Some("<m1@example.test>"));
+    assert_eq!(first.references, ["<root@example.test>", "<m1@example.test>"]);
+    assert_eq!(core.saved_reply(source).await.unwrap().unwrap().id, id);
+    assert!(core.saved_reply(other).await.unwrap().is_none());
+    assert!(core.save_draft(id.clone(), b.id, "".into(), "".into(), "".into(), "wrong account".into(), None, vec![]).await.is_err());
+    core.stores.local.lock().unwrap().delete_message(source).unwrap();
+    save("latest edits", Some(source)).await.unwrap();
+    let last = core.local_draft(id.clone()).await.unwrap();
+    assert_eq!(last.references, first.references, "editing must survive the source being deleted");
+    drop(core);
+    let core = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
+    let restored = core.local_drafts().await.unwrap();
+    assert_eq!(restored.len(), 1);
+    let restored = core.local_draft(restored[0].id.clone()).await.unwrap();
+    assert_eq!(restored.body, "latest edits");
+    assert_eq!(restored.attachments[0].data, [0, 255]);
+    let queued = core.send_draft(id.clone()).await.unwrap();
+    assert_eq!(queued, id);
+    assert!(core.local_drafts().await.unwrap().is_empty());
+    let pending = core.stores.local.lock().unwrap().pending(&id).unwrap();
+    assert_eq!(pending.mail.to, ["\"Doe, Jo\" <jo@example.test>"]);
+    assert_eq!(pending.mail.cc, ["copy@example.test"]);
+    assert_eq!(pending.mail.text, "latest edits");
+    assert_eq!(pending.mail.in_reply_to, first.in_reply_to);
+    assert_eq!(pending.mail.references, first.references);
+    assert_eq!(pending.mail.attachments[0].data, [0, 255]);
+    assert!(core.send_draft(id.clone()).await.is_err());
+    assert!(core.save_draft(id, a.id, "".into(), "".into(), "".into(), "late".into(), None, vec![]).await.is_err());
+}
+
+#[tokio::test]
+async fn draft_invalid_tokens_and_failed_enqueue_preserve_edits_and_discard_is_durable() {
+    let (dir, core) = fixture();
+    let a = fixture_account(&core.stores.local.lock().unwrap(), "a@example.test", 1);
+    let id = smtp::message_id(&a.email);
+    let mut draft = lagom_core::outbox::Draft { id: id.clone(), account: a.id.clone(), to: "Name, <valid@example.test>".into(),
+        recipient_tokens: Some([vec!["Name".into(), "<valid@example.test>".into()], vec![]]), text: "keep me".into(), ..Default::default() };
+    core.stores.local.lock().unwrap().save_draft(&draft).unwrap();
+    core.save_draft(id.clone(), a.id, draft.to.clone(), "".into(), "edited".into(), draft.text.clone(), None, vec![]).await.unwrap();
+    draft.subject = "edited".into();
+    assert!(core.send_draft(id.clone()).await.is_err());
+    assert_eq!(core.stores.local.lock().unwrap().draft(&id).unwrap(), draft);
+    core.delete_draft(id.clone()).await.unwrap();
+    core.delete_draft(id).await.unwrap();
+    drop(core);
+    let core = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
+    assert!(core.local_drafts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mobile_sync_all_keeps_local_drafts_off_the_server() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let a = fixture_account(&core.stores.local.lock().unwrap(), "a@example.test", listener.local_addr().unwrap().port());
+        let id = smtp::message_id(&a.email);
+        // Even an invalid recipient is a valid local draft and must not break refresh.
+        core.save_draft(id.clone(), a.id.clone(), "unfinished".into(), "".into(), "".into(), "local".into(), None, vec![]).await.unwrap();
+        assert_eq!(core.stores.local.lock().unwrap().due_drafts(&a.id, milliseconds()).unwrap(), [id.clone()]);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n* LIST (\\Drafts) NIL \"Drafts\"\r\n" }
+                else if cmd.starts_with("SELECT ") { "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 1] next\r\n" }
+                else if cmd == "UID SEARCH ALL" || cmd == "UID SEARCH UNDELETED" { "* SEARCH\r\n" }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                else { panic!("local draft caused unexpected network work: {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+        core.sync_all().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(core.local_drafts().await.unwrap()[0].id, id);
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn mobile_draft_list_and_reply_resume_only_offer_locally_owned_drafts() {
+    let (dir, core) = fixture();
+    let (a, source) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let source = mail(&mut s, &a, 1, 1);
+        (a, source)
+    };
+    let id = smtp::message_id(&a.email);
+    core.save_draft(id.clone(), a.id, "sender@example.test".into(), "".into(), "".into(), "local".into(), Some(source), vec![]).await.unwrap();
+    assert_eq!(core.local_drafts().await.unwrap().len(), 1);
+    assert!(core.saved_reply(source).await.unwrap().is_some());
+    // The existing folder reader marks imported server drafts as unowned. Server editing is outside this API.
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("UPDATE draft_sync SET owned=0 WHERE id=?1", [&id]).unwrap();
+    assert!(core.local_drafts().await.unwrap().is_empty());
+    assert!(core.saved_reply(source).await.unwrap().is_none());
+    assert_eq!(core.stores.local.lock().unwrap().draft(&id).unwrap().text, "local");
+}
+
+#[tokio::test]
+async fn first_reply_save_survives_deleted_parent() {
+    let (_dir, core) = fixture();
+    let (a, source) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let source = mail(&mut s, &a, 1, 1);
+        s.delete_message(source).unwrap();
+        (a, source)
+    };
+    let id = smtp::message_id(&a.email);
+    let row = core.save_draft(id.clone(), a.id, "unfinished".into(), "".into(), "Reply".into(),
+        "keep edits".into(), Some(source), vec![]).await.unwrap();
+    assert_eq!(row.id, id);
+    let draft = core.local_draft(id.clone()).await.unwrap();
+    assert_eq!(draft.body, "keep edits");
+    assert!(draft.in_reply_to.is_none());
+    assert!(draft.references.is_empty());
+    core.delete_draft(id.clone()).await.unwrap();
+    assert!(matches!(core.local_draft(id).await, Err(MailError::NotFound)));
+}

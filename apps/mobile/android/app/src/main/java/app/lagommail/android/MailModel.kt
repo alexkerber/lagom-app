@@ -9,32 +9,45 @@ import app.lagommail.core.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
+import java.util.UUID
 
 internal data class RowPresentation(val row: MailRow) {
     val sender = row.senderName.ifEmpty { row.senderAddress }
     val subject = row.subject.ifEmpty { "(No subject)" }
     val date: Instant = Instant.ofEpochSecond(row.dateUnix)
 }
+internal fun draftMessageId(email: String): String =
+    "<${UUID.randomUUID().toString().replace("-", "")}@${email.substringAfterLast('@', "localhost")}>"
+
 internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
     val body: String = "", val replyTo: Long? = null,
-    val attachments: List<SendAttachment> = emptyList(),
+    val id: String = draftMessageId(""),
+    val attachments: List<SendAttachment> = emptyList(), val restored: Boolean = false,
+    val isReply: Boolean = replyTo != null,
     val title: String = if (replyTo == null) "New message" else "Reply",
 ) {
-    constructor(reply: ReplyDraft, kind: ComposeKind = ComposeKind.REPLY) : this(
-        reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, reply.attachments,
-        when (kind) { ComposeKind.REPLY -> "Reply"; ComposeKind.REPLY_ALL -> "Reply all"; ComposeKind.FORWARD -> "Forward" })
+    constructor(reply: ReplyDraft, kind: ComposeKind = ComposeKind.REPLY, email: String = "") : this(
+        reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, id = draftMessageId(email), attachments = reply.attachments,
+        title = when (kind) { ComposeKind.REPLY -> "Reply"; ComposeKind.REPLY_ALL -> "Reply all"; ComposeKind.FORWARD -> "Forward" })
+    constructor(saved: LocalDraft) : this(saved.account, saved.to, saved.cc, saved.subject, saved.body,
+        id = saved.id, attachments = saved.attachments, restored = true, isReply = saved.inReplyTo != null || saved.references.isNotEmpty(),
+        title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft")
+    val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || subject.isNotEmpty() || body.isNotEmpty() || attachments.isNotEmpty()
 }
 internal enum class MailAction { Done, Later, Delete }
 
 internal class MailModel(
     private val open: suspend () -> LagomCoreInterface,
     private val tomorrow: () -> Long = ::tomorrowAtEight,
-    private val recipients: (String) -> List<String> = ::splitRecipients,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : ViewModel() {
     var core: LagomCoreInterface? = null; private set
@@ -57,12 +70,29 @@ internal class MailModel(
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
-    // shortcut: compose lives in memory only, add Rust draft persistence before process-death restoration.
+    var drafts by mutableStateOf<List<DraftRow>>(emptyList()); private set
+    var showingDrafts by mutableStateOf(false); private set
+    var savedDraftIds by mutableStateOf<Set<String>>(emptySet()); private set
+    private var draftRevision = 0
+    private val draftLock = Mutex()
+    private var autosave: Job? = null
+    private var endingCompose = false
+    private val finishedDrafts = mutableSetOf<String>()
     private var composeRevision = 0
     private var composeDraft by mutableStateOf<ComposeDraft?>(null)
     var draft: ComposeDraft?
         get() = composeDraft
-        set(value) { composeRevision++; composeDraft = value }
+        set(value) {
+            val old = composeDraft
+            composeRevision++; composeDraft = value
+            if (endingCompose || old == value) return
+            autosave?.cancel()
+            if (value != null && (value.hasContent || old?.hasContent == true || value.id in savedDraftIds)) {
+                autosave = perform { delay(500); persist(value) }
+            } else if (value == null && old != null) {
+                perform { persist(old) }
+            }
+        }
     var accountForm by mutableStateOf<AccountForm?>(null)
     private var revision = 0
     private var appliedRevision = 0
@@ -83,6 +113,7 @@ internal class MailModel(
         foreground = active
         wake?.cancel(); wake = null
         if (active) { start(); reload(); sync() }
+        else if (!sending) draft?.let { persist(it) }
     }
     suspend fun reload(more: Boolean = false) {
         val core = core ?: return
@@ -122,8 +153,17 @@ internal class MailModel(
             } else null
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == revision) throw e }
+        val draftRequest = draftRevision
+        try {
+            val drafts = core.localDrafts()
+            if (request != revision || draftRequest != draftRevision) return
+            this.drafts = drafts
+            savedDraftIds = savedDraftIds + drafts.map { it.id }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (request == revision) error = e.mailMessage() }
     }
     suspend fun changeScope(account: String?, box: Mailbox) {
+        showingDrafts = false
         revision++
         clearSelection()
         accountId = account; mailbox = box; rows = emptyList(); hasMore = false
@@ -197,18 +237,131 @@ internal class MailModel(
         if (draft != null) return
         val request = ++composeRevision
         val selection = selectionRevision
-        val reply = core.composeDraft(id, kind)
-        if (request == composeRevision && selection == selectionRevision) draft = ComposeDraft(reply, kind)
+        // Like desktop R: only a plain reply reuses its saved draft.
+        val saved = if (kind == ComposeKind.REPLY) core.savedReply(id) else null
+        val prepared = if (saved != null) ComposeDraft(saved) else {
+            val reply = core.composeDraft(id, kind)
+            ComposeDraft(reply, kind, accounts.firstOrNull { it.id == reply.account }?.email.orEmpty())
+        }
+        if (request == composeRevision && selection == selectionRevision) {
+            if (saved != null) { savedDraftIds = savedDraftIds + saved.id; finishedDrafts.remove(saved.id) }
+            draft = prepared
+        }
     }
-    suspend fun send() {
+    suspend fun showDrafts() {
+        clearSelection()
+        showingDrafts = true
+        reload()
+    }
+    suspend fun openDraft(row: DraftRow) = draftLock.withLock {
+        val core = core ?: return@withLock
+        if (draft != null) return@withLock
+        val saved = try { core.localDraft(row.id) } catch (e: MailException.NotFound) {
+            draftRevision++
+            drafts = drafts.filterNot { it.id == row.id }
+            savedDraftIds = savedDraftIds - row.id
+            return@withLock
+        }
+        if (draft != null) return@withLock
+        savedDraftIds = savedDraftIds + saved.id
+        finishedDrafts.remove(saved.id)
+        draft = ComposeDraft(saved)
+    }
+    private suspend fun persist(snapshot: ComposeDraft) = draftLock.withLock {
+        val core = core ?: return@withLock
+        if (snapshot.id in finishedDrafts || (!snapshot.hasContent && snapshot.id !in savedDraftIds)) return@withLock
+        // Rust may finish a write after coroutine cancellation; keep the lock until it completes.
+        withContext(NonCancellable) {
+            try {
+                val saved = core.saveDraft(snapshot.id, snapshot.account, snapshot.to, snapshot.cc, snapshot.subject,
+                    snapshot.body, snapshot.replyTo, snapshot.attachments)
+                draftRevision++
+                savedDraftIds = savedDraftIds + saved.id
+                drafts = listOf(saved) + drafts.filterNot { it.id == saved.id }
+            } catch (e: Exception) {
+                if (draft == null && snapshot.id !in finishedDrafts) {
+                    endingCompose = true
+                    draft = snapshot
+                    endingCompose = false
+                }
+                throw e
+            }
+        }
+    }
+    suspend fun changeComposeAccount(account: String) {
         val core = core ?: return
-        val draft = draft ?: return
+        val old = draft ?: return
+        if (sending || old.isReply || old.restored || old.account == account) return
+        sending = true
+        try {
+            autosave?.cancelAndJoin()
+            draftLock.withLock {
+                withContext(NonCancellable) {
+                    val replacement = old.copy(id = draftMessageId(accounts.firstOrNull { it.id == account }?.email.orEmpty()), account = account)
+                    if (old.hasContent || old.id in savedDraftIds) {
+                        // Save the replacement first so a failed account change cannot lose the original.
+                        val saved = core.saveDraft(replacement.id, account, old.to, old.cc, old.subject, old.body, null, old.attachments)
+                        draftRevision++
+                        drafts = listOf(saved) + drafts
+                        savedDraftIds = savedDraftIds + saved.id
+                        core.deleteDraft(old.id)
+                    }
+                    draftRevision++
+                    drafts = drafts.filterNot { it.id == old.id }
+                    savedDraftIds = savedDraftIds - old.id
+                    finishedDrafts += old.id
+                    endingCompose = true
+                    draft = replacement
+                    endingCompose = false
+                }
+            }
+        } finally { sending = false }
+    }
+    suspend fun closeCompose(discard: Boolean) {
+        val core = core ?: return
+        val snapshot = draft ?: return
         if (sending) return
         sending = true
         try {
-            core.send(draft.account, recipients(draft.to), recipients(draft.cc), draft.subject, draft.body, draft.replyTo, draft.attachments)
-            this.draft = null
-            notice = "Queued for sending"
+            autosave?.cancelAndJoin()
+            if (!discard) persist(snapshot)
+            draftLock.withLock {
+                withContext(NonCancellable) {
+                    if (discard) {
+                        core.deleteDraft(snapshot.id)
+                        draftRevision++
+                        drafts = drafts.filterNot { it.id == snapshot.id }
+                        savedDraftIds = savedDraftIds - snapshot.id
+                    }
+                    finishCompose(snapshot.id)
+                }
+            }
+        } finally { sending = false }
+    }
+    private fun finishCompose(id: String) {
+        finishedDrafts += id
+        endingCompose = true
+        draft = null
+        endingCompose = false
+    }
+    suspend fun send() {
+        val core = core ?: return
+        val snapshot = draft ?: return
+        if (sending) return
+        sending = true
+        try {
+            autosave?.cancelAndJoin()
+            persist(snapshot)
+            draftLock.withLock {
+                withContext(NonCancellable) {
+                    core.sendDraft(snapshot.id)
+                    draftRevision++
+                    drafts = drafts.filterNot { it.id == snapshot.id }
+                    savedDraftIds = savedDraftIds - snapshot.id
+                    finishCompose(snapshot.id)
+                    notice = "Queued for sending"
+                }
+            }
         } finally { sending = false }
         sync()
     }

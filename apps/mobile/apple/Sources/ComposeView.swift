@@ -6,32 +6,43 @@ struct ComposeView: View {
     @State var draft: ComposeDraft
     @State private var sending = false
     @State private var error: String?
+    @State private var cancelling = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { dismiss() }) {
+        SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { cancelling = true }) {
             VStack(spacing: 0) {
                 FieldRow(label: "From") {
                     Menu {
-                        Picker("From", selection: $draft.account) {
+                        Picker("From", selection: Binding(get: { draft.account }, set: { account in
+                            sending = true
+                            Task {
+                                defer { sending = false }
+                                do {
+                                    model.composeDraft = draft
+                                    try await model.changeComposeAccount(account)
+                                    if let updated = model.composeDraft { draft = updated }
+                                } catch { self.error = error.localizedDescription }
+                            }
+                        })) {
                             ForEach(model.accounts, id: \.id) { Text($0.email).tag($0.id) }
                         }
                     } label: {
                         HStack(spacing: 4) {
                             Text(from).lineLimit(1)
-                            if draft.replyTo == nil { Icon("chevron", size: 14).foregroundStyle(Theme.secondary) }
+                            if !draft.isReply && !draft.restored { Icon("chevron", size: 14).foregroundStyle(Theme.secondary) }
                         }
                         .foregroundStyle(Theme.ink)
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                     }
-                    .disabled(draft.replyTo != nil)
+                    .disabled(draft.isReply || draft.restored)
                     .accessibilityLabel("From")
                     .accessibilityValue(from)
                 }
-                FieldRow(label: "To") { address("To", $draft.to) }
-                FieldRow(label: "Cc") { address("Cc", $draft.cc) }
+                FieldRow(label: "To") { address("To", binding(\.to)) }
+                FieldRow(label: "Cc") { address("Cc", binding(\.cc)) }
                 FieldRow(label: "Subject") {
-                    TextField("Subject", text: $draft.subject, prompt: Text("")).fontWeight(.semibold).accessibilityLabel("Subject")
+                    TextField("Subject", text: binding(\.subject), prompt: Text("")).fontWeight(.semibold).accessibilityLabel("Subject")
                 }
                 if !draft.attachments.isEmpty {
                     HStack(spacing: 6) {
@@ -42,7 +53,7 @@ struct ComposeView: View {
                 }
             }
             .padding(.horizontal, 16)
-            TextEditor(text: $draft.body)
+            TextEditor(text: binding(\.body))
                 .lagomFont(.body).lineSpacing(3)
                 .scrollContentBackground(.hidden)
                 .overlay(alignment: .topLeading) {
@@ -56,12 +67,12 @@ struct ComposeView: View {
         } footer: {
             HouseButton(title: "Send", icon: "send", primary: true) {
                 Task {
-                    guard let core = model.core else { return }
+                    guard model.core != nil else { return }
                     sending = true
                     defer { sending = false }
                     do {
-                        try await draft.enqueue(using: core)
-                        model.notice = "Queued for sending"
+                        model.composeDraft = draft
+                        try await model.sendCompose()
                         dismiss()
                         await model.sync()
                     } catch { self.error = error.localizedDescription }
@@ -77,11 +88,36 @@ struct ComposeView: View {
                 Text(words == 1 ? "1 word" : "\(words) words").lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
             }
         }
+        .onDisappear { model.composeDisappeared(draft) }
+        .confirmationDialog("Save draft?", isPresented: $cancelling, titleVisibility: .visible) {
+            Button("Keep draft") { close(discard: false) }
+            Button("Discard", role: .destructive) { close(discard: true) }
+            Button("Cancel", role: .cancel) { }
+        }
         .disabled(sending)
         .interactiveDismissDisabled(sending)
     }
 
+    private func close(discard: Bool) {
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                model.composeDraft = draft
+                try await model.closeCompose(discard: discard)
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
     private var from: String { model.accounts.first { $0.id == draft.account }?.email ?? "" }
+
+    private func binding(_ field: WritableKeyPath<ComposeDraft, String>) -> Binding<String> {
+        Binding(get: { draft[keyPath: field] }, set: { value in
+            draft[keyPath: field] = value
+            model.composeDraft = draft
+        })
+    }
 
     private func address(_ label: String, _ text: Binding<String>) -> some View {
         TextField(label, text: text, prompt: Text(""))
