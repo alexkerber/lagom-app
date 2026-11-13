@@ -13,13 +13,13 @@ and the steps that need a human (certificates, store accounts, secrets).
 - Numeric fields that refuse a suffix use the `1.2.3` part only.
 - Release files are named `lagom-<LAGOM_VERSION>` plus a platform suffix and extension.
 
-| Platform | Where the version goes                                                                       | Build number                                                            |
-| -------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| macOS    | `CFBundleShortVersionString` = `1.2.3`, dmg `lagom-1.2.3.dmg`                                | `CFBundleVersion` = commit time, UTC `YYYYMMDDHHMM`                     |
-| Windows  | `lagom.rc` `FILEVERSION`/`PRODUCTVERSION` = `1,2,3,0`, installer `lagom-1.2.3-windows-x64.*` | none                                                                    |
-| Linux    | package version `1.2.3`, files `lagom-1.2.3-linux-x86_64.*`                                  | none                                                                    |
-| iOS      | `MARKETING_VERSION` = `1.2.3` (pass it to `xcodebuild`, do not edit `project.yml`)           | `CURRENT_PROJECT_VERSION` = UTC minute `YYYYMMDDHHMM`                   |
-| Android  | `versionName` = `LAGOM_VERSION`                                                              | `versionCode` = major×1 000 000 + minor×10 000 + patch×100 + n          |
+| Platform | Where the version goes                                                                       | Build number                                                   |
+| -------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| macOS    | `CFBundleShortVersionString` = `1.2.3`, dmg `lagom-1.2.3.dmg`                                | `CFBundleVersion` = commit time, UTC `YYYYMMDDHHMM`            |
+| Windows  | `lagom.rc` `FILEVERSION`/`PRODUCTVERSION` = `1,2,3,0`, installer `lagom-1.2.3-windows-x64.*` | none                                                           |
+| Linux    | package version `1.2.3`, files `lagom-1.2.3-linux-x86_64.*`                                  | none                                                           |
+| iOS      | `MARKETING_VERSION` = `1.2.3` (pass it to `xcodebuild`, do not edit `project.yml`)           | `CURRENT_PROJECT_VERSION` = UTC minute `YYYYMMDDHHMM`          |
+| Android  | `versionName` = `LAGOM_VERSION`                                                              | `versionCode` = major×1 000 000 + minor×10 000 + patch×100 + n |
 
 Android `n` is the pre-release number (`beta.4` gives 4) and 99 for the final release. So
 `v1.2.3-beta.4` gives 1020304 and `v1.2.3` gives 1020399, and the final release always sorts last.
@@ -176,16 +176,18 @@ it gives you.
 
 ### GitHub secrets for iOS
 
-| Secret                          | Content                                                                                  |
-| ------------------------------- | ---------------------------------------------------------------------------------------- |
-| `IOS_DISTRIBUTION_P12`          | Base64 of the "Apple Distribution" certificate and private key, exported as .p12        |
-| `IOS_DISTRIBUTION_P12_PASSWORD` | The .p12 export password                                                                 |
-| `APP_STORE_CONNECT_KEY`         | The full text of the App Store Connect API key file `AuthKey_<id>.p8`                    |
-| `APP_STORE_CONNECT_KEY_ID`      | The API key ID (10 characters)                                                           |
-| `APP_STORE_CONNECT_ISSUER_ID`   | The issuer ID (a UUID). The same value as `APPLE_NOTARY_ISSUER_ID`.                      |
+| Secret                        | Content                                                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `IOS_SIGNING_P12`             | Base64 of one .p12 with the "Apple Development" and "Apple Distribution" certificates and keys |
+| `IOS_SIGNING_P12_PASSWORD`    | The .p12 export password                                                                       |
+| `APP_STORE_CONNECT_KEY`       | The full text of the App Store Connect API key file `AuthKey_<id>.p8`                          |
+| `APP_STORE_CONNECT_KEY_ID`    | The API key ID (10 characters)                                                                 |
+| `APP_STORE_CONNECT_ISSUER_ID` | The issuer ID (a UUID). The same value as `APPLE_NOTARY_ISSUER_ID`.                            |
 
 Xcode creates and downloads the App Store provisioning profile itself with the API key
-(`-allowProvisioningUpdates`). No profile secret.
+(`-allowProvisioningUpdates`). No profile secret. Automatic signing archives with the development
+certificate and signs the export with the distribution certificate, so the .p12 needs both. Without the
+development key Xcode makes a new development certificate on every run, and the team hits Apple's limit.
 
 ### Human steps for iOS
 
@@ -193,16 +195,18 @@ Once:
 
 1. In App Store Connect, create the app record for `com.alexkerber.lagom` (name, primary language
    English (U.S.), SKU `lagom-ios`).
-2. In the Apple Developer account, create an **Apple Distribution** certificate. Export it with its
-   private key from Keychain Access as `lagom-dist.p12` with a strong password.
+2. In the Apple Developer account, make sure the team has an **Apple Development** and an **Apple
+   Distribution** certificate, with their private keys in your login keychain. In Keychain Access, select
+   both and export them together as `lagom-signing.p12` with a strong password. The development
+   profile needs at least one registered device in the team.
 3. In App Store Connect, go to Users and Access, Integrations, Team Keys. Create a key with the
    **App Manager** role. Download the .p8 file (Apple allows one download). Note the key ID. Not
    verified that App Manager may create the profile from CI; if step 6 fails on the profile, use **Admin**.
 4. Store the secrets:
 
    ```sh
-   base64 -i lagom-dist.p12 | gh secret set IOS_DISTRIBUTION_P12
-   gh secret set IOS_DISTRIBUTION_P12_PASSWORD
+   base64 -i lagom-signing.p12 | gh secret set IOS_SIGNING_P12
+   gh secret set IOS_SIGNING_P12_PASSWORD
    gh secret set APP_STORE_CONNECT_KEY < AuthKey_XXXXXXXXXX.p8
    gh secret set APP_STORE_CONNECT_KEY_ID --body XXXXXXXXXX
    gh secret set APP_STORE_CONNECT_ISSUER_ID --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
