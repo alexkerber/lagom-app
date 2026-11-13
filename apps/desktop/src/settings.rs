@@ -165,7 +165,7 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .children(lists)
         .child(shortcuts(t))
         // The About equivalent on every platform; macOS also has About lagom in the menu bar.
-        .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(format!("lagom {}", env!("CARGO_PKG_VERSION"))))
+        .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(format!("lagom {}", option_env!("LAGOM_VERSION").unwrap_or("development build"))))
 }
 
 /// Every shortcut, grouped, with the keys this platform uses.
