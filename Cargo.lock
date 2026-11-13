@@ -3107,8 +3107,6 @@ dependencies = [
 [[package]]
 name = "html5ever"
 version = "0.39.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46a1761807faccc9a19e86944bbf40610014066306f96edcdedc2fb714bcb7b8"
 dependencies = [
  "log",
  "markup5ever",
@@ -3734,9 +3732,9 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
- "dom_query",
  "futures-util",
  "hickory-resolver",
+ "html5ever",
  "keyring",
  "lettre",
  "libc",

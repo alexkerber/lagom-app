@@ -686,6 +686,26 @@ extension MailModelTests {
         XCTAssertEqual(model.composeDraft?.subject, "Last edit")
     }
 
+    @MainActor func testPickedAttachmentsWarnRemoveAutosaveAndRestore() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data([1, 2]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let file = try readAttachment(url)
+        XCTAssertEqual(file.mimeType, "application/pdf")
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.attachments += [file, SendAttachment(filename: "big.bin", mimeType: "application/octet-stream", data: Data(count: attachmentWarningBytes))]
+        XCTAssertEqual(model.composeDraft?.attachmentsTooLarge, true)
+        model.composeDraft?.attachments.remove(at: 1)
+        XCTAssertEqual(model.composeDraft?.attachmentsTooLarge, false)
+        try await model.closeCompose(discard: false)
+        XCTAssertEqual(core.saved.first?.attachments, [file])
+        await model.openDraft(try XCTUnwrap(core.saved.first).row)
+        XCTAssertEqual(model.composeDraft?.attachments, [file])
+        try await model.closeCompose(discard: true)
+    }
+
     @MainActor func testOpeningAStaleDraftRowReadsTheLatestSavedBody() async throws {
         let core = ComposeFixtureCore(noHandle: .init())
         let model = MailModel(); model.core = core

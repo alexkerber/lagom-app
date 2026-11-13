@@ -168,7 +168,7 @@ impl Render for MessageWindow {
                     .child(button(&t, if in_trash { "Move to Inbox" } else { "Done" }, Some(t.accent))
                         .on_click(cx.listener(move |this, _, _, cx| this.act(if in_trash { Move::Inbox } else { Move::Done }, cx)))),
             )
-            .child(reading_view(&t, (id, &m), !web || menu_open && self.web.cover().is_none(), self.web.surface(), 0, menu, on_download, on_reply, None))
+            .child(reading_view(&t, (id, &m), !web || self.web.failed || menu_open && self.web.cover().is_none(), self.web.surface(), 0, menu, on_download, on_reply, None))
     }
 }
 

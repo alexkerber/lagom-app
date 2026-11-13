@@ -1,0 +1,18 @@
+[package]
+name = "html5ever"
+version = "0.39.0"
+edition = "2021"
+rust-version = "1.71.0"
+authors = ["The html5ever Project Developers"]
+description = "High-performance browser-grade HTML5 parser"
+documentation = "https://docs.rs/html5ever"
+repository = "https://github.com/servo/html5ever"
+license = "MIT OR Apache-2.0"
+
+[features]
+serde = ["markup5ever/serde"]
+trace_tokenizer = []
+
+[dependencies]
+log = "0.4"
+markup5ever = "0.39"
