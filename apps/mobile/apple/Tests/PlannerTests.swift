@@ -41,6 +41,8 @@ final class PresentationTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: icons.appendingPathComponent(set).appendingPathComponent(name)),
                            try Data(contentsOf: desktop.appendingPathComponent(name)), name)
         }
+        XCTAssertEqual(try Data(contentsOf: apple.appendingPathComponent("Assets.xcassets/EmptyTray.imageset/empty-tray.svg")),
+                       try Data(contentsOf: apple.appendingPathComponent("../../desktop/assets/illustrations/empty-tray.svg")))
     }
 
     func testDateGroupsStopAtTheStartOfTheWeek() {
@@ -80,6 +82,14 @@ final class PresentationTests: XCTestCase {
         let groups = grouped(["a1", "a2", "b1", "a3"]) { String($0.prefix(1)) }
         XCTAssertEqual(groups.map(\.title), ["a", "b", "a"])
         XCTAssertEqual(groups.map(\.items), [["a1", "a2"], ["b1"], ["a3"]])
+    }
+
+    func testOnlyAFewArrivingOrLeavingRowsAnimate() {
+        XCTAssertTrue(animatesRowChange(from: [1, 2, 3], to: [0, 1, 2, 3]), "new mail grows in")
+        XCTAssertTrue(animatesRowChange(from: [1, 2, 3], to: [1, 3]), "a done row leaves")
+        XCTAssertFalse(animatesRowChange(from: [1, 2, 3], to: [3, 2, 1]), "a reorder has nothing to show")
+        XCTAssertFalse(animatesRowChange(from: [Int](), to: Array(0..<100)), "a page appears without motion")
+        XCTAssertFalse(animatesRowChange(from: [1, 2], to: [1, 2]))
     }
 
     func testWeekBlocksShareOverlapsInLanesAsOnDesktop() {
