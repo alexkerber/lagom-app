@@ -518,7 +518,10 @@ impl ImapSync {
                 .map(|d| d.timestamp())
                 .unwrap_or_default();
         }
-        store.save_synced_message(&message, attachments)
+        let id = store.save_synced_message(&message, attachments)?;
+        // From the headers already fetched: opening the message never goes to the network for it.
+        store.set_unsubscribe(id, fetch.and_then(Fetch::header).and_then(crate::unsubscribe::from_headers).as_ref())?;
+        Ok(id)
     }
     pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
         let message = store.message(id)?.summary;

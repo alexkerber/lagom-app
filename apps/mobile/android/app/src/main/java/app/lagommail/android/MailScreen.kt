@@ -363,6 +363,36 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     }
 }
 
+/** One quiet line above the body. Nothing runs before the confirm. */
+// shortcut: no "Move all from this sender to Trash" offer; there is no sender-wide bulk move to reuse yet.
+@Composable private fun UnsubscribeLine(model: MailModel, id: Long, offer: UnsubscribeOffer) {
+    var confirm by remember(id) { mutableStateOf(false) }
+    val context = LocalContext.current
+    val quiet = MaterialTheme.typography.bodySmall
+    when {
+        id in model.unsubscribedIds -> Text("Unsubscribed", style = quiet)
+        model.unsubscribingId == id -> Text("Unsubscribing…", style = quiet)
+        else -> TextButton(onClick = { confirm = true }, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text("Unsubscribe from ${offer.list}", style = quiet, maxLines = 2)
+        }
+    }
+    if (confirm) AlertDialog(
+        onDismissRequest = { confirm = false },
+        title = { Text("Unsubscribe from ${offer.list}?") },
+        text = { Text(offer.explain) },
+        confirmButton = { TextButton(onClick = {
+            confirm = false
+            val link = offer.link
+            if (link == null) model.perform { model.unsubscribe(id) }
+            else if (link.startsWith("https://")) {
+                try { context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(link))) }
+                catch (_: ActivityNotFoundException) { model.error = "No browser can open this page" }
+            }
+        }) { Text("Unsubscribe") } },
+        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+    )
+}
+
 /** motion.md "Loading": nothing for the first 150 ms, then the row's preview stands in for the body. */
 @Composable private fun MessagePlaceholder(row: MailRow?) {
     if (!afterWait(true)) return
@@ -430,6 +460,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                 Text(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM).withZone(ZoneId.systemDefault()).format(RowPresentation(message.row).date), style = MaterialTheme.typography.labelSmall)
             }
         }
+        message.unsubscribe?.let { UnsubscribeLine(model, message.row.id, it) }
         if (message.htmlBody != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(plain, { plain = it }); Text("Plain text")

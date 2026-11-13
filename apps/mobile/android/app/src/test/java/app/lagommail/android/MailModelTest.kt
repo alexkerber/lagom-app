@@ -97,6 +97,17 @@ class MailModelTest {
         assertEquals(listOf(1L) to 86_400L, core.snoozed)
     }
 
+    @Test fun unsubscribeMarksOnlyWhatTheCoreConfirmed() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.unsubscribe(1)
+        assertEquals(listOf(1L), core.unsubscribed)
+        assertEquals(setOf(1L), model.unsubscribedIds)
+        model.perform { model.unsubscribe(2) }.join()
+        assertEquals(setOf(1L), model.unsubscribedIds)
+        assertEquals("the list could not be reached", model.error)
+        assertEquals(null, model.unsubscribingId)
+    }
+
     @Test fun conversationExpansionReadStateAndRemoteConsentArePerMessage() = runTest(dispatcher) {
         val core = FakeCore().apply {
             mail = listOf(row(1), row(2, unread = true), row(3))
@@ -957,6 +968,11 @@ private class FakeCore : LagomCoreInterface {
     }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit
+    val unsubscribed = mutableListOf<Long>()
+    override suspend fun unsubscribe(messageId: Long) {
+        if (messageId == 2L) throw MailException.Failed("the list could not be reached")
+        unsubscribed += messageId
+    }
     override suspend fun replyDraft(id: Long): ReplyDraft = error("Reply must use composeDraft")
     override suspend fun composeDraft(id: Long, kind: ComposeKind): ReplyDraft {
         composeKinds += kind
