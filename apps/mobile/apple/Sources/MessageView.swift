@@ -6,6 +6,15 @@ struct ConversationView: View {
     @Bindable var model: MailModel
 
     var body: some View {
+        // Most mail is a single message: keep the full-height reading view for it.
+        if model.messages.count == 1, let message = model.messages.first {
+            MessageView(message: message, model: model)
+        } else {
+            thread
+        }
+    }
+
+    private var thread: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(model.messages, id: \.row.id) { message in

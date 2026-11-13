@@ -229,6 +229,8 @@ internal fun Mailbox.label(): String = when (this) {
 @Composable private fun ConversationScreen(model: MailModel, back: Boolean) {
     Column(Modifier.fillMaxSize()) {
         if (back) TextButton(onClick = model::clearSelection) { Text("Back") }
+        // Most mail is a single message: keep the full-height reading view for it.
+        model.messages.singleOrNull()?.let { Box(Modifier.weight(1f)) { MessageScreen(model, it) }; return@Column }
         LazyColumn(Modifier.weight(1f)) {
             items(model.messages, key = { it.row.id }) { message ->
                 val row = message.row
