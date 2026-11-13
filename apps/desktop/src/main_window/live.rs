@@ -1005,7 +1005,9 @@ impl MainWindow {
     /// "Personal · synced 10:12" for the current account, `None` in demo mode.
     pub(super) fn sync_line(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
-        Some(format!("{} · {}", short_name(live.account()?), self.sync_state()?).into())
+        let line = format!("{} · {}", short_name(live.account()?), self.sync_state()?);
+        // The empty inbox footer has room for the reason the list header keeps in a tooltip.
+        Some(match self.sync_error() { Some(e) => format!("{line}: {e}"), None => line }.into())
     }
 
     pub(super) fn sync_icon(&self) -> &'static str {
@@ -4152,6 +4154,7 @@ mod tests {
             v.on_events(vec![Event::Sync(account.clone(), SyncState::Failed("connection refused".into()))], window, cx);
             assert_eq!(v.sync_state().unwrap().as_ref(), "not synced");
             assert_eq!(v.sync_error().as_deref(), Some("connection refused"));
+            assert!(v.sync_line().unwrap().ends_with("not synced: connection refused"));
             v.on_events(vec![Event::Sync(account, SyncState::Synced(0))], window, cx);
             assert_eq!(v.sync_error(), None);
         });

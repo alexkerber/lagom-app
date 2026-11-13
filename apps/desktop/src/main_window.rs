@@ -130,12 +130,16 @@ pub(crate) use polish::action_icon;
 mod panes;
 use panes::{default_list, Panes, StartPage, SIDEBAR_DEFAULT};
 
-/// The main window's frame from last time, if it still fits on a connected display.
-pub fn saved_window(cx: &App) -> Option<gpui::WindowBounds> {
+/// The main window's frame from last time and its display, if that display is still connected
+/// and holds most of the frame.
+pub fn saved_window(cx: &App) -> Option<(gpui::WindowBounds, gpui::DisplayId)> {
     let path = Store::default_path().ok()?.with_file_name("window.json");
     let saved = panes::Writes::load(&path, 1440., cx).ok()?.window?;
-    let displays: Vec<_> = cx.displays().iter().map(|d| d.bounds()).collect();
-    saved.bounds(&displays, MIN_WINDOW)
+    let display = match saved.display {
+        Some(id) => cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.as_u128() == id))?,
+        None => cx.primary_display()?,
+    };
+    Some((saved.bounds(display.bounds(), MIN_WINDOW)?, display.id()))
 }
 
 #[derive(Clone, Copy)]
@@ -475,7 +479,9 @@ impl MainWindow {
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             _bounds: cx.observe_window_bounds(window, |this, window, cx| {
-                let Some(saved) = panes::SavedWindow::from_bounds(window.window_bounds()) else { return };
+                // macOS reports the frame relative to its display, so the display goes with it.
+                let display = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.as_u128());
+                let Some(saved) = panes::SavedWindow::from_bounds(window.window_bounds(), display) else { return };
                 if this.preferences_path.is_none() || this.panes.window == Some(saved) { return; }
                 this.panes.window = Some(saved);
                 // Live resizing reports every frame; write once the window settles.

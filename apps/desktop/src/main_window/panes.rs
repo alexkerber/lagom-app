@@ -98,7 +98,8 @@ pub(super) struct Panes {
     pub window: Option<SavedWindow>,
 }
 
-/// The main window's frame in screen points; `maximized` keeps the restore frame too.
+/// The main window's frame as GPUI reports it (relative to its display on macOS), and that
+/// display's stable id; `maximized` keeps the restore frame too.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct SavedWindow {
     pub x: f32,
@@ -106,27 +107,28 @@ pub(crate) struct SavedWindow {
     pub width: f32,
     pub height: f32,
     pub maximized: bool,
+    #[serde(default)]
+    pub display: Option<u128>,
 }
 
 impl SavedWindow {
-    pub fn from_bounds(bounds: gpui::WindowBounds) -> Option<Self> {
+    pub fn from_bounds(bounds: gpui::WindowBounds, display: Option<u128>) -> Option<Self> {
         let b = bounds.get_bounds();
         let (x, y, width, height) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
         // Full screen reopens as a window: a new Space at launch surprises more than it helps.
-        let saved = Self { x, y, width, height, maximized: matches!(bounds, gpui::WindowBounds::Maximized(_)) };
+        let saved = Self { x, y, width, height, maximized: matches!(bounds, gpui::WindowBounds::Maximized(_)), display };
         [x, y, width, height].iter().all(|v| v.is_finite()).then_some(saved).filter(|s| s.width > 0. && s.height > 0.)
     }
 
-    /// The saved frame, clamped to the minimum size, if most of it is still on one of `displays`.
-    pub fn bounds(self, displays: &[gpui::Bounds<gpui::Pixels>], min: (f32, f32)) -> Option<gpui::WindowBounds> {
+    /// The saved frame, clamped to the minimum size, if most of it is still on `display`,
+    /// the saved display's bounds in the same coordinates.
+    pub fn bounds(self, display: gpui::Bounds<gpui::Pixels>, min: (f32, f32)) -> Option<gpui::WindowBounds> {
         use gpui::{point, px, size, Bounds};
         let frame = Bounds::new(point(px(self.x), px(self.y)), size(px(self.width.max(min.0)), px(self.height.max(min.1))));
-        // A display that was unplugged would leave the window out of reach.
-        let visible = displays.iter().any(|d| {
-            let shared = d.intersect(&frame);
-            // Disjoint frames intersect with negative sizes, so clamp before multiplying.
-            f32::from(shared.size.width).max(0.) * f32::from(shared.size.height).max(0.) >= 0.5 * f32::from(frame.size.width) * f32::from(frame.size.height)
-        });
+        let shared = display.intersect(&frame);
+        // Disjoint frames intersect with negative sizes, so clamp before multiplying.
+        let visible = f32::from(shared.size.width).max(0.) * f32::from(shared.size.height).max(0.)
+            >= 0.5 * f32::from(frame.size.width) * f32::from(frame.size.height);
         visible.then_some(if self.maximized { gpui::WindowBounds::Maximized(frame) } else { gpui::WindowBounds::Windowed(frame) })
     }
 }
@@ -286,21 +288,21 @@ mod tests {
         use gpui::{point, px, size, Bounds, WindowBounds};
         let display = Bounds::new(point(px(0.), px(0.)), size(px(1512.), px(982.)));
         let frame = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
-        let saved = SavedWindow::from_bounds(WindowBounds::Windowed(frame(100., 50., 1200., 800.))).unwrap();
-        assert_eq!(saved.bounds(&[display], (720., 600.)), Some(WindowBounds::Windowed(frame(100., 50., 1200., 800.))));
-        // Old files without the field still load, and the frame survives a round trip.
+        let saved = SavedWindow::from_bounds(WindowBounds::Windowed(frame(100., 50., 1200., 800.)), Some(u128::MAX)).unwrap();
+        assert_eq!(saved.bounds(display, (720., 600.)), Some(WindowBounds::Windowed(frame(100., 50., 1200., 800.))));
+        // Old files without the fields still load; the frame and a 128-bit display id round-trip.
         let old: Panes = serde_json::from_str(r#"{"sidebar":220,"list":420,"sidebar_hidden":false}"#).unwrap();
         assert_eq!(old.window, None);
         let panes = Panes { window: Some(saved), ..old };
         assert_eq!(serde_json::from_str::<Panes>(&serde_json::to_string(&panes).unwrap()).unwrap(), panes);
         // Too small grows to the minimum; maximized stays maximized.
         let tiny = SavedWindow { width: 10., height: 10., maximized: true, ..saved };
-        assert_eq!(tiny.bounds(&[display], (720., 600.)), Some(WindowBounds::Maximized(frame(100., 50., 720., 600.))));
-        // A frame on an unplugged display, or mostly off screen, opens centred instead.
+        assert_eq!(tiny.bounds(display, (720., 600.)), Some(WindowBounds::Maximized(frame(100., 50., 720., 600.))));
+        // A frame mostly off its display opens centred instead.
         for (x, y) in [(3000., 50.), (-2000., -2000.), (1000., 50.)] {
-            assert_eq!(SavedWindow { x, y, ..saved }.bounds(&[display], (720., 600.)), None, "{x},{y}");
+            assert_eq!(SavedWindow { x, y, ..saved }.bounds(display, (720., 600.)), None, "{x},{y}");
         }
-        assert_eq!(SavedWindow::from_bounds(WindowBounds::Windowed(frame(f32::NAN, 0., 800., 600.))), None);
+        assert_eq!(SavedWindow::from_bounds(WindowBounds::Windowed(frame(f32::NAN, 0., 800., 600.)), None), None);
     }
 
     #[test]

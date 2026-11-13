@@ -155,10 +155,12 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
             .filter(|v| v.is_finite()).unwrap_or(1440.).max(main_window::MIN_WINDOW.0)
     } else { 1440. };
     let saved = if demo { None } else { main_window::saved_window(cx) };
-    let bounds = saved.unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(900.)), cx)));
+    let display_id = saved.map(|(_, display)| display);
+    let bounds = saved.map_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(900.)), cx)), |(bounds, _)| bounds);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(bounds),
+            display_id,
             window_min_size: Some(size(px(main_window::MIN_WINDOW.0), px(main_window::MIN_WINDOW.1))),
             // macOS: no visible title bar, traffic lights inside the sidebar. The invisible
             // system title bar still moves the window. Windows and Linux keep their native bar.
