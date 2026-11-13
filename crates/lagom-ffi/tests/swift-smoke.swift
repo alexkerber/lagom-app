@@ -19,10 +19,9 @@ struct Smoke {
         let backgroundRows = try await core.backgroundSync()
         precondition(backgroundRows.isEmpty)
         core.cancelBackgroundSync()
-        do {
-            _ = try await core.backgroundSync()
-            preconditionFailure("cancelled background sync did not throw")
-        } catch MailError.Failed { }
+        // A cancelled handle stops before the next account and returns what it found.
+        let cancelledRows = try await core.backgroundSync()
+        precondition(cancelledRows.isEmpty, "cancelled background sync returned rows")
         do {
             _ = try await core.message(id: -1)
             preconditionFailure("missing message did not throw")
