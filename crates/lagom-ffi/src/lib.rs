@@ -479,11 +479,19 @@ impl LagomCore {
         match self.run(move |s| s.unsubscribe(message_id)?.ok_or(lagom_core::Error::NotFound)).await? {
             Unsubscribe::OneClick(url) => Ok(lagom_core::unsubscribe::one_click(&url).await?),
             Unsubscribe::Mail(_) => self.run_network(move |s| network(async {
+                // The password first: a locked keychain must not leave a queued row behind.
+                let a = account(s, &s.message_summary(message_id)?.account)?;
+                let password = a.password()?;
                 let id = s.enqueue_unsubscribe(message_id)?;
                 let pending = s.pending(&id)?;
-                let a = account(s, &pending.account)?;
                 // A failed send stays in the outbox and shows in send_failures, like any other.
-                if s.claim_send(&id, milliseconds())? { smtp::send_queued(&a, &a.password()?, &pending, s).await?; }
+                if s.claim_send(&id, milliseconds())? {
+                    match smtp::send_queued(&a, &password, &pending, s).await {
+                        // Submitted; only the Sent copy failed.
+                        Ok(()) | Err(lagom_core::Error::SentCopy) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
                 Ok(())
             })).await,
             Unsubscribe::Link(_) => Err(failure("open the unsubscribe page in the browser")),

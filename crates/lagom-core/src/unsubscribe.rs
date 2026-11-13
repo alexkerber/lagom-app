@@ -1,5 +1,6 @@
 //! Unsubscribe from a list: List-Unsubscribe (RFC 2369) and List-Unsubscribe-Post (RFC 8058).
 //! Sync stores the choice from headers it already has. Nothing here runs until the person confirms.
+// shortcut: mail synced before schema v19 has no choice stored; re-read headers for it if people miss the line on older mail.
 
 use crate::{smtp::Outgoing, store::Store, Error, Result};
 use rusqlite::OptionalExtension;
@@ -121,18 +122,14 @@ fn decode(value: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Redirects stay on HTTPS, a few hops at most.
-fn follow(url: &Url, hops: usize) -> bool { url.scheme() == "https" && hops < 5 }
-
 fn client() -> Result<reqwest::Client> {
     // No cookie store: this reqwest build has no cookie feature, and none is set here.
     reqwest::Client::builder()
         .use_rustls_tls()
         .timeout(TIMEOUT)
         .user_agent(USER_AGENT)
-        .redirect_policy(reqwest::redirect::Policy::custom(|a| {
-            if follow(a.url(), a.previous().len()) { a.follow() } else { a.stop() }
-        }))
+        // RFC 8058 §3.1 forbids redirects; following one turns the POST into a GET that proves nothing.
+        .redirect_policy(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| Error::Network("HTTP client failed"))
 }
@@ -219,9 +216,6 @@ mod tests {
         assert!(request.headers().get(reqwest::header::COOKIE).is_none());
         assert!(request.headers().get(reqwest::header::AUTHORIZATION).is_none());
         assert_eq!(request.body().and_then(|b| b.as_bytes()), Some(&b"List-Unsubscribe=One-Click"[..]));
-        assert!(follow(&url("https://list.example/done"), 1));
-        assert!(!follow(&url("http://list.example/done"), 1));
-        assert!(!follow(&url("https://list.example/done"), 5));
     }
 
     #[test]

@@ -1095,8 +1095,8 @@ impl Worker {
             Unsubscribe::Mail(_) => {
                 let queued = self.store.enqueue_unsubscribe(id)?;
                 self.send(&queued).await;
-                // A sent row leaves the outbox; one still there failed and shows with the other failed sends.
-                if self.store.pending(&queued).is_ok() { return Err(Error::Network("the unsubscribe email was not sent")); }
+                // A sent row leaves the outbox, or stays submitted when only its Sent copy failed.
+                if self.store.pending(&queued).is_ok_and(|p| !p.submitted) { return Err(Error::Network("the unsubscribe email was not sent")); }
                 Ok(())
             }
             Unsubscribe::Link(_) => Err(Error::Invalid("open the unsubscribe page in the browser")),
