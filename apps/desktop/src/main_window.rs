@@ -2060,7 +2060,7 @@ impl MainWindow {
         };
         // HTML mail: the web view covers only the body. While an overlay hides it, a picture of the
         // page stands in; the text shows only where there is no picture (Windows, a page not yet shown).
-        let web = html::SUPPORTED && m.html.is_some();
+        let web = html::supported() && m.html.is_some();
         let text = !web || (self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some()) && self.web.cover().is_none();
         // Toasts sit just above the reply field; the web view would cover them.
         let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count()
@@ -2186,7 +2186,7 @@ fn reading_view(
 ) -> Stateful<Div> {
     let theme = *t;
     let address: SharedString = m.address.clone().into();
-    let web = html::SUPPORTED && m.html.is_some();
+    let web = html::supported() && m.html.is_some();
     let initials: String = m.from.split_whitespace().take(2).filter_map(|w| w.chars().next()).collect();
     let to = if m.to.is_empty() { "you".to_string() } else { m.to.clone() };
     let on_download = std::rc::Rc::new(on_download);
