@@ -17,6 +17,8 @@ if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { throw "Version must
 $env:LAGOM_VERSION = $version
 # VERSIONINFO takes four numbers: 1.2.3-beta.1 becomes 1.2.3.0.
 $numeric = ($version -split '[-+]')[0] + '.0'
+# Static CRT: a clean Windows has no VCRUNTIME140.dll, and the installer ships no VC++ redistributable.
+$env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
 cargo build --release --locked -p lagom
 
 $out = Join-Path $repo 'target\windows'
@@ -50,8 +52,9 @@ try {
         $pfx = Join-Path ([IO.Path]::GetTempPath()) "lagom-$([guid]::NewGuid()).pfx"
         [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
         $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-        # Inno Setup expands $q to a quote and $f to the quoted file; a literal $ is $$.
-        $password = "$env:WINDOWS_CERTIFICATE_PASSWORD".Replace('$', '$$')
+        # Windows argument quoting (backslashes before a quote or the closing quote double), then
+        # Inno Setup's: $q is a quote, $f the quoted file and a literal $ is $$.
+        $password = ("$env:WINDOWS_CERTIFICATE_PASSWORD" -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1').Replace('$', '$$')
         $sign = '$q{0}$q sign /fd sha256 /td sha256 /tr {1} /f $q{2}$q /p $q{3}$q $f' -f $signtool.FullName, $timestamp, $pfx, $password
         $defines += '/DSign', "/Slagom=$sign"
     } else {
