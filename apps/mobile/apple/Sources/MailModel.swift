@@ -168,9 +168,8 @@ final class MailModel {
     func start() async {
         guard core == nil else { return }
         do {
-            if FileManager.default.fileExists(atPath: attachmentDirectory.path) {
-                try FileManager.default.removeItem(at: attachmentDirectory)
-            }
+            // Best effort: a stale cache must never block opening mail.
+            try? FileManager.default.removeItem(at: attachmentDirectory)
             let directory = try Storage.directory()
             #if os(iOS)
             // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.

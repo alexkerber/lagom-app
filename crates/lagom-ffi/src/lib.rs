@@ -342,15 +342,21 @@ impl LagomCore {
             let cached = self.run(move |s| s.cached_forward_attachments(id)).await?;
             draft.attachments = match cached {
                 Some(parts) => parts.into_iter().map(|a| SendAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect(),
-                None => {
-                    let attachments = self.run(move |s| s.attachments(id)).await?;
+                // One login covers every uncached part; `attachment` opens one part at a time.
+                None => self.run_network(move |s| network(async {
+                    let a = account(s, &s.message_summary(id)?.account)?;
+                    let mut session = ImapSync::login(&a, &a.password()?).await?;
                     let mut parts = Vec::new();
-                    for part in attachments {
-                        let data = self.attachment_bytes(id, part.section).await?;
+                    for part in s.attachments(id)? {
+                        let data = match s.cached_attachment(id, &part.section)? {
+                            Some(data) => data,
+                            None => session.fetch_attachment(s, id, &part.section).await?,
+                        };
                         parts.push(SendAttachment { filename: part.filename, mime_type: part.mime_type, data });
                     }
-                    parts
-                }
+                    let _ = session.logout().await;
+                    Ok(parts)
+                })).await?,
             };
         }
         Ok(draft)

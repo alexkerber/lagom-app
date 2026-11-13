@@ -117,9 +117,8 @@ internal class MailModel(
     suspend fun start() {
         if (core != null) return
         try {
-            withContext(Dispatchers.IO) {
-                check(!attachmentDirectory.exists() || attachmentDirectory.deleteRecursively()) { "Could not clear attachment cache" }
-            }
+            // Best effort: a stale cache must never block opening mail.
+            withContext(Dispatchers.IO) { attachmentDirectory.deleteRecursively() }
             core = open(); reload()
         } finally { loading = false }
     }
