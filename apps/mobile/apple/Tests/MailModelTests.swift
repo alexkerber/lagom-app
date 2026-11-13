@@ -1,6 +1,26 @@
 import XCTest
 
 final class MailModelTests: XCTestCase {
+    func testRecipientTokenUsesDesktopBoundariesAndPreservesEarlierAddresses() {
+        XCTAssertEqual(recipientToken(""), "")
+        XCTAssertEqual(recipientToken("  "), "")
+        XCTAssertEqual(recipientToken("An"), "An")
+        XCTAssertEqual(recipientToken("one@example.com,  An "), "An")
+        XCTAssertEqual(recipientToken("one@example.com;\r\nAn"), "An")
+        XCTAssertEqual(recipientToken("one@example.com, "), "")
+        XCTAssertEqual(recipientToken("\"Team, West\" <west@example.com>, An"), "An")
+        XCTAssertEqual(recipientToken("\"Team, West"), "\"Team, West")
+        XCTAssertEqual(recipientToken("\"Team\\\", West\" <west@example.com>; An"), "An")
+        XCTAssertEqual(recipientToken("One (team, (west; east)) <one@example.com>, An"), "An")
+        XCTAssertEqual(recipientToken("odd <one,two"), "odd <one,two")
+        XCTAssertEqual(recipientToken("Åsa@example.com, Éq"), "Éq")
+        XCTAssertEqual(recipientToken("An", replacingWith: "\"Team, West\" <west@example.com>"), "\"Team, West\" <west@example.com>, ")
+        XCTAssertEqual(recipientToken("one@example.com,  An", replacingWith: "\"Team, West\" <west@example.com>"), "one@example.com,  \"Team, West\" <west@example.com>, ")
+        XCTAssertEqual(recipientToken("\"Team, West\" <west@example.com>, We", replacingWith: "\"Team, West\" <west@example.com>"), "\"Team, West\" <west@example.com>, \"Team, West\" <west@example.com>, ")
+        XCTAssertEqual(recipientToken("one@example.com;\r\nWe", replacingWith: "\"Team, West\" <west@example.com>"), "one@example.com;\r\n\"Team, West\" <west@example.com>, ")
+        XCTAssertEqual(recipientToken("\"Team, W", replacingWith: "\"Team, West\" <west@example.com>"), "\"Team, West\" <west@example.com>, ")
+    }
+
     func testSafeAttachmentName() {
         for (input, expected) in [("../../secret.txt", "secret.txt"), ("..\\..\\safe.pdf", "safe.pdf"),
                                   ("", "attachment"), (" . ", "attachment"), ("..", "attachment"),
@@ -79,6 +99,8 @@ final class MailModelTests: XCTestCase {
 }
 
 @MainActor final class ComposeFixtureCore: LagomCore, @unchecked Sendable {
+    override func refreshContacts(accountId: String) async throws {}
+    override func suggestContacts(accountId: String, query: String) -> [ContactSuggestion] { [] }
     var attachmentCalls: [(Int64, String)] = []
     var suspendAttachment = false
     var attachmentGate: CheckedContinuation<Void, Never>?

@@ -24,6 +24,26 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = { 86_400 }, now = now)
 
+    @Test fun recipientTokensUseDesktopBoundariesAndPreserveEarlierAddresses() {
+        assertEquals("", recipientToken(""))
+        assertEquals("", recipientToken("  "))
+        assertEquals("An", recipientToken("An"))
+        assertEquals("An", recipientToken("one@example.com,  An "))
+        assertEquals("An", recipientToken("one@example.com;\r\nAn"))
+        assertEquals("", recipientToken("one@example.com, "))
+        assertEquals("An", recipientToken("\"Team, West\" <west@example.com>, An"))
+        assertEquals("\"Team, West", recipientToken("\"Team, West"))
+        assertEquals("An", recipientToken("\"Team\\\", West\" <west@example.com>; An"))
+        assertEquals("An", recipientToken("One (team, (west; east)) <one@example.com>, An"))
+        assertEquals("odd <one,two", recipientToken("odd <one,two"))
+        assertEquals("Éq", recipientToken("Åsa@example.com, Éq"))
+        assertEquals("\"Team, West\" <west@example.com>, ", recipientToken("An", "\"Team, West\" <west@example.com>"))
+        assertEquals("one@example.com,  \"Team, West\" <west@example.com>, ", recipientToken("one@example.com,  An", "\"Team, West\" <west@example.com>"))
+        assertEquals("\"Team, West\" <west@example.com>, \"Team, West\" <west@example.com>, ", recipientToken("\"Team, West\" <west@example.com>, We", "\"Team, West\" <west@example.com>"))
+        assertEquals("one@example.com;\r\n\"Team, West\" <west@example.com>, ", recipientToken("one@example.com;\r\nWe", "\"Team, West\" <west@example.com>"))
+        assertEquals("\"Team, West\" <west@example.com>, ", recipientToken("\"Team, W", "\"Team, West\" <west@example.com>"))
+    }
+
     @Test fun safeAttachmentNames() {
         for ((input, expected) in listOf("../../secret.txt" to "secret.txt", "..\\..\\safe.pdf" to "safe.pdf",
             "" to "attachment", " . " to "attachment", ".." to "attachment", "dir/" to "attachment",
@@ -595,6 +615,8 @@ class MailModelTest {
 }
 
 private class FakeCore : LagomCoreInterface {
+    override suspend fun refreshContacts(accountId: String) = Unit
+    override fun suggestContacts(accountId: String, query: String) = emptyList<ContactSuggestion>()
     var attachmentGate: CompletableDeferred<Unit>? = null
     var attachmentCalls = mutableListOf<Pair<Long, String>>()
     var rejectAttachment = false

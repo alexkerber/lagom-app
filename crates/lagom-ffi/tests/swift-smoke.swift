@@ -10,6 +10,11 @@ struct Smoke {
         let accounts = try await core.accounts()
         let inbox = try await core.inbox(limit: 100, offset: 0)
         precondition(accounts.isEmpty && inbox.isEmpty)
+        precondition(core.suggestContacts(accountId: "missing", query: "sender").isEmpty)
+        do {
+            try await core.refreshContacts(accountId: "missing")
+            preconditionFailure("missing account did not throw")
+        } catch MailError.NotFound { }
         try await core.syncAll()
         do {
             _ = try await core.message(id: -1)
@@ -21,6 +26,6 @@ struct Smoke {
         let tomorrow = try tomorrowAtEight()
         precondition(tomorrow > Int64(Date().timeIntervalSince1970))
         precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true, messageId: 1, remote: false).contains("<x-LINK"))
-        print("Swift FFI smoke: 7 checks passed")
+        print("Swift FFI smoke: 9 checks passed")
     }
 }

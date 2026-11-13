@@ -1,7 +1,7 @@
 //! The mobile boundary separates local access from serial network work; records hide core storage types.
 use lagom_core::{account::{Account, Security, ServerConfig}, imap_sync::{ImapSync, DEFAULT_LIMIT},
     smtp::{self, Outgoing}, store::{FolderRole, MessageSummary, Store}};
-use std::{future::Future, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, future::Future, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
 use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
@@ -83,10 +83,12 @@ pub enum ComposeKind { Reply, ReplyAll, Forward }
 pub struct SendAttachment { pub filename: String, pub mime_type: String, pub data: Vec<u8> }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SendFailure { pub id: String, pub subject: String, pub message: String }
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ContactSuggestion { pub name: String, pub address: String, pub recipient: String }
 
 #[derive(uniffi::Object)]
 pub struct LagomCore { stores: Arc<Stores> }
-struct Stores { local: Mutex<Store>, network: Mutex<Store> }
+struct Stores { local: Mutex<Store>, network: Mutex<Store>, contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>> }
 
 impl LagomCore {
     async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
@@ -187,12 +189,26 @@ impl LagomCore {
         let store = Store::open(dir.join("lagom.sqlite3"))?;
         store.recover_outbox()?;
         let local = Store::open(dir.join("lagom.sqlite3"))?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { local: Mutex::new(local), network: Mutex::new(store) }) });
+        let core = Arc::new(Self { stores: Arc::new(Stores { local: Mutex::new(local), network: Mutex::new(store), contacts: Mutex::new(HashMap::new()) }) });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
     pub async fn accounts(&self) -> Result<Vec<MailAccount>> {
         self.run(|s| Ok(s.accounts()?.into_iter().map(Into::into).collect())).await
+    }
+    pub async fn refresh_contacts(&self, account_id: String) -> Result<()> {
+        let stores = self.stores.clone();
+        self.run(move |s| {
+            account(s, &account_id)?;
+            let contacts = s.contacts(&account_id, now())?;
+            stores.contacts.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(account_id, contacts);
+            Ok(())
+        }).await
+    }
+    pub fn suggest_contacts(&self, account_id: String, query: String) -> Vec<ContactSuggestion> {
+        self.stores.contacts.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&account_id).map(|contacts| contacts.suggest(&query)).unwrap_or_default()
+            .into_iter().map(|c| ContactSuggestion { recipient: c.recipient(), name: c.name, address: c.address }).collect()
     }
     pub async fn add_account(&self, email: String, password: String) -> Result<MailAccount> {
         let password = Zeroizing::new(password);
@@ -215,7 +231,15 @@ impl LagomCore {
         self.run_network(move |s| network(add(s, Account::new(email, imap.into(), smtp.into())?, password))).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
-        self.run_network(move |s| { account(s, &id)?.delete_password()?; s.delete_account(&id) }).await
+        let stores = self.stores.clone();
+        self.run_network(move |s| {
+            account(s, &id)?.delete_password()?;
+            // Serialize with refresh, and evict even if the caller cancels this future.
+            let _local = stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.delete_account(&id)?;
+            stores.contacts.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
+            Ok(())
+        }).await
     }
     pub async fn sync(&self, account_id: String) -> Result<()> {
         self.run_network(move |s| { let a = account(s, &account_id)?; network(sync_account(s, &a)) }).await
