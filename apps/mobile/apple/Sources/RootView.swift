@@ -140,7 +140,7 @@ struct SidebarView: View {
             }
         }
         mailbox(.later, count: planner.later(account: nil))
-        ForEach([MailboxChoice.sent, .done, .trash]) { mailbox($0, count: 0) }
+        ForEach([MailboxChoice.drafts, .sent, .done, .trash]) { mailbox($0, count: 0) }
         }
     }
 

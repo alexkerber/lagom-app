@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum MailboxChoice: String, CaseIterable, Identifiable {
-    case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", trash = "Trash"
+    case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", trash = "Trash", drafts = "Drafts"
     var id: String { rawValue }
     var mailbox: Mailbox {
         switch self {
@@ -11,14 +11,15 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
         case .done: .done
         case .sent: .sent
         case .trash: .trash
+        case .drafts: .inbox
         }
     }
     /// The desktop icon, `apps/desktop/assets/icons`.
-    var icon: String { rawValue.lowercased() }
+    var icon: String { self == .drafts ? "compose" : rawValue.lowercased() }
 }
 
-struct ComposeDraft: Identifiable {
-    let id = UUID()
+struct ComposeDraft: Identifiable, Equatable {
+    var id = "<\(UUID().uuidString)@draft.lagommail.app>"
     var account: String
     var to = ""
     var cc = ""
@@ -27,6 +28,9 @@ struct ComposeDraft: Identifiable {
     var replyTo: Int64?
     var attachments: [SendAttachment] = []
     var title = "New message"
+    var restored = false
+    var isReply = false
+    var hasContent: Bool { !to.isEmpty || !cc.isEmpty || !subject.isEmpty || !body.isEmpty || !attachments.isEmpty }
 
     init(account: String) { self.account = account }
     init(reply: ReplyDraft, kind: ComposeKind = .reply) {
@@ -36,6 +40,7 @@ struct ComposeDraft: Identifiable {
         subject = reply.subject
         body = reply.body
         replyTo = reply.replyTo
+        isReply = reply.replyTo != nil
         attachments = reply.attachments
         switch kind {
         case .reply: title = "Reply"
@@ -44,9 +49,24 @@ struct ComposeDraft: Identifiable {
         }
     }
 
+    init(saved: LocalDraft) {
+        id = saved.id
+        account = saved.account
+        to = saved.to; cc = saved.cc; subject = saved.subject; body = saved.body
+        attachments = saved.attachments
+        restored = true
+        isReply = saved.inReplyTo != nil || !saved.references.isEmpty
+        title = isReply ? "Reply" : "Draft"
+    }
+
+    func save(using core: LagomCore) async throws -> LocalDraft {
+        try await core.saveDraft(id: id, accountId: account, to: to, cc: cc, subject: subject,
+                                 body: body, replyTo: replyTo, attachments: attachments)
+    }
+
     func enqueue(using core: LagomCore) async throws {
-        _ = try await core.send(accountId: account, to: splitRecipients(value: to), cc: splitRecipients(value: cc),
-                                subject: subject, bodyMarkdown: body, replyTo: replyTo, attachments: attachments)
+        _ = try await save(using: core)
+        _ = try await core.sendDraft(id: id)
     }
 }
 
@@ -56,6 +76,8 @@ final class MailModel {
     var accounts: [MailAccount] = []
     var rows: [MailRow] = []
     var failures: [SendFailure] = []
+    var drafts: [LocalDraft] = []
+    var savedDraftIDs: Set<String> = []
     var accountID: String?
     var mailbox: MailboxChoice = .inbox
     var searchText = ""
@@ -66,7 +88,28 @@ final class MailModel {
     var message: MailMessage?
     var error: String?
     var notice: String?
-    var composeDraft: ComposeDraft?
+    var composeDraft: ComposeDraft? {
+        didSet {
+            guard !endingCompose, !composeBusy, oldValue != composeDraft else { return }
+            autosaveTask?.cancel()
+            if let draft = composeDraft {
+                guard draft.hasContent || oldValue?.hasContent == true || savedDraftIDs.contains(draft.id) else { return }
+                autosaveTask = Task { [weak self] in
+                    do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                    guard !Task.isCancelled else { return }
+                    await self?.keep(draft)
+                }
+            } else if let draft = oldValue {
+                // Interactive sheet dismissal must flush its final edit, even before the debounce fires.
+                composeDisappeared(draft)
+            }
+        }
+    }
+    var composeBusy = false
+    private var finishedDraftIDs: Set<String> = []
+    private var endingCompose = false
+    @ObservationIgnored private var autosaveTask: Task<Void, Never>?
+    @ObservationIgnored private var draftWrite: Task<Void, Error>?
     var preparingCompose = false
     var syncing = false
     private var actingID: Int64?
@@ -78,7 +121,7 @@ final class MailModel {
     private var foreground = true
     @ObservationIgnored private var wakeTask: Task<Void, Never>?
 
-    deinit { wakeTask?.cancel() }
+    deinit { wakeTask?.cancel(); autosaveTask?.cancel() }
 
     func start() async {
         guard core == nil else { return }
@@ -108,6 +151,7 @@ final class MailModel {
         let request = revision
         let offset = more ? UInt32(rows.count) : 0
         let account = accountID
+        let draftsOnly = mailbox == .drafts
         let mailbox = mailbox.mailbox
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
@@ -118,16 +162,19 @@ final class MailModel {
             var hasMore = false
             repeat {
                 try Task.checkCancellation()
-                let batch = try await query.isEmpty
+                let batch = try await draftsOnly ? [] : query.isEmpty
                     ? core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: offset + UInt32(page.count))
                     : core.search(accountId: account, query: query, limit: 100, offset: offset + UInt32(page.count))
                 page += batch
                 hasMore = batch.count == 100
             } while hasMore && page.count < count
             let failures = try await core.sendFailures()
+            let drafts = try await core.localDrafts()
             guard request == revision, !Task.isCancelled else { return }
             self.accounts = accounts
             self.failures = failures
+            self.drafts = drafts
+            savedDraftIDs.formUnion(drafts.map(\.id))
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
             self.hasMore = hasMore
             wake(at: due)
@@ -150,6 +197,7 @@ final class MailModel {
         foreground = active
         wakeTask?.cancel()
         wakeTask = nil
+        if !active, let draft = composeDraft { await keep(draft) }
         if active {
             await reload()
             await sync()
@@ -245,10 +293,137 @@ final class MailModel {
         preparingCompose = true
         defer { preparingCompose = false }
         do {
+            _ = try? await draftWrite?.value
+            let saved = kind == .reply ? try await core.savedReply(id: id) : nil
+            if let saved {
+                guard selectedID == id, composeDraft == nil else { return }
+                restoreDraft(saved)
+                return
+            }
             let reply = try await core.composeDraft(id: id, kind: kind)
             guard selectedID == id, composeDraft == nil else { return }
             composeDraft = ComposeDraft(reply: reply, kind: kind)
         } catch { if selectedID == id { self.error = error.localizedDescription } }
+    }
+
+    func openDraft(_ row: LocalDraft) async {
+        guard let core, composeDraft == nil, !preparingCompose else { return }
+        preparingCompose = true
+        defer { preparingCompose = false }
+        do {
+            _ = try? await draftWrite?.value
+            // A list row can predate the final save performed by a dismissed sheet.
+            guard let saved = try await core.localDrafts().first(where: { $0.id == row.id }), composeDraft == nil else { return }
+            restoreDraft(saved)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func restoreDraft(_ saved: LocalDraft) {
+        savedDraftIDs.insert(saved.id)
+        finishedDraftIDs.remove(saved.id)
+        composeDraft = ComposeDraft(saved: saved)
+    }
+
+    // Serialize writes: cancelling a Swift task does not cancel an in-flight Rust SQLite write.
+    private func save(_ draft: ComposeDraft) -> Task<Void, Error> {
+        let previous = draftWrite
+        let task = Task { @MainActor in
+            _ = try? await previous?.value
+            guard let core, !finishedDraftIDs.contains(draft.id), draft.hasContent || savedDraftIDs.contains(draft.id) else { return }
+            let saved = try await draft.save(using: core)
+            savedDraftIDs.insert(saved.id)
+            drafts.removeAll { $0.id == saved.id }
+            drafts.insert(saved, at: 0)
+        }
+        draftWrite = task
+        return task
+    }
+
+    private func keep(_ draft: ComposeDraft) async {
+        guard !composeBusy else { return }
+        do { try await save(draft).value }
+        catch {
+            self.error = error.localizedDescription
+            if composeDraft == nil, !finishedDraftIDs.contains(draft.id) {
+                endingCompose = true
+                composeDraft = draft
+                endingCompose = false
+            }
+        }
+    }
+
+    func composeDisappeared(_ draft: ComposeDraft) {
+        guard !composeBusy, !finishedDraftIDs.contains(draft.id) else { return }
+        let pending = save(draft)
+        Task {
+            do { try await pending.value }
+            catch {
+                self.error = error.localizedDescription
+                if composeDraft == nil, !finishedDraftIDs.contains(draft.id) {
+                    endingCompose = true
+                    composeDraft = draft
+                    endingCompose = false
+                }
+            }
+        }
+    }
+
+    func changeComposeAccount(_ account: String) async throws {
+        guard let old = composeDraft, let core, !old.isReply, !old.restored, old.account != account, !composeBusy else { return }
+        composeBusy = true
+        defer { composeBusy = false }
+        autosaveTask?.cancel()
+        _ = try? await draftWrite?.value
+        var replacement = old
+        replacement.id = "<\(UUID().uuidString)@draft.lagommail.app>"
+        replacement.account = account
+        if old.hasContent || savedDraftIDs.contains(old.id) {
+            // Save the replacement first so a failed account change cannot lose the original.
+            let saved = try await replacement.save(using: core)
+            drafts.insert(saved, at: 0)
+            savedDraftIDs.insert(saved.id)
+            try await core.deleteDraft(id: old.id)
+        }
+        drafts.removeAll { $0.id == old.id }
+        savedDraftIDs.remove(old.id)
+        finishedDraftIDs.insert(old.id)
+        endingCompose = true
+        composeDraft = replacement
+        endingCompose = false
+    }
+
+    func closeCompose(discard: Bool) async throws {
+        guard let draft = composeDraft, let core, !composeBusy else { return }
+        composeBusy = true
+        defer { composeBusy = false }
+        autosaveTask?.cancel()
+        if discard {
+            _ = try? await draftWrite?.value
+            try await core.deleteDraft(id: draft.id)
+            drafts.removeAll { $0.id == draft.id }
+            savedDraftIDs.remove(draft.id)
+        } else { try await save(draft).value }
+        endCompose()
+    }
+
+    func sendCompose() async throws {
+        guard let draft = composeDraft, let core, !composeBusy else { return }
+        composeBusy = true
+        defer { composeBusy = false }
+        autosaveTask?.cancel()
+        try await save(draft).value
+        _ = try await core.sendDraft(id: draft.id)
+        drafts.removeAll { $0.id == draft.id }
+        savedDraftIDs.remove(draft.id)
+        endCompose()
+        notice = "Queued for sending"
+    }
+
+    private func endCompose() {
+        if let draft = composeDraft { finishedDraftIDs.insert(draft.id) }
+        endingCompose = true
+        composeDraft = nil
+        endingCompose = false
     }
 
     func remove(_ account: MailAccount) async {

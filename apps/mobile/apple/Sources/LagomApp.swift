@@ -47,7 +47,9 @@ struct MailView: View {
 
     var body: some View {
         Group {
-            if split {
+            if model.mailbox == .drafts {
+                draftList
+            } else if split {
                 HStack(spacing: 0) {
                     inbox.frame(width: 360)
                     Theme.line.frame(width: 1)
@@ -87,14 +89,14 @@ struct MailView: View {
             HStack(alignment: .center, spacing: 8) {
                 mailboxMenu
                 Spacer(minLength: 4)
-                if !model.accounts.isEmpty { FilterControl(unreadOnly: $unreadOnly) }
+                if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
                 IconButton(title: "New message", icon: "compose") {
                     model.composeDraft = ComposeDraft(account: model.accountID ?? model.accounts.first?.id ?? "")
                 }
                 .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
                 .padding(.trailing, -6)
             }
-            if !regular { SearchField(text: $model.searchText) }
+            if !regular && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
         .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
@@ -103,7 +105,7 @@ struct MailView: View {
     /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
     /// also narrows Later, Sent, Done and Trash.
     private var mailboxMenu: some View {
-        let name = model.searchText.isEmpty ? title : "Search"
+        let name = model.mailbox == .drafts || model.searchText.isEmpty ? title : "Search"
         let left = model.mailbox == .inbox && !model.accounts.isEmpty ? "\(planner.inboxLeft(account: model.accountID)) left" : nil
         return Menu {
             Picker("Mailbox", selection: $model.mailbox) {
@@ -133,6 +135,33 @@ struct MailView: View {
             .frame(minHeight: 44).contentShape(Rectangle())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([name, model.syncing ? "Syncing" : "Synced", left, "mailboxes and accounts"].compactMap { $0 }.joined(separator: ", "))
+        }
+    }
+
+    private var draftList: some View {
+        VStack(spacing: 0) {
+            header
+            List {
+                let drafts = model.drafts.filter { model.accountID == nil || $0.account == model.accountID }
+                if drafts.isEmpty { Text("No drafts").foregroundStyle(Theme.secondary) }
+                ForEach(drafts, id: \.id) { draft in
+                    Button { Task { await model.openDraft(draft) } } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(draft.subject.isEmpty ? "(No subject)" : draft.subject).fontWeight(.semibold)
+                            Text(draft.to).foregroundStyle(Theme.secondary).lineLimit(1)
+                            Text(model.accounts.first { $0.id == draft.account }?.email ?? "").foregroundStyle(Theme.secondary)
+                            if draft.updatedUnix > 0 {
+                                Text(Date(timeIntervalSince1970: Double(draft.updatedUnix)), style: .date).font(.caption)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit draft, \(draft.subject.isEmpty ? "No subject" : draft.subject), \(draft.to)")
+                }
+            }
+            .listStyle(.plain)
+            .refreshable { await model.reload() }
         }
     }
 
