@@ -7,6 +7,12 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 mod macos;
 #[cfg(all(target_os = "macos", not(test)))]
 use macos as platform;
+// Compiled in tests too, for its click parsing test.
+#[cfg(target_os = "linux")]
+#[cfg_attr(test, allow(dead_code))]
+mod linux;
+#[cfg(all(target_os = "linux", not(test)))]
+use linux as platform;
 #[cfg(all(target_os = "windows", not(test)))]
 mod toast;
 #[cfg(all(target_os = "windows", not(test)))]
@@ -132,31 +138,18 @@ impl Service {
     }
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(all(not(any(target_os = "macos", target_os = "linux", target_os = "windows")), not(test)))]
 mod platform {
     use super::*;
 
     pub struct Service(UnboundedSender<Event>);
     impl Service {
         pub fn new(events: UnboundedSender<Event>) -> Self { Self(events) }
-        pub fn authorize(&self) { let _ = self.0.send(Event::Authorized(true)); }
-        pub fn show(&self, notice: Notice) {
-            // shortcut: clicks need a running process; add desktop-entry activation with Linux packaging.
-            let events = self.0.clone();
-            let failed = events.clone();
-            if std::thread::Builder::new().name("lagom-notification".into()).spawn(move || {
-                // Escape server-supported body markup: mail subjects are plain text.
-                let body = notice.body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                match notify_rust::Notification::new().appname("lagom").summary(&notice.title)
-                    .body(&body).action("default", "Open").timeout(10_000).show()
-                {
-                    Ok(handle) => handle.wait_for_action(|action| {
-                        if action == "default" { let _ = events.send(Event::Clicked(notice.target)); }
-                    }),
-                    Err(_) => { let _ = events.send(Event::Failed("Could not post a notification")); },
-                }
-            }).is_err() { let _ = failed.send(Event::Failed("Could not start notifications")); }
+        pub fn authorize(&self) {
+            let _ = self.0.send(Event::Authorized(false));
+            let _ = self.0.send(Event::Failed("Notifications are not available on this platform yet"));
         }
+        pub fn show(&self, _: Notice) {}
     }
 }
 

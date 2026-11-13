@@ -69,9 +69,7 @@ pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
                 .flex_wrap()
                 .gap_x(px(20.))
                 .gap_y(px(8.))
-                .child(mono("C compose", t.ink2))
-                .child(mono("G D what you finished", t.ink2))
-                .child(mono("⌘K commands", t.ink2)),
+                .children([("c", "new message"), ("secondary-z", "undo"), ("secondary-k", "commands")].map(|(key, what)| mono(format!("{} {what}", crate::shortcuts::label(key)), t.ink2))),
         )
         // Calm fade-in, no confetti (docs/motion.md). Plays once per element id. A fade only, so
         // reduced motion keeps it.

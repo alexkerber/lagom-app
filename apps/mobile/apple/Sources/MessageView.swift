@@ -83,7 +83,7 @@ struct MessageView: View {
                     Icon("reply")
                     Text("Reply to \(RowPresentation(row).sender)").lagomFont(.base).lineLimit(1)
                     Spacer(minLength: 0)
-                    if model.preparingCompose { ProgressView().accessibilityLabel("Preparing message") }
+                    if model.preparingCompose { CalmProgress(label: "Preparing message") }
                 }
                 .foregroundStyle(Theme.secondary)
                 .padding(.horizontal, 12).frame(minHeight: 44)
@@ -132,7 +132,7 @@ struct MessageView: View {
         let sender = RowPresentation(row).sender
         let initials = sender.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
         return HStack(spacing: 12) {
-            Text(initials).lagomFont(.small, .semibold)
+            Text(initials).lagomFont(.small, .semibold).lineLimit(1).minimumScaleFactor(0.5)
                 .frame(width: 36, height: 36)
                 .background(Theme.subtle, in: Circle())
                 .overlay(Circle().strokeBorder(Theme.line))
@@ -207,6 +207,33 @@ struct MessageView: View {
         }
         .scrollIndicators(.hidden)
         .accessibilityLabel("Attachments")
+    }
+}
+
+/// The reading layout filled from the list row: the subject, sender and preview stand in while the
+/// body loads, so the page never opens blank (docs/motion.md, Loading).
+struct MessagePreview: View {
+    let row: MailRow
+    @Environment(\.horizontalSizeClass) private var width
+
+    var body: some View {
+        let value = RowPresentation(row)
+        let pad: CGFloat = width == .regular ? 24 : 16
+        VStack(alignment: .leading, spacing: 16) {
+            Text(value.subject).lagomFont(.subject, .semibold).lineLimit(3).accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 20) {
+                Text(value.sender).lagomFont(.base, .semibold).lineLimit(2).frame(minHeight: 36)
+                Text(value.preview).lagomFont(.body).lineSpacing(3).foregroundStyle(Theme.secondary)
+            }
+            .padding(width == .regular ? 20 : 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.line))
+        }
+        .padding(pad)
+        .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(Theme.ink)
     }
 }
 

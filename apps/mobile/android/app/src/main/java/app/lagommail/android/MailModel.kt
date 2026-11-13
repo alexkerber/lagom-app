@@ -314,7 +314,8 @@ internal class MailModel(
                 MailAction.Delete -> core.delete(ids)
             }
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
-        } finally { actingId = null; reload() }
+        // Busy until the list shows the result, so a swiped row never comes back before it leaves.
+        } finally { try { reload() } finally { actingId = null } }
     }
     /** The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session. */
     var unsubscribingId by mutableStateOf<Long?>(null); private set
