@@ -217,6 +217,8 @@ internal class MailModel(
         accountForm = null
         searchText = ""
         changeScope(target.account, Mailbox.INBOX)
+        // The user may have navigated while the Inbox loaded; never pull them back.
+        if (accountId != target.account || mailbox != Mailbox.INBOX || showingDrafts || searchText.isNotEmpty() || selectedId != null) return
         select(target.message)
     }
     suspend fun changeScope(account: String?, box: Mailbox) {

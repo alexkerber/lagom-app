@@ -994,7 +994,8 @@ async fn background_sync_reports_new_unseen_mail_once_and_survives_a_locked_acco
                 }
             }
         });
-        assert!(core.background_sync().await.unwrap().is_empty(), "first sync is silent");
+        // The foreground sync makes the Inbox known; background sync only refreshes known Inboxes.
+        let _ = core.sync_all().await;
         let rows = core.background_sync().await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].account.as_str(), rows[0].subject.as_str(), rows[0].unread), (a.id.as_str(), "Mail 2", true));
@@ -1006,35 +1007,17 @@ async fn background_sync_reports_new_unseen_mail_once_and_survives_a_locked_acco
 }
 
 #[tokio::test]
-async fn cancelling_background_sync_closes_the_connection_and_releases_the_worker() {
+async fn cancelled_background_handle_never_connects() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
-        let sync = tokio::spawn({ let core = core.clone(); async move { core.background_sync().await } });
-        let (socket, _) = listener.accept().await.unwrap();
-        let mut socket = BufReader::new(socket);
-        sync.abort();
-        assert!(sync.await.unwrap_err().is_cancelled());
-        assert_eq!(socket.read_line(&mut String::new()).await.unwrap(), 0);
-        core.run_network(|_| Ok(())).await.unwrap();
-    }).await.unwrap();
-}
-
-#[tokio::test]
-async fn explicit_background_cancellation_handles_running_and_not_yet_polled_swift_calls() {
-    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+        mail(&mut s, &a, 1, now());
+    }
+    // Swift may cancel before the call is polled; the handle stays cancelled.
     core.cancel_background_sync();
-    assert!(core.background_sync().await.is_err());
     assert!(core.background_sync().await.unwrap().is_empty());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
-        let sync = tokio::spawn({ let core = core.clone(); async move { core.background_sync().await } });
-        let (socket, _) = listener.accept().await.unwrap();
-        core.cancel_background_sync();
-        assert!(sync.await.unwrap().is_err());
-        assert_eq!(BufReader::new(socket).read_line(&mut String::new()).await.unwrap(), 0);
-        core.run_network(|_| Ok(())).await.unwrap();
-    }).await.unwrap();
+    assert!(core.background_sync().await.unwrap().is_empty());
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await.is_err(), "no IMAP connection");
 }

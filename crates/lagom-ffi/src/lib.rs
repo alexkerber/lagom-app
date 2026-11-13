@@ -87,7 +87,7 @@ pub struct SendFailure { pub id: String, pub subject: String, pub message: Strin
 pub struct ContactSuggestion { pub name: String, pub address: String, pub recipient: String }
 
 #[derive(uniffi::Object)]
-pub struct LagomCore { stores: Arc<Stores>, background_cancel: Arc<tokio::sync::Notify> }
+pub struct LagomCore { stores: Arc<Stores>, background_cancel: Arc<std::sync::atomic::AtomicBool> }
 struct Stores { local: Mutex<Store>, network: Mutex<Store>, contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>> }
 
 impl LagomCore {
@@ -255,38 +255,32 @@ impl LagomCore {
             match first_error { Some(error) => Err(error), None => Ok(()) }
         })).await
     }
-    // UniFFI's Swift async bridge does not forward Task cancellation.
-    pub fn cancel_background_sync(&self) { self.background_cancel.notify_one(); }
+    // UniFFI's Swift async bridge does not forward Task cancellation; the flag stops before the next account.
+    pub fn cancel_background_sync(&self) { self.background_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
+    /// Syncs only each Inbox and never sends: a cancel can never strand a claimed outbox row.
+    // shortcut: a process kill after an Inbox sync drops its notifications; persist a notified-UID marker if that matters.
     pub async fn background_sync(&self) -> Result<Vec<MailRow>> {
-        // Dropping the FFI future must also stop network work inside spawn_blocking.
-        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
-        let explicit_cancel = self.background_cancel.clone();
-        let result = self.run_network(move |s| network(async {
-            tokio::select! {
-                biased;
-                _ = cancelled => Err(lagom_core::Error::Cancelled),
-                _ = explicit_cancel.notified() => Err(lagom_core::Error::Cancelled),
-                result = async {
-                    let mut rows = Vec::new();
-                    for a in s.accounts()? {
-                        let before = match s.folders(&a.id, now()) {
-                            Ok(folders) => folders.into_iter().filter(|f| f.role == FolderRole::Inbox).collect::<Vec<_>>(),
-                            Err(_) => continue,
-                        };
-                        // A later folder may fail after Inbox has already synced.
-                        let _ = sync_account(s, &a).await;
-                        for before in before {
-                            if let (Ok(after), Ok(messages)) = (s.folder(before.id), s.messages_since(before.id, before.last_uid)) {
-                                rows.extend(lagom_core::new_mail::new_mail(&before, &after, messages).into_iter().map(MailRow::from));
-                            }
-                        }
-                    }
-                    Ok(rows)
-                } => result,
+        // A cancel may arrive before this call starts, so the flag is never reset: open a new handle per run.
+        let cancel = self.background_cancel.clone();
+        self.run_network(move |s| network(async {
+            let mut rows = Vec::new();
+            for a in s.accounts()? {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                // No Inbox yet means no first sync: new_mail would stay silent anyway.
+                let Some(before) = s.folders(&a.id, now())?.into_iter().find(|f| f.role == FolderRole::Inbox) else { continue };
+                let synced = async {
+                    let mut session = ImapSync::login(&a, &a.password()?).await?;
+                    let result = session.sync_folder(s, before.id, DEFAULT_LIMIT).await;
+                    let _ = session.logout().await;
+                    result
+                }.await;
+                // One account's failure (locked secret, network) must not stop the others.
+                if synced.is_err() { continue; }
+                let (after, messages) = (s.folder(before.id)?, s.messages_since(before.id, before.last_uid)?);
+                rows.extend(lagom_core::new_mail::new_mail(&before, &after, messages).into_iter().map(MailRow::from));
             }
-        })).await;
-        drop(cancel);
-        result
+            Ok(rows)
+        })).await
     }
     pub async fn next_snooze(&self) -> Result<Option<i64>> {
         self.run(|s| {
