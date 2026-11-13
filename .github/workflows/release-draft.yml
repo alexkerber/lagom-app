@@ -1,0 +1,26 @@
+# The only job that creates a release: a draft, the moment a v* tag is pushed. The platform
+# workflows wait for it in scripts/upload-release.sh and only upload, so they cannot make two.
+name: Release draft
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 && exit 0
+          prerelease=()
+          [[ $TAG != *-* ]] || prerelease=(--prerelease)
+          gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag --title "lagom ${TAG#v}" --generate-notes

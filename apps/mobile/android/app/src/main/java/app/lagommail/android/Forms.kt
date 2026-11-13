@@ -30,13 +30,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.lagommail.core.*
 import kotlinx.coroutines.CancellationException
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable internal fun ComposeScreen(model: MailModel) {
-    val draft = model.draft ?: return
+@Composable internal fun ComposeScreen(model: MailModel, draft: ComposeDraft) {
+    // While the screen animates out the model holds no draft; an edit then must not reopen it.
+    val live = model.draft?.id == draft.id
+    fun edit(next: ComposeDraft) { if (model.draft?.id == next.id) model.draft = next }
     var cancelling by remember(draft.id) { mutableStateOf(false) }
     var contactsAccount by remember(draft.id) { mutableStateOf<String?>(null) }
     var contactsError by remember(draft.id) { mutableStateOf<String?>(null) }
@@ -54,7 +57,14 @@ import kotlinx.coroutines.CancellationException
     val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
     val media = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { add(it) }
     var attachMenu by remember { mutableStateOf(false) }
-    BackHandler { if (!model.sending) cancelling = true }
+    // Back keeps the draft, as closing the sheet does on iOS; Cancel still asks.
+    // Enabled on `live` alone: disabling the handler cancels its running close, which could leave the screen shrunk.
+    val back = rememberBackPreview(enabled = live) {
+        model.perform { model.closeCompose(discard = false) }.join()
+        model.draft != null
+    }
+    // While a send or save runs, back does nothing rather than leaving the app. Added last, so it wins.
+    BackHandler(live && model.sending) {}
     if (cancelling) {
         AlertDialog(onDismissRequest = { cancelling = false }, title = { Text("Save draft?") },
             confirmButton = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = {
@@ -64,8 +74,8 @@ import kotlinx.coroutines.CancellationException
                 cancelling = false; model.perform { model.closeCompose(discard = true) }
             }) { Text("Discard") } })
     }
-    Scaffold(topBar = {
-        TopAppBar(title = { Text(draft.title) },
+    Scaffold(Modifier.backPreview(back), topBar = {
+        TopAppBar(title = { Text(draft.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             navigationIcon = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = { cancelling = true }) { Text("Cancel") } },
             actions = {
                 Box {
@@ -93,10 +103,10 @@ import kotlinx.coroutines.CancellationException
                     }
                 }
             }
-            RecipientField("To", draft.to, !model.sending, model.core, draft.account, contactsAccount == draft.account) { model.draft = draft.copy(to = it) }
-            RecipientField("Cc", draft.cc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { model.draft = draft.copy(cc = it) }
+            RecipientField("To", draft.to, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(to = it)) }
+            RecipientField("Cc", draft.cc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(cc = it)) }
             contactsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            Field("Subject", draft.subject, !model.sending) { model.draft = draft.copy(subject = it) }
+            Field("Subject", draft.subject, !model.sending) { edit(draft.copy(subject = it)) }
             if (draft.attachments.isNotEmpty() || model.attaching) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     draft.attachments.forEachIndexed { index, file ->
@@ -110,7 +120,7 @@ import kotlinx.coroutines.CancellationException
                 if (draft.attachmentsTooLarge) Text("Over 20 MB. Some mail servers refuse mail this large.", maxLines = 1,
                     overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
             }
-            OutlinedTextField(draft.body, { model.draft = draft.copy(body = it) }, enabled = !model.sending,
+            OutlinedTextField(draft.body, { edit(draft.copy(body = it)) }, enabled = !model.sending,
                 label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
         }
     }
@@ -178,10 +188,9 @@ internal class AccountForm {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable internal fun AddAccountScreen(model: MailModel, close: () -> Unit) {
-    val form = model.accountForm ?: return
+@Composable internal fun AddAccountScreen(model: MailModel, form: AccountForm, close: () -> Unit) {
     with(form) {
-        BackHandler { if (!connecting) { password = ""; close() } }
+        BackHandler(model.accountForm === form) { if (!connecting) { password = ""; close() } }
         Scaffold(topBar = {
             TopAppBar(title = { Text("Add account") }, navigationIcon = {
                 TextButton(enabled = !connecting, onClick = { password = ""; close() }) { Text("Cancel") }
@@ -226,7 +235,7 @@ internal class AccountForm {
                         SecurityChoice(smtpTls, !connecting) { smtpTls = it }
                     }
                 }
-                if (connecting) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (afterWait(connecting)) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
         }
     }

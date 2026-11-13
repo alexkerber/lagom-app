@@ -24,7 +24,7 @@ and the steps that need a human (certificates, store accounts, secrets).
 Android `n` is the pre-release number (`beta.4` gives 4) and 99 for the final release. So
 `v1.2.3-beta.4` gives 1020304 and `v1.2.3` gives 1020399, and the final release always sorts last.
 
-The Windows, Linux, iOS and Android rows are the agreed rule. Their scripts implement it in their own
+The Windows, Linux and Android rows are the agreed rule. Their scripts implement it in their own
 branches. Not verified on `main` when this page was written.
 
 ## Cut a release
@@ -35,7 +35,7 @@ branches. Not verified on `main` when this page was written.
 4. Each desktop packaging workflow builds on the tag and uploads its files to one **draft** GitHub
    release. The first workflow to finish creates the draft.
 5. Download every file from the draft. Install and open each one on a clean machine or account.
-6. Check that the tag has one draft with every platform's files (two platforms finishing at once can each create one; move the files and delete the extra). Write the release notes and publish the draft. Publishing makes it the "latest" release.
+6. Check that the tag has one draft with every platform's files. Only `release-draft.yml` creates it, at tag push; the platform uploads wait for it (`scripts/upload-release.sh`). Write the release notes and publish the draft. Publishing makes it the "latest" release.
 7. Upload the iOS and Android builds to the stores (see below). Store review takes one to several days.
 
 ### Before you tag
@@ -108,7 +108,7 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 - Build the installer on `windows-latest` from the tag. Set `FILEVERSION`/`PRODUCTVERSION` in
   `apps/desktop/lagom.rc` from `LAGOM_VERSION` at build time.
-- Upload to the same draft release with `gh release upload --clobber`. Create the draft when it is missing and stop when the release is already published,
+- Upload to the same draft release with `scripts/upload-release.sh` (it waits for the draft from `release-draft.yml`) and stop when the release is already published,
   as `package-macos.yml` does.
 - Human step: get a code signing service. Azure Trusted Signing (Artifact Signing) is the cheapest
   route for an individual. An OV or EV certificate on a hardware token also works. Unsigned installers
@@ -117,49 +117,178 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 ## Linux
 
-- Build on `ubuntu-latest` from the tag. Name files `lagom-<LAGOM_VERSION>-linux-x86_64.*`.
-- Upload to the same draft release, as for Windows.
+Script: `scripts/package-linux.sh [version]`. Workflow: `.github/workflows/package-linux.yml`.
+
+- Builds `lagom-<LAGOM_VERSION>-linux-x86_64.deb` and `.AppImage` on `ubuntu-22.04`, not
+  `ubuntu-latest`: the packages need at least the glibc they were built with, so the oldest
+  supported Ubuntu reaches the most distributions.
+- The .deb version replaces `-` with `~` (`1.2.3~beta.4`), so a pre-release sorts before `1.2.3`.
+- CI installs the .deb, starts lagom through D-Bus activation and the AppImage under Xvfb.
+- Uploads to the same draft release, as for macOS.
 - No signing certificate is needed. Optional: publish a `SHA256SUMS` file with the release.
+- Human step: set `LAGOM_DEB_MAINTAINER` (or the script default) to a real contact address.
 - Human step for a Flathub or Snap listing: create the store account and submit the manifest.
 
 ## iOS and iPadOS
 
-Script: `apps/mobile/apple/release.sh [--upload]`. It builds the Rust library, archives with
-Xcode automatic signing (team `3KFU9JQ5LH`) and exports or uploads the build.
+Workflow: `.github/workflows/package-ios.yml`. Script: `apps/mobile/apple/release.sh <version> [--upload | --unsigned]`.
 
-1. Pass the version: the script must call `xcodebuild ... MARKETING_VERSION="${LAGOM_VERSION%%-*}"`.
-   Not done on `main` when this page was written.
-2. Run `apps/mobile/apple/release.sh --upload` on a Mac that is signed in to Xcode with the team.
-3. In TestFlight, test the build on an iPhone and an iPad.
-4. Submit for review in App Store Connect.
+- The script builds the Rust library, generates the Xcode project and archives the Release build. It passes
+  `MARKETING_VERSION=${LAGOM_VERSION%%-*}` and `CURRENT_PROJECT_VERSION` = the UTC minute to `xcodebuild`.
+  `project.yml` keeps development values. A pre-release `1.2.3-beta.4` ships as `1.2.3`, and TestFlight
+  tells builds apart by the build number.
+- Signing is automatic (team `3KFU9JQ5LH`): the Apple ID in Xcode, or an App Store Connect API key when
+  `LAGOM_ASC_KEY` (path to the .p8), `LAGOM_ASC_KEY_ID` and `LAGOM_ASC_ISSUER` are set.
+- Tags `v*`: archive, sign, export and upload to TestFlight.
+- `workflow_dispatch` on a tag: as a tag push. On a branch: the version is `0.0.0-dev.<sha>`, and the
+  signed .ipa is a workflow artifact. Nothing goes to TestFlight.
+- Pull requests that change Apple packaging: an unsigned archive, as a build check. Pull requests never
+  get the signing secrets.
+- Without the signing secrets the workflow archives unsigned and warns. Nothing is uploaded.
+- No OAuth secret: the iOS app has no Google or Microsoft sign-in yet.
 
-Human steps (once per app, then per release where noted):
+Local release from a Mac signed in to Xcode with the team:
 
-- Create the app record for `com.alexkerber.lagom` in App Store Connect.
-- Fill in the privacy nutrition labels. lagom collects no data; mail stays between the device and the
-  mail server.
-- Add screenshots in the sizes App Store Connect asks for (iPhone and iPad), a description, keywords, a support URL and a
-  privacy policy URL (per release when the UI changes).
-- Give App Review a test IMAP account and password in the review notes (per release).
-- Export compliance: `ITSAppUsesNonExemptEncryption` is already `false` in `project.yml`.
+```sh
+apps/mobile/apple/release.sh 1.2.3 --upload     # or without --upload: export an .ipa to apps/mobile/apple/build/export
+apps/mobile/apple/release.sh 1.2.3 --unsigned   # build check, no Apple account needed
+```
+
+Then test the build in TestFlight on an iPhone and an iPad, and submit it for review in App Store Connect.
+
+### App Store files
+
+- `apps/mobile/apple/PrivacyInfo.xcprivacy`: no tracking and no collected data. Required-reason APIs:
+  UserDefaults (`CA92.1`, `@AppStorage`) and file timestamps (`C617.1`, `stat`/`fstat`/`lstat` from Rust
+  and SQLite on files in the app container). The file says how it was measured. Measure again when a
+  dependency changes: `nm -u` on the archived binary.
+- `Info.plist` (from `project.yml`): `ITSAppUsesNonExemptEncryption` is `false` (see below).
+  `NSPhotoLibraryAddUsageDescription` covers "Save to Photos" in the attachment share sheet and on mail
+  images. Notifications need no usage string. The app asks for no photos, files, contacts, camera,
+  microphone or location access.
+- The launch screen is the `LaunchBackground` colour, the same as `Theme.background` (`#FFFFFF` light,
+  `#1E1E1E` dark), so the first frame does not flash.
+- `brand/store/app-store/`: name, subtitle, promotional text, description, keywords, URLs, age rating
+  answers, App Privacy answers and the screenshot shot list.
+
+### Export compliance
+
+The app uses TLS (rustls with ring) for IMAP, SMTP and HTTPS to the user's own servers, and the iOS
+Keychain for the password. It does not encrypt data of its own. That is standard encryption for
+communication in a mass-market app with public source, which is why `ITSAppUsesNonExemptEncryption` is
+`false`. Not verified against today's App Store Connect questionnaire: because rustls is not Apple's own
+TLS, App Store Connect can ask about "standard encryption algorithms instead of Apple's" and about
+France. If it asks for documents, set the key to `true` and add the `ITSEncryptionExportComplianceCode`
+it gives you.
+
+### GitHub secrets for iOS
+
+| Secret                        | Content                                                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `IOS_SIGNING_P12`             | Base64 of one .p12 with the "Apple Development" and "Apple Distribution" certificates and keys |
+| `IOS_SIGNING_P12_PASSWORD`    | The .p12 export password                                                                       |
+| `APP_STORE_CONNECT_KEY`       | The full text of the App Store Connect API key file `AuthKey_<id>.p8`                          |
+| `APP_STORE_CONNECT_KEY_ID`    | The API key ID (10 characters)                                                                 |
+| `APP_STORE_CONNECT_ISSUER_ID` | The issuer ID (a UUID). The same value as `APPLE_NOTARY_ISSUER_ID`.                            |
+
+Xcode creates and downloads the App Store provisioning profile itself with the API key
+(`-allowProvisioningUpdates`). No profile secret. Automatic signing archives with the development
+certificate and signs the export with the distribution certificate, so the .p12 needs both. Without the
+development key Xcode makes a new development certificate on every run, and the team hits Apple's limit.
+
+### Human steps for iOS
+
+Once:
+
+1. In App Store Connect, create the app record for `com.alexkerber.lagom` (name, primary language
+   English (U.S.), SKU `lagom-ios`).
+2. In the Apple Developer account, make sure the team has an **Apple Development** and an **Apple
+   Distribution** certificate, with their private keys in your login keychain. In Keychain Access, select
+   both and export them together as `lagom-signing.p12` with a strong password. The development
+   profile needs at least one registered device in the team.
+3. In App Store Connect, go to Users and Access, Integrations, Team Keys. Create a key with the
+   **App Manager** role. Download the .p8 file (Apple allows one download). Note the key ID. Not
+   verified that App Manager may create the profile from CI; if step 6 fails on the profile, use **Admin**.
+4. Store the secrets:
+
+   ```sh
+   base64 -i lagom-signing.p12 | gh secret set IOS_SIGNING_P12
+   gh secret set IOS_SIGNING_P12_PASSWORD
+   gh secret set APP_STORE_CONNECT_KEY < AuthKey_XXXXXXXXXX.p8
+   gh secret set APP_STORE_CONNECT_KEY_ID --body XXXXXXXXXX
+   gh secret set APP_STORE_CONNECT_ISSUER_ID --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   ```
+
+5. Delete the local .p12 and .p8 copies, or keep them only in a password manager.
+6. Run the workflow with `workflow_dispatch` on a branch. Check that the log signs with "Apple Distribution"
+   and exports an .ipa.
+7. Put the support and privacy pages on the site (`brand/store/app-store/README.md` lists the URLs).
+8. Fill in the listing from `brand/store/app-store/`, the age rating and App Privacy ("Data Not Collected").
+   Answer the export compliance question once (see above).
+
+Per release:
+
+- Upload screenshots when the UI changes (6.9" iPhone and 13" iPad, see the shot list).
+- Give App Review a test IMAP account and password in the review notes.
+- Test the TestFlight build on an iPhone and an iPad, then submit for review.
 
 ## Android
 
-1. Build a signed App Bundle with `./gradlew bundleRelease` after `scripts/build-android.sh`.
-   `build.gradle.kts` has no release signing config and no version from `LAGOM_VERSION` yet. The
-   Android branch adds both: read the keystore path and passwords from environment variables or
-   GitHub secrets, never from the repository.
-2. Upload the `.aab` to the Play Console, internal testing track first, then production.
+Workflow: `.github/workflows/package-android.yml`. Store text and Data safety answers:
+`brand/store/google-play/`.
+
+- `build.gradle.kts` reads `LAGOM_VERSION` and sets `versionName` and `versionCode` by the rule above.
+  Without it, the build is `0.0.0-dev` with `versionCode` 1. A version that does not fit the rule
+  stops the build.
+- The release build runs R8 and shrinks resources. `app/proguard-rules.pro` keeps JNA and the UniFFI
+  bindings, which find native code by name.
+- Tags `v*`: build the App Bundle and the APK, sign them with the upload key and attach both to the
+  draft release. Files: `lagom-<LAGOM_VERSION>-android.aab` and `.apk`.
+- Pull requests that change Android packaging: build unsigned, as a workflow artifact only.
+- `workflow_dispatch`: as a tag, but development version and nothing goes to a release.
+- Without the upload key the build is unsigned and the workflow warns. A tag then attaches nothing.
+
+Local release build:
+
+```sh
+scripts/build-android.sh
+LAGOM_VERSION=1.2.3 apps/mobile/android/gradlew -p apps/mobile/android :app:bundleRelease
+```
+
+Signing reads four values from the environment or from `~/.gradle/gradle.properties`, never from the
+repository. Without them the release output is unsigned.
+
+| Secret or property                | Content                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------- |
+| `LAGOM_ANDROID_KEYSTORE`          | Base64 of the upload keystore (`base64 -i lagom-upload.jks`)                  |
+| `LAGOM_ANDROID_KEYSTORE_PASSWORD` | The keystore password                                                         |
+| `LAGOM_ANDROID_KEY_ALIAS`         | The key alias (`upload`)                                                      |
+| `LAGOM_ANDROID_KEY_PASSWORD`      | The key password. Optional; the keystore password is used when it is missing. |
+
+Per release: download the `.aab` from the draft release and upload it to the Play Console, internal
+testing track first, then production.
 
 Human steps (once):
 
-- Create the Play Console developer account and the app `com.alexkerber.lagom`.
-- Create an upload keystore (`keytool -genkeypair -v -keystore lagom-upload.jks -keyalg RSA -keysize 4096 -validity 10000 -alias upload`).
-  Keep it and its passwords in a password manager. Turn on Play App Signing.
-- New personal developer accounts must run a closed test with at least 12 testers for 14 days
-  before production access. Plan for this.
-- Fill in the Data safety form, content rating, target audience and store listing (icon
-  `brand/app-icon/export/play-store-512.png`, feature graphic, screenshots).
+1. Create the Play Console developer account and the app `com.alexkerber.lagom`.
+2. Create the upload keystore and store it as GitHub secrets:
+
+   ```sh
+   keytool -genkeypair -v -keystore lagom-upload.jks -keyalg RSA -keysize 4096 -validity 10000 -alias upload
+   base64 -i lagom-upload.jks | gh secret set LAGOM_ANDROID_KEYSTORE
+   gh secret set LAGOM_ANDROID_KEYSTORE_PASSWORD
+   gh secret set LAGOM_ANDROID_KEY_ALIAS --body upload
+   ```
+
+   Keep the keystore and its password in a password manager, then delete the local copy.
+3. Turn on Play App Signing and upload the first `.aab` by hand. Google keeps the app signing key.
+4. New personal developer accounts must run a closed test with at least 12 testers for 14 days
+   before production access. Plan for this.
+5. Fill in the store listing, Data safety, content rating and target audience from
+   `brand/store/google-play/`. Icon `brand/store/play-icon-512.png`, feature graphic
+   `brand/store/play-feature-1024x500.png`. Take the screenshots from the shot list there.
+6. Run the workflow once with `workflow_dispatch` and check that the log shows the certificate from
+   `apksigner verify --print-certs`.
 
 ## OAuth providers (all platforms)
 
@@ -190,6 +319,3 @@ Not implemented on this branch. Tracked as an open item below.
 ## Open items
 
 - [ ] Desktop: the update check described above.
-- [ ] iOS: pass `MARKETING_VERSION` from `LAGOM_VERSION` in `release.sh`.
-- [ ] Android: release signing config and `versionName`/`versionCode` from `LAGOM_VERSION`.
-- [ ] Windows and Linux: packaging workflows that follow this page.

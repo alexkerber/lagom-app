@@ -34,7 +34,8 @@ internal suspend fun prepareMailDocument(
     val prepared by key(messageId, html, dark, remote) {
         produceState<String?>(null) { value = prepareMailDocument(html, dark, messageId, remote) }
     }
-    val document = prepared ?: run { Text("Loading message…"); return }
+    // A quick render shows nothing; only a slow one shows the note (motion.md: 150 ms).
+    val document = prepared ?: run { if (afterWait(true)) Text("Loading message…"); return }
     AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
         WebView(context).apply {
             settings.javaScriptEnabled = false

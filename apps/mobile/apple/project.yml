@@ -11,6 +11,7 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: com.alexkerber.lagom
     DEVELOPMENT_TEAM: 3KFU9JQ5LH
     CODE_SIGN_STYLE: Automatic
+    # Development defaults. release.sh passes the tag's version and the UTC minute to xcodebuild.
     MARKETING_VERSION: '0.1.0'
     CURRENT_PROJECT_VERSION: '1'
     OTHER_LDFLAGS: ['$(inherited)', '-lsqlite3', '-liconv', '-lresolv', '-lc++']
@@ -21,6 +22,7 @@ targets:
     sources:
       - Sources
       - Assets.xcassets
+      - PrivacyInfo.xcprivacy
       - path: Generated/LagomCore.swift
     dependencies:
       - framework: Generated/LagomFFI.xcframework
@@ -35,11 +37,19 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: lagom
-        # The owner's export compliance answer, so App Store Connect stops asking per build.
+        # XcodeGen writes 1.0 and 1 here otherwise, and the build settings never reach the app.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # The only encryption is TLS to the user's own mail and OAuth servers (rustls) and the system
+        # Keychain. No own data encryption. See docs/release.md, "Export compliance", before changing.
         ITSAppUsesNonExemptEncryption: false
         BGTaskSchedulerPermittedIdentifiers: [app.lagommail.refresh]
         UIBackgroundModes: [fetch]
-        UILaunchScreen: {}
+        # The share sheet of an attachment preview and a long press on a mail image offer "Save to Photos".
+        NSPhotoLibraryAddUsageDescription: lagom saves an image or video to Photos only when you choose to save it.
+        # Theme.background in light and dark, so the first frame does not flash.
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:

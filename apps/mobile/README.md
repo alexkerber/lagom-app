@@ -264,10 +264,11 @@ manual follow-up; no GUI acceptance is claimed by fixture tests or generic build
 
 ## TestFlight
 
-`apps/mobile/apple/release.sh` builds the bindings, generates the project and
+`apps/mobile/apple/release.sh <version>` builds the bindings, generates the project and
 archives a Release build for devices with automatic signing, using the Apple ID
-signed in to Xcode. The build number is the UTC time (`YYYYMMDDHHMM`), so every
-archive is newer than the last. Without arguments it exports an IPA to
+signed in to Xcode. The version is the release tag without the `v`; the build number is the UTC time
+(`YYYYMMDDHHMM`), so every archive is newer than the last. Without a flag it exports an IPA to
 `apps/mobile/apple/build/export`; with `--upload` the export goes straight to
-App Store Connect through the same Xcode account (no API key). The app record
+App Store Connect through the same Xcode account; `--unsigned` only archives. CI uses an API key instead
+(`.github/workflows/package-ios.yml`, secrets in `docs/release.md`). The app record
 for `com.alexkerber.lagom` must exist in App Store Connect first.
