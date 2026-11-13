@@ -1,6 +1,17 @@
 import Foundation
 
 @MainActor final class FixtureCore: LagomCore, @unchecked Sendable {
+    var attachmentCalls = 0
+    var attachmentGate: CheckedContinuation<Void, Never>?
+    var suspendAttachment = false
+    var failAttachment = false
+    override func attachment(messageId: Int64, section: String) async throws -> Data {
+        precondition(messageId == 42 && section == "2")
+        attachmentCalls += 1
+        if suspendAttachment { await withCheckedContinuation { attachmentGate = $0 } }
+        if failAttachment { throw MailError.Failed(reason: "download failed") }
+        return Data([0, 255])
+    }
     var deadline: Int64?
     var reads = 0
     var syncs = 0
@@ -89,11 +100,47 @@ import Foundation
 
 @main
 struct ModelChecks {
+    @MainActor static func attachments() async throws {
+        for (name, safe) in [("../../file.txt", "file.txt"), ("..\\file.txt", "file.txt"),
+                             (" \0\n", "attachment"), ("", "attachment"), ("..", "attachment"),
+                             (" a\u{7f}b ", "ab")] { precondition(safeAttachmentName(name) == safe) }
+        precondition(safeAttachmentName(String(repeating: "x", count: 121)).count == 120)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = MailModel(attachmentDirectory: root.appendingPathComponent("attachments"))
+        let core = FixtureCore(noHandle: .init()); model.core = core
+        let part = MailAttachment(section: "2", filename: "../fixture.bin", mimeType: "", size: 2)
+        core.suspendAttachment = true
+        let pending = Task { await model.openAttachment(messageID: 42, part: part) }
+        while core.attachmentGate == nil { await Task.yield() }
+        await model.openAttachment(messageID: 42, part: part)
+        precondition(core.attachmentCalls == 1 && model.downloadingAttachments == ["42:2"])
+        core.attachmentGate?.resume(); await pending.value
+        let url = model.attachmentURL!
+        let bytes = try Data(contentsOf: url)
+        precondition(bytes == Data([0, 255]) && url.lastPathComponent == "fixture.bin")
+        precondition(UUID(uuidString: url.deletingLastPathComponent().lastPathComponent) != nil)
+        precondition(url.deletingLastPathComponent().deletingLastPathComponent().path == model.attachmentDirectory.path)
+        precondition(model.downloadingAttachments.isEmpty)
+        model.attachmentURL = nil
+        core.suspendAttachment = false; core.failAttachment = true
+        await model.openAttachment(messageID: 42, part: part)
+        precondition(model.attachmentURL == nil && model.error != nil && model.downloadingAttachments.isEmpty)
+        model.error = nil; core.failAttachment = false; core.suspendAttachment = true; core.attachmentGate = nil
+        let stale = Task { await model.openAttachment(messageID: 42, part: part) }
+        while core.attachmentGate == nil { await Task.yield() }
+        await model.select(nil)
+        core.attachmentGate?.resume(); await stale.value
+        precondition(model.attachmentURL == nil && model.downloadingAttachments.isEmpty)
+        print("Attachment safe names, bytes, double tap, error and stale selection checks passed")
+    }
+
     @MainActor static func main() async throws {
         if CommandLine.arguments.contains("--wake") {
             await wake()
             return
         }
+        try await attachments()
         try await draftReload()
         try await draftLifecycle()
         await openingDuringArchive()

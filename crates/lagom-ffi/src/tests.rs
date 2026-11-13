@@ -514,6 +514,23 @@ async fn reply_all_uses_source_identity_cc_signature_and_thread() {
 }
 
 #[tokio::test]
+async fn attachment_returns_cached_decoded_bytes_offline_and_rejects_unknown_sections() {
+    let (dir, core) = fixture();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "me@example.test", 1);
+        mail(&mut s, &a, 1, 1)
+    };
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("INSERT INTO attachments VALUES (?1,'2','fixture.bin','application/octet-stream',8,'base64')", [id]).unwrap();
+    db.execute("INSERT INTO attachment_cache VALUES (?1,'2',?2)", rusqlite::params![id, b"\0\xffhi".as_slice()]).unwrap();
+    assert_eq!(core.attachment(id, "2".into()).await.unwrap(), b"\0\xffhi");
+    for (message, section) in [(id, "3"), (id, "../2"), (-1, "2")] {
+        assert!(matches!(core.attachment(message, section.into()).await, Err(MailError::NotFound)));
+    }
+}
+
+#[tokio::test]
 async fn forward_preserves_cached_attachments_offline_and_starts_a_new_thread() {
     let (dir, core) = fixture();
     let (a, id) = {
@@ -563,51 +580,57 @@ async fn forward_refuses_unknown_or_unavailable_attachments_instead_of_dropping_
 }
 
 #[tokio::test]
-async fn forward_fetches_only_missing_parts_and_reuses_the_cache() {
-    // SQLite migrations are setup, not part of the protocol hang guard.
-    let (dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let id = {
-            let mut s = core.stores.local.lock().unwrap();
-            let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
-            mail(&mut s, &a, 1, 1)
-        };
-        let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
-        db.execute("UPDATE messages SET attachments_loaded=1 WHERE id=?1", [id]).unwrap();
-        db.execute("INSERT INTO attachments VALUES (?1,'2','cached.txt','text/plain',4,'7bit')", [id]).unwrap();
-        db.execute("INSERT INTO attachment_cache VALUES (?1,'2',?2)", rusqlite::params![id, b"file".as_slice()]).unwrap();
-        db.execute("INSERT INTO attachments VALUES (?1,'3','data.bin','application/octet-stream',8,'base64')", [id]).unwrap();
-        let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut socket = BufReader::new(socket);
-            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
-            let mut downloads = 0;
-            loop {
-                let mut line = String::new();
-                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
-                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
-                let data = if cmd.starts_with("LOGIN ") { "" }
-                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
-                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n" }
-                else if cmd == "UID FETCH 1 (UID BODY.PEEK[3])" {
-                    downloads += 1;
-                    "* 1 FETCH (UID 1 BODY[3] {8}\r\nAP9oaQ==)\r\n"
-                } else if cmd == "LOGOUT" { "* BYE bye\r\n" }
-                else { panic!("unexpected command {cmd}"); };
-                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
-                if cmd == "LOGOUT" { break; }
+async fn attachment_and_forward_fetch_only_missing_parts_and_reuse_the_cache() {
+    for attachment_first in [false, true] {
+        // SQLite migrations are setup, not part of the protocol hang guard.
+        let (dir, core) = fixture();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let id = {
+                let mut s = core.stores.local.lock().unwrap();
+                let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+                mail(&mut s, &a, 1, 1)
+            };
+            let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+            db.execute("UPDATE messages SET attachments_loaded=1 WHERE id=?1", [id]).unwrap();
+            db.execute("INSERT INTO attachments VALUES (?1,'2','cached.txt','text/plain',4,'7bit')", [id]).unwrap();
+            db.execute("INSERT INTO attachment_cache VALUES (?1,'2',?2)", rusqlite::params![id, b"file".as_slice()]).unwrap();
+            db.execute("INSERT INTO attachments VALUES (?1,'3','data.bin','application/octet-stream',8,'base64')", [id]).unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                let mut downloads = 0;
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                    let data = if cmd.starts_with("LOGIN ") { "" }
+                    else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                    else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n" }
+                    else if cmd == "UID FETCH 1 (UID BODY.PEEK[3])" {
+                        downloads += 1;
+                        "* 1 FETCH (UID 1 BODY[3] {8}\r\nAP9oaQ==)\r\n"
+                    } else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                    else { panic!("unexpected command {cmd}"); };
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                    if cmd == "LOGOUT" { break; }
+                }
+                assert_eq!(downloads, 1);
+            });
+            if attachment_first {
+                assert_eq!(core.attachment(id, "3".into()).await.unwrap(), b"\0\xffhi");
             }
-            assert_eq!(downloads, 1);
-        });
-        for _ in 0..2 {
-            let draft = core.compose_draft(id, ComposeKind::Forward).await.unwrap();
-            assert_eq!(draft.attachments.len(), 2);
-            assert_eq!(draft.attachments[0].data, b"file");
-            assert_eq!(draft.attachments[1].data, b"\0\xffhi");
-        }
-        server.await.unwrap();
-    }).await.unwrap();
+            for _ in 0..2 {
+                let draft = core.compose_draft(id, ComposeKind::Forward).await.unwrap();
+                assert_eq!(draft.attachments.len(), 2);
+                assert_eq!(draft.attachments[0].data, b"file");
+                assert_eq!(draft.attachments[1].data, b"\0\xffhi");
+            }
+            assert_eq!(core.attachment(id, "3".into()).await.unwrap(), b"\0\xffhi");
+            server.await.unwrap();
+        }).await.unwrap();
+    }
 }
 
 #[tokio::test]

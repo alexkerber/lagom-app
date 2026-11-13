@@ -23,6 +23,13 @@ func draftMessageID(email: String) -> String {
     return "<\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())@\(domain)>"
 }
 
+func safeAttachmentName(_ filename: String) -> String {
+    let component = filename.replacingOccurrences(of: "\\", with: "/").components(separatedBy: "/").last ?? ""
+    let clean = String(String.UnicodeScalarView(component.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+    let name = String(clean.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty || name == "." || name == ".." ? "attachment" : name
+}
+
 struct ComposeDraft: Identifiable, Equatable {
     let id = UUID()
     var messageID: String
@@ -79,6 +86,33 @@ struct ComposeDraft: Identifiable, Equatable {
 
 @MainActor @Observable
 final class MailModel {
+    let attachmentDirectory: URL
+    var attachmentURL: URL?
+    private(set) var downloadingAttachments: Set<String> = []
+
+    init(attachmentDirectory: URL = URL.cachesDirectory.appendingPathComponent("attachments", isDirectory: true)) {
+        self.attachmentDirectory = attachmentDirectory
+    }
+
+    func openAttachment(messageID: Int64, part: MailAttachment) async {
+        guard let core else { return }
+        let key = "\(messageID):\(part.section)"
+        guard downloadingAttachments.insert(key).inserted else { return }
+        defer { downloadingAttachments.remove(key) }
+        let selection = selectionRevision
+        do {
+            let data = try await core.attachment(messageId: messageID, section: part.section)
+            let url = attachmentDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                .appendingPathComponent(safeAttachmentName(part.filename))
+            try await Task.detached {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: url, options: .atomic)
+            }.value
+            guard selection == selectionRevision, !Task.isCancelled else { return }
+            attachmentURL = url
+        } catch { if selection == selectionRevision && !Task.isCancelled { self.error = error.localizedDescription } }
+    }
+
     var core: LagomCore?
     var accounts: [MailAccount] = []
     var rows: [MailRow] = []
@@ -134,6 +168,8 @@ final class MailModel {
     func start() async {
         guard core == nil else { return }
         do {
+            // Best effort: a stale cache must never block opening mail.
+            try? FileManager.default.removeItem(at: attachmentDirectory)
             let directory = try Storage.directory()
             #if os(iOS)
             // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.
