@@ -16,6 +16,13 @@ struct Smoke {
             preconditionFailure("missing account did not throw")
         } catch MailError.NotFound { }
         try await core.syncAll()
+        let backgroundRows = try await core.backgroundSync()
+        precondition(backgroundRows.isEmpty)
+        core.cancelBackgroundSync()
+        do {
+            _ = try await core.backgroundSync()
+            preconditionFailure("cancelled background sync did not throw")
+        } catch MailError.Failed { }
         do {
             _ = try await core.message(id: -1)
             preconditionFailure("missing message did not throw")
@@ -26,6 +33,6 @@ struct Smoke {
         let tomorrow = try tomorrowAtEight()
         precondition(tomorrow > Int64(Date().timeIntervalSince1970))
         precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true, messageId: 1, remote: false).contains("<x-LINK"))
-        print("Swift FFI smoke: 9 checks passed")
+        print("Swift FFI smoke: 11 checks passed")
     }
 }

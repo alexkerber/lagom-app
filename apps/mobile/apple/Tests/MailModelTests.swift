@@ -1,6 +1,38 @@
 import XCTest
 
 final class MailModelTests: XCTestCase {
+    func testNotificationContentGroupsAccountsAndTargetsNewestMail() {
+        let row = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: true, hasAttachments: false)
+        XCTAssertTrue(mailNotices([]).isEmpty)
+        XCTAssertEqual(mailNotices([row]), [MailNotice(target: MailTarget(account: "a", message: 1), title: "sender@example.test", body: "First")])
+        var named = row; named.senderName = "Sender"; named.account = "b"
+        XCTAssertEqual(mailNotices([named]).first?.title, "Sender")
+        var second = row; second.id = 2; second.dateUnix = 2; second.subject = "Second"
+        var third = second; third.id = 3; third.subject = "Third"
+        var fourth = third; fourth.id = 4; fourth.subject = "Fourth"
+        let notices = mailNotices([row, named, second, fourth, third])
+        XCTAssertEqual(notices.count, 2)
+        XCTAssertEqual(notices[0], MailNotice(target: MailTarget(account: "a", message: 4), title: "4 new messages", body: "Fourth\nThird\nSecond"))
+    }
+
+    @MainActor func testNotificationWaitsForStoreThenSelectsAccountAndMessage() async {
+        let model = MailModel()
+        model.mailbox = .sent; model.searchText = "old search"
+        let target = MailTarget(account: "second", message: 1)
+        model.openNotification(target)
+        await model.changeScope()
+        XCTAssertEqual(model.notificationTarget, target)
+        model.core = DailyFixtureCore(noHandle: .init())
+        await model.changeScope()
+        XCTAssertEqual(model.accountID, "second")
+        XCTAssertEqual(model.mailbox, .inbox)
+        XCTAssertEqual(model.searchText, "")
+        XCTAssertEqual(model.selectedID, 1)
+        XCTAssertNil(model.notificationTarget)
+        await model.select(model.selectedID)
+        XCTAssertEqual(model.message?.row.id, 1)
+    }
+
     func testRecipientTokenUsesDesktopBoundariesAndPreservesEarlierAddresses() {
         XCTAssertEqual(recipientToken(""), "")
         XCTAssertEqual(recipientToken("  "), "")
@@ -99,6 +131,8 @@ final class MailModelTests: XCTestCase {
 }
 
 @MainActor final class ComposeFixtureCore: LagomCore, @unchecked Sendable {
+    override func cancelBackgroundSync() {}
+    override func backgroundSync() async throws -> [MailRow] { [] }
     override func refreshContacts(accountId: String) async throws {}
     override func suggestContacts(accountId: String, query: String) -> [ContactSuggestion] { [] }
     var attachmentCalls: [(Int64, String)] = []
@@ -286,6 +320,8 @@ extension MailModelTests {
 }
 
 @MainActor final class DailyFixtureCore: LagomCore, @unchecked Sendable {
+    override func cancelBackgroundSync() {}
+    override func backgroundSync() async throws -> [MailRow] { [] }
     var mail = (1...205).map { id in
         MailRow(id: Int64(id), account: id == 1 ? "second" : "fixture", senderName: "Sender",
                 senderAddress: "sender@example.test", subject: "Mail", preview: "", dateUnix: Int64(id),

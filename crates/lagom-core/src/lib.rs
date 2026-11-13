@@ -8,6 +8,7 @@ pub mod attachment;
 pub mod discovery;
 pub use discovery::{discover, Discovery, Preset};
 pub mod imap_sync;
+pub mod new_mail;
 pub mod mime;
 pub mod html;
 pub mod inline;

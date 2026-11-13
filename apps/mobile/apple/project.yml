@@ -37,6 +37,8 @@ targets:
         CFBundleDisplayName: lagom
         # The owner's export compliance answer, so App Store Connect stops asking per build.
         ITSAppUsesNonExemptEncryption: false
+        BGTaskSchedulerPermittedIdentifiers: [app.lagommail.refresh]
+        UIBackgroundModes: [fetch]
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

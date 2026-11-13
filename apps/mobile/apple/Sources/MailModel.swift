@@ -109,6 +109,27 @@ struct ComposeDraft: Identifiable, Equatable {
     }
 }
 
+struct MailTarget: Equatable {
+    let account: String
+    let message: Int64
+}
+
+struct MailNotice: Equatable {
+    let target: MailTarget
+    let title: String
+    let body: String
+}
+
+func mailNotices(_ rows: [MailRow]) -> [MailNotice] {
+    Dictionary(grouping: rows, by: \.account).sorted { $0.key < $1.key }.compactMap { account, rows in
+        let newest = rows.sorted { $0.dateUnix == $1.dateUnix ? $0.id > $1.id : $0.dateUnix > $1.dateUnix }
+        guard let first = newest.first else { return nil }
+        return MailNotice(target: MailTarget(account: account, message: first.id),
+                          title: rows.count == 1 ? (first.senderName.isEmpty ? first.senderAddress : first.senderName) : "\(rows.count) new messages",
+                          body: rows.count == 1 ? first.subject : newest.prefix(3).map(\.subject).joined(separator: "\n"))
+    }
+}
+
 @MainActor @Observable
 final class MailModel {
     let attachmentDirectory: URL
@@ -144,6 +165,8 @@ final class MailModel {
     var failures: [SendFailure] = []
     var drafts: [DraftRow] = []
     var savedDraftIDs: Set<String> = []
+    private(set) var notificationRevision = 0
+    var notificationTarget: MailTarget?
     var accountID: String?
     var mailbox: MailboxChoice = .inbox
     var searchText = ""
@@ -190,25 +213,29 @@ final class MailModel {
 
     deinit { wakeTask?.cancel(); autosaveTask?.cancel() }
 
+    static func openCore() async throws -> LagomCore {
+        let directory = try Storage.directory()
+        #if os(iOS)
+        // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.
+        let files = FileManager.default
+        try files.createDirectory(at: directory, withIntermediateDirectories: true)
+        for item in [directory] + ((try? files.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []) {
+            try files.setAttributes([.protectionKey: FileProtectionType.completeUnlessOpen], ofItemAtPath: item.path)
+        }
+        var backup = URLResourceValues()
+        backup.isExcludedFromBackup = true
+        var excluded = directory
+        try excluded.setResourceValues(backup)
+        #endif
+        return try await Task.detached { try LagomCore.open(dataDir: directory.path) }.value
+    }
+
     func start() async {
         guard core == nil else { return }
         do {
             // Best effort: a stale cache must never block opening mail.
             try? FileManager.default.removeItem(at: attachmentDirectory)
-            let directory = try Storage.directory()
-            #if os(iOS)
-            // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.
-            let files = FileManager.default
-            try files.createDirectory(at: directory, withIntermediateDirectories: true)
-            for item in [directory] + ((try? files.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []) {
-                try files.setAttributes([.protectionKey: FileProtectionType.completeUnlessOpen], ofItemAtPath: item.path)
-            }
-            var backup = URLResourceValues()
-            backup.isExcludedFromBackup = true
-            var excluded = directory
-            try excluded.setResourceValues(backup)
-            #endif
-            core = try await Task.detached { try LagomCore.open(dataDir: directory.path) }.value
+            core = try await Self.openCore()
             await reload()
             await sync()
         } catch { self.error = error.localizedDescription }
@@ -277,6 +304,15 @@ final class MailModel {
         }
     }
 
+    func openNotification(_ target: MailTarget) {
+        composeDraft = nil
+        notificationTarget = target
+        notificationRevision += 1
+        accountID = target.account
+        mailbox = .inbox
+        searchText = ""
+    }
+
     func changeScope() async {
         selectionRevision += 1
         remoteImagesID = nil
@@ -285,6 +321,10 @@ final class MailModel {
         message = nil
         rows = []
         await reload()
+        guard !Task.isCancelled, core != nil, let target = notificationTarget,
+              target.account == accountID, mailbox == .inbox, searchText.isEmpty else { return }
+        notificationTarget = nil
+        selectedID = target.message
     }
 
     func select(_ id: Int64?) async {

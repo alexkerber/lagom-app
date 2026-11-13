@@ -212,6 +212,13 @@ internal class MailModel(
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == revision) error = e.mailMessage() }
     }
+    suspend fun openNotification(target: MailTarget) {
+        closeCompose(discard = false)
+        accountForm = null
+        searchText = ""
+        changeScope(target.account, Mailbox.INBOX)
+        select(target.message)
+    }
     suspend fun changeScope(account: String?, box: Mailbox) {
         showingDrafts = false
         revision++

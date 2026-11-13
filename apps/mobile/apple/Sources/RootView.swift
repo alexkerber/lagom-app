@@ -50,13 +50,20 @@ struct RootView: View {
             }
         }
         // One reload per scope, even when the mailbox and the account change together.
-        .task(id: "\(model.mailbox.rawValue)/\(model.accountID ?? "")/\(model.searchText)") {
+        .task(id: "\(model.mailbox.rawValue)/\(model.accountID ?? "")/\(model.searchText)/\(model.core == nil)/\(model.notificationRevision)") {
             await model.changeScope()
             guard !Task.isCancelled else { return }
             let id = pending
             pending = nil
             // A newer scope change cancels this task; never open the message in another scope.
             if let id, model.mailbox == .inbox, model.accountID == nil, model.searchText.isEmpty { model.selectedID = id }
+        }
+        .onChange(of: model.notificationRevision, initial: true) { _, _ in
+            if model.notificationTarget != nil {
+                addAccount = false
+                pending = nil
+                section = .mail
+            }
         }
         // Unread counts, Today's mail and the sidebar counts follow every mail reload.
         .onChange(of: model.rows) { _, _ in Task { await planner.reloadMail() } }

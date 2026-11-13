@@ -1,5 +1,11 @@
 package app.lagommail.android
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.compose.currentStateAsState
 import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -19,11 +25,16 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.lagommail.core.LagomCore
 import app.lagommail.core.installSecretStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
 class LagomApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        MailRefreshWorker.schedule(this)
+    }
     private val credentials by lazy { installSecretStore(AndroidSecretStore(this)); true }
     val core: LagomCore by lazy {
         check(credentials)
@@ -32,9 +43,34 @@ class LagomApplication : Application() {
 }
 
 class MainActivity : ComponentActivity() {
+    private var notificationTarget by mutableStateOf<MailTarget?>(null)
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    private fun readNotification(intent: Intent) {
+        val account = intent.getStringExtra("account") ?: return
+        if (!intent.hasExtra("message")) return
+        notificationTarget = MailTarget(account, intent.getLongExtra("message", 0))
+        intent.removeExtra("account"); intent.removeExtra("message")
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        readNotification(intent)
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val settings = getSharedPreferences("notifications", MODE_PRIVATE)
+        if (settings.getBoolean("requested", false)) return
+        settings.edit().putBoolean("requested", true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        readNotification(intent)
         enableEdgeToEdge()
         setContent {
             val model: MailModel = viewModel(factory = object : ViewModelProvider.Factory {
@@ -45,6 +81,19 @@ class MainActivity : ComponentActivity() {
             })
             LifecycleEventEffect(Lifecycle.Event.ON_START) { model.perform { model.setForeground(true) } }
             LifecycleEventEffect(Lifecycle.Event.ON_STOP) { model.perform { model.setForeground(false) } }
+            val state by lifecycle.currentStateAsState()
+            LaunchedEffect(state, model.accounts.isEmpty()) {
+                if (state.isAtLeast(Lifecycle.State.RESUMED) && model.accounts.isNotEmpty()) requestNotificationPermission()
+            }
+            LaunchedEffect(notificationTarget, model.core) {
+                val target = notificationTarget
+                if (target != null && model.core != null) {
+                    try { model.openNotification(target) }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) { model.error = error.mailMessage() }
+                    if (notificationTarget == target) notificationTarget = null
+                }
+            }
             val size = calculateWindowSizeClass(this)
             LagomTheme {
                 MailScreen(model, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact)
