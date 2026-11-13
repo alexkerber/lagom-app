@@ -327,6 +327,8 @@ pub struct MainWindow {
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     confirm_empty_trash: bool,
+    /// The store row whose "Unsubscribe from …" line has moved past its first state.
+    unsubscribe: Option<(i64, Unsub)>,
     folder_name: Option<Entity<TextInput>>,
     folder_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
@@ -449,6 +451,7 @@ impl MainWindow {
             message_menu: None,
             all_folders: false,
             confirm_empty_trash: false,
+            unsubscribe: None,
             folder_name: None,
             folder_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
@@ -2173,9 +2176,33 @@ impl MainWindow {
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
-            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)))))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
+    }
+
+    /// One quiet line above the message body: "Unsubscribe from …", a confirm step, then the outcome.
+    // shortcut: single messages in the main reading pane only; add it to conversations and pop-outs if newsletters thread.
+    fn unsubscribe_line(&self, m: &Mail, cx: &mut Context<Self>) -> Option<Div> {
+        let (store, choice) = (m.store?, m.unsubscribe.as_ref()?);
+        let t = &self.theme;
+        let line = div().flex().flex_wrap().items_center().gap(px(8.)).flex_shrink_0()
+            .text_size(px(size::SMALL)).text_color(t.ink2);
+        Some(match self.unsubscribe.as_ref().filter(|(id, _)| *id == store).map(|(_, step)| step) {
+            None => line.child(pressable(div().id("unsubscribe"), t, false).debug_selector(|| "unsubscribe".into())
+                .px(px(6.)).py(px(2.)).rounded(px(radius::CONTROL)).child(format!("Unsubscribe from {}", m.from))
+                .on_click(cx.listener(move |this, _, _, cx| { this.unsubscribe = Some((store, Unsub::Confirm)); cx.notify(); }))),
+            Some(Unsub::Confirm) => line.child(choice.explain())
+                .child(button(t, "Unsubscribe", None).on_click(cx.listener(move |this, _, _, cx| this.confirm_unsubscribe(store, cx))))
+                .child(button(t, "Cancel", None).on_click(cx.listener(|this, _, _, cx| { this.unsubscribe = None; cx.notify(); }))),
+            Some(Unsub::Working) => line.child(calm(div().child("Unsubscribing…"), ("unsubscribing", store as usize))),
+            // shortcut: no "Move all from this sender to Trash" offer; there is no sender-wide bulk move to reuse yet.
+            Some(Unsub::Done) => line.child(div().debug_selector(|| "unsubscribed".into()).child("Unsubscribed")),
+        })
     }
 }
+
+/// The steps after "Unsubscribe from …" is clicked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Unsub { Confirm, Working, Done }
 
 /// The bar above a message: buttons on a macOS toolbar's height.
 fn toolbar(t: &Theme) -> Div {
@@ -2256,6 +2283,7 @@ fn reading_view(
     menu: impl IntoElement,
     on_download: impl Fn(String, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    notice: Option<Div>,
 ) -> Stateful<Div> {
     let theme = *t;
     let address: SharedString = m.address.clone().into();
@@ -2307,6 +2335,7 @@ fn reading_view(
                         .child("to").child(div().min_w(px(0.)).one_line().child(to))))
                 .child(div().text_size(px(size::SMALL)).text_color(t.ink2).child(mail::reading_date(m.date, chrono::Local::now())))
                 .child(menu))
+            .children(notice)
             .child(div().flex().flex_col().gap(px(12.)).text_size(px(size::BODY)).line_height(relative(READING_LEADING))
                 .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
                 // The preview stands in while the text loads; the note shows only for a slow load.

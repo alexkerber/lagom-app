@@ -316,6 +316,19 @@ internal class MailModel(
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
         } finally { actingId = null; reload() }
     }
+    /** The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session. */
+    var unsubscribingId by mutableStateOf<Long?>(null); private set
+    var unsubscribedIds by mutableStateOf<Set<Long>>(emptySet()); private set
+    /** Only after the person confirmed. A web page is the screen's to open; the core never fetches it. */
+    suspend fun unsubscribe(id: Long) {
+        val core = core ?: return
+        if (unsubscribingId != null) return
+        unsubscribingId = id
+        try {
+            core.unsubscribe(id)
+            unsubscribedIds += id
+        } finally { unsubscribingId = null }
+    }
     suspend fun remove(account: MailAccount) {
         core?.removeAccount(account.id)
         changeScope(if (accountId == account.id) null else accountId, mailbox)

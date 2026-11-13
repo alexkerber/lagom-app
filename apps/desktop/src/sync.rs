@@ -77,6 +77,8 @@ pub enum Cmd {
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
     Send(String),
+    /// Confirmed by the person: the one-click POST or the unsubscribe mail for this store row.
+    Unsubscribe(i64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +130,7 @@ pub enum Event {
     ForwardAttachments { draft: String, result: Result<Vec<lagom_core::smtp::OutgoingAttachment>, String> },
     /// `error` says why, also when the message went out but its Sent copy failed.
     Sent { delivery: Delivery, error: Option<String> },
+    Unsubscribed { id: i64, error: Option<String> },
 }
 
 #[derive(Clone)]
@@ -433,6 +436,10 @@ impl Worker {
                 self.emit(Event::Changed);
             }
             Cmd::Send(id) => { self.send(&id).await; }
+            Cmd::Unsubscribe(id) => {
+                let error = self.unsubscribe(id).await.err().map(|e| e.to_string());
+                self.emit(Event::Unsubscribed { id, error });
+            }
             other => self.deferred.push_back(other),
         }
     }
@@ -1079,6 +1086,21 @@ impl Worker {
         let result = session.mark_seen(&mut self.store, id, seen).await;
         self.give(&account.id, session, &result);
         result
+    }
+
+    async fn unsubscribe(&mut self, id: i64) -> lagom_core::Result<()> {
+        use lagom_core::unsubscribe::{one_click, Unsubscribe};
+        match self.store.unsubscribe(id)?.ok_or(Error::NotFound)? {
+            Unsubscribe::OneClick(url) => one_click(&url).await,
+            Unsubscribe::Mail(_) => {
+                let queued = self.store.enqueue_unsubscribe(id)?;
+                self.send(&queued).await;
+                // A sent row leaves the outbox; one still there failed and shows with the other failed sends.
+                if self.store.pending(&queued).is_ok() { return Err(Error::Network("the unsubscribe email was not sent")); }
+                Ok(())
+            }
+            Unsubscribe::Link(_) => Err(Error::Invalid("open the unsubscribe page in the browser")),
+        }
     }
 
     async fn send(&mut self, id: &str) {

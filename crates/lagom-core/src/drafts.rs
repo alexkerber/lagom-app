@@ -311,6 +311,6 @@ mod tests {
             ('mobile_draft_times','mobile_draft_insert','mobile_draft_update')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(store.draft_row("old").unwrap().updated, 0);
         assert_eq!(store.draft("old").unwrap(), draft);
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 18);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 19);
     }
 }

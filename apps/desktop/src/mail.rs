@@ -35,6 +35,8 @@ pub struct Mail {
     /// "Load remote images" was clicked for this message.
     pub remote: bool,
     pub attachments: Vec<Attachment>,
+    /// From the store with the body; never fetched on open.
+    pub unsubscribe: Option<lagom_core::unsubscribe::Unsubscribe>,
     pub inline: std::sync::Arc<Vec<lagom_core::inline::InlinePart>>,
     pub inline_referenced: bool,
     pub inline_pending: bool,
@@ -71,6 +73,7 @@ impl Mail {
             html: None,
             remote: false,
             attachments: Vec::new(),
+            unsubscribe: None,
             inline: Default::default(),
             inline_referenced: false,
             inline_pending: false,

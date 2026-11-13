@@ -52,7 +52,9 @@ struct MessageView: View {
     @Bindable var model: MailModel
     @Environment(\.colorScheme) private var scheme
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.openURL) private var openURL
     @State private var showText = false
+    @State private var confirmUnsubscribe = false
 
     var body: some View {
         let row = message.row
@@ -62,6 +64,7 @@ struct MessageView: View {
                 .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 20) {
                 header
+                if let offer = message.unsubscribe { unsubscribeLine(offer) }
                 if message.htmlBody != nil && !showText && !model.remoteImagesIDs.contains(row.id) {
                     HStack(spacing: 10) {
                         HouseButton(title: "Load remote images", icon: "image") { model.loadRemoteImages(id: row.id) }
@@ -97,6 +100,30 @@ struct MessageView: View {
         .foregroundStyle(Theme.ink)
         .quickLookPreview($model.attachmentURL)
         .onChange(of: message.row.id) { _, _ in showText = false }
+    }
+
+    /// One quiet line above the body. Nothing runs before the confirm.
+    // shortcut: no "Move all from this sender to Trash" offer; there is no sender-wide bulk move to reuse yet.
+    private func unsubscribeLine(_ offer: UnsubscribeOffer) -> some View {
+        let id = message.row.id
+        return Group {
+            if model.unsubscribedIDs.contains(id) {
+                Text("Unsubscribed")
+            } else if model.unsubscribingID == id {
+                Text("Unsubscribing…")
+            } else {
+                Button("Unsubscribe from \(offer.list)") { confirmUnsubscribe = true }
+                    .buttonStyle(.plain).frame(minHeight: 44)
+            }
+        }
+        .lagomFont(.small).foregroundStyle(Theme.secondary).lineLimit(2)
+        .confirmationDialog("Unsubscribe from \(offer.list)?", isPresented: $confirmUnsubscribe, titleVisibility: .visible) {
+            Button("Unsubscribe") {
+                if let link = offer.link, let url = URL(string: link), url.scheme == "https" { openURL(url) }
+                else if offer.link == nil { Task { await model.unsubscribe(id: id) } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(offer.explain) }
     }
 
     /// Initials, sender, address and date, with the desktop's message menu.

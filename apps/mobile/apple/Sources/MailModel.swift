@@ -184,6 +184,9 @@ final class MailModel {
     var message: MailMessage?
     var error: String?
     var notice: String?
+    /// The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session.
+    private(set) var unsubscribingID: Int64?
+    private(set) var unsubscribedIDs: Set<Int64> = []
     private(set) var undoSendID: String?
     private var sendRevision = 0
     var composeDraft: ComposeDraft? {
@@ -419,6 +422,17 @@ final class MailModel {
             do { try await core.syncAll() } catch { self.error = error.localizedDescription }
             await reload()
         } while syncAgain
+    }
+
+    /// Only after the person confirmed. A web page is the view's to open; the core never fetches it.
+    func unsubscribe(id: Int64) async {
+        guard let core, unsubscribingID == nil else { return }
+        unsubscribingID = id
+        defer { unsubscribingID = nil }
+        do {
+            try await core.unsubscribe(messageId: id)
+            unsubscribedIDs.insert(id)
+        } catch { self.error = error.localizedDescription }
     }
 
     func act(_ action: MailAction, id: Int64, until: Int64? = nil) async {

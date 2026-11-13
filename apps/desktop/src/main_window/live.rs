@@ -572,6 +572,12 @@ impl MainWindow {
                     read = true;
                     self.notify(sent_note(delivery, error), cx);
                 }
+                Event::Unsubscribed { id, error } => {
+                    if self.unsubscribe.is_some_and(|(store, _)| store == id) {
+                        self.unsubscribe = error.is_none().then_some((id, Unsub::Done));
+                    }
+                    if let Some(error) = error { self.notify(format!("Could not unsubscribe: {error}"), cx); }
+                }
             }
         }
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
@@ -837,6 +843,20 @@ impl MainWindow {
         }
     }
 
+    /// The confirm step's yes. A web page opens in the browser; the worker runs the rest.
+    pub(super) fn confirm_unsubscribe(&mut self, store: i64, cx: &mut Context<Self>) {
+        let Some(choice) = self.inbox.mail.iter().find(|m| m.store == Some(store)).and_then(|m| m.unsubscribe.clone()) else { return };
+        if let lagom_core::unsubscribe::Unsubscribe::Link(url) = choice {
+            cx.open_url(url.as_str());
+            self.unsubscribe = None;
+        } else if self.live.as_ref().is_some_and(|live| live.bridge.send(Cmd::Unsubscribe(store))) {
+            self.unsubscribe = Some((store, Unsub::Working));
+        } else if self.live.is_some() {
+            self.worker_gone(cx);
+        }
+        cx.notify();
+    }
+
     /// Before a frame: the selected message's body comes from the store once, and opening a
     /// message marks it read. One indexed row read, only when the selection changed.
     pub(super) fn open_current(&mut self, mark_read: bool, cx: &mut Context<Self>) {
@@ -893,6 +913,7 @@ impl MainWindow {
                 Ok((m, parts, inline)) => {
                     self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
+                    self.inbox.mail[id].unsubscribe = live.store.unsubscribe(store).ok().flatten();
                     self.inbox.mail[id].html = m.body_html.map(Into::into);
                     if self.inbox.mail[id].text.is_none() {
                         let (send, text) = tokio::sync::watch::channel(None);
@@ -4310,6 +4331,36 @@ mod tests {
             assert_eq!(v.reading_members.len(), 2);
             assert!(v.reading_members.iter().all(|&id| v.inbox.mail[id].message_id.is_empty()));
         });
+    }
+
+    #[gpui::test]
+    fn unsubscribe_line_confirms_before_the_worker_runs(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = &live.accounts[0].id;
+            let folder = live.store.folders(account, 0).unwrap()[0].id;
+            let mut m = lagom_core::mime::parse(b"From: News <news@list.example>\r\nSubject: Weekly\r\n\r\nBody").unwrap();
+            m.summary.account = account.clone(); m.summary.folder = folder; m.summary.uid = 1;
+            let id = live.store.save_message(&m).unwrap();
+            let choice = lagom_core::unsubscribe::parse("<https://list.example/one>", Some("List-Unsubscribe=One-Click"));
+            live.store.set_unsubscribe(id, choice.as_ref()).unwrap();
+            v.inbox = Inbox::live(); v.reading_thread = None;
+            v.reload(cx); v.open_current(true, cx);
+            cx.notify();
+            id
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        let line = cx.debug_bounds("unsubscribe").expect("the quiet line shows").center();
+        cx.simulate_click(line, Default::default());
+        assert!(rx.try_recv().is_err(), "the first click only asks");
+        let confirm = cx.debug_bounds("Unsubscribe").expect("the confirm step shows").center();
+        cx.simulate_click(confirm, Default::default());
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, Cmd::Unsubscribe(row) if row == id)));
+        view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Unsubscribed { id, error: None }], window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("unsubscribed").is_some());
     }
 
     #[gpui::test]

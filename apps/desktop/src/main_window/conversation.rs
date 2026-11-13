@@ -64,7 +64,7 @@ impl Render for MessageBody {
             }))))
             .child(reading_view(&theme, (id, &self.mail), overlay && self.web.cover().is_none() || !html::supported() || self.mail.html.is_none(), self.web.surface(), 0, menu,
                 move |section, _, cx| { download.update(cx, |main, cx| main.download_attachment(id, section, cx)).ok(); },
-                move |_, window, cx| { reply.update(cx, |main, cx| main.compose_for(Some(id), window, cx)).ok(); }))
+                move |_, window, cx| { reply.update(cx, |main, cx| main.compose_for(Some(id), window, cx)).ok(); }, None))
     }
 }
 

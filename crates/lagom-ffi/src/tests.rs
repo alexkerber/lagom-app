@@ -1102,3 +1102,22 @@ async fn conversations_count_visible_members_and_read_whole_thread_without_dupli
     assert_eq!(core.mailbox(Some(account), Mailbox::Later, 10, 0).await.unwrap()[0].message_ids, [old]);
     assert_eq!(core.conversation(newest).await.unwrap().len(), 3); // Reading also includes snoozed members.
 }
+
+#[tokio::test]
+async fn unsubscribe_offer_and_a_web_page_is_never_fetched() {
+    use lagom_core::unsubscribe::parse;
+    let (_dir, core) = fixture();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        mail(&mut s, &a, 1, now())
+    };
+    assert!(core.message(id).await.unwrap().unsubscribe.is_none());
+    assert!(matches!(core.unsubscribe(id).await, Err(MailError::NotFound)));
+    core.stores.local.lock().unwrap().set_unsubscribe(id, parse("<https://list.example/u>", None).as_ref()).unwrap();
+    let offer = core.message(id).await.unwrap().unsubscribe.unwrap();
+    assert_eq!((offer.list.as_str(), offer.link.as_deref()), ("sender@example.test", Some("https://list.example/u")));
+    assert!(core.unsubscribe(id).await.is_err());
+    core.stores.local.lock().unwrap().set_unsubscribe(id, parse("<https://list.example/one>", Some("List-Unsubscribe=One-Click")).as_ref()).unwrap();
+    assert_eq!(core.message(id).await.unwrap().unsubscribe.unwrap().link, None);
+}
