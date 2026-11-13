@@ -7,6 +7,8 @@ use zeroize::Zeroizing;
 uniffi::setup_scaffolding!();
 
 mod secret_store;
+mod drafts;
+pub use drafts::LocalDraft;
 
 type Result<T> = std::result::Result<T, MailError>;
 
@@ -157,6 +159,7 @@ impl LagomCore {
         let mut open = OPEN.get_or_init(Default::default).lock().map_err(|_| failure("mail registry unavailable"))?;
         if let Some(stores) = open.get(&dir).and_then(std::sync::Weak::upgrade) { return Ok(Arc::new(Self { stores })); }
         let store = Store::open(dir.join("lagom.sqlite3"))?;
+        drafts::install(&store)?;
         store.recover_outbox()?;
         let local = Store::open(dir.join("lagom.sqlite3"))?;
         let core = Arc::new(Self { stores: Arc::new(Stores { local: Mutex::new(local), network: Mutex::new(store) }) });
