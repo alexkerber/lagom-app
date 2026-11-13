@@ -1383,7 +1383,19 @@ impl MainWindow {
         window.focus(&self.focus);
         self.release(false, cx);
         self.confirm_empty_trash = false;
+        #[cfg(target_os = "macos")]
+        { self.default_mail = crate::default_mail::is_default(); }
         self.set_page(Page::Settings(None), cx);
+        cx.notify();
+    }
+
+    /// Settings shows the row only on macOS.
+    pub(crate) fn make_default_mail(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            if !crate::default_mail::make_default() { self.notify("Could not make lagom the default mail app", cx); }
+            self.default_mail = crate::default_mail::is_default();
+        }
         cx.notify();
     }
 

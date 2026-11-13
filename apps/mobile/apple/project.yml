@@ -45,6 +45,10 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         BGTaskSchedulerPermittedIdentifiers: [app.lagommail.refresh]
         UIBackgroundModes: [fetch]
+        # mailto links; the system sends them here only with the com.apple.developer.mail-client entitlement.
+        CFBundleURLTypes:
+          - CFBundleURLName: mailto
+            CFBundleURLSchemes: [mailto]
         # The share sheet of an attachment preview and a long press on a mail image offer "Save to Photos".
         NSPhotoLibraryAddUsageDescription: lagom saves an image or video to Photos only when you choose to save it.
         # Theme.background in light and dark, so the first frame does not flash.

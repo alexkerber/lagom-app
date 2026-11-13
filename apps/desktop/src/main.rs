@@ -5,6 +5,8 @@ mod icon;
 mod accounts;
 mod command_palette;
 mod compose;
+#[cfg(target_os = "macos")]
+mod default_mail;
 mod empty_inbox;
 mod folders;
 mod mail;
@@ -186,10 +188,28 @@ fn reopen_main_window(demo: bool, cx: &mut App) {
     if let Err(error) = open_main_window(demo, cx) { eprintln!("Could not reopen mail: {error}"); }
 }
 
+/// Windows and Linux start lagom with the link as an argument; macOS sends it as an Apple event.
+fn mailto_args(args: impl Iterator<Item = String>) -> Vec<String> {
+    args.skip(1).filter(|a| a.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:"))).collect()
+}
+
+fn open_mailto(url: &str, demo: bool, cx: &mut App) {
+    let Some(link) = lagom_core::compose::parse_mailto(url) else { return eprintln!("Could not read a mail link") };
+    match open_main_window(demo, cx) {
+        Ok(handle) => { handle.update(cx, |view, window, cx| view.compose_mailto(link, window, cx)).ok(); }
+        Err(error) => eprintln!("Could not open mail: {error}"),
+    }
+}
+
 fn main() {
     let demo = std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1");
     let app = Application::new().with_assets(Assets);
     app.on_reopen(move |cx| reopen_main_window(demo, cx));
+    // A link that launches lagom arrives before `run`; the channel holds it until the window exists.
+    // shortcut: on Windows and Linux a link while lagom runs starts a second process; forward it to the first one when that matters.
+    let (links, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+    for url in mailto_args(std::env::args()) { links.send(url).ok(); }
+    app.on_open_urls(move |urls| for url in urls { links.send(url).ok(); });
     app.run(move |cx: &mut App| {
         // All text is the system font. Geist Mono (palette key caps) comes from the system if
         // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.
@@ -200,6 +220,11 @@ fn main() {
         menus::init(cx);
         if !demo { notifications::init(cx, move |cx| open_main_window(false, cx)); }
         open_main_window(demo, cx).expect("open main window");
+        cx.spawn(async move |cx| {
+            while let Some(url) = incoming.recv().await {
+                if cx.update(|cx| open_mailto(&url, demo, cx)).is_err() { return; }
+            }
+        }).detach();
         #[cfg(target_os = "macos")]
         icon::install();
     });
@@ -208,6 +233,12 @@ fn main() {
 #[cfg(test)]
 mod action_icon_tests {
     use super::*;
+
+    #[test]
+    fn only_mailto_arguments_open_compose() {
+        let args = ["lagom", "MAILTO:a@example.test", "--flag", "mailto:", "https://example.test", "mail"].map(String::from);
+        assert_eq!(mailto_args(args.into_iter()), ["MAILTO:a@example.test", "mailto:"]);
+    }
 
     #[test]
     fn action_icons_are_distinct_and_embedded_in_the_house_stroke_style() {

@@ -65,6 +65,14 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key><true/>
     <!-- Lets Intel Macs with two GPUs stay on the integrated one. -->
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <!-- mailto links: Settings can make lagom the default mail app. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>Email Address URL</string>
+            <key>CFBundleURLSchemes</key><array><string>mailto</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

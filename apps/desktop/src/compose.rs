@@ -154,8 +154,11 @@ impl Compose {
         this
     }
 
-    pub fn initialize(&mut self, cc: &str, body: &str, forward_source: Option<i64>, cx: &mut Context<Self>) {
+    /// `bcc` comes only from mailto links; the field opens so a link never adds a hidden recipient unseen.
+    pub fn initialize(&mut self, cc: &str, bcc: &str, body: &str, forward_source: Option<i64>, cx: &mut Context<Self>) {
         self.cc.update(cx, |input, cx| input.set_text(cc, cx));
+        self.bcc.update(cx, |input, cx| input.set_text(bcc, cx));
+        self.show_bcc = !bcc.is_empty();
         self.body.update(cx, |input, cx| { input.set_text(body, cx); input.select(0..0, cx); });
         self.show_cc = !cc.is_empty();
         self.forward_source = forward_source;
@@ -870,7 +873,7 @@ mod tests {
             ("A -- separator is prose", 5),
             ("", 0),
         ] {
-            view.update(cx, |v, cx| v.initialize("", text, None, cx));
+            view.update(cx, |v, cx| v.initialize("", "", text, None, cx));
             assert_eq!(view.read_with(cx, |v, _| v.words), count, "{text:?}");
         }
     }

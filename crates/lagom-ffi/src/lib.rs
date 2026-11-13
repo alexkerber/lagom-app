@@ -564,3 +564,12 @@ pub fn mail_document(html: String, dark: bool, message_id: i64, remote: bool) ->
     let html = lagom_core::inline::rewrite(&html, message_id, false);
     format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 system-ui,-apple-system,sans-serif;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(remote, "lagom-cid:"), inert_tags(&html))
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Mailto { pub to: Vec<String>, pub cc: Vec<String>, pub bcc: Vec<String>, pub subject: String, pub body: String }
+
+/// `None`: not a mailto link, or too long. See `lagom_core::compose::parse_mailto`.
+#[uniffi::export]
+pub fn parse_mailto(url: String) -> Option<Mailto> {
+    lagom_core::compose::parse_mailto(&url).map(|m| Mailto { to: m.to, cc: m.cc, bcc: m.bcc, subject: m.subject, body: m.body })
+}

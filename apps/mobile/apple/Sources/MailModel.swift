@@ -113,6 +113,15 @@ struct ComposeDraft: Identifiable, Equatable {
         title = isReply ? "Reply" : "Draft"
     }
 
+    /// A mailto link's message. Bcc is left out: mobile Compose has no Bcc field, and a hidden recipient must never be sent unseen.
+    init(mailto: Mailto, account: String, email: String = "") {
+        self.init(account: account, email: email)
+        to = mailto.to.joined(separator: ", ")
+        cc = mailto.cc.joined(separator: ", ")
+        subject = mailto.subject
+        body = mailto.body
+    }
+
     func save(using core: LagomCore) async throws -> DraftRow {
         try await core.saveDraft(id: messageID, accountId: account, to: to, cc: cc, subject: subject,
                                  body: body, replyTo: replyTo, attachments: attachments)
@@ -298,6 +307,7 @@ final class MailModel {
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
             self.hasMore = hasMore
             wake(at: due)
+            await openPendingMailto()
         } catch { if request == revision && !Task.isCancelled { self.error = error.localizedDescription } }
         let draftRequest = draftRevision
         do {
@@ -329,6 +339,25 @@ final class MailModel {
             await reload()
             await sync()
         }
+    }
+
+    /// A mailto link waits for the store and the accounts; `reload` opens it.
+    private(set) var pendingMailto: Mailto?
+    func openMailto(_ url: String) async {
+        guard let mail = parseMailto(url: url) else { error = "lagom could not read this mail link."; return }
+        pendingMailto = mail
+        await reload()
+    }
+
+    private func openPendingMailto() async {
+        guard let mail = pendingMailto, !composeBusy, !preparingCompose else { return }
+        pendingMailto = nil
+        guard let account = accountID ?? accounts.first?.id else { error = "Add an account, then open the link again."; return }
+        // An open message goes to Drafts first; a failed save keeps it open, never replaced.
+        do { try await closeCompose(discard: false) } catch { self.error = error.localizedDescription; return }
+        guard composeDraft == nil else { return }
+        composeDraft = ComposeDraft(mailto: mail, account: account, email: accounts.first { $0.id == account }?.email ?? "")
+        if !mail.bcc.isEmpty { notice = "The link's Bcc was left out." }
     }
 
     func openNotification(_ target: MailTarget) {
