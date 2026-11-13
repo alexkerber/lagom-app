@@ -24,7 +24,7 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = now)
 
-    @Test fun undoRestoresDraftAndExpirySyncsOnlyInForeground() = runTest(dispatcher) {
+    @Test fun undoRestoresDraftAndExpirySyncsEvenInBackground() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.setForeground(true)
         val initialSyncs = core.syncs
         val draft = ComposeDraft("fixture", to = "to@example.test", body = "keep edits",
@@ -42,13 +42,13 @@ class MailModelTest {
         assertEquals("Already sent", model.notice); assertNull(model.draft)
         model.setForeground(false)
         advanceTimeBy(5000); runCurrent()
-        assertEquals(initialSyncs + 1, core.syncs)
-        model.setForeground(true)
         assertEquals(initialSyncs + 2, core.syncs)
+        model.setForeground(true)
+        assertEquals(initialSyncs + 3, core.syncs)
         model.draft = draft.copy(id = "next"); model.send(); runCurrent()
         advanceTimeBy(5000); runCurrent()
         assertNull(model.undoSendId); assertNull(model.notice)
-        assertEquals(initialSyncs + 3, core.syncs)
+        assertEquals(initialSyncs + 4, core.syncs)
     }
 
     @Test fun resendingRestoredDraftGetsItsOwnFullUndoWindow() = runTest(dispatcher) {

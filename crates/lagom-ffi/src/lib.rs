@@ -174,7 +174,8 @@ async fn sync_account(store: &mut Store, a: &Account) -> lagom_core::Result<()> 
     let password = a.password()?;
     let mut error = None;
     for id in store.due_outbox(&a.id, milliseconds())? {
-        let pending = store.pending(&id)?;
+        // Undo send may remove the row after due_outbox listed it.
+        let pending = match store.pending(&id) { Err(lagom_core::Error::NotFound) => continue, other => other? };
         if store.claim_send(&id, milliseconds())? {
             if let Err(e) = smtp::send_queued(a, &password, &pending, store).await { error = Some(e); }
         }

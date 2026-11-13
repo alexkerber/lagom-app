@@ -449,7 +449,9 @@ internal class MailModel(
                     perform {
                         delay(5000)
                         if (sendRevision == request && undoSendId == snapshot.id) { undoSendId = null; notice = null }
-                        if (foreground) sync()
+                        // Background sync never sends, so send here even if the user left the app inside the Undo window.
+                        // shortcut: a process kill inside the window leaves the mail queued until the next start, upgrade to a delayed WorkManager job if that shows up.
+                        sync()
                     }
                 }
             }

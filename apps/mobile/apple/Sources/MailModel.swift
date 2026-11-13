@@ -137,6 +137,8 @@ final class MailModel {
     private(set) var downloadingAttachments: Set<String> = []
 
     @ObservationIgnored private let sendDelay: @Sendable () async throws -> Void
+    /// The app sets this to hold a background task; it returns the release. Tests run without UIKit.
+    @ObservationIgnored var keepAlive: @MainActor () -> @MainActor () -> Void = { {} }
 
     init(sendDelay: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(5)) }, attachmentDirectory: URL = URL.cachesDirectory.appendingPathComponent("attachments", isDirectory: true)) {
         self.attachmentDirectory = attachmentDirectory
@@ -580,11 +582,15 @@ final class MailModel {
         undoSendID = draft.messageID
         notice = "Sending…"
         let delay = sendDelay
+        // Background sync never sends, so the mail leaves here even if the user locks the phone inside the Undo window.
+        // shortcut: a sync already in flight ends the keep-alive early, upgrade if mail stalls in the outbox after locking.
+        let release = keepAlive()
         Task { [weak self] in
+            defer { release() }
             do { try await delay() } catch { return }
             guard let self else { return }
             if self.sendRevision == sending, self.undoSendID == draft.messageID { self.undoSendID = nil; self.notice = nil }
-            if self.foreground { await self.sync() }
+            await self.sync()
         }
     }
 
