@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import app.lagommail.core.*
+import kotlinx.coroutines.launch
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -140,7 +141,7 @@ internal fun Mailbox.label(): String = when (this) {
                         modifier = Modifier.clickable { onRetry(failure) })
                 }
                 items(model.visibleRows, key = { it.id }) { row ->
-                    MailListRow(row, model.working, onSelect = { model.perform { model.select(row.id) } },
+                    MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, onSelect = { model.perform { model.select(row.id) } },
                         onAction = { model.perform { model.act(it, row.id) } })
                     HorizontalDivider()
                 }
@@ -154,30 +155,41 @@ internal fun Mailbox.label(): String = when (this) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun MailListRow(row: MailRow, busy: Boolean, onSelect: () -> Unit, onAction: (MailAction) -> Unit) {
+@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, onSelect: () -> Unit, onAction: (MailAction) -> Unit) {
     val currentAction by rememberUpdatedState(onAction)
     val currentBusy by rememberUpdatedState(busy)
     val state = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
         if (!currentBusy) when (value) {
             SwipeToDismissBoxValue.StartToEnd -> currentAction(MailAction.Done)
-            SwipeToDismissBoxValue.EndToStart -> currentAction(MailAction.Later)
             else -> Unit
         }
-        false
+        value == SwipeToDismissBoxValue.Settled || (!currentBusy && value == SwipeToDismissBoxValue.EndToStart)
     })
+    val scope = rememberCoroutineScope()
+    val revealed = state.currentValue == SwipeToDismissBoxValue.EndToStart
     val view = RowPresentation(row)
     SwipeToDismissBox(state = state, gesturesEnabled = !busy, backgroundContent = {
         val done = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
-        Box(Modifier.fillMaxSize().background(if (done) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.secondary).padding(20.dp),
-            contentAlignment = if (done) Alignment.CenterStart else Alignment.CenterEnd) {
-            Text(if (done) "Done" else "Later", color = if (done) MaterialTheme.colorScheme.onTertiary else MaterialTheme.colorScheme.onSecondary)
+        if (done) Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.tertiary).padding(20.dp), contentAlignment = Alignment.CenterStart) {
+            Text("Done", color = MaterialTheme.colorScheme.onTertiary)
+        } else Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)
+            .then(if (revealed) Modifier else Modifier.clearAndSetSemantics {}),
+            horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            TextButton(enabled = !busy, onClick = { scope.launch { state.reset(); currentAction(MailAction.Later) } },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Later" }) { Text("Later") }
+            if (canDelete) TextButton(enabled = !busy, onClick = { scope.launch { state.reset(); currentAction(MailAction.Delete) } },
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Delete" }) { Text("Delete") }
+            TextButton(onClick = { scope.launch { state.reset() } },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Cancel" }) { Text("Cancel") }
         }
     }) {
-        ListItem(modifier = Modifier.clickable(onClick = onSelect).semantics {
+        ListItem(modifier = Modifier.clickable(onClick = onSelect).then(if (revealed) Modifier.clearAndSetSemantics {} else Modifier.semantics {
             stateDescription = if (row.unread) "Unread" else "Read"
             customActions = listOf(CustomAccessibilityAction("Done") { if (!busy) onAction(MailAction.Done); !busy },
-                CustomAccessibilityAction("Later") { if (!busy) onAction(MailAction.Later); !busy })
-        }, headlineContent = { Text(view.sender, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal, maxLines = 1) },
+                CustomAccessibilityAction("Later") { if (!busy) onAction(MailAction.Later); !busy }) +
+                if (canDelete) listOf(CustomAccessibilityAction("Delete") { if (!busy) onAction(MailAction.Delete); !busy }) else emptyList()
+        }), headlineContent = { Text(view.sender, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal, maxLines = 1) },
             supportingContent = { Column { Text(view.subject, maxLines = 1); Text(row.preview, maxLines = 2) } },
             trailingContent = { Column(horizontalAlignment = Alignment.End) {
                 Text(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(view.date), style = MaterialTheme.typography.labelSmall)
@@ -219,6 +231,9 @@ internal fun Mailbox.label(): String = when (this) {
                 modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Reply all" }) { Text("Reply all") }
             TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id, ComposeKind.FORWARD) } },
                 modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Forward" }) { Text("Forward") }
+            val readLabel = if (message.row.unread) "Mark read" else "Mark unread"
+            TextButton(enabled = !model.working, onClick = { model.perform { model.setRead(message.row.id, message.row.unread) } },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = readLabel }) { Text(readLabel) }
             TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Later, message.row.id) } }) { Text("Later") }
             TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id) } }) { Text("Delete") }
             Button(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Done, message.row.id) } }) { Text("Done") }

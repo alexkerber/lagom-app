@@ -50,7 +50,9 @@ internal class MailModel(
     var message by mutableStateOf<MailMessage?>(null); private set
     var hasMore by mutableStateOf(false); private set
     var syncing by mutableStateOf(false); private set
-    var working by mutableStateOf(false); private set
+    private var actingId by mutableStateOf<Long?>(null)
+    private var readingIds by mutableStateOf<Set<Long>>(emptySet())
+    val working: Boolean get() = actingId != null || readingIds.isNotEmpty()
     var sending by mutableStateOf(false); private set
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
@@ -143,16 +145,22 @@ internal class MailModel(
             val loaded = withContext(Dispatchers.IO) { core.message(id) }
             if (request != selectionRevision) return
             message = loaded
-            if (loaded.row.unread) {
-                core.markRead(id, true)
-                if (request != selectionRevision) return
-                val read = withContext(Dispatchers.IO) { core.message(id) }
-                if (request != selectionRevision) return
-                message = read
-                reload()
-            }
+            if (loaded.row.unread) setRead(id, true)
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == selectionRevision) throw e }
+    }
+    suspend fun setRead(id: Long, read: Boolean) {
+        val core = core ?: return
+        if (actingId == id || id in readingIds) return
+        readingIds += id
+        try {
+            core.markRead(id, read)
+            if (selectedId == id) {
+                val selection = selectionRevision
+                val updated = withContext(Dispatchers.IO) { core.message(id) }
+                if (selectedId == id && selection == selectionRevision) message = updated
+            }
+        } finally { readingIds -= id; reload() }
     }
     suspend fun sync() {
         val core = core ?: return
@@ -170,7 +178,7 @@ internal class MailModel(
     suspend fun act(action: MailAction, id: Long) {
         val core = core ?: return
         if (working) return
-        working = true
+        actingId = id
         try {
             when (action) {
                 MailAction.Done -> core.done(listOf(id))
@@ -178,7 +186,7 @@ internal class MailModel(
                 MailAction.Delete -> core.delete(listOf(id))
             }
             if (selectedId == id) clearSelection()
-        } finally { working = false; reload() }
+        } finally { actingId = null; reload() }
     }
     suspend fun remove(account: MailAccount) {
         core?.removeAccount(account.id)
