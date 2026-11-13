@@ -279,6 +279,17 @@ struct ModelChecks {
         precondition(model.composeDraft?.id == opened, "a later reload must not open the link again")
         await model.openMailto("https://example.test")
         precondition(model.error == "lagom could not read this mail link.")
+        // An open message is saved before the link replaces it; a failed save keeps it open.
+        let drafts = DraftFixtureCore(noHandle: .init())
+        let busy = MailModel(); busy.core = drafts; busy.accountID = "fixture"
+        var open = ComposeDraft(account: "fixture"); open.body = "unsaved"
+        busy.composeDraft = open
+        drafts.fail = true
+        await busy.openMailto(link)
+        precondition(busy.composeDraft?.messageID == open.messageID && busy.error != nil, "a failed save keeps the open message")
+        drafts.fail = false; busy.error = nil
+        await busy.openMailto(link)
+        precondition(busy.composeDraft?.to == "a@example.test" && drafts.drafts[open.messageID]?.body == "unsaved")
         print("MailModel: mailto link to draft passed")
     }
 

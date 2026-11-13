@@ -142,12 +142,13 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(shareIntent) {
                 val intent = shareIntent ?: return@LaunchedEffect
-                shareIntent = null
                 try {
                     val shared = withContext(Dispatchers.IO) { readShare(intent) }
                     if (shared == null) model.error = "lagom could not read this mail link." else model.openShared(shared)
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Exception) { model.error = error.message ?: error.mailMessage() }
+                // Clearing the key earlier would cancel this effect mid-read; a newer share has its own run.
+                finally { if (shareIntent == intent) shareIntent = null }
             }
             val size = calculateWindowSizeClass(this)
             LagomTheme {

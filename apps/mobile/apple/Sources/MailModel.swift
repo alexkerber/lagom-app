@@ -289,7 +289,7 @@ final class MailModel {
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
             self.hasMore = hasMore
             wake(at: due)
-            openPendingMailto()
+            await openPendingMailto()
         } catch { if request == revision && !Task.isCancelled { self.error = error.localizedDescription } }
         let draftRequest = draftRevision
         do {
@@ -331,12 +331,13 @@ final class MailModel {
         await reload()
     }
 
-    private func openPendingMailto() {
+    private func openPendingMailto() async {
         guard let mail = pendingMailto, !composeBusy, !preparingCompose else { return }
         pendingMailto = nil
         guard let account = accountID ?? accounts.first?.id else { error = "Add an account, then open the link again."; return }
-        // An open message goes to Drafts, as when a notification opens.
-        composeDraft = nil
+        // An open message goes to Drafts first; a failed save keeps it open, never replaced.
+        do { try await closeCompose(discard: false) } catch { self.error = error.localizedDescription; return }
+        guard composeDraft == nil else { return }
         composeDraft = ComposeDraft(mailto: mail, account: account, email: accounts.first { $0.id == account }?.email ?? "")
         if !mail.bcc.isEmpty { notice = "The link's Bcc was left out." }
     }
