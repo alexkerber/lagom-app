@@ -1001,6 +1001,8 @@ impl MainWindow {
         let left: Vec<(usize, usize)> = before.ids.iter().enumerate().skip(old_from)
             .filter(|&(_, id)| !pos.contains_key(id) && !self.ghosts.iter().any(|g| g.id == *id))
             .map(|(k, &id)| (id, remap(k))).collect();
+        // A row back before its exit finished: the real row replaces its ghost.
+        self.ghosts.retain(|g| !arrived.iter().any(|&(id, _)| id == g.id));
         if arrived.len() + left.len() <= SETTLE_MAX {
             let at = Instant::now();
             self.ghosts.extend(left.into_iter().map(|(id, ix)| Ghost { id, ix, what: ARRIVE, at, dx: 0. }));
@@ -2281,6 +2283,8 @@ fn reading_view(
             .child(mono(attachment_size(part.size), t.ink2))
             .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
     }).collect::<Vec<_>>();
+    // The text is still being read (the body then holds only `live::LOADING`).
+    let loading = m.text.as_ref().is_some_and(|t| t.borrow().is_none());
     div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().max_w(px(760.))
         .flex().flex_col().gap(px(16.)).p(px(24.))
         .child(div().flex_shrink_0().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
@@ -2306,10 +2310,10 @@ fn reading_view(
             .child(div().flex().flex_col().gap(px(12.)).text_size(px(size::BODY)).line_height(relative(READING_LEADING))
                 .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
                 // The preview stands in while the text loads; the note shows only for a slow load.
-                .when(text && m.body.first().is_some_and(|p| p == live::LOADING), |d| d
+                .when(text && loading, |d| d
                     .child(div().text_color(t.ink2).child(m.snippet.clone()))
                     .child(calm(div().text_size(px(size::SMALL)).text_color(t.ink2).child(live::LOADING), ("loading-message", id))))
-                .when(text && m.body.first().is_none_or(|p| p != live::LOADING), |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
+                .when(text && !loading, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
                 .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
                     div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
             .children(attachment()))
@@ -3880,6 +3884,13 @@ mod dispatch {
             v.settle_list(before);
             let g = v.ghosts.iter().find(|g| g.id == gone).expect("the removed row fades out");
             assert_eq!((g.ix, g.what), (3, ARRIVE));
+            // Back before its exit ends: one row, no ghost beside it.
+            let before = v.list_before();
+            v.inbox.items.insert(3, gone);
+            v.inbox.regroup();
+            v.settle_list(before);
+            assert!(!v.ghosts.iter().any(|g| g.id == gone));
+            assert!(v.entering.iter().any(|g| g.id == gone));
             // A page of rows, or another list, appears at once.
             v.entering.clear();
             v.ghosts.clear();
