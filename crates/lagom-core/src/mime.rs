@@ -61,17 +61,80 @@ struct TextState {
     skip_newline: bool,
     /// In the text of a raw text element (`title`, `style`, `script`): no tags until its end tag.
     raw: bool,
+    /// Open `svg` and `math` elements: there `<g/>` closes itself.
+    foreign: usize,
+    /// Open lists, `dl`, tables and `select` (see `container`): their end tag closes a hidden item.
+    containers: [usize; 4],
 }
 
-/// A hidden element: how many elements of its name are open, how many of its containers are open
-/// inside it (see `container`), and the text length and state when it started.
+/// Elements tracked inside a hidden element. Deeper nesting keeps it hidden to the end of the mail.
+const HIDDEN_DEPTH: usize = 256;
+
+/// A hidden element, and the text length and state when it started. When unsure whether a tag
+/// closes it, it stays hidden: a lost line in a preview is better than shown hidden text.
 struct Hidden {
     name: LocalName,
-    open: usize,
-    nested: usize,
+    /// The elements open inside it, innermost last, and whether each hides; `None` past
+    /// `HIDDEN_DEPTH`.
+    inside: Option<Vec<(LocalName, bool)>>,
     at: usize,
     pre: usize,
     p: bool,
+}
+
+impl Hidden {
+    /// Whether this tag closes the hidden element, as the tree builder would. Otherwise it tracks
+    /// the elements this tag opens or closes inside it.
+    fn closed_by(&mut self, name: &LocalName, start: bool, opens: bool, hides: bool, containers: &[usize; 4]) -> bool {
+        let Some(inside) = &mut self.inside else { return false };
+        let open = |set: fn(&LocalName) -> bool| inside.iter().any(|(n, _)| set(n));
+        // A container end tag closes the item only when that container is open around it.
+        let around = |n: &LocalName| container(n).is_some_and(|k| containers[k] > inside.iter().filter(|(m, _)| container(m) == Some(k)).count());
+        let hidden = &self.name;
+        if start {
+            // A sibling's start closes it, unless an element open inside it stops that.
+            let closes = match *hidden {
+                local_name!("head") => !head_content(name) && !open(|n| *n == local_name!("template")),
+                local_name!("p") => closes_p(name) && !open(button_scope),
+                local_name!("li") => *name == local_name!("li") && !open(|n| special(n) && !matches!(*n, local_name!("address") | local_name!("div") | local_name!("p"))),
+                local_name!("dt") | local_name!("dd") => matches!(*name, local_name!("dt") | local_name!("dd")) && !open(|n| special(n) && !matches!(*n, local_name!("address") | local_name!("div") | local_name!("p"))),
+                local_name!("td") | local_name!("th") => matches!(*name, local_name!("td") | local_name!("th") | local_name!("tr") | local_name!("tbody") | local_name!("thead") | local_name!("tfoot")) && !open(table_scope),
+                local_name!("tr") => matches!(*name, local_name!("tr") | local_name!("tbody") | local_name!("thead") | local_name!("tfoot")) && !open(table_scope),
+                local_name!("tbody") | local_name!("thead") | local_name!("tfoot") => matches!(*name, local_name!("tbody") | local_name!("thead") | local_name!("tfoot")) && !open(table_scope),
+                local_name!("option") => matches!(*name, local_name!("option") | local_name!("optgroup")) && inside.is_empty(),
+                _ => heading(hidden) && heading(name) && inside.is_empty(),
+            };
+            if !closes && opens {
+                if inside.len() < HIDDEN_DEPTH { inside.push((name.clone(), hides)); } else { self.inside = None; }
+            }
+            return closes;
+        }
+        if let Some(at) = inside.iter().rposition(|(n, _)| n == name) {
+            inside.truncate(at);
+            return false;
+        }
+        // Its own end tag, or the end of its list or table, unless a scope boundary is open inside.
+        let own = *name == *hidden || heading(hidden) && heading(name);
+        let parent = match *hidden {
+            local_name!("li") => matches!(*name, local_name!("ul") | local_name!("ol") | local_name!("menu")) && !open(default_scope),
+            local_name!("dt") | local_name!("dd") => *name == local_name!("dl") && !open(default_scope),
+            local_name!("td") | local_name!("th") => matches!(*name, local_name!("tr") | local_name!("tbody") | local_name!("thead") | local_name!("tfoot") | local_name!("table")) && !open(table_scope),
+            local_name!("tr") => matches!(*name, local_name!("tbody") | local_name!("thead") | local_name!("tfoot") | local_name!("table")) && !open(table_scope),
+            local_name!("tbody") | local_name!("thead") | local_name!("tfoot") => *name == local_name!("table") && !open(table_scope),
+            local_name!("option") => *name == local_name!("select"),
+            _ => false,
+        } && around(name);
+        let blocked: fn(&LocalName) -> bool = match *hidden {
+            local_name!("p") => button_scope,
+            local_name!("li") => |n| default_scope(n) || matches!(*n, local_name!("ul") | local_name!("ol")),
+            local_name!("td") | local_name!("th") | local_name!("tr") | local_name!("tbody") | local_name!("thead") | local_name!("tfoot") => table_scope,
+            // Block and formatting end tags close through other elements; any other end tag
+            // stops at the first special element.
+            _ if special(hidden) || formatting(hidden) => default_scope,
+            _ => special,
+        };
+        own && !open(blocked) || parent
+    }
 }
 
 impl TokenSink for TextSink {
@@ -81,16 +144,8 @@ impl TokenSink for TextSink {
         match token {
             Token::TagToken(tag) => return state.tag(tag),
             Token::CharacterTokens(chars) => state.chars(&chars),
-            // Unclosed at the end: `head` and raw text elements stay hidden, as in a DOM. Any other
-            // hidden element shows, so one unmatched end tag cannot hide the rest of a mail.
-            Token::EOFToken => {
-                if let Some(hidden) = &state.hidden {
-                    if raw_kind(&hidden.name).is_some() || hidden.name == local_name!("head") {
-                        let at = hidden.at;
-                        state.text.truncate(at);
-                    }
-                }
-            }
+            // Unclosed at the end: hidden to the end, as in a DOM.
+            Token::EOFToken => state.unhide(),
             _ => {}
         }
         TokenSinkResult::Continue
@@ -105,42 +160,60 @@ impl TextState {
         }
     }
 
+    fn count(&mut self, name: &LocalName, start: bool, opens: bool) {
+        if let Some(kind) = container(name) {
+            if opens { self.containers[kind] += 1; } else if !start { self.containers[kind] = self.containers[kind].saturating_sub(1); }
+        }
+    }
+
     fn tag(&mut self, tag: Tag) -> TokenSinkResult<()> {
         let (name, start) = (&tag.name, tag.kind == TagKind::StartTag);
         self.raw = false;
         self.skip_newline = false;
-        // The tree builder closes some elements without an end tag: at a sibling's start or at
-        // their container's end, unless that tag is inside a container opened within them.
+        let void = matches!(*name, local_name!("area") | local_name!("base") | local_name!("br") | local_name!("col") | local_name!("embed") | local_name!("hr") | local_name!("img") | local_name!("image") | local_name!("input") | local_name!("link") | local_name!("meta") | local_name!("source") | local_name!("track") | local_name!("wbr") | local_name!("param") | local_name!("keygen") | local_name!("basefont") | local_name!("bgsound") | local_name!("frame"));
+        // The tag opens an element: in `svg` and `math`, `<g/>` does not.
+        let opens = start && !void && !(tag.self_closing && self.foreign > 0);
+        if matches!(*name, local_name!("svg") | local_name!("math")) {
+            if opens { self.foreign += 1; } else if !start { self.foreign = self.foreign.saturating_sub(1); }
+        }
+        let hides = start && hides(&tag);
         if let Some(hidden) = &mut self.hidden {
-            if hidden.nested == 0 && implied_end(&hidden.name, name, start) {
+            if hidden.closed_by(name, start, opens, hides, &self.containers) {
+                let own = !start && (hidden.name == *name || heading(&hidden.name) && heading(name));
+                // A hidden formatting element open inside comes back in later blocks.
+                // In well-formed HTML nothing is open inside. Otherwise a hidden element open inside
+                // may outlive it (adoption, reconstructed formatting, ignored table tags): keep
+                // hiding from the first one.
+                let revive = hidden.inside.iter().flatten().find(|(_, h)| *h).map(|(n, _)| n.clone());
                 self.unhide();
-            } else if container(&hidden.name, name) {
-                if start { hidden.nested += 1; } else { hidden.nested = hidden.nested.saturating_sub(1); }
+                if let Some(name) = revive {
+                    self.hidden = Some(Hidden { name, inside: Some(Vec::new()), at: self.text.len(), pre: self.pre, p: self.p });
+                }
+                // Its own end tag is done; a sibling's start or a parent's end goes on below.
+                if own {
+                    self.count(name, start, opens);
+                    return TokenSinkResult::Continue;
+                }
             }
         }
-        let void = matches!(*name, local_name!("area") | local_name!("base") | local_name!("br") | local_name!("col") | local_name!("embed") | local_name!("hr") | local_name!("img") | local_name!("image") | local_name!("input") | local_name!("link") | local_name!("meta") | local_name!("source") | local_name!("track") | local_name!("wbr") | local_name!("param") | local_name!("keygen") | local_name!("basefont") | local_name!("bgsound") | local_name!("frame"));
+        self.count(name, start, opens);
         let result = match raw_kind(name) {
-            Some(_) if !start => TokenSinkResult::Continue,
+            Some(_) if !opens => TokenSinkResult::Continue,
             Some(Some(kind)) => { self.raw = true; TokenSinkResult::RawData(kind) }
             Some(None) => TokenSinkResult::Plaintext,
             None => TokenSinkResult::Continue,
         };
         let closes_p = start && closes_p(name);
-        match &mut self.hidden {
-            Some(hidden) if hidden.name == *name && hidden.name != local_name!("head") => {
-                if start { hidden.open += 1; } else { hidden.open -= 1; }
-                if hidden.open == 0 {
-                    self.unhide();
-                    return result;
-                }
-            }
-            Some(_) => {}
-            None if start && hides(&tag) => {
-                // A hidden void element (`<br hidden>`) breaks no line.
-                if void { return result; }
-                self.hidden = Some(Hidden { name: name.clone(), open: 1, nested: 0, at: self.text.len(), pre: self.pre, p: self.p });
-            }
-            None => {}
+        // A later `<html>` or `<body>` adds its attributes to the one element: all text is hidden.
+        if hides && matches!(*name, local_name!("html") | local_name!("body")) {
+            self.unhide();
+            self.hidden = Some(Hidden { name: name.clone(), inside: None, at: 0, pre: 0, p: false });
+            return result;
+        }
+        if self.hidden.is_none() && hides {
+            // A hidden void element (`<br hidden>`) breaks no line.
+            if !opens { return result; }
+            self.hidden = Some(Hidden { name: name.clone(), inside: Some(Vec::new()), at: self.text.len(), pre: self.pre, p: self.p });
         }
         if self.pre > 0 {
             if *name == local_name!("pre") {
@@ -177,7 +250,9 @@ impl TextState {
 
     fn chars(&mut self, chars: &str) {
         // Text ends `head`, unless it is in a `title`, `style` or `template` there.
-        if self.hidden.as_ref().is_some_and(|h| h.name == local_name!("head") && h.nested == 0) && !self.raw && !chars.trim().is_empty() {
+        if self.hidden.as_ref().is_some_and(|h| h.name == local_name!("head") && h.inside.as_ref().is_some_and(|i| !i.iter().any(|(n, _)| *n == local_name!("template"))))
+            && !self.raw && !chars.trim().is_empty()
+        {
             self.unhide();
         }
         let chars = if std::mem::take(&mut self.skip_newline) { chars.strip_prefix('\n').unwrap_or(chars) } else { chars };
@@ -226,28 +301,48 @@ fn block(name: &LocalName) -> bool {
     matches!(*name, local_name!("article") | local_name!("blockquote") | local_name!("section") | local_name!("div") | local_name!("p") | local_name!("pre") | local_name!("h1") | local_name!("h2") | local_name!("h3") | local_name!("h4") | local_name!("h5") | local_name!("h6") | local_name!("ul") | local_name!("ol") | local_name!("dl") | local_name!("table"))
 }
 
-/// Whether this tag closes an open `hidden` element without its end tag.
-fn implied_end(hidden: &LocalName, name: &LocalName, start: bool) -> bool {
-    match *hidden {
-        local_name!("head") => if start { !matches!(*name, local_name!("head") | local_name!("base") | local_name!("basefont") | local_name!("bgsound") | local_name!("link") | local_name!("meta") | local_name!("title") | local_name!("style") | local_name!("script") | local_name!("noscript") | local_name!("template") | local_name!("noframes")) } else { *name == local_name!("head") },
-        local_name!("p") => start && closes_p(name),
-        local_name!("li") => if start { *name == local_name!("li") } else { matches!(*name, local_name!("ul") | local_name!("ol") | local_name!("menu")) },
-        local_name!("dt") | local_name!("dd") => if start { matches!(*name, local_name!("dt") | local_name!("dd")) } else { *name == local_name!("dl") },
-        local_name!("td") | local_name!("th") => matches!(*name, local_name!("tr")) || if start { matches!(*name, local_name!("td") | local_name!("th")) } else { matches!(*name, local_name!("tbody") | local_name!("thead") | local_name!("tfoot") | local_name!("table")) },
-        local_name!("tr") => if start { *name == local_name!("tr") } else { matches!(*name, local_name!("tbody") | local_name!("thead") | local_name!("tfoot") | local_name!("table")) },
-        _ => false,
+/// Lists, `dl`, tables and `select`, by kind.
+fn container(name: &LocalName) -> Option<usize> {
+    match *name {
+        local_name!("ul") | local_name!("ol") | local_name!("menu") => Some(0),
+        local_name!("dl") => Some(1),
+        local_name!("table") => Some(2),
+        local_name!("select") => Some(3),
+        _ => None,
     }
 }
 
-/// An element inside `hidden` that holds its own `implied_end` tags: a nested list or table.
-fn container(hidden: &LocalName, name: &LocalName) -> bool {
-    match *hidden {
-        local_name!("head") => *name == local_name!("template"),
-        local_name!("li") => matches!(*name, local_name!("ul") | local_name!("ol") | local_name!("menu")),
-        local_name!("dt") | local_name!("dd") => *name == local_name!("dl"),
-        local_name!("td") | local_name!("th") | local_name!("tr") => *name == local_name!("table"),
-        _ => false,
-    }
+/// The start tags that may stay in `head`.
+fn head_content(name: &LocalName) -> bool {
+    matches!(*name, local_name!("head") | local_name!("base") | local_name!("basefont") | local_name!("bgsound") | local_name!("link") | local_name!("meta") | local_name!("title") | local_name!("style") | local_name!("script") | local_name!("noscript") | local_name!("template") | local_name!("noframes"))
+}
+
+fn heading(name: &LocalName) -> bool {
+    matches!(*name, local_name!("h1") | local_name!("h2") | local_name!("h3") | local_name!("h4") | local_name!("h5") | local_name!("h6"))
+}
+
+fn formatting(name: &LocalName) -> bool {
+    matches!(*name, local_name!("a") | local_name!("b") | local_name!("big") | local_name!("code") | local_name!("em") | local_name!("font") | local_name!("i") | local_name!("nobr") | local_name!("s") | local_name!("small") | local_name!("strike") | local_name!("strong") | local_name!("tt") | local_name!("u"))
+}
+
+/// The boundaries of the tree builder's "has an element in scope". `svg` and `math` stand in for
+/// their integration points.
+fn default_scope(name: &LocalName) -> bool {
+    matches!(*name, local_name!("applet") | local_name!("caption") | local_name!("html") | local_name!("table") | local_name!("td") | local_name!("th") | local_name!("marquee") | local_name!("object") | local_name!("template") | local_name!("svg") | local_name!("math"))
+}
+
+fn button_scope(name: &LocalName) -> bool {
+    default_scope(name) || *name == local_name!("button")
+}
+
+fn table_scope(name: &LocalName) -> bool {
+    matches!(*name, local_name!("html") | local_name!("table") | local_name!("template"))
+}
+
+/// The tree builder's special category: an end tag of another element does not close through it.
+fn special(name: &LocalName) -> bool {
+    default_scope(name) || head_content(name) || closes_p(name) || heading(name)
+        || matches!(*name, local_name!("area") | local_name!("body") | local_name!("br") | local_name!("button") | local_name!("col") | local_name!("colgroup") | local_name!("embed") | local_name!("frameset") | local_name!("iframe") | local_name!("img") | local_name!("input") | local_name!("keygen") | local_name!("noembed") | local_name!("param") | local_name!("select") | local_name!("source") | local_name!("tbody") | local_name!("textarea") | local_name!("tfoot") | local_name!("thead") | local_name!("tr") | local_name!("track") | local_name!("wbr"))
 }
 
 /// The start tags that close an open `p`, except `table`: mail without a doctype is in quirks mode.
@@ -567,7 +662,9 @@ mod tests {
         attributes.push_str(">Tail");
         // Each hidden element closed a `pre` and trimmed the same spaces again.
         let spaces = "<pre>".to_string() + &" ".repeat(200_000) + &"<span hidden></pre></span>".repeat(50_000) + "Spaces";
-        for (html, text) in [(formatting, "x\n\nx"), ("<div>".repeat(30_000) + "Deep", "Deep"), (attributes, "Tail"), (spaces, "Spaces")] {
+        // Unmatched end tags inside a hidden element search its open elements, at most 256 deep.
+        let stray = "<p>Shown</p><div hidden>".to_string() + &"<span>".repeat(255) + &"</b>".repeat(200_000);
+        for (html, text) in [(formatting, "x\n\nx"), ("<div>".repeat(30_000) + "Deep", "Deep"), (attributes, "Tail"), (spaces, "Spaces"), (stray, "Shown")] {
             let start = std::time::Instant::now();
             let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
             assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?} for {} bytes", start.elapsed(), html.len());
@@ -591,10 +688,24 @@ mod tests {
             ("<ul><li hidden>Hidden<ul><li>Inner</ul>Still<li>Visible</ul>", "Visible"),
             ("<head><template><div>Hidden</div></template></head><body>Visible</body>", "Visible"),
             ("<table><tr><td style='display:none'>Hidden<td>Visible</table>", "Visible"),
+            // A tag closes a hidden element only where the tree builder would.
+            ("<p hidden><template><div>Hidden</div></template>Still hidden</p><p>Visible</p>", "Visible"),
+            ("<p hidden><button><div>Hidden</div></button>Still hidden</p><p>Visible</p>", "Visible"),
+            ("<ul><li hidden><blockquote><li>Hidden</blockquote>Still hidden<li>Visible</ul>", "Visible"),
+            ("<table><tbody hidden><tr><td>Hidden</td></tr></table><p>Visible</p>", "Visible"),
+            ("<select><option hidden>Hidden<option>Visible</select>", "Visible"),
+            ("<h1 hidden>Hidden<h2>Visible</h2>", "Visible"),
+            ("<svg><g hidden><g/><text>Hidden</text></g></svg><p>Visible</p>", "Visible"),
+            ("<p>Visible</p><template>Hidden", "Visible"),
+            ("<span style='display:none'>Pre<div>Body", ""),
+            // A hidden element left open inside another outlives it.
+            ("<i hidden>x<p hidden>y</i>Still hidden", ""),
+            ("Visible<body style='display:none'>Hidden", ""),
         ] {
             assert_eq!(html_to_text(html), text, "{html}");
         }
-        // An unclosed hidden element shows its text rather than hide the rest of the mail.
-        assert_eq!(html_to_text("<span style='display:none'>Pre<div>Body"), "Pre\nBody");
+        // `hidden` and `style` count after the tokenizer's 256-attribute cap.
+        let many: String = (0..256).map(|i| format!(" x{i}")).collect();
+        assert_eq!(html_to_text(&format!("<div{many} hidden>Hidden</div><p{many} style='display:none'>Hidden</p>Visible")), "Visible");
     }
 }

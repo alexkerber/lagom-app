@@ -301,7 +301,8 @@ impl Web {
             // Shown already: the previous message stays until this one has loaded, no flash.
             self.ready &= self.visible.get();
         }
-        self.drawable.set(self.ready && !overlay);
+        // `failed`: a late load event for the previous document must not show it again.
+        self.drawable.set(self.ready && !overlay && !self.failed);
         self.snapshot(overlay, cx);
         // Native children outside the scroll viewport must stay hidden until their slot is painted.
         self.set_visible(false);
@@ -636,6 +637,23 @@ mod tests {
             v.toast.as_mut().unwrap().1 = true;
             v.web_frame(window, cx);
             assert!(v.web.drawable.get(), "task toast must not blank the HTML body");
+        });
+    }
+
+    #[gpui::test]
+    fn late_load_after_failed_load_keeps_text(cx: &mut gpui::TestAppContext) {
+        if !supported() { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        view.update_in(cx, |v, window, cx| {
+            v.open_box(None, cx);
+            let id = v.inbox.current().unwrap();
+            v.inbox.mail[id].html = Some("<p>Too large for WebView2</p>".into());
+            v.web.shown = Some((id, v.inbox.mail[id].html.as_ref().unwrap().len(), v.inbox.mail[id].remote, v.theme.dark, v.inbox.mail[id].inline.len()));
+            v.web.failed = true;
+            // The previous message's load event arrives after this one failed.
+            Web::event(v, Msg::Loaded, window, cx);
+            v.web_frame(window, cx);
+            assert!(!v.web.drawable.get(), "a failed load must not show the previous body");
         });
     }
 
