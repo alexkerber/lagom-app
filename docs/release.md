@@ -18,13 +18,13 @@ and the steps that need a human (certificates, store accounts, secrets).
 | macOS    | `CFBundleShortVersionString` = `1.2.3`, dmg `lagom-1.2.3.dmg`                                | `CFBundleVersion` = commit time, UTC `YYYYMMDDHHMM`                     |
 | Windows  | `lagom.rc` `FILEVERSION`/`PRODUCTVERSION` = `1,2,3,0`, installer `lagom-1.2.3-windows-x64.*` | none                                                                    |
 | Linux    | package version `1.2.3`, files `lagom-1.2.3-linux-x86_64.*`                                  | none                                                                    |
-| iOS      | `MARKETING_VERSION` = `1.2.3` (pass it to `xcodebuild`, do not edit `project.yml`)           | `CURRENT_PROJECT_VERSION` = UTC minute (`release.sh` already does this) |
+| iOS      | `MARKETING_VERSION` = `1.2.3` (pass it to `xcodebuild`, do not edit `project.yml`)           | `CURRENT_PROJECT_VERSION` = UTC minute `YYYYMMDDHHMM`                   |
 | Android  | `versionName` = `LAGOM_VERSION`                                                              | `versionCode` = major×1 000 000 + minor×10 000 + patch×100 + n          |
 
 Android `n` is the pre-release number (`beta.4` gives 4) and 99 for the final release. So
 `v1.2.3-beta.4` gives 1020304 and `v1.2.3` gives 1020399, and the final release always sorts last.
 
-The Windows, Linux, iOS and Android rows are the agreed rule. Their scripts implement it in their own
+The Windows, Linux and Android rows are the agreed rule. Their scripts implement it in their own
 branches. Not verified on `main` when this page was written.
 
 ## Cut a release
@@ -124,24 +124,102 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 ## iOS and iPadOS
 
-Script: `apps/mobile/apple/release.sh [--upload]`. It builds the Rust library, archives with
-Xcode automatic signing (team `3KFU9JQ5LH`) and exports or uploads the build.
+Workflow: `.github/workflows/package-ios.yml`. Script: `apps/mobile/apple/release.sh <version> [--upload | --unsigned]`.
 
-1. Pass the version: the script must call `xcodebuild ... MARKETING_VERSION="${LAGOM_VERSION%%-*}"`.
-   Not done on `main` when this page was written.
-2. Run `apps/mobile/apple/release.sh --upload` on a Mac that is signed in to Xcode with the team.
-3. In TestFlight, test the build on an iPhone and an iPad.
-4. Submit for review in App Store Connect.
+- The script builds the Rust library, generates the Xcode project and archives the Release build. It passes
+  `MARKETING_VERSION=${LAGOM_VERSION%%-*}` and `CURRENT_PROJECT_VERSION` = the UTC minute to `xcodebuild`.
+  `project.yml` keeps development values. A pre-release `1.2.3-beta.4` ships as `1.2.3`, and TestFlight
+  tells builds apart by the build number.
+- Signing is automatic (team `3KFU9JQ5LH`): the Apple ID in Xcode, or an App Store Connect API key when
+  `LAGOM_ASC_KEY` (path to the .p8), `LAGOM_ASC_KEY_ID` and `LAGOM_ASC_ISSUER` are set.
+- Tags `v*`: archive, sign, export and upload to TestFlight.
+- `workflow_dispatch` on a tag: as a tag push. On a branch: the version is `0.0.0-dev.<sha>`, and the
+  signed .ipa is a workflow artifact. Nothing goes to TestFlight.
+- Pull requests that change Apple packaging: an unsigned archive, as a build check. Pull requests never
+  get the signing secrets.
+- Without the signing secrets the workflow archives unsigned and warns. Nothing is uploaded.
+- No OAuth secret: the iOS app has no Google or Microsoft sign-in yet.
 
-Human steps (once per app, then per release where noted):
+Local release from a Mac signed in to Xcode with the team:
 
-- Create the app record for `com.alexkerber.lagom` in App Store Connect.
-- Fill in the privacy nutrition labels. lagom collects no data; mail stays between the device and the
-  mail server.
-- Add screenshots in the sizes App Store Connect asks for (iPhone and iPad), a description, keywords, a support URL and a
-  privacy policy URL (per release when the UI changes).
-- Give App Review a test IMAP account and password in the review notes (per release).
-- Export compliance: `ITSAppUsesNonExemptEncryption` is already `false` in `project.yml`.
+```sh
+apps/mobile/apple/release.sh 1.2.3 --upload     # or without --upload: export an .ipa to apps/mobile/apple/build/export
+apps/mobile/apple/release.sh 1.2.3 --unsigned   # build check, no Apple account needed
+```
+
+Then test the build in TestFlight on an iPhone and an iPad, and submit it for review in App Store Connect.
+
+### App Store files
+
+- `apps/mobile/apple/PrivacyInfo.xcprivacy`: no tracking and no collected data. Required-reason APIs:
+  UserDefaults (`CA92.1`, `@AppStorage`) and file timestamps (`C617.1`, `stat`/`fstat`/`lstat` from Rust
+  and SQLite on files in the app container). The file says how it was measured. Measure again when a
+  dependency changes: `nm -u` on the archived binary.
+- `Info.plist` (from `project.yml`): `ITSAppUsesNonExemptEncryption` is `false` (see below).
+  `NSPhotoLibraryAddUsageDescription` covers "Save to Photos" in the attachment share sheet and on mail
+  images. Notifications need no usage string. The app asks for no photos, files, contacts, camera,
+  microphone or location access.
+- The launch screen is the `LaunchBackground` colour, the same as `Theme.background` (`#FFFFFF` light,
+  `#1E1E1E` dark), so the first frame does not flash.
+- `brand/store/app-store/`: name, subtitle, promotional text, description, keywords, URLs, age rating
+  answers, App Privacy answers and the screenshot shot list.
+
+### Export compliance
+
+The app uses TLS (rustls with ring) for IMAP, SMTP and HTTPS to the user's own servers, and the iOS
+Keychain for the password. It does not encrypt data of its own. That is standard encryption for
+communication in a mass-market app with public source, which is why `ITSAppUsesNonExemptEncryption` is
+`false`. Not verified against today's App Store Connect questionnaire: because rustls is not Apple's own
+TLS, App Store Connect can ask about "standard encryption algorithms instead of Apple's" and about
+France. If it asks for documents, set the key to `true` and add the `ITSEncryptionExportComplianceCode`
+it gives you.
+
+### GitHub secrets for iOS
+
+| Secret                          | Content                                                                                  |
+| ------------------------------- | ---------------------------------------------------------------------------------------- |
+| `IOS_DISTRIBUTION_P12`          | Base64 of the "Apple Distribution" certificate and private key, exported as .p12        |
+| `IOS_DISTRIBUTION_P12_PASSWORD` | The .p12 export password                                                                 |
+| `APP_STORE_CONNECT_KEY`         | The full text of the App Store Connect API key file `AuthKey_<id>.p8`                    |
+| `APP_STORE_CONNECT_KEY_ID`      | The API key ID (10 characters)                                                           |
+| `APP_STORE_CONNECT_ISSUER_ID`   | The issuer ID (a UUID). The same value as `APPLE_NOTARY_ISSUER_ID`.                      |
+
+Xcode creates and downloads the App Store provisioning profile itself with the API key
+(`-allowProvisioningUpdates`). No profile secret.
+
+### Human steps for iOS
+
+Once:
+
+1. In App Store Connect, create the app record for `com.alexkerber.lagom` (name, primary language
+   English (U.S.), SKU `lagom-ios`).
+2. In the Apple Developer account, create an **Apple Distribution** certificate. Export it with its
+   private key from Keychain Access as `lagom-dist.p12` with a strong password.
+3. In App Store Connect, go to Users and Access, Integrations, Team Keys. Create a key with the
+   **App Manager** role. Download the .p8 file (Apple allows one download). Note the key ID. Not
+   verified that App Manager may create the profile from CI; if step 6 fails on the profile, use **Admin**.
+4. Store the secrets:
+
+   ```sh
+   base64 -i lagom-dist.p12 | gh secret set IOS_DISTRIBUTION_P12
+   gh secret set IOS_DISTRIBUTION_P12_PASSWORD
+   gh secret set APP_STORE_CONNECT_KEY < AuthKey_XXXXXXXXXX.p8
+   gh secret set APP_STORE_CONNECT_KEY_ID --body XXXXXXXXXX
+   gh secret set APP_STORE_CONNECT_ISSUER_ID --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   ```
+
+5. Delete the local .p12 and .p8 copies, or keep them only in a password manager.
+6. Run the workflow with `workflow_dispatch` on a branch. Check that the log signs with "Apple Distribution"
+   and exports an .ipa.
+7. Put the support and privacy pages on the site (`brand/store/app-store/README.md` lists the URLs).
+8. Fill in the listing from `brand/store/app-store/`, the age rating and App Privacy ("Data Not Collected").
+   Answer the export compliance question once (see above).
+
+Per release:
+
+- Upload screenshots when the UI changes (6.9" iPhone and 13" iPad, see the shot list).
+- Give App Review a test IMAP account and password in the review notes.
+- Test the TestFlight build on an iPhone and an iPad, then submit for review.
 
 ## Android
 
@@ -190,6 +268,5 @@ Not implemented on this branch. Tracked as an open item below.
 ## Open items
 
 - [ ] Desktop: the update check described above.
-- [ ] iOS: pass `MARKETING_VERSION` from `LAGOM_VERSION` in `release.sh`.
 - [ ] Android: release signing config and `versionName`/`versionCode` from `LAGOM_VERSION`.
 - [ ] Windows and Linux: packaging workflows that follow this page.
