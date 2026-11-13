@@ -1,6 +1,8 @@
 import Foundation
 
 @MainActor final class FixtureCore: LagomCore, @unchecked Sendable {
+    override func cancelBackgroundSync() {}
+    override func backgroundSync() async throws -> [MailRow] { [] }
     override func refreshContacts(accountId: String) async throws {}
     override func suggestContacts(accountId: String, query: String) -> [ContactSuggestion] { [] }
     var attachmentCalls = 0
@@ -53,6 +55,8 @@ import Foundation
 }
 
 @MainActor final class DraftFixtureCore: LagomCore, @unchecked Sendable {
+    override func cancelBackgroundSync() {}
+    override func backgroundSync() async throws -> [MailRow] { [] }
     override func refreshContacts(accountId: String) async throws {}
     override func suggestContacts(accountId: String, query: String) -> [ContactSuggestion] { [] }
     var drafts: [String: LocalDraft] = [:]
@@ -140,6 +144,26 @@ struct ModelChecks {
     }
 
     @MainActor static func main() async throws {
+        let first = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: false, hasAttachments: false)
+        precondition(mailNotices([]).isEmpty)
+        precondition(mailNotices([first]) == [MailNotice(target: MailTarget(account: "a", message: 1), title: "sender@example.test", body: "First")])
+        var second = first; second.id = 2; second.dateUnix = 2; second.subject = "Second"
+        var named = first; named.account = "b"; named.senderName = "Sender"
+        let notices = mailNotices([first, named, second])
+        precondition(notices.count == 2 && notices[0] == MailNotice(target: MailTarget(account: "a", message: 2), title: "2 new messages", body: "Second\nFirst"))
+        precondition(notices[1].title == "Sender")
+        let notificationModel = MailModel()
+        notificationModel.mailbox = .sent; notificationModel.searchText = "old"
+        notificationModel.openNotification(MailTarget(account: "fixture", message: 42))
+        await notificationModel.changeScope()
+        precondition(notificationModel.notificationTarget != nil)
+        notificationModel.core = FixtureCore(noHandle: .init())
+        await notificationModel.changeScope()
+        precondition(notificationModel.accountID == "fixture" && notificationModel.mailbox == .inbox && notificationModel.searchText.isEmpty)
+        precondition(notificationModel.selectedID == 42 && notificationModel.notificationTarget == nil)
+        await notificationModel.select(notificationModel.selectedID)
+        precondition(notificationModel.message?.row.id == 42)
+
         precondition(recipientToken("") == "")
         precondition(recipientToken("  ") == "")
         precondition(recipientToken("An") == "An")

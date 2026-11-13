@@ -24,6 +24,34 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = { 86_400 }, now = now)
 
+    @Test fun notificationContentGroupsAccountsAndTargetsNewestMail() {
+        val first = row(1, "a").copy(senderName = "", senderAddress = "sender@example.test", subject = "First", dateUnix = 1)
+        assertTrue(mailNotices(emptyList()).isEmpty())
+        assertEquals(listOf(MailNotice(MailTarget("a", 1), "sender@example.test", "First")), mailNotices(listOf(first)))
+        val named = first.copy(account = "b", senderName = "Sender")
+        assertEquals("Sender", mailNotices(listOf(named)).single().title)
+        val second = first.copy(id = 2, dateUnix = 2, subject = "Second")
+        val third = second.copy(id = 3, subject = "Third")
+        val fourth = third.copy(id = 4, subject = "Fourth")
+        val notices = mailNotices(listOf(first, named, second, fourth, third))
+        assertEquals(2, notices.size)
+        assertEquals(MailNotice(MailTarget("a", 4), "4 new messages", "Fourth\nThird\nSecond"), notices[0])
+    }
+
+    @Test fun notificationSelectsAccountAndMessageOutsideCurrentSearchAndMailbox() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(42, "second")) }
+        val model = model(core)
+        model.start()
+        model.changeScope("fixture", Mailbox.SENT)
+        model.changeSearch("old search")
+        model.openNotification(MailTarget("second", 42))
+        assertEquals("second", model.accountId)
+        assertEquals(Mailbox.INBOX, model.mailbox)
+        assertEquals("", model.searchText)
+        assertEquals(42L, model.selectedId)
+        assertEquals(42L, model.message?.row?.id)
+    }
+
     @Test fun recipientTokensUseDesktopBoundariesAndPreserveEarlierAddresses() {
         assertEquals("", recipientToken(""))
         assertEquals("", recipientToken("  "))
@@ -242,6 +270,17 @@ class MailModelTest {
         assertTrue(model.rows.isEmpty())
         assertEquals("other", model.accountId)
         assertEquals(Mailbox.SENT, model.mailbox)
+    }
+    @Test fun notificationDoesNotOverrideNavigationDuringItsReload() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(42, "second")) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.pageGate = gate
+        val open = async { model.openNotification(MailTarget("second", 42)) }; runCurrent()
+        core.pageGate = null
+        model.changeScope("second", Mailbox.SENT)
+        model.changeScope("second", Mailbox.INBOX)
+        gate.complete(Unit); open.await()
+        assertNull(model.selectedId)
     }
     @Test fun staleReloadCannotReplaceNewScope() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1)) }
@@ -720,6 +759,8 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun inbox(limit: UInt, offset: UInt) = mailbox(null, Mailbox.INBOX, limit, offset)
     override suspend fun nextSnooze() = due
     override suspend fun sendFailures() = emptyList<SendFailure>()
+    override fun cancelBackgroundSync() {}
+    override suspend fun backgroundSync(): List<MailRow> { syncAll(); return emptyList() }
     override suspend fun syncAll() { syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
     override suspend fun sync(accountId: String) = syncAll()
     override suspend fun message(id: Long): MailMessage {

@@ -947,3 +947,77 @@ async fn first_reply_save_survives_deleted_parent() {
     core.delete_draft(id.clone()).await.unwrap();
     assert!(matches!(core.local_draft(id).await, Err(MailError::NotFound)));
 }
+
+#[tokio::test]
+async fn background_sync_reports_new_unseen_mail_once_and_survives_a_locked_account() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
+        let locked = fixture_account(&core.stores.local.lock().unwrap(), "a-locked@example.test", 1);
+        locked.delete_password().unwrap();
+        let server = tokio::spawn(async move {
+            for (count, validity) in [(1, 7), (3, 7), (3, 7), (4, 8)] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                    let mut data = String::new();
+                    if cmd.starts_with("LOGIN ") {}
+                    else if cmd == "CAPABILITY" { data += "* CAPABILITY IMAP4rev1\r\n"; }
+                    else if cmd.starts_with("LIST ") { data += "* LIST () NIL \"INBOX\"\r\n"; }
+                    else if cmd.starts_with("SELECT ") {
+                        data += &format!("* {count} EXISTS\r\n* OK [UIDVALIDITY {validity}] valid\r\n* OK [UIDNEXT {}] next\r\n", count + 1);
+                    } else if cmd == "UID SEARCH ALL" {
+                        data += &format!("* SEARCH {}\r\n", (1..=count).map(|uid| uid.to_string()).collect::<Vec<_>>().join(" "));
+                    } else if let Some(rest) = cmd.strip_prefix("UID FETCH ") {
+                        let (set, items) = rest.split_once(' ').unwrap();
+                        for uid in set.split(',').map(|uid| uid.parse::<u32>().unwrap()) {
+                            let flags = if uid == 3 { "\\Seen" } else { "" };
+                            if items.contains("BODYSTRUCTURE") {
+                                let header = format!("From: Sender <sender@example.test>\r\nSubject: Mail {uid}\r\nMessage-ID: <{uid}@example.test>\r\nContent-Type: text/plain\r\n\r\n");
+                                data += &format!("* {uid} FETCH (UID {uid} FLAGS ({flags}) RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len());
+                            } else if items.contains("BODY.PEEK[TEXT]") {
+                                data += &format!("* {uid} FETCH (UID {uid} BODY[TEXT] {{4}}\r\nbody)\r\n");
+                            } else {
+                                assert_eq!(items, "(UID FLAGS)");
+                                data += &format!("* {uid} FETCH (UID {uid} FLAGS ({flags}))\r\n");
+                            }
+                        }
+                    } else if cmd == "LOGOUT" { data += "* BYE bye\r\n"; }
+                    else { panic!("unexpected command {cmd}"); }
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                    if cmd == "LOGOUT" { break; }
+                }
+            }
+        });
+        // The foreground sync makes the Inbox known; background sync only refreshes known Inboxes.
+        let _ = core.sync_all().await;
+        let rows = core.background_sync().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].account.as_str(), rows[0].subject.as_str(), rows[0].unread), (a.id.as_str(), "Mail 2", true));
+        assert_eq!(core.inbox(10, 0).await.unwrap().len(), 3, "seen mail still syncs");
+        assert!(core.background_sync().await.unwrap().is_empty(), "no duplicate notice");
+        assert!(core.background_sync().await.unwrap().is_empty(), "UIDVALIDITY reset is silent");
+        server.await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_background_handle_never_connects() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+        mail(&mut s, &a, 1, now());
+    }
+    // Swift may cancel before the call is polled; the handle stays cancelled.
+    core.cancel_background_sync();
+    assert!(core.background_sync().await.unwrap().is_empty());
+    assert!(core.background_sync().await.unwrap().is_empty());
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await.is_err(), "no IMAP connection");
+}

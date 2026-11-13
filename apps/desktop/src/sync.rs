@@ -937,7 +937,7 @@ impl Worker {
         if before.role != FolderRole::Inbox { return Ok(()); }
         let after = self.store.folder(before.id)?;
         let messages = self.store.messages_since(before.id, before.last_uid)?;
-        let messages = crate::notifications::new_mail(before, &after, messages);
+        let messages = lagom_core::new_mail::new_mail(before, &after, messages);
         if !messages.is_empty() { self.emit(Event::NewMail(messages)); }
         Ok(())
     }

@@ -2,7 +2,8 @@ import SwiftUI
 
 @main
 struct LagomApp: App {
-    @State private var model = MailModel()
+    @UIApplicationDelegateAdaptor(MailAppDelegate.self) private var delegate
+    private var model: MailModel { delegate.model }
     @State private var planner = PlannerModel()
     @Environment(\.scenePhase) private var phase
 
@@ -10,7 +11,12 @@ struct LagomApp: App {
         WindowGroup {
             RootView(model: model, planner: planner)
                 .tint(Theme.accent)
-                .task { await model.start() }
+                .task(id: phase) {
+                    guard phase == .active else { return }
+                    await model.start()
+                    await delegate.requestPermission()
+                }
+                .task(id: model.accounts.isEmpty) { await delegate.requestPermission() }
                 // Local tasks and events load as soon as the store opens, not after the first sync.
                 .task(id: model.core == nil) {
                     guard let core = model.core else { return }
@@ -18,7 +24,7 @@ struct LagomApp: App {
                     await planner.reload()
                 }
                 .onChange(of: phase) { _, phase in
-                    // shortcut: foreground/local sync only in v1; add BGAppRefreshTask before background fetch or push.
+                    if phase == .background { MailAppDelegate.schedule() }
                     Task {
                         await model.setForeground(phase == .active)
                         if phase == .active { await planner.reload() }
