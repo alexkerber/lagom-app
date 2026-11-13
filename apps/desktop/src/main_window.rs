@@ -24,7 +24,7 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, CloseWindow, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, CloseWindow, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo, ShowShortcuts]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("secondary-w", CloseWindow, None)]);
@@ -69,6 +69,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewMessage, ctx),
         KeyBinding::new("c", NewMessage, keys),
         KeyBinding::new("secondary-,", OpenSettings, ctx),
+        KeyBinding::new("secondary-/", ShowShortcuts, ctx),
         KeyBinding::new("alt-secondary-s", ToggleSidebar, ctx),
         KeyBinding::new("escape", Cancel, keys),
         KeyBinding::new("tab", crate::text_input::FocusNext, Some("Settings && !TextInput")),
@@ -126,6 +127,18 @@ mod polish;
 pub(crate) use polish::action_icon;
 mod panes;
 use panes::{default_list, Panes, StartPage, SIDEBAR_DEFAULT};
+
+/// The main window's frame from last time and its display, if that display is still connected
+/// and holds most of the frame.
+pub fn saved_window(cx: &App) -> Option<(gpui::WindowBounds, gpui::DisplayId)> {
+    let path = Store::default_path().ok()?.with_file_name("window.json");
+    let saved = panes::Writes::load(&path, 1440., cx).ok()?.window?;
+    let display = match saved.display {
+        Some(id) => cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.as_u128() == id))?,
+        None => cx.primary_display()?,
+    };
+    Some((saved.bounds(display.bounds(), MIN_WINDOW)?, display.id()))
+}
 
 #[derive(Clone, Copy)]
 enum Divider { Sidebar, List }
@@ -331,6 +344,7 @@ pub struct MainWindow {
     confirm_empty_trash: bool,
     folder_name: Option<Entity<TextInput>>,
     folder_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
     sidebar_mail: bool,
     sidebar_fade: Option<Instant>,
@@ -362,6 +376,9 @@ pub struct MainWindow {
     popouts: Vec<(usize, gpui::WindowHandle<MessageWindow>)>,
     _appearance: gpui::Subscription,
     _activation: gpui::Subscription,
+    _bounds: gpui::Subscription,
+    /// The pending write of a moved or resized window frame.
+    bounds_save: Option<gpui::Task<()>>,
 }
 
 impl MainWindow {
@@ -454,6 +471,7 @@ impl MainWindow {
             confirm_empty_trash: false,
             folder_name: None,
             folder_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
             sidebar_mail: false,
             sidebar_fade: None,
@@ -478,6 +496,22 @@ impl MainWindow {
             popouts: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            _bounds: cx.observe_window_bounds(window, |this, window, cx| {
+                // macOS reports the frame relative to its display, so the display goes with it.
+                // X11 gives every display the nil id; that falls back to the primary display.
+                // shortcut: separate X11 screens reopen on the primary one, key on DisplayId if anyone runs that.
+                let display = window.display(cx).and_then(|d| d.uuid().ok()).filter(|u| !u.is_nil()).map(|u| u.as_u128());
+                let Some(saved) = panes::SavedWindow::from_bounds(window.window_bounds(), display) else { return };
+                if this.preferences_path.is_none() || this.panes.window == Some(saved) { return; }
+                this.panes.window = Some(saved);
+                // Live resizing reports every frame; write once the window settles.
+                // shortcut: a quit within the delay keeps the previous frame, flush in hold_exit if that bites.
+                this.bounds_save = Some(cx.spawn(async |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    this.update(cx, |this, cx| this.save_panes(cx)).ok();
+                }));
+            }),
+            bounds_save: None,
         };
         if let Some(problem) = problem.or(preference_problem) {
             this.notify(problem, cx);
@@ -516,6 +550,7 @@ impl MainWindow {
                 this.open_box(first, cx);
             }
             "settings" => this.set_page(Page::Settings(None), cx),
+            "shortcuts" => this.show_shortcuts(window, cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
@@ -670,6 +705,7 @@ impl MainWindow {
             Run::Sync => self.sync_now(),
             Run::Settings => self.open_settings(window, cx),
             Run::AddAccount => self.add_account(window, cx),
+            Run::Shortcuts => self.show_shortcuts(window, cx),
             Run::Open(id) => self.open_found(id, cx),
         }
     }
@@ -1447,7 +1483,7 @@ impl MainWindow {
         let Some(resize) = self.resize.as_mut() else { return };
         if x == resize.start_x && !resize.moved { return; }
         resize.moved = true;
-        self.panes = Panes { start_page: self.panes.start_page, ..resize.start_panes };
+        self.panes = Panes { start_page: self.panes.start_page, window: self.panes.window, ..resize.start_panes };
         let width = resize.start_width + f32::from(x - resize.start_x);
         let viewport = f32::from(window.viewport_size().width);
         match resize.divider {
@@ -2068,9 +2104,17 @@ impl MainWindow {
                             .flex_col()
                             .min_w(px(0.))
                             .child(div().font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
-                            .child(div().flex().items_center().gap(px(6.))
+                            .child(div().id("sync-status").flex().items_center().gap(px(6.))
                                 .child(icon(self.sync_icon(), t.ink2, 16.))
-                                .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}")))),
+                                .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}")))
+                                // A failed sync says why on hover and tries again on click.
+                                .when_some(self.sync_error(), |d, error| {
+                                    let theme = *t;
+                                    let tip: SharedString = format!("{}. Click to try again.", error.trim_end_matches('.')).into();
+                                    d.cursor_pointer()
+                                        .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.clone())).into())
+                                        .on_click(cx.listener(|this, _, _, cx| { this.sync_now(); cx.notify(); }))
+                                })),
                     )
                     .child(if self.inbox.open_kind() == Some(Kind::Trash) {
                         let controls = div().flex().gap(px(8.));
@@ -2417,6 +2461,7 @@ impl Render for MainWindow {
                     names: &self.names,
                     signatures: &self.signatures,
                     password: self.new_password.as_ref(),
+                    scroll: &self.settings_scroll,
                 }, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.
@@ -2496,6 +2541,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &NewMessage, window, cx| if !this.overlay_open(cx) { this.open_compose(false, window, cx) }))
             .on_action(cx.listener(|this, _: &OpenInWindow, window, cx| if !this.overlay_open(cx) { this.open_popout(window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(window, cx) }))
+            .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| if this.palette.is_none() && this.compose.is_none() { this.show_shortcuts(window, cx) }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
                 this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
@@ -4170,7 +4216,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true, start_page: StartPage::Mail };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true, start_page: StartPage::Mail, window: None };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();
@@ -4187,7 +4233,8 @@ mod dispatch {
             cx.simulate_mouse_down(at, MouseButton::Left, Default::default());
             cx.simulate_mouse_move(at, MouseButton::Left, Default::default());
             cx.simulate_mouse_up(at, MouseButton::Left, Default::default());
-            assert_eq!(view.read_with(cx, |v, _| v.panes), panes);
+            // The resize above records the window frame; the dividers must leave the rest alone.
+            assert_eq!(view.read_with(cx, |v, _| Panes { window: None, ..v.panes }), panes);
             assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
         }
         std::fs::remove_file(path).unwrap();
@@ -4578,6 +4625,19 @@ mod dispatch {
                 v.compose = None;
             }
         });
+    }
+
+    #[gpui::test]
+    fn shortcut_key_opens_settings_at_the_keyboard_shortcuts(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        cx.simulate_keystrokes("secondary-/");
+        frame(cx);
+        frame(cx);
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        let list = cx.debug_bounds("keyboard-shortcuts").expect("shortcut list");
+        let height = cx.update(|window, _| window.viewport_size().height);
+        // Scrolled to the end: the list's bottom is inside the window, not below it.
+        assert!(list.bottom() <= height, "{list:?} in {height:?}");
     }
 
     #[gpui::test]

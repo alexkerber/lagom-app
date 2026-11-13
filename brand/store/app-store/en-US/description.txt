@@ -1,0 +1,23 @@
+lagom (LAH-gom) is Swedish for not too much, not too little. Just right.
+
+lagom is an email app that only does email. It has one job: to get you back to an empty inbox.
+
+THREE BUTTONS
+Done, Reply and Later. Done archives the message. Later brings it back when you have time. The list says how many are left, so you know when you are done.
+
+ONE INBOX
+Read all your accounts in one list, or one account at a time. Inbox, Later, Done, Sent, Drafts and Trash are always close. Search finds mail in every account.
+
+WRITING
+Reply, Reply all and Forward. Write in plain text or Markdown. Drafts save as you type. Undo send gives you a moment to change your mind.
+
+YOUR DAY
+Today shows unread mail and what is next. Todo keeps simple lists on your phone.
+
+PRIVATE BY DEFAULT
+Your mail stays on your phone and your mail server. lagom has no account, no tracking and no ads. Remote images in mail are blocked until you load them. Passwords stay in the iOS Keychain.
+
+WORKS WITH YOUR MAIL
+Any IMAP and SMTP account. Gmail and iCloud work with an app-specific password.
+
+iPhone and iPad. Light and dark. Open source under the MIT licence. Made in Sweden.

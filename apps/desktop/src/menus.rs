@@ -8,7 +8,7 @@ use crate::main_window::CloseWindow;
 
 actions!(
     lagom,
-    [Quit, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen, OpenRepository]
+    [Quit, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen, OpenRepository, About]
 );
 
 const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
@@ -28,6 +28,7 @@ pub fn init(cx: &mut App) {
         }
         cx.quit();
     });
+    cx.on_action(|_: &About, _| crate::icon::about());
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -48,6 +49,8 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "lagom".into(),
             items: vec![
+                MenuItem::action("About lagom", About),
+                MenuItem::separator(),
                 MenuItem::action("Settings…", crate::main_window::OpenSettings),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -81,6 +84,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("New Message", crate::main_window::NewMessage),
                 MenuItem::action("Open in New Window", crate::main_window::OpenInWindow),
                 MenuItem::action("Reply", crate::main_window::Reply),
+                MenuItem::action("Mark Read or Unread", crate::main_window::ToggleRead),
                 MenuItem::action("Delete", crate::main_window::DeleteMessage),
                 MenuItem::separator(),
                 MenuItem::action("Command Palette", crate::main_window::OpenPalette),
@@ -89,6 +93,11 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Today", crate::main_window::ShowHome),
+                MenuItem::action("Mail", crate::main_window::ShowMail),
+                MenuItem::action("Calendar", crate::main_window::ShowCalendar),
+                MenuItem::action("Todo", crate::main_window::ShowTodo),
+                MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", crate::main_window::ToggleSidebar),
                 MenuItem::separator(),
                 MenuItem::action("Enter Full Screen", ToggleFullScreen),
@@ -98,7 +107,13 @@ pub fn init(cx: &mut App) {
             name: "Window".into(),
             items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)],
         },
-        Menu { name: "Help".into(), items: vec![MenuItem::action("lagom on GitHub", OpenRepository)] },
+        Menu {
+            name: "Help".into(),
+            items: vec![
+                MenuItem::action("Keyboard Shortcuts", crate::main_window::ShowShortcuts),
+                MenuItem::action("lagom on GitHub", OpenRepository),
+            ],
+        },
     ]);
 }
 

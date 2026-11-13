@@ -18,7 +18,8 @@ profile=${LAGOM_NOTARY_PROFILE:-lagom-notary}
 out=target/macos
 app=$out/lagom.app
 dmg=$out/lagom-$version.dmg
-targets=(aarch64-apple-darwin x86_64-apple-darwin)
+# Releases are universal. LAGOM_MAC_TARGETS=aarch64-apple-darwin gives a local build on a Mac without the Intel Rust target.
+read -ra targets <<< "${LAGOM_MAC_TARGETS:-aarch64-apple-darwin x86_64-apple-darwin}"
 
 # The single version source for code that needs it (option_env!), see docs/release.md.
 export LAGOM_VERSION=$version
@@ -35,8 +36,10 @@ done
 
 rm -rf "$out"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-lipo -create -output "$app/Contents/MacOS/lagom" target/aarch64-apple-darwin/release/lagom target/x86_64-apple-darwin/release/lagom
-lipo "$app/Contents/MacOS/lagom" -verify_arch arm64 x86_64
+binaries=()
+for target in "${targets[@]}"; do binaries+=("target/$target/release/lagom"); done
+lipo -create -output "$app/Contents/MacOS/lagom" "${binaries[@]}"
+[[ -n ${LAGOM_MAC_TARGETS:-} ]] || lipo "$app/Contents/MacOS/lagom" -verify_arch arm64 x86_64
 cp brand/app-icon/export/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 # The bundle version is the commit time, so rebuilding one commit gives the same Info.plist.
 build_number=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M)

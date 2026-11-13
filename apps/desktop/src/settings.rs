@@ -35,6 +35,8 @@ pub struct Data<'a> {
     pub names: &'a HashMap<String, Entity<TextInput>>,
     pub signatures: &'a HashMap<String, Entity<TextInput>>,
     pub password: Option<&'a NewPassword>,
+    /// Keyboard shortcuts scrolls it to the end.
+    pub scroll: &'a gpui::ScrollHandle,
 }
 
 /// A new password on its way to the provider.
@@ -92,10 +94,13 @@ pub fn view(t: &Theme, d: Data, cx: &mut Context<MainWindow>) -> Div {
     div().flex_1().min_w(px(0.)).flex().child(
         div()
             .id("settings-page")
+            .track_scroll(d.scroll)
             .flex_1()
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            // Content keeps its own height, so a long page scrolls instead of overflowing.
+            .items_start()
             .px(px(24.))
             .py(px(32.))
             .rounded(px(radius::PANEL))
@@ -160,6 +165,25 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .child(accounts)
         .child(general)
         .children(lists)
+        .child(shortcuts(t))
+        // The About equivalent on every platform; macOS also has About lagom in the menu bar.
+        .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(format!("lagom {}", option_env!("LAGOM_VERSION").unwrap_or("development build"))))
+}
+
+/// Every shortcut, grouped, with the keys this platform uses.
+fn shortcuts(t: &Theme) -> Div {
+    div().debug_selector(|| "keyboard-shortcuts".into()).flex().flex_col().gap(px(12.))
+        .child(section(t, "Keyboard shortcuts", Some("Single keys work when you are not typing in a field.")))
+        .children(crate::shortcuts::LIST.iter().map(|(group, rows)| {
+            plate(t).px(px(14.)).py(px(6.))
+                .child(div().py(px(4.)).text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).text_color(t.ink2).child(*group))
+                .children(rows.iter().map(|(label, chords)| {
+                    div().flex().items_center().justify_between().gap(px(12.)).min_h(px(28.))
+                        .child(div().min_w(px(0.)).one_line().child(*label))
+                        .child(div().flex().flex_shrink_0().gap(px(4.))
+                            .children(chords.iter().map(|c| crate::command_palette::key_cap(t, crate::shortcuts::label(c), false))))
+                }))
+        }))
 }
 
 fn account_page(t: &Theme, d: &Data, ix: usize, cx: &mut Context<MainWindow>) -> Div {

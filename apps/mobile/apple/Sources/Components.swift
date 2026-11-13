@@ -82,15 +82,33 @@ struct IconButton: View {
     }
 }
 
-/// The filled count on Mail in the sidebar and the bar.
+/// The filled count on Mail in the sidebar and the bar. Numbers roll, they do not jump.
 struct Badge: View {
     let count: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Text("\(count)").lagomFont(.small, .semibold).monospacedDigit()
+            .contentTransition(.numericText(value: Double(count)))
+            .animation(reduceMotion ? nil : Motion.fade, value: count)
             .foregroundStyle(Theme.accentInk)
             .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
             .background(Theme.accent, in: Capsule())
+    }
+}
+
+/// A spinner that appears only once a wait passes `Motion.calm`, so a quick load never flashes it.
+struct CalmProgress: View {
+    let label: String
+    @State private var shown = false
+
+    var body: some View {
+        ProgressView().accessibilityLabel(label)
+            .opacity(shown ? 1 : 0)
+            .task {
+                guard (try? await Task.sleep(for: Motion.calm)) != nil else { return }
+                withAnimation(Motion.fade) { shown = true }
+            }
     }
 }
 
@@ -131,16 +149,23 @@ struct Heading: View {
     }
 }
 
-/// The desktop's empty pages: a large line icon over a quiet line, and an optional action.
+/// The desktop's empty pages: a large line icon, or the desktop's line illustration, over a quiet
+/// line, and an optional action.
 struct EmptyState<Action: View>: View {
     let icon: String
     let title: String
     var detail: String? = nil
+    var illustration: String? = nil
     @ViewBuilder var action: Action
 
     var body: some View {
         VStack(spacing: 10) {
-            Icon(icon, size: 36).foregroundStyle(Theme.secondary)
+            if let illustration {
+                Image(illustration).resizable().scaledToFit().frame(maxWidth: 240)
+                    .foregroundStyle(Theme.ink).padding(.bottom, 12).accessibilityHidden(true)
+            } else {
+                Icon(icon, size: 36).foregroundStyle(Theme.secondary)
+            }
             Text(title).lagomFont(.base, .semibold).foregroundStyle(Theme.ink)
             if let detail {
                 Text(detail).lagomFont(.snippet).foregroundStyle(Theme.secondary)
@@ -154,20 +179,23 @@ struct EmptyState<Action: View>: View {
 }
 
 extension EmptyState where Action == EmptyView {
-    init(icon: String, title: String, detail: String? = nil) {
-        self.init(icon: icon, title: title, detail: detail) { EmptyView() }
+    init(icon: String, title: String, detail: String? = nil, illustration: String? = nil) {
+        self.init(icon: icon, title: title, detail: detail, illustration: illustration) { EmptyView() }
     }
 }
 
 /// All / Unread, the desktop list header's filter: icons and labels in a small segmented well.
 struct FilterControl: View {
     @Binding var unreadOnly: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
             segment("All", icon: "filter-all", unread: false)
             segment("Unread", icon: "unread", unread: true)
         }
+        // The highlight moves in 140 ms ease-out, as the desktop selection; at once under Reduce Motion.
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: unreadOnly)
         .padding(2)
         .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
@@ -245,10 +273,12 @@ struct SheetScaffold<Content: View, Footer: View>: View {
 struct FieldRow<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
+    // Grows with the label's text style, so "Subject" never clips at large Dynamic Type sizes.
+    @ScaledMetric(relativeTo: .footnote) private var labelWidth: CGFloat = 64
 
     var body: some View {
         HStack(spacing: 16) {
-            Text(label).lagomFont(.small).foregroundStyle(Theme.secondary).frame(width: 64, alignment: .leading)
+            Text(label).lagomFont(.small).foregroundStyle(Theme.secondary).frame(width: labelWidth, alignment: .leading)
                 .accessibilityHidden(true)
             content.lagomFont(.base).frame(maxWidth: .infinity, alignment: .leading)
         }
