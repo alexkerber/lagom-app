@@ -68,15 +68,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        # Same rule as package-macos.yml: the first platform creates the draft, a human publishes it.
-        # release-draft.yml creates the draft at tag push; this create is the fallback.
-        run: |
-          prerelease=()
-          [[ $TAG != *-* ]] || prerelease=(--prerelease)
-          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
-            # A rerun must not swap files under a release people already download.
-            [[ $draft == true ]] || { echo "::error::$TAG is published; upload by hand if you mean it."; exit 1; }
-          else
-            gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag --title "lagom ${TAG#v}" --generate-notes
-          fi
-          gh release upload "$TAG" target/windows/lagom-*-setup.exe --clobber
+        # release-draft.yml creates the draft; a human publishes it after docs/release.md.
+        run: scripts/upload-release.sh "$TAG" target/windows/lagom-*-setup.exe

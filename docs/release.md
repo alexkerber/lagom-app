@@ -35,7 +35,7 @@ branches. Not verified on `main` when this page was written.
 4. Each desktop packaging workflow builds on the tag and uploads its files to one **draft** GitHub
    release. The first workflow to finish creates the draft.
 5. Download every file from the draft. Install and open each one on a clean machine or account.
-6. Check that the tag has one draft with every platform's files. `release-draft.yml` creates it at tag push; a second draft only appears if that job failed. Write the release notes and publish the draft. Publishing makes it the "latest" release.
+6. Check that the tag has one draft with every platform's files. Only `release-draft.yml` creates it, at tag push; the platform uploads wait for it (`scripts/upload-release.sh`). Write the release notes and publish the draft. Publishing makes it the "latest" release.
 7. Upload the iOS and Android builds to the stores (see below). Store review takes one to several days.
 
 ### Before you tag
@@ -108,7 +108,7 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 - Build the installer on `windows-latest` from the tag. Set `FILEVERSION`/`PRODUCTVERSION` in
   `apps/desktop/lagom.rc` from `LAGOM_VERSION` at build time.
-- Upload to the same draft release with `gh release upload --clobber`. Create the draft when it is missing and stop when the release is already published,
+- Upload to the same draft release with `scripts/upload-release.sh` (it waits for the draft from `release-draft.yml`) and stop when the release is already published,
   as `package-macos.yml` does.
 - Human step: get a code signing service. Azure Trusted Signing (Artifact Signing) is the cheapest
   route for an individual. An OV or EV certificate on a hardware token also works. Unsigned installers

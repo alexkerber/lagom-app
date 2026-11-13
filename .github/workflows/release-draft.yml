@@ -1,5 +1,5 @@
-# Creates the draft release the moment a v* tag is pushed. The platform builds take minutes, so
-# they find this draft and only upload; their own create step stays as a fallback.
+# The only job that creates a release: a draft, the moment a v* tag is pushed. The platform
+# workflows wait for it in scripts/upload-release.sh and only upload, so they cannot make two.
 name: Release draft
 
 on:
