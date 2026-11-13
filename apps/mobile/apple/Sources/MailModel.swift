@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UniformTypeIdentifiers
 
 enum MailboxChoice: String, CaseIterable, Identifiable {
     case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", trash = "Trash", drafts = "Drafts"
@@ -28,6 +29,19 @@ func safeAttachmentName(_ filename: String) -> String {
     let clean = String(String.UnicodeScalarView(component.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
     let name = String(clean.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
     return name.isEmpty || name == "." || name == ".." ? "attachment" : name
+}
+
+/// Total size above which compose shows a one-line warning; many servers refuse mail near 25 MB.
+let attachmentWarningBytes = 20 * 1024 * 1024
+
+/// Reads a picked file; callers run it off the main thread. Files app URLs are security scoped.
+// shortcut: reads the whole file into memory with no cap, add a hard limit if people pick very large videos.
+func readAttachment(_ url: URL) throws -> SendAttachment {
+    let scoped = url.startAccessingSecurityScopedResource()
+    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+    let data = try Data(contentsOf: url)
+    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+    return SendAttachment(filename: safeAttachmentName(url.lastPathComponent), mimeType: mime, data: data)
 }
 
 // Same boundaries as core split_recipients; desktop keeps the unfinished token in its input.
@@ -69,6 +83,7 @@ struct ComposeDraft: Identifiable, Equatable {
     var restored = false
     var isReply = false
     var hasContent: Bool { !to.isEmpty || !cc.isEmpty || !subject.isEmpty || !body.isEmpty || !attachments.isEmpty }
+    var attachmentsTooLarge: Bool { attachments.reduce(0) { $0 + $1.data.count } > attachmentWarningBytes }
 
     init(account: String, email: String = "") { self.account = account; messageID = draftMessageID(email: email) }
     init(reply: ReplyDraft, kind: ComposeKind = .reply, email: String = "") {

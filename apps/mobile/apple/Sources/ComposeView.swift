@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 /// The desktop compose sheet: From, To, Cc and Subject lines, the body, and Send with a word count.
@@ -12,6 +13,10 @@ struct ComposeView: View {
     @FocusState private var addressFocus: String?
     // Suggestions follow the caret: editing an earlier recipient must not complete the last one.
     @State private var addressSelection: [String: TextSelection] = [:]
+    @State private var pickingFiles = false
+    @State private var pickingPhotos = false
+    @State private var photos: [PhotosPickerItem] = []
+    @State private var attaching = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -40,7 +45,8 @@ struct ComposeView: View {
                         .foregroundStyle(Theme.ink)
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                     }
-                    .disabled(draft.isReply || draft.restored)
+                    // Changing sender mid-read would race the pending files.
+                    .disabled(draft.isReply || draft.restored || attaching)
                     .accessibilityLabel("From")
                     .accessibilityValue(from)
                 }
@@ -52,12 +58,29 @@ struct ComposeView: View {
                 FieldRow(label: "Subject") {
                     TextField("Subject", text: binding(\.subject), prompt: Text("")).fontWeight(.semibold).accessibilityLabel("Subject")
                 }
-                if !draft.attachments.isEmpty {
-                    HStack(spacing: 6) {
-                        Icon("attachment", size: 16).foregroundStyle(Theme.secondary)
-                        Text(draft.attachments.map(\.filename).joined(separator: ", ")).lagomFont(.small).lineLimit(2)
+                if !draft.attachments.isEmpty || attaching {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(Array(draft.attachments.enumerated()), id: \.offset) { index, file in
+                                HStack(spacing: 2) {
+                                    Icon("attachment", size: 16).foregroundStyle(Theme.secondary)
+                                    Text(file.filename).lagomFont(.small).lineLimit(1).truncationMode(.middle).frame(maxWidth: 180)
+                                    IconButton(title: "Remove \(file.filename)", icon: "close") {
+                                        draft.attachments.remove(at: index)
+                                        model.composeDraft = draft
+                                    }
+                                }
+                                .padding(.leading, 10)
+                                .background(Theme.subtle, in: Capsule())
+                            }
+                            if attaching { ProgressView().accessibilityLabel("Adding attachments") }
+                        }
+                        .padding(.vertical, 6)
                     }
-                    .padding(.vertical, 8).frame(maxWidth: .infinity, alignment: .leading)
+                    if draft.attachmentsTooLarge {
+                        Text("Over 20 MB. Some mail servers refuse mail this large.").lagomFont(.small).foregroundStyle(Theme.secondary)
+                            .lineLimit(1).minimumScaleFactor(0.8).frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 6)
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -85,7 +108,15 @@ struct ComposeView: View {
                     } catch { self.error = error.localizedDescription }
                 }
             }
-            .disabled(sending || (draft.to.isEmpty && draft.cc.isEmpty) || draft.account.isEmpty)
+            .disabled(sending || attaching || (draft.to.isEmpty && draft.cc.isEmpty) || draft.account.isEmpty)
+            Menu {
+                Button("Files") { pickingFiles = true }
+                Button("Photos") { pickingPhotos = true }
+            } label: {
+                Icon("attachment").foregroundStyle(Theme.secondary).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            }
+            .disabled(attaching)
+            .accessibilityLabel("Attach")
             if sending { CalmProgress(label: "Sending") }
             Spacer(minLength: 0)
             if let error {
@@ -93,6 +124,26 @@ struct ComposeView: View {
             } else {
                 let words = draft.body.split(whereSeparator: \.isWhitespace).count
                 Text(words == 1 ? "1 word" : "\(words) words").lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+            }
+        }
+        .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): attach { try await Task.detached { try urls.map(readAttachment) }.value }
+            case .failure(let failure): error = failure.localizedDescription
+            }
+        }
+        .photosPicker(isPresented: $pickingPhotos, selection: $photos, matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
+        .onChange(of: photos) {
+            let items = photos
+            guard !items.isEmpty else { return }
+            photos = []
+            attach {
+                var files: [SendAttachment] = []
+                for item in items {
+                    guard let file = try await item.loadTransferable(type: PickedFile.self) else { throw CocoaError(.fileReadUnknown) }
+                    files.append(file.attachment)
+                }
+                return files
             }
         }
         .onDisappear { model.composeDisappeared(draft) }
@@ -127,6 +178,20 @@ struct ComposeView: View {
                 try await model.closeCompose(discard: discard)
                 dismiss()
             } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private func attach(_ read: @escaping () async throws -> [SendAttachment]) {
+        attaching = true
+        Task {
+            defer { attaching = false }
+            do {
+                let files = try await read()
+                // The sheet may have closed while reading; adding then would reopen it.
+                guard model.composeDraft?.id == draft.id else { return }
+                draft.attachments += files
+                model.composeDraft = draft
+            } catch { self.error = "Could not add the attachment: \(error.localizedDescription)" }
         }
     }
 
@@ -181,5 +246,14 @@ struct ComposeView: View {
                 .frame(minHeight: 44, maxHeight: CGFloat(matches.count) * 44)
             }
         }
+    }
+}
+
+/// A picked photo or video, read from the file the picker hands over so it keeps its name and type.
+private struct PickedFile: Transferable {
+    let attachment: SendAttachment
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { PickedFile(attachment: try readAttachment($0.file)) }
+        FileRepresentation(importedContentType: .movie) { PickedFile(attachment: try readAttachment($0.file)) }
     }
 }
