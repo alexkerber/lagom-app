@@ -47,6 +47,25 @@ enum Theme {
     }
 }
 
+/// docs/motion.md on iOS: a spring where something moves and lands, ease-out for fades, and under
+/// Reduce Motion nothing travels, it only fades.
+enum Motion {
+    /// `motion::spring`: damping 0.85 (under 1 % overshoot), the desktop's 280 ms.
+    static let spring = Animation.spring(duration: 0.28, bounce: 0.15)
+    static let fade = Animation.easeOut(duration: 0.15)
+    /// `motion::CALM`: a loading note waits this long, so a quick load never flashes it.
+    static let calm = Duration.milliseconds(150)
+
+    /// The spring, or a fade under Reduce Motion.
+    static func move(_ reduce: Bool) -> Animation { reduce ? fade : spring }
+    /// Slides in from `edge` and fades, or only fades under Reduce Motion.
+    static func slide(_ edge: Edge, _ reduce: Bool) -> AnyTransition {
+        reduce ? .opacity : .move(edge: edge).combined(with: .opacity)
+    }
+    /// Fades in once `calm` has passed and leaves at once, so a state shown for a moment never flashes.
+    static var calmIn: AnyTransition { .asymmetric(insertion: .opacity.animation(fade.delay(0.15)), removal: .identity) }
+}
+
 /// The desktop type scale, `theme::size`, in the system font as on desktop. A macOS point reads
 /// smaller than an iOS point at phone distance, so every size is the desktop's × 1.15 (body 13 → 15),
 /// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.

@@ -115,21 +115,17 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: macos-dmg
-      # The Windows and Linux workflows do the same: the first to finish creates the draft.
-      # A human publishes it after the checklist in docs/release.md.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/upload-release.sh
+          sparse-checkout-cone-mode: false
+          path: repo
+      # release-draft.yml creates the draft; a human publishes it after docs/release.md.
       - name: Upload to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           DMG: ${{ needs.package.outputs.dmg }}
-        run: |
-          prerelease=()
-          [[ $TAG != *-* ]] || prerelease=(--prerelease)
-          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
-            # A rerun must not swap files under a release people already download.
-            [[ $draft == true ]] || { echo "::error::$TAG is published; upload by hand if you mean it."; exit 1; }
-          else
-            gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag --title "lagom ${TAG#v}" --generate-notes
-          fi
-          gh release upload "$TAG" "$DMG" --clobber
+        run: repo/scripts/upload-release.sh "$TAG" "$DMG"

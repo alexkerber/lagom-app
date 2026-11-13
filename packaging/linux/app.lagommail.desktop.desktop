@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=lagom
+GenericName=Mail
+Comment=A fast, minimal, keyboard-first email client
+Exec=lagom
+Icon=app.lagommail.desktop
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;inbox;calendar;tasks;
+StartupWMClass=app.lagommail.desktop
+X-GNOME-UsesNotifications=true

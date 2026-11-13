@@ -138,6 +138,13 @@ func grouped<Item>(_ items: [Item], by key: (Item) -> String) -> [RowGroup<Item>
     return groups
 }
 
+/// Whether a list change animates (docs/motion.md, New mail): one to five rows arrive or leave.
+/// A page loading, a scope change or a pure reorder appears without motion.
+func animatesRowChange<ID: Hashable>(from old: [ID], to new: [ID]) -> Bool {
+    let before = Set(old), after = Set(new)
+    return (1...5).contains(before.subtracting(after).count + after.subtracting(before).count)
+}
+
 /// A timed event placed on the week grid, desktop `week::layout`: minutes from midnight, and its lane among overlaps.
 struct WeekBlock: Equatable {
     let index: Int

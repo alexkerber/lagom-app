@@ -511,6 +511,17 @@ class MailModelTest {
         assertEquals(core.mail, model.rows)
         assertFalse(model.hasMore)
     }
+    @Test fun actionStaysBusyUntilTheListShowsIt() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.pageGate = gate
+        val action = async { model.act(MailAction.Done, 1) }; runCurrent()
+        assertTrue(model.working)
+        assertEquals(listOf(1L, 2L), model.rows.map { it.id })
+        gate.complete(Unit); action.await()
+        assertFalse(model.working)
+        assertEquals(listOf(2L), model.rows.map { it.id })
+    }
     @Test fun messageReadsIncludingAfterMarkReadRunOffMain() = runTest(dispatcher) {
         val main = Thread.currentThread()
         val core = FakeCore().apply { mail = listOf(row(1, unread = true)) }
