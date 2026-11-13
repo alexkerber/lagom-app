@@ -180,7 +180,8 @@ struct ModelChecks {
         precondition(model.composeDraft!.id == sheetID, "account change replaced sheet identity")
         precondition(core.drafts.values.first?.account == "second" && core.drafts.values.first?.body == "latest")
         model.composeDraft?.body = ""
-        try await Task.sleep(for: .milliseconds(600))
+        // CI runners oversleep; poll instead of racing the 0.5 s debounce.
+        for _ in 0..<50 where core.drafts.values.first?.body != "" { try await Task.sleep(for: .milliseconds(100)) }
         precondition(core.drafts.values.first?.body == "", "clearing text must autosave")
         model.composeDraft?.body = "latest"
         model.composeDraft?.subject = "Last edit"
