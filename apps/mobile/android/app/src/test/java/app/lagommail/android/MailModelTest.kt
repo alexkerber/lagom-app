@@ -17,7 +17,106 @@ class MailModelTest {
     @Before fun setup() { Dispatchers.setMain(dispatcher) }
     @After fun teardown() { Dispatchers.resetMain() }
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
-        open = { core }, tomorrow = { 86_400 }, recipients = { it.split(',').map(String::trim).filter(String::isNotEmpty) }, now = now)
+        open = { core }, tomorrow = { 86_400 }, now = now)
+
+    @Test fun editsDebounceAndKeepFlushesBeforeClosingAndRestores() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "first")
+        advanceTimeBy(400)
+        model.draft = model.draft!!.copy(body = "latest")
+        advanceTimeBy(499); runCurrent()
+        assertEquals(0, core.saveCalls)
+        advanceTimeBy(1); runCurrent()
+        assertEquals("latest", core.saved.values.single().body)
+        model.draft = model.draft!!.copy(subject = "Last edit")
+        model.closeCompose(discard = false)
+        assertNull(model.draft)
+        assertEquals("Last edit", core.saved.values.single().subject)
+        val reopened = model(core); reopened.start(); reopened.showDrafts()
+        reopened.openDraft(reopened.drafts.single())
+        assertEquals("latest", reopened.draft?.body)
+        assertEquals("Last edit", reopened.draft?.subject)
+    }
+    @Test fun discardWaitsForInflightAutosaveAndCannotResurrectDraft() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "saved")
+        val gate = CompletableDeferred<Unit>(); core.saveGate = gate
+        advanceTimeBy(500); runCurrent()
+        assertEquals(1, core.saveCalls)
+        val close = async { model.closeCompose(discard = true) }; runCurrent()
+        assertFalse(close.isCompleted)
+        gate.complete(Unit); close.await(); advanceUntilIdle()
+        assertNull(model.draft)
+        assertTrue(core.saved.isEmpty())
+    }
+    @Test fun saveAndDiscardFailuresKeepComposerAndEdits() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "keep me")
+        core.rejectSave = true
+        try { model.closeCompose(discard = false); fail("save should fail") } catch (_: IllegalStateException) { }
+        assertEquals("keep me", model.draft?.body)
+        core.rejectSave = false; core.rejectDelete = true
+        try { model.closeCompose(discard = true); fail("discard should fail") } catch (_: IllegalStateException) { }
+        assertEquals("keep me", model.draft?.body)
+        assertFalse(model.sending)
+    }
+    @Test fun replyRestoresOnlyMatchingAccountAndSendConsumesSavedDraft() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(42, account = "source")) }
+        val model = model(core); model.start()
+        core.saved["other"] = LocalDraft("other", "another", "other@example.test", "", "wrong", "wrong", "<42>", emptyList(), emptyList(), 1)
+        model.reply(42)
+        assertFalse(model.draft!!.restored)
+        model.draft = model.draft!!.copy(body = "answer")
+        model.closeCompose(discard = false)
+        model.reply(42)
+        assertTrue(model.draft!!.restored)
+        assertEquals("answer", model.draft?.body)
+        model.send()
+        assertNull(model.draft)
+        assertEquals("answer", core.sent.single().body)
+        assertEquals(42L, core.sent.single().replyTo)
+        assertEquals(setOf("other"), core.saved.keys)
+    }
+    @Test fun openingStaleDraftRowReadsLatestSavedBody() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "before")
+        model.closeCompose(discard = false)
+        val stale = model.drafts.single()
+        core.saved[stale.id] = stale.copy(body = "latest on disk")
+        model.openDraft(stale)
+        assertEquals("latest on disk", model.draft?.body)
+        model.closeCompose(discard = true)
+    }
+
+    @Test fun changingSenderMovesEditsToNewIdentityAndClearedFieldsAutosave() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "keep edits")
+        advanceTimeBy(500); runCurrent()
+        val old = model.draft!!.id
+        model.changeComposeAccount("second")
+        assertEquals("second", model.draft?.account)
+        assertNotEquals(old, model.draft?.id)
+        assertEquals("keep edits", core.saved.values.single().body)
+        assertEquals("second", core.saved.values.single().account)
+        model.draft = model.draft!!.copy(body = "")
+        advanceTimeBy(500); runCurrent()
+        assertEquals("", core.saved.values.single().body)
+        model.closeCompose(discard = true)
+    }
+
+    @Test fun backgroundAndDismissalFlushTheLastEdit() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture", body = "background")
+        model.setForeground(false)
+        assertEquals("background", core.saved.values.single().body)
+        model.draft = model.draft!!.copy(body = "dismissed")
+        model.draft = null
+        runCurrent()
+        assertEquals("dismissed", core.saved.values.single().body)
+    }
 
     @Test fun refreshRetainsLoadedPagesAndScopeChangeResetsThem() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = (1L..250L).reversed().map { row(it) } }
@@ -119,7 +218,9 @@ class MailModelTest {
         assertEquals("\n\n-- \nSignature\n\n> body", draft.body)
         assertEquals(42L, draft.replyTo)
         model.send()
-        assertEquals(draft, core.sent.single())
+        assertEquals(draft.account, core.sent.single().account)
+        assertEquals(draft.body, core.sent.single().body)
+        assertEquals(draft.replyTo, core.sent.single().replyTo)
     }
     @Test fun delayedReplyCannotOverwriteEditedCompose() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1)) }
@@ -172,7 +273,9 @@ class MailModelTest {
         model.send()
         assertNull(model.draft)
         assertEquals(1, core.sent.size)
-        assertEquals(draft, core.sent.single())
+        assertEquals(draft.account, core.sent.single().account)
+        assertEquals(draft.body, core.sent.single().body)
+        assertEquals(draft.replyTo, core.sent.single().replyTo)
         assertNotNull(model.error)
         model.sync()
         assertEquals(1, core.sent.size)
@@ -236,6 +339,33 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun todoLists(): List<TodoList> = emptyList()
     override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> = emptyList()
 
+    val saved = mutableMapOf<String, LocalDraft>()
+    val replyIds = mutableMapOf<String, Long?>()
+    var saveCalls = 0
+    var saveGate: CompletableDeferred<Unit>? = null
+    var rejectSave = false
+    var rejectDelete = false
+    override suspend fun localDrafts() = saved.values.toList()
+    override suspend fun savedReply(id: Long): LocalDraft? = saved.values.firstOrNull {
+        it.account == mail.first { row -> row.id == id }.account && it.inReplyTo == "<${id}>"
+    }
+    override suspend fun saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
+        replyTo: Long?, attachments: List<SendAttachment>): LocalDraft {
+        saveCalls++
+        saveGate?.await()
+        check(!rejectSave) { "Fixture save refused" }
+        replyIds[id] = replyTo ?: replyIds[id]
+        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments, 42)
+        saved[id] = value
+        return value
+    }
+    override suspend fun deleteDraft(id: String) { check(!rejectDelete) { "Fixture discard refused" }; saved.remove(id) }
+    override suspend fun sendDraft(id: String): String {
+        val draft = saved.getValue(id)
+        val result = send(draft.account, listOf(draft.to), listOf(draft.cc), draft.subject, draft.body, replyIds[id], draft.attachments)
+        saved.remove(id)
+        return result
+    }
     var mail = emptyList<MailRow>()
     var due: Long? = null
     var pageCalls = 0

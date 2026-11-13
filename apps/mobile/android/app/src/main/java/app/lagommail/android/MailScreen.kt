@@ -33,7 +33,7 @@ import java.time.format.FormatStyle
         adding -> AddAccountScreen(model) { model.accountForm = null }
         model.draft != null -> ComposeScreen(model)
         else -> Scaffold(topBar = {
-            TopAppBar(title = { Text(if (model.accounts.isEmpty()) "lagom" else model.mailbox.label()) }, navigationIcon = {
+            TopAppBar(title = { Text(if (model.showingDrafts) "Drafts" else if (model.accounts.isEmpty()) "lagom" else model.mailbox.label()) }, navigationIcon = {
                 Box {
                     TextButton(onClick = { menu = true }) { Text("Mailboxes") }
                     DropdownMenu(menu, { menu = false }) {
@@ -42,6 +42,9 @@ import java.time.format.FormatStyle
                                 menu = false; model.perform { model.changeScope(model.accountId, box) }
                             })
                         }
+                        DropdownMenuItem(text = { Text("Drafts") }, onClick = {
+                            menu = false; model.perform { model.showDrafts() }
+                        })
                         HorizontalDivider()
                         DropdownMenuItem(text = { Text("All accounts") }, onClick = {
                             menu = false; model.perform { model.changeScope(null, model.mailbox) }
@@ -72,6 +75,21 @@ import java.time.format.FormatStyle
                         Text("Add an account to get started.")
                         Button(enabled = model.core != null, onClick = { model.accountForm = AccountForm() }) { Text("Add account") }
                         if (model.core == null) TextButton(onClick = { model.perform { model.setForeground(true) } }) { Text("Try again") }
+                    }
+                } else if (model.showingDrafts) {
+                    LazyColumn(Modifier.weight(1f)) {
+                        val drafts = model.drafts.filter { model.accountId == null || it.account == model.accountId }
+                        if (drafts.isEmpty()) item { Text("No drafts", Modifier.padding(24.dp)) }
+                        items(drafts, key = { it.id }) { draft ->
+                            ListItem(headlineContent = { Text(draft.subject.ifEmpty { "(No subject)" }) },
+                                supportingContent = { Column {
+                                    Text(draft.to)
+                                    Text(model.accounts.find { it.id == draft.account }?.email.orEmpty())
+                                    if (draft.updatedUnix > 0) Text(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
+                                        .withZone(ZoneId.systemDefault()).format(java.time.Instant.ofEpochSecond(draft.updatedUnix)))
+                                } }, modifier = Modifier.heightIn(min = 48.dp).clickable(onClickLabel = "Edit draft") { model.perform { model.openDraft(draft) } })
+                            HorizontalDivider()
+                        }
                     }
                 } else Row(Modifier.weight(1f)) {
                     if (twoPane || model.selectedId == null) {

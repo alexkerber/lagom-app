@@ -17,28 +17,39 @@ import app.lagommail.core.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ComposeScreen(model: MailModel) {
     val draft = model.draft ?: return
-    BackHandler { if (!model.sending) model.draft = null }
+    var cancelling by remember(draft.id) { mutableStateOf(false) }
+    BackHandler { if (!model.sending) cancelling = true }
+    if (cancelling) {
+        AlertDialog(onDismissRequest = { cancelling = false }, title = { Text("Save draft?") },
+            confirmButton = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = {
+                cancelling = false; model.perform { model.closeCompose(discard = false) }
+            }) { Text("Keep draft") } },
+            dismissButton = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = {
+                cancelling = false; model.perform { model.closeCompose(discard = true) }
+            }) { Text("Discard") } })
+    }
     Scaffold(topBar = {
-        TopAppBar(title = { Text(if (draft.replyTo == null) "New message" else "Reply") },
-            navigationIcon = { TextButton(enabled = !model.sending, onClick = { model.draft = null }) { Text("Cancel") } },
-            actions = { TextButton(enabled = !model.sending && draft.to.isNotBlank() && draft.account.isNotBlank(),
-                onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
+        TopAppBar(title = { Text(if (draft.isReply) "Reply" else if (draft.restored) "Draft" else "New message") },
+            navigationIcon = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = { cancelling = true }) { Text("Cancel") } },
+            actions = { TextButton(enabled = !model.sending && (draft.to.isNotBlank() || draft.cc.isNotBlank()) && draft.account.isNotBlank(),
+                modifier = Modifier.heightIn(min = 48.dp), onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             var fromMenu by remember { mutableStateOf(false) }
             Box {
-                OutlinedButton(enabled = !model.sending && draft.replyTo == null, onClick = { fromMenu = true }) {
+                OutlinedButton(enabled = !model.sending && !draft.isReply && !draft.restored, onClick = { fromMenu = true }) {
                     Text("From: ${model.accounts.find { it.id == draft.account }?.email.orEmpty()}")
                 }
                 DropdownMenu(fromMenu, { fromMenu = false }) {
                     model.accounts.forEach { account ->
-                        DropdownMenuItem(text = { Text(account.email) }, onClick = { fromMenu = false; model.draft = draft.copy(account = account.id) })
+                        DropdownMenuItem(text = { Text(account.email) }, onClick = { fromMenu = false; model.perform { model.changeComposeAccount(account.id) } })
                     }
                 }
             }
             Field("To", draft.to, !model.sending, KeyboardType.Email) { model.draft = draft.copy(to = it) }
             Field("Cc", draft.cc, !model.sending, KeyboardType.Email) { model.draft = draft.copy(cc = it) }
             Field("Subject", draft.subject, !model.sending) { model.draft = draft.copy(subject = it) }
+            if (draft.attachments.isNotEmpty()) Text("Attachments: ${draft.attachments.joinToString { it.filename }}")
             OutlinedTextField(draft.body, { model.draft = draft.copy(body = it) }, enabled = !model.sending,
                 label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
         }
