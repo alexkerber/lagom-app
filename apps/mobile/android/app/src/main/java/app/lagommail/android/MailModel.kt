@@ -77,6 +77,8 @@ internal class MailModel(
     private val open: suspend () -> LagomCoreInterface,
     private val attachmentDirectory: File,
     private val now: () -> Long = { System.currentTimeMillis() },
+    /** Sends the outbox from WorkManager, which outlives a frozen or killed process. */
+    private val sendLater: () -> Unit = {},
 ) : ViewModel() {
     var downloadingAttachments by mutableStateOf<Set<Pair<Long, String>>>(emptySet()); private set
     var core: LagomCoreInterface? = null; private set
@@ -169,6 +171,8 @@ internal class MailModel(
         wake?.cancel(); wake = null
         if (active) { start(); reload(); sync() }
         else if (!sending) draft?.let { persist(it) }
+        // Background refresh never sends, so mail inside the Undo window needs its own job.
+        if (!active && undoSendId != null) sendLater()
     }
     suspend fun reload(more: Boolean = false) {
         val core = core ?: return
@@ -449,9 +453,7 @@ internal class MailModel(
                     perform {
                         delay(5000)
                         if (sendRevision == request && undoSendId == snapshot.id) { undoSendId = null; notice = null }
-                        // Background sync never sends, so send here even if the user left the app inside the Undo window.
-                        // shortcut: a process kill inside the window leaves the mail queued until the next start, upgrade to a delayed WorkManager job if that shows up.
-                        sync()
+                        if (foreground) sync() else sendLater()
                     }
                 }
             }

@@ -21,10 +21,11 @@ class MailModelTest {
     private val dispatcher = StandardTestDispatcher()
     @Before fun setup() { Dispatchers.setMain(dispatcher) }
     @After fun teardown() { Dispatchers.resetMain() }
+    private var sendLaters = 0
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
-        open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = now)
+        open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = now, sendLater = { sendLaters++ })
 
-    @Test fun undoRestoresDraftAndExpirySyncsEvenInBackground() = runTest(dispatcher) {
+    @Test fun undoRestoresDraftAndExpirySyncsOnlyInForeground() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.setForeground(true)
         val initialSyncs = core.syncs
         val draft = ComposeDraft("fixture", to = "to@example.test", body = "keep edits",
@@ -41,14 +42,24 @@ class MailModelTest {
         model.send(); runCurrent(); core.queued.clear(); model.undoSend()
         assertEquals("Already sent", model.notice); assertNull(model.draft)
         model.setForeground(false)
+        assertEquals(0, sendLaters)
         advanceTimeBy(5000); runCurrent()
-        assertEquals(initialSyncs + 2, core.syncs)
+        assertEquals(initialSyncs + 1, core.syncs); assertEquals(1, sendLaters)
         model.setForeground(true)
-        assertEquals(initialSyncs + 3, core.syncs)
+        assertEquals(initialSyncs + 2, core.syncs)
         model.draft = draft.copy(id = "next"); model.send(); runCurrent()
         advanceTimeBy(5000); runCurrent()
         assertNull(model.undoSendId); assertNull(model.notice)
-        assertEquals(initialSyncs + 4, core.syncs)
+        assertEquals(initialSyncs + 3, core.syncs)
+    }
+
+    @Test fun leavingInsideUndoWindowHandsSendToWorkManager() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.setForeground(true)
+        model.draft = ComposeDraft("fixture", to = "to@example.test", body = "leave now"); model.send(); runCurrent()
+        model.setForeground(false)
+        assertEquals(1, sendLaters)
+        model.setForeground(true); model.setForeground(false)
+        assertEquals(2, sendLaters)
     }
 
     @Test fun resendingRestoredDraftGetsItsOwnFullUndoWindow() = runTest(dispatcher) {
