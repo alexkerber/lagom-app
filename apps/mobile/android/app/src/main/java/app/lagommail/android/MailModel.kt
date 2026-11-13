@@ -16,6 +16,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.Instant
 import java.util.UUID
 
@@ -26,6 +27,12 @@ internal data class RowPresentation(val row: MailRow) {
 }
 internal fun draftMessageId(email: String): String =
     "<${UUID.randomUUID().toString().replace("-", "")}@${email.substringAfterLast('@', "localhost")}>"
+
+internal fun safeAttachmentName(filename: String): String {
+    val name = filename.replace('\\', '/').substringAfterLast('/').filterNot { it.isISOControl() }
+        .trim().take(120).trim()
+    return name.takeUnless { it.isEmpty() || it == "." || it == ".." } ?: "attachment"
+}
 
 internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
@@ -47,9 +54,11 @@ internal enum class MailAction { Done, Later, Delete }
 
 internal class MailModel(
     private val open: suspend () -> LagomCoreInterface,
+    private val attachmentDirectory: File,
     private val tomorrow: () -> Long = ::tomorrowAtEight,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : ViewModel() {
+    var downloadingAttachments by mutableStateOf<Set<Pair<Long, String>>>(emptySet()); private set
     var core: LagomCoreInterface? = null; private set
     var accounts by mutableStateOf<List<MailAccount>>(emptyList()); private set
     var rows by mutableStateOf<List<MailRow>>(emptyList()); private set
@@ -107,7 +116,28 @@ internal class MailModel(
     }
     suspend fun start() {
         if (core != null) return
-        try { core = open(); reload() } finally { loading = false }
+        try {
+            withContext(Dispatchers.IO) {
+                check(!attachmentDirectory.exists() || attachmentDirectory.deleteRecursively()) { "Could not clear attachment cache" }
+            }
+            core = open(); reload()
+        } finally { loading = false }
+    }
+    suspend fun openAttachment(messageId: Long, part: MailAttachment): File? {
+        val core = core ?: return null
+        val key = messageId to part.section
+        if (key in downloadingAttachments) return null
+        downloadingAttachments += key
+        val selection = selectionRevision
+        try {
+            val data = core.attachment(messageId, part.section)
+            val file = withContext(Dispatchers.IO) {
+                val directory = File(attachmentDirectory, UUID.randomUUID().toString())
+                check(directory.mkdirs()) { "Could not create attachment cache" }
+                File(directory, safeAttachmentName(part.filename)).also { it.writeBytes(data) }
+            }
+            return file.takeIf { selection == selectionRevision }
+        } finally { downloadingAttachments -= key }
     }
     suspend fun setForeground(active: Boolean) {
         foreground = active

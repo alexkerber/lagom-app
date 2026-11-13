@@ -1,6 +1,46 @@
 import XCTest
 
 final class MailModelTests: XCTestCase {
+    func testSafeAttachmentName() {
+        for (input, expected) in [("../../secret.txt", "secret.txt"), ("..\\..\\safe.pdf", "safe.pdf"),
+                                  ("", "attachment"), (" . ", "attachment"), ("..", "attachment"),
+                                  ("dir/", "attachment"), (" \0\n\t ", "attachment"),
+                                  (" a\0b\u{7f}c.txt ", "abc.txt")] {
+            XCTAssertEqual(safeAttachmentName(input), expected)
+        }
+        XCTAssertEqual(safeAttachmentName(String(repeating: "x", count: 121)).count, 120)
+    }
+
+    @MainActor func testAttachmentWritesBytesBlocksDoubleTapsAndReportsFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(attachmentDirectory: directory.appendingPathComponent("attachments"))
+        model.core = core
+        let part = MailAttachment(section: "2", filename: "../../fixture.bin", mimeType: "application/octet-stream", size: 2)
+        core.suspendAttachment = true
+        let pending = Task { await model.openAttachment(messageID: 42, part: part) }
+        while core.attachmentGate == nil { await Task.yield() }
+        XCTAssertTrue(model.downloadingAttachments.contains("42:2"))
+        await model.openAttachment(messageID: 42, part: part)
+        XCTAssertEqual(core.attachmentCalls.count, 1)
+        XCTAssertEqual(core.attachmentCalls.first?.0, 42)
+        XCTAssertEqual(core.attachmentCalls.first?.1, "2")
+        core.attachmentGate?.resume(); await pending.value
+        let url = try XCTUnwrap(model.attachmentURL)
+        XCTAssertEqual(try Data(contentsOf: url), Data([0, 255]))
+        XCTAssertEqual(url.lastPathComponent, "fixture.bin")
+        XCTAssertNotNil(UUID(uuidString: url.deletingLastPathComponent().lastPathComponent))
+        XCTAssertEqual(url.deletingLastPathComponent().deletingLastPathComponent().path, model.attachmentDirectory.path)
+        XCTAssertTrue(model.downloadingAttachments.isEmpty)
+        model.attachmentURL = nil
+        core.suspendAttachment = false; core.fail = true
+        await model.openAttachment(messageID: 42, part: part)
+        XCTAssertNil(model.attachmentURL)
+        XCTAssertNotNil(model.error)
+        XCTAssertTrue(model.downloadingAttachments.isEmpty)
+    }
+
     func testRowMappingKeepsFlagsDateAndFallbacks() {
         let row = MailRow(id: 42, account: "fixture", senderName: "", senderAddress: "sender@example.test", subject: "", preview: "Preview", dateUnix: 1_700_000_000, unread: true, hasAttachments: true)
         let view = RowPresentation(row)
@@ -39,6 +79,15 @@ final class MailModelTests: XCTestCase {
 }
 
 @MainActor final class ComposeFixtureCore: LagomCore, @unchecked Sendable {
+    var attachmentCalls: [(Int64, String)] = []
+    var suspendAttachment = false
+    var attachmentGate: CheckedContinuation<Void, Never>?
+    override func attachment(messageId: Int64, section: String) async throws -> Data {
+        attachmentCalls.append((messageId, section))
+        if suspendAttachment { await withCheckedContinuation { attachmentGate = $0 } }
+        if fail { throw MailError.Failed(reason: "download failed") }
+        return Data([0, 255])
+    }
     var calls: [(Int64, ComposeKind)] = []
     var suspended = false
     var fail = false

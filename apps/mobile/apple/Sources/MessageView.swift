@@ -1,11 +1,12 @@
 import SwiftUI
 import WebKit
+import QuickLook
 
 /// The desktop reading pane: the subject, then the message card (sender, date, actions menu, body,
 /// attachments), then the reply box.
 struct MessageView: View {
     let message: MailMessage
-    let model: MailModel
+    @Bindable var model: MailModel
     @Environment(\.colorScheme) private var scheme
     @Environment(\.horizontalSizeClass) private var width
     @State private var showText = false
@@ -51,6 +52,7 @@ struct MessageView: View {
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Theme.ink)
+        .quickLookPreview($model.attachmentURL)
         .onChange(of: message.row.id) { _, _ in showText = false }
     }
 
@@ -108,21 +110,28 @@ struct MessageView: View {
         }
     }
 
-    /// Desktop attachment chips. shortcut: metadata only in v1; add downloads when mobile file handling is implemented.
     private var attachments: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 ForEach(message.attachments, id: \.section) { part in
-                    HStack(spacing: 12) {
-                        Icon("attachment").foregroundStyle(Theme.secondary)
-                        Text(part.filename).lagomFont(.snippet, .medium).lineLimit(1).truncationMode(.middle)
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(part.size), countStyle: .file))
-                            .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+                    let name = safeAttachmentName(part.filename)
+                    let size = ByteCountFormatter.string(fromByteCount: Int64(part.size), countStyle: .file)
+                    let downloading = model.downloadingAttachments.contains("\(message.row.id):\(part.section)")
+                    Button { Task { await model.openAttachment(messageID: message.row.id, part: part) } } label: {
+                        HStack(spacing: 12) {
+                            if downloading { ProgressView().accessibilityLabel("Downloading") }
+                            else { Icon("attachment").foregroundStyle(Theme.secondary) }
+                            Text(name).lagomFont(.snippet, .medium).lineLimit(1).truncationMode(.middle)
+                            Text(size).lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+                        }
+                        .padding(.horizontal, 14).frame(minHeight: 44)
+                        .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.attachment))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.attachment).strokeBorder(Theme.line))
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.attachment))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.attachment).strokeBorder(Theme.line))
-                    .accessibilityElement(children: .combine)
+                    .buttonStyle(.plain)
+                    .disabled(downloading)
+                    .accessibilityLabel("Open \(name), \(size)")
                 }
             }
         }

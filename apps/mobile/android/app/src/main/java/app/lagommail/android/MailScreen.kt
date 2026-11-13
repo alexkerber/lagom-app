@@ -1,5 +1,11 @@
 package app.lagommail.android
 
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.Intent
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -219,6 +225,24 @@ internal fun Mailbox.label(): String = when (this) {
 
 @Composable private fun MessageScreen(model: MailModel, message: MailMessage, back: Boolean) {
     var plain by remember(message.row.id) { mutableStateOf(false) }
+    val context = LocalContext.current
+    fun openAttachment(part: MailAttachment, share: Boolean = false) {
+        model.perform {
+            val file = model.openAttachment(message.row.id, part) ?: return@perform
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            val mime = part.mimeType.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+                ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase(java.util.Locale.ROOT))
+                ?: "application/octet-stream"
+            val intent = if (share) Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
+                else Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            intent.clipData = ClipData.newRawUri(file.name, uri)
+            try {
+                if (!share && intent.resolveActivity(context.packageManager) == null) throw ActivityNotFoundException()
+                context.startActivity(Intent.createChooser(intent, if (share) "Share attachment" else "Open attachment"))
+            } catch (_: ActivityNotFoundException) { model.error = "No app can open this file" }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (back) TextButton(onClick = model::clearSelection) { Text("Back") }
         SelectionContainer {
@@ -238,10 +262,23 @@ internal fun Mailbox.label(): String = when (this) {
             if (!plain && message.htmlBody != null) MailHtml(message.row.id, message.htmlBody!!)
             else SelectionContainer { Text(message.textBody, Modifier.fillMaxSize().verticalScroll(rememberScrollState())) }
         }
-        // shortcut: attachment metadata only, add transfers when mobile file handling is implemented.
         if (message.attachments.isNotEmpty()) {
-            LazyColumn(Modifier.heightIn(max = 90.dp)) {
-                items(message.attachments) { Text("${it.filename} · ${it.size} bytes", style = MaterialTheme.typography.bodySmall) }
+            LazyColumn(Modifier.heightIn(max = 144.dp)) {
+                items(message.attachments, key = { it.section }) { part ->
+                    val downloading = (message.row.id to part.section) in model.downloadingAttachments
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f).heightIn(min = 48.dp)
+                            .clickable(enabled = !downloading, onClickLabel = "Open", role = Role.Button) { openAttachment(part) }
+                            .padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (downloading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Text("${safeAttachmentName(part.filename)} · ${part.size} bytes", style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(enabled = !downloading, onClick = { openAttachment(part, share = true) },
+                            modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                                .semantics { contentDescription = "Share ${safeAttachmentName(part.filename)}" }) { Text("Share") }
+                    }
+                }
             }
         }
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

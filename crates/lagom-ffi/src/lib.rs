@@ -89,6 +89,28 @@ pub struct LagomCore { stores: Arc<Stores> }
 struct Stores { local: Mutex<Store>, network: Mutex<Store> }
 
 impl LagomCore {
+    async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
+        let key = section.clone();
+        let cached = self.run(move |s| {
+            if !s.attachments(id)?.iter().any(|part| part.section == key) {
+                return Err(lagom_core::Error::NotFound);
+            }
+            s.cached_attachment(id, &key)
+        }).await?;
+        if let Some(data) = cached { return Ok(data); }
+        self.run_network(move |s| network(async {
+            if !s.attachments(id)?.iter().any(|part| part.section == section) {
+                return Err(lagom_core::Error::NotFound);
+            }
+            // Another queued download may have populated the cache while we waited.
+            if let Some(data) = s.cached_attachment(id, &section)? { return Ok(data); }
+            let a = account(s, &s.message_summary(id)?.account)?;
+            let mut session = ImapSync::login(&a, &a.password()?).await?;
+            let result = session.fetch_attachment(s, id, &section).await;
+            let _ = session.logout().await;
+            result
+        })).await
+    }
     async fn run<T: Send + 'static>(&self, action: impl FnOnce(&mut Store) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
         self.run_on(false, action).await
     }
@@ -238,6 +260,9 @@ impl LagomCore {
                 attachments: s.attachments(id)?.into_iter().map(|a| MailAttachment { section: a.section, filename: a.filename, mime_type: a.mime_type, size: a.size }).collect() })
         }).await
     }
+    pub async fn attachment(&self, message_id: i64, section: String) -> Result<Vec<u8>> {
+        self.attachment_bytes(message_id, section).await
+    }
     pub async fn load_inline(&self, id: i64) -> Result<()> {
         let needed = self.run(move |s| {
             let message = s.message(id)?;
@@ -317,20 +342,15 @@ impl LagomCore {
             let cached = self.run(move |s| s.cached_forward_attachments(id)).await?;
             draft.attachments = match cached {
                 Some(parts) => parts.into_iter().map(|a| SendAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect(),
-                None => self.run_network(move |s| network(async {
-                    let a = account(s, &s.message_summary(id)?.account)?;
-                    let mut session = ImapSync::login(&a, &a.password()?).await?;
+                None => {
+                    let attachments = self.run(move |s| s.attachments(id)).await?;
                     let mut parts = Vec::new();
-                    for part in s.attachments(id)? {
-                        let data = match s.cached_attachment(id, &part.section)? {
-                            Some(data) => data,
-                            None => session.fetch_attachment(s, id, &part.section).await?,
-                        };
+                    for part in attachments {
+                        let data = self.attachment_bytes(id, part.section).await?;
                         parts.push(SendAttachment { filename: part.filename, mime_type: part.mime_type, data });
                     }
-                    let _ = session.logout().await;
-                    Ok(parts)
-                })).await?,
+                    parts
+                }
             };
         }
         Ok(draft)

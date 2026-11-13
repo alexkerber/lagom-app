@@ -10,15 +10,63 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MailModelTest {
+    @get:Rule val temporary = TemporaryFolder()
     private val dispatcher = StandardTestDispatcher()
     @Before fun setup() { Dispatchers.setMain(dispatcher) }
     @After fun teardown() { Dispatchers.resetMain() }
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
-        open = { core }, tomorrow = { 86_400 }, now = now)
+        open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = { 86_400 }, now = now)
 
+    @Test fun safeAttachmentNames() {
+        for ((input, expected) in listOf("../../secret.txt" to "secret.txt", "..\\..\\safe.pdf" to "safe.pdf",
+            "" to "attachment", " . " to "attachment", ".." to "attachment", "dir/" to "attachment",
+            " \u0000\n\t " to "attachment", " a\u0000b\u007fc.txt " to "abc.txt")) {
+            assertEquals(expected, safeAttachmentName(input))
+        }
+        assertEquals(120, safeAttachmentName("x".repeat(121)).length)
+    }
+    @Test fun attachmentClearsOldCacheWritesBytesAndBlocksDoubleTaps() = runTest(dispatcher) {
+        val directory = temporary.newFolder("attachments")
+        val old = File(directory, "old.txt").apply { writeText("old") }
+        val core = FakeCore()
+        val model = MailModel(open = { core }, attachmentDirectory = directory)
+        model.start()
+        assertFalse(old.exists())
+        val part = MailAttachment("2", "../../fixture.bin", "application/octet-stream", 2u)
+        val gate = CompletableDeferred<Unit>(); core.attachmentGate = gate
+        val pending = async { model.openAttachment(42, part) }; runCurrent()
+        assertEquals(setOf(42L to "2"), model.downloadingAttachments)
+        assertNull(model.openAttachment(42, part))
+        assertEquals(listOf(42L to "2"), core.attachmentCalls)
+        gate.complete(Unit)
+        val file = pending.await()!!
+        assertArrayEquals(byteArrayOf(0, -1), file.readBytes())
+        assertEquals("fixture.bin", file.name)
+        assertNotNull(UUID.fromString(file.parentFile!!.name))
+        assertEquals(directory, file.parentFile!!.parentFile)
+        assertTrue(model.downloadingAttachments.isEmpty())
+        assertNotEquals(file, model.openAttachment(42, part))
+        core.rejectAttachment = true
+        model.perform { model.openAttachment(42, part) }.join()
+        assertEquals("download failed", model.error)
+        assertTrue(model.downloadingAttachments.isEmpty())
+    }
+    @Test fun attachmentCannotOpenAfterChangingMessage() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.attachmentGate = gate
+        val pending = async { model.openAttachment(42, MailAttachment("2", "file.txt", "text/plain", 2u)) }; runCurrent()
+        model.clearSelection()
+        gate.complete(Unit)
+        assertNull(pending.await())
+        assertTrue(model.downloadingAttachments.isEmpty())
+    }
     @Test fun messageIdUsesLastDomainAndCompactLowercaseUuid() {
         for ((email, domain) in listOf("name@earlier@example.test" to "example.test", "missing" to "localhost")) {
             val id = draftMessageId(email)
@@ -294,7 +342,7 @@ class MailModelTest {
         val main = Thread.currentThread()
         var deadlineThread: Thread? = null
         val core = FakeCore().apply { mail = listOf(row(1)) }
-        val model = MailModel(open = { core }, tomorrow = {
+        val model = MailModel(open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = {
             deadlineThread = Thread.currentThread()
             86_400
         })
@@ -547,6 +595,15 @@ class MailModelTest {
 }
 
 private class FakeCore : LagomCoreInterface {
+    var attachmentGate: CompletableDeferred<Unit>? = null
+    var attachmentCalls = mutableListOf<Pair<Long, String>>()
+    var rejectAttachment = false
+    override suspend fun attachment(messageId: Long, section: String): ByteArray {
+        attachmentCalls += messageId to section
+        attachmentGate?.await()
+        if (rejectAttachment) throw MailException.Failed("download failed")
+        return byteArrayOf(0, -1)
+    }
     override suspend fun inlineResource(id: Long, request: String): InlineResource = error("unused")
     override suspend fun loadInline(id: Long): Unit = error("unused")
     val searchCalls = mutableListOf<Triple<String?, String, UInt>>()
