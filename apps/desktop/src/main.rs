@@ -54,6 +54,7 @@ impl AssetSource for Assets {
             "icons/send.svg" => include_bytes!("../assets/icons/send.svg"),
             "icons/compose.svg" => include_bytes!("../assets/icons/compose.svg"),
             "icons/settings.svg" => include_bytes!("../assets/icons/settings.svg"),
+            "icons/keyboard.svg" => include_bytes!("../assets/icons/keyboard.svg"),
             "icons/insert-file.svg" => include_bytes!("../assets/icons/insert-file.svg"),
             "icons/bold.svg" => include_bytes!("../assets/icons/bold.svg"),
             "icons/italic.svg" => include_bytes!("../assets/icons/italic.svg"),
@@ -155,10 +156,13 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
         std::env::var("LAGOM_DEMO_WIDTH").ok().and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite()).unwrap_or(1440.).max(main_window::MIN_WINDOW.0)
     } else { 1440. };
-    let bounds = Bounds::centered(None, size(px(width), px(900.)), cx);
+    let saved = if demo { None } else { main_window::saved_window(cx) };
+    let display_id = saved.map(|(_, display)| display);
+    let bounds = saved.map_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(900.)), cx)), |(bounds, _)| bounds);
     cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(bounds),
+            display_id,
             window_min_size: Some(size(px(main_window::MIN_WINDOW.0), px(main_window::MIN_WINDOW.1))),
             // macOS: no visible title bar, traffic lights inside the sidebar. The invisible
             // system title bar still moves the window. Windows and Linux keep their native bar.
