@@ -21,14 +21,19 @@ const ONE_CLICK: &str = "List-Unsubscribe=One-Click";
 // Fixed and generic: no version, account or device data.
 const USER_AGENT: &str = "lagom";
 const TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_SUBJECT: usize = 200;
 
 impl Unsubscribe {
     /// What confirming does, in the confirm step of every platform.
-    pub fn explain(&self) -> &'static str {
+    pub fn explain(&self) -> String {
         match self {
-            Self::OneClick(_) => "lagom asks the list to remove you.",
-            Self::Mail(_) => "lagom sends an unsubscribe email from your account.",
-            Self::Link(_) => "Opens the list's unsubscribe page in your browser.",
+            Self::OneClick(_) => "lagom asks the list to remove you.".into(),
+            // The address comes from the sender's header, so the person sees where their mail goes.
+            Self::Mail(url) => match outgoing(url) {
+                Some(mail) => format!("lagom sends \"Unsubscribe\" from your account to {}.", mail.to[0]),
+                None => "lagom sends an unsubscribe email from your account.".into(),
+            },
+            Self::Link(_) => "Opens the list's unsubscribe page in your browser.".into(),
         }
     }
 
@@ -66,7 +71,7 @@ pub fn parse(list_unsubscribe: &str, post: Option<&str>) -> Option<Unsubscribe> 
     let https = uris.iter().find(|u| u.scheme() == "https");
     // RFC 8058 §3.1: one-click needs the exact key=value and an HTTPS URI. http:// never qualifies.
     if post.is_some_and(|p| p.trim() == ONE_CLICK) {
-        if let Some(url) = https { return Some(Unsubscribe::OneClick(url.clone())); }
+        if let Some(url) = https.filter(|u| public_host(u)) { return Some(Unsubscribe::OneClick(url.clone())); }
     }
     uris.iter().find(|u| u.scheme() == "mailto" && outgoing(u).is_some()).cloned().map(Unsubscribe::Mail)
         .or_else(|| https.cloned().map(Unsubscribe::Link))
@@ -94,17 +99,17 @@ pub fn outgoing(url: &Url) -> Option<Outgoing> {
     let to = decode(url.path())?;
     // shortcut: one address and no `to=`/`cc=` fields; widen when real lists need more.
     if to.is_empty() || to.contains([',', '<', '>']) || to.chars().any(char::is_control) { return None; }
-    let (mut subject, mut text) = (String::new(), String::new());
+    let mut subject = String::new();
     for pair in url.query().unwrap_or_default().split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         if key.eq_ignore_ascii_case("subject") { subject = decode(value)?; }
-        if key.eq_ignore_ascii_case("body") { text = decode(value)?; }
     }
     // A folded or injected header line is refused, not repaired.
     if subject.chars().any(char::is_control) { return None; }
-    if subject.trim().is_empty() { subject = "Unsubscribe".into(); }
-    if text.trim().is_empty() { text = "Unsubscribe".into(); }
-    Some(Outgoing { to: vec![to], subject, text, ..Default::default() })
+    // Lists key on the subject; the sender must not write a long message from the person's account.
+    if subject.trim().is_empty() || subject.chars().count() > MAX_SUBJECT { subject = "Unsubscribe".into(); }
+    // The body is always ours: a sender-chosen `body=` would be sent in the person's name.
+    Some(Outgoing { to: vec![to], subject, text: "Unsubscribe".into(), ..Default::default() })
 }
 
 /// Percent-decoding only: RFC 6068 keeps `+` literal.
@@ -134,9 +139,20 @@ fn client() -> Result<reqwest::Client> {
         .map_err(|_| Error::Network("HTTP client failed"))
 }
 
+/// A named public host on port 443. The POST comes from the person's network, so mail must not
+/// aim it at a router, localhost or an intranet name.
+// shortcut: a public name that resolves to a private address still passes; add a resolver check if lists abuse it.
+fn public_host(url: &Url) -> bool {
+    let Some(url::Host::Domain(host)) = url.host() else { return false };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    url.port().is_none() && host.contains('.') && !host.ends_with(".localhost") && !host.ends_with(".local")
+        && !host.ends_with(".internal") && !host.ends_with(".lan") && !host.ends_with(".home.arpa")
+}
+
 /// RFC 8058 §3.2: a form POST with only the one-click key, no credentials.
 pub fn one_click_request(client: &reqwest::Client, url: &Url) -> Result<reqwest::Request> {
     if url.scheme() != "https" { return Err(Error::Invalid("one-click unsubscribe needs an HTTPS link")); }
+    if !public_host(url) { return Err(Error::Invalid("one-click unsubscribe needs a public web address")); }
     client.post(url.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(ONE_CLICK)
@@ -203,6 +219,11 @@ mod tests {
         assert_eq!(parse("<http://list.example/u>, <mailto:leave@list.example>", Some(ONE_CLICK)), Some(Unsubscribe::Mail(url("mailto:leave@list.example"))));
         let client = reqwest::Client::new();
         assert!(matches!(one_click_request(&client, &url("http://list.example/u")), Err(Error::Invalid(_))));
+        for internal in ["https://127.0.0.1/u", "https://[::1]/u", "https://192.168.1.1/u", "https://localhost/u",
+                         "https://router.local/u", "https://intranet/u", "https://list.example:8443/u"] {
+            assert!(matches!(one_click_request(&client, &url(internal)), Err(Error::Invalid(_))), "{internal}");
+            assert!(!matches!(parse(&format!("<{internal}>"), Some(ONE_CLICK)), Some(Unsubscribe::OneClick(_))), "{internal}");
+        }
         assert_eq!(Unsubscribe::from_stored("one-click http://list.example/u"), None);
     }
 
@@ -222,7 +243,11 @@ mod tests {
     fn mailto_with_subject_and_body() {
         let mail = outgoing(&url("mailto:leave+news@list.example?Subject=Stop%20please&body=remove+me")).unwrap();
         assert_eq!(mail.to, ["leave+news@list.example"]);
-        assert_eq!((mail.subject.as_str(), mail.text.as_str()), ("Stop please", "remove+me"));
+        assert_eq!((mail.subject.as_str(), mail.text.as_str()), ("Stop please", "Unsubscribe"), "the sender never writes the body");
+        let long = format!("mailto:leave@list.example?subject={}", "x".repeat(201));
+        assert_eq!(outgoing(&url(&long)).unwrap().subject, "Unsubscribe");
+        let explain = Unsubscribe::Mail(url("mailto:leave@list.example?body=hi")).explain();
+        assert!(explain.contains("leave@list.example"), "{explain}");
         let plain = outgoing(&url("mailto:leave@list.example")).unwrap();
         assert_eq!((plain.to[0].as_str(), plain.subject.as_str()), ("leave@list.example", "Unsubscribe"));
         assert!(outgoing(&url("mailto:a@x.example,b@x.example")).is_none());
