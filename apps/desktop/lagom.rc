@@ -2,8 +2,9 @@
 1 ICON "../../brand/app-icon/export/lagom.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,0,0,0
-PRODUCTVERSION 0,0,0,0
+// build.rs defines the numbers from LAGOM_VERSION, the tag (docs/release.md).
+FILEVERSION LAGOM_MAJOR,LAGOM_MINOR,LAGOM_PATCH,0
+PRODUCTVERSION LAGOM_MAJOR,LAGOM_MINOR,LAGOM_PATCH,0
 FILETYPE 1
 BEGIN
     BLOCK "StringFileInfo"

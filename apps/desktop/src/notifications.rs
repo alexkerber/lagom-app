@@ -7,6 +7,10 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 mod macos;
 #[cfg(all(target_os = "macos", not(test)))]
 use macos as platform;
+#[cfg(all(target_os = "windows", not(test)))]
+mod toast;
+#[cfg(all(target_os = "windows", not(test)))]
+use toast as platform;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
@@ -30,6 +34,15 @@ fn notice(messages: &[MessageSummary]) -> Option<Notice> {
         body: if messages.len() == 1 { first.subject.clone() } else { format!("{} new messages", messages.len()) },
         target: Target { account: first.account.clone(), message: (messages.len() == 1).then_some(first.id) },
     })
+}
+
+/// A Windows toast: sender and subject as plain text. XML 1.0 has no control characters.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn toast_xml(notice: &Notice) -> String {
+    let text = |s: &str| s.chars().filter(|c| !c.is_control() || matches!(c, '\t' | '\n')).collect::<String>()
+        .replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    format!(r#"<toast><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual></toast>"#,
+        text(&notice.title), text(&notice.body))
 }
 
 #[derive(Debug)]
@@ -147,22 +160,6 @@ mod platform {
     }
 }
 
-#[cfg(all(not(any(target_os = "macos", target_os = "linux")), not(test)))]
-mod platform {
-    use super::*;
-
-    // shortcut: Windows needs a registered app identity for toast activation; add it with the installer.
-    pub struct Service(UnboundedSender<Event>);
-    impl Service {
-        pub fn new(events: UnboundedSender<Event>) -> Self { Self(events) }
-        pub fn authorize(&self) {
-            let _ = self.0.send(Event::Authorized(false));
-            let _ = self.0.send(Event::Failed("Notifications are not available on this platform yet"));
-        }
-        pub fn show(&self, _: Notice) {}
-    }
-}
-
 #[cfg(test)]
 mod platform {
     use super::*;
@@ -237,6 +234,12 @@ mod tests {
         MessageSummary { id: uid as i64, account: "fixture".into(), folder: 1, uid,
             from_address: "sender@example.test".into(), subject: "Subject".into(), ..Default::default() }
     }
+    #[test]
+    fn toast_xml_is_escaped_plain_text() {
+        let notice = Notice { title: "A & B <a@b>".into(), body: "Re: \u{1}5 > 4".into(), target: Target { account: "a".into(), message: None } };
+        assert_eq!(toast_xml(&notice), r#"<toast><visual><binding template="ToastGeneric"><text>A &amp; B &lt;a@b&gt;</text><text>Re: 5 &gt; 4</text></binding></visual></toast>"#);
+    }
+
     #[test]
     fn single_sender_subject_and_batch_summary_have_correct_targets() {
         assert!(notice(&[]).is_none());
