@@ -325,7 +325,8 @@ internal class MailModel(
                 MailAction.Delete -> core.delete(ids)
             }
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
-        } finally { actingId = null; reload() }
+        // Busy until the list shows the result, so a swiped row never comes back before it leaves.
+        } finally { try { reload() } finally { actingId = null } }
     }
     suspend fun remove(account: MailAccount) {
         core?.removeAccount(account.id)

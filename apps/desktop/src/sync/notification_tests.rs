@@ -21,7 +21,8 @@ async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
     // SQLite migrations must not consume the protocol hang guard on slow disks.
     let path = std::env::temp_dir().join(format!("lagom-notify-{into_inbox}-{resolving}-{fail_source}-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let mut store = Store::open(&path).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Only catches a hang; slow Windows CI runners took over 5 s.
+    tokio::time::timeout(Duration::from_secs(30), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {

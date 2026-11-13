@@ -48,6 +48,15 @@ struct MailView: View {
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Rows Done, Later or Delete just took: they leave at once and come back only if the core refuses.
+    @State private var leaving: Set<Int64> = []
+    /// The row ids the list last drew, to tell a few arriving rows from a whole page loading.
+    @State private var drawnIDs: [Int64] = []
+    /// Counts committed swipes and toolbar actions, for the haptic.
+    @State private var acted = 0
+    /// The sync mark turns to "syncing" only once a sync passes `Motion.calm`.
+    @State private var syncShown = false
 
     private var regular: Bool { width == .regular && height == .regular }
     /// List and reading pane side by side only where both fit; a narrow iPad pushes the message as a phone does.
@@ -75,29 +84,37 @@ struct MailView: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if let notice = model.notice {
-                HStack {
-                    Text(notice).lagomFont(.snippet).foregroundStyle(Theme.secondary)
-                    Spacer()
-                    if model.undoSendID != nil {
-                        Button("Undo") { Task { await model.undoSend() } }
-                            .frame(minWidth: 44, minHeight: 44).accessibilityLabel("Undo send")
-                            .disabled(model.composeBusy || model.preparingCompose)
-                    } else {
-                        Button("Dismiss") { model.notice = nil }.frame(minWidth: 44, minHeight: 44)
+            // The Sending notice rises from the bottom edge on the spring; its text changes in place.
+            ZStack {
+                if let notice = model.notice {
+                    HStack {
+                        Text(notice).lagomFont(.snippet).foregroundStyle(Theme.secondary)
+                            .contentTransition(.opacity)
+                        Spacer()
+                        if model.undoSendID != nil {
+                            Button("Undo") { Task { await model.undoSend() } }
+                                .frame(minWidth: 44, minHeight: 44).accessibilityLabel("Undo send")
+                                .disabled(model.composeBusy || model.preparingCompose)
+                        } else {
+                            Button("Dismiss") { model.notice = nil }.frame(minWidth: 44, minHeight: 44)
+                        }
                     }
-                }.padding(.horizontal, 10).background(Theme.background)
+                    .padding(.horizontal, 10).background(Theme.background)
+                    .transition(Motion.slide(.bottom, reduceMotion))
+                }
             }
+            .animation(Motion.move(reduceMotion), value: model.notice)
         }
         .confirmationDialog("Later", isPresented: Binding(get: { laterID != nil }, set: { if !$0 { laterID = nil } })) {
             ForEach(laterChoices, id: \.label) { choice in
                 Button(choice.label) {
                     guard let id = laterID else { return }
                     laterID = nil
-                    Task { await model.act(.later, id: id, until: choice.untilUnix) }
+                    act(.later, id: id, until: choice.untilUnix)
                 }
             }
         }
+        .sensoryFeedback(.impact(weight: .light), trigger: acted)
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
@@ -160,14 +177,22 @@ struct MailView: View {
                 }
                 .foregroundStyle(Theme.ink)
                 HStack(spacing: 6) {
-                    Icon(model.syncing ? "cloud-syncing" : "cloud-synced", size: 16)
-                    if let left { Text(left).lagomFont(.small).monospacedDigit() }
+                    Icon(syncShown ? "cloud-syncing" : "cloud-synced", size: 16)
+                    if let left {
+                        Text(left).lagomFont(.small).monospacedDigit()
+                            .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
+                    }
                 }
                 .foregroundStyle(Theme.secondary)
             }
             .frame(minHeight: 44).contentShape(Rectangle())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([name, model.syncing ? "Syncing" : "Synced", left, "mailboxes and accounts"].compactMap { $0 }.joined(separator: ", "))
+        }
+        .task(id: model.syncing) {
+            guard model.syncing else { syncShown = false; return }
+            guard (try? await Task.sleep(for: Motion.calm)) != nil else { return }
+            syncShown = true
         }
     }
 
@@ -199,7 +224,9 @@ struct MailView: View {
     }
 
     private var inbox: some View {
-        let rows = unreadOnly ? model.rows.filter(\.unread) : model.rows
+        let rows = (unreadOnly ? model.rows.filter(\.unread) : model.rows)
+            .filter { !leaving.contains($0.id) && !$0.messageIds.contains(where: leaving.contains) }
+        let ids = rows.map(\.id)
         let words = DateWords()
         return VStack(spacing: 0) {
             header
@@ -236,18 +263,30 @@ struct MailView: View {
             .listStyle(.plain)
             .environment(\.defaultMinListRowHeight, 0)
             .scrollContentBackground(.hidden)
+            // New mail grows in and a done row closes its gap; a page or a scope change appears without motion.
+            // shortcut: the list keeps UIKit's scroll offset, so rows arriving above a scrolled list push it down; pin the first visible row if that reads as a jump on device.
+            .animation(animatesRowChange(from: drawnIDs, to: ids) ? Motion.move(reduceMotion) : nil, value: ids)
+            .onChange(of: ids, initial: true) { _, ids in drawnIDs = ids }
             .refreshable { await model.sync() }
             .overlay {
-                if unreadOnly && rows.isEmpty && !model.rows.isEmpty {
-                    EmptyState(icon: "read", title: "No unread mail")
-                } else if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
-                    EmptyState(icon: "inbox", title: model.accounts.isEmpty ? "Welcome to lagom" : "No mail here",
-                               detail: model.accounts.isEmpty ? "Add an account to get started." : "Pull to refresh your mail.") {
+                Group {
+                    if unreadOnly && rows.isEmpty && !model.rows.isEmpty {
+                        EmptyState(icon: "read", title: "No unread mail")
+                    } else if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
                         if model.accounts.isEmpty {
-                            HouseButton(title: "Add account", icon: "account-add", primary: true) { addAccount = true }
+                            EmptyState(icon: "inbox", title: "Welcome to lagom", detail: "Add an account to get started.") {
+                                HouseButton(title: "Add account", icon: "account-add", primary: true) { addAccount = true }
+                            }
+                        } else if model.mailbox == .inbox && model.searchText.isEmpty {
+                            // Inbox zero, as on desktop: one calm illustration, no confetti.
+                            EmptyState(icon: "inbox", title: "Nothing left.", illustration: "EmptyTray")
+                        } else {
+                            EmptyState(icon: "inbox", title: "No mail here", detail: "Pull to refresh your mail.")
                         }
                     }
                 }
+                // A scope change empties the list for a moment; the empty page waits out a quick load.
+                .transition(Motion.calmIn)
             }
         }
         .background(Theme.background)
@@ -265,14 +304,28 @@ struct MailView: View {
             }.disabled(model.working)
         }
         .swipeActions(edge: .leading) {
-            Button { Task { await model.act(.done, id: row.id) } } label: { Label("Done", image: "done") }.tint(Theme.done)
+            Button { act(.done, id: row.id) } label: { Label("Done", image: "done") }.tint(Theme.done)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if model.mailbox != .trash {
-                Button(role: .destructive) { Task { await model.act(.delete, id: row.id) } } label: { Label("Delete", image: "trash") }
+                Button(role: .destructive) { act(.delete, id: row.id) } label: { Label("Delete", image: "trash") }
                     .tint(Theme.danger)
             }
-            Button { Task { await model.act(.later, id: row.id) } } label: { Label("Later", image: "later") }.tint(Theme.later)
+            Button { act(.later, id: row.id) } label: { Label("Later", image: "later") }.tint(Theme.later)
+        }
+    }
+
+    /// Done, Later and Delete act at once (docs/motion.md rule 1): a light tap, the message closes and
+    /// its row leaves while the core works. A refused action brings the row back with the next reload.
+    private func act(_ action: MailAction, id: Int64, until: Int64? = nil) {
+        // The model refuses while another action or a read flag is in flight; leave the row where it is.
+        guard !model.working else { return }
+        acted += 1
+        if model.selectedID == id { model.selectedID = nil }
+        leaving.insert(id)
+        Task {
+            await model.act(action, id: id, until: until)
+            leaving.remove(id)
         }
     }
 
@@ -282,7 +335,13 @@ struct MailView: View {
     }
 
     /// The desktop reading pane's toolbar over the message: Later, Delete, Mark read, and Done filled.
-    @ViewBuilder private var detail: some View {
+    private var detail: some View {
+        Group { reading }
+            // The message fades in over its preview instead of popping in.
+            .animation(Motion.fade, value: model.message == nil)
+    }
+
+    @ViewBuilder private var reading: some View {
         if let message = model.message {
             let id = model.selectedID ?? message.row.id
             VStack(spacing: 0) {
@@ -297,10 +356,21 @@ struct MailView: View {
             }
             .background(Theme.background)
             .disabled(model.working)
+        } else if let id = model.selectedID, let row = model.rows.first(where: { $0.id == id || $0.messageIds.contains(id) }) {
+            // While the message loads its list preview stands in, under a bar as tall as the toolbar.
+            VStack(spacing: 0) {
+                HStack {
+                    if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                }
+                .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+                MessagePreview(row: row)
+            }
+            .background(Theme.background)
         } else if split {
             EmptyState(icon: "mail", title: "No message selected")
         } else {
-            // While the message loads, or when it failed to: only the way back.
+            // A message outside the loaded rows, while it loads or when it failed to: only the way back.
             VStack(alignment: .leading, spacing: 0) {
                 IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }
                     .padding(.horizontal, 10).frame(minHeight: 56)
@@ -324,7 +394,7 @@ extension MailView {
                 laterChoices = model.core?.laterChoices() ?? []; laterID = id
             }
             if model.mailbox != .trash {
-                HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { Task { await model.act(.delete, id: id) } }
+                HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { act(.delete, id: id) }
             }
             if regular {
                 HouseButton(title: message.row.unread ? "Mark read" : "Mark unread", icon: message.row.unread ? "read" : "unread",
@@ -333,7 +403,7 @@ extension MailView {
                 }
             }
             Spacer(minLength: 0)
-            HouseButton(title: "Done", icon: "done", primary: true) { Task { await model.act(.done, id: id) } }
+            HouseButton(title: "Done", icon: "done", primary: true) { act(.done, id: id) }
         }
     }
 }

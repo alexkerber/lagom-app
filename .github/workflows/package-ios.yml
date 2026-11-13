@@ -1,0 +1,103 @@
+name: Package iOS
+
+# Tags v1.2.3 (and a manual run on a tag) archive, export and upload to TestFlight.
+# A manual run on a branch exports a signed .ipa without uploading it.
+# Without the signing secrets, and on pull requests, it archives unsigned: a build check only.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - apps/mobile/apple/project.yml
+      - apps/mobile/apple/release.sh
+      - apps/mobile/apple/ExportOptions.plist
+      - apps/mobile/apple/PrivacyInfo.xcprivacy
+      - scripts/build-apple.sh
+      - .github/workflows/package-ios.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: iPhone and iPad archive
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Version from the tag
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [[ $REF_TYPE == tag ]]; then version=${REF_NAME#v}; else version=0.0.0-dev.${SHA:0:7}; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Pull requests never get the signing keys, even from branches in this repository.
+      # The .p12 holds the development and the distribution identity: automatic signing archives
+      # with the first and exports with the second.
+      - name: Signing keychain and App Store Connect key
+        id: signing
+        if: github.event_name != 'pull_request'
+        env:
+          P12: ${{ secrets.IOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.IOS_SIGNING_P12_PASSWORD }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          if [[ -z $P12 || -z $ASC_KEY || -z $ASC_KEY_ID || -z $ASC_ISSUER ]]; then
+            echo '::warning::No iOS signing secrets: the archive is unsigned and nothing goes to TestFlight.'
+            exit 0
+          fi
+          keychain=$RUNNER_TEMP/lagom-ios.keychain-db
+          keychain_password=$(uuidgen)
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          printf '%s\n' "$ASC_KEY" > "$RUNNER_TEMP/asc.p8"
+          {
+            echo "LAGOM_ASC_KEY=$RUNNER_TEMP/asc.p8"
+            echo "LAGOM_ASC_KEY_ID=$ASC_KEY_ID"
+            echo "LAGOM_ASC_ISSUER=$ASC_ISSUER"
+          } >> "$GITHUB_ENV"
+          echo "signed=1" >> "$GITHUB_OUTPUT"
+      - name: Archive, export and upload
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [[ $SIGNED != 1 ]]; then mode=--unsigned
+          elif [[ $REF_TYPE == tag ]]; then mode=--upload
+          else mode="export"; fi
+          apps/mobile/apple/release.sh "$VERSION" "$mode"
+          plutil -p apps/mobile/apple/build/Lagom.xcarchive/Products/Applications/Lagom.app/Info.plist \
+            | grep -E 'CFBundleShortVersionString|CFBundleVersion"'
+      - name: Remove signing material
+        if: always()
+        run: |
+          [[ ! -f $RUNNER_TEMP/lagom-ios.keychain-db ]] || security delete-keychain "$RUNNER_TEMP/lagom-ios.keychain-db"
+          rm -f "$RUNNER_TEMP/asc.p8"
+      # The .ipa when signed; an unsigned archive is only a build check and is not kept.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.signing.outputs.signed == '1'
+        with:
+          name: ios-ipa
+          path: apps/mobile/apple/build/export/*.ipa
+          if-no-files-found: ignore
