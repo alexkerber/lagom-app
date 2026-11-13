@@ -5,4 +5,10 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
     </style>
+    <!-- Same background as the first screen, so the splash hands over without a colour jump. -->
+    <style name="Theme.Lagom.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#FFFFFF</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.Lagom</item>
+    </style>
 </resources>
