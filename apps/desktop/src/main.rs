@@ -172,6 +172,8 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
                 appears_transparent: cfg!(target_os = "macos"),
                 traffic_light_position: cfg!(target_os = "macos").then(|| point(px(18.), px(18.))),
             }),
+            // Linux: matches the desktop file, so docks show its icon and focus this window.
+            app_id: Some("app.lagommail.desktop".into()),
             window_background: if cfg!(target_os = "macos") { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Blurred },
             ..Default::default()
         },
