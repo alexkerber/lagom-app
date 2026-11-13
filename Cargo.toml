@@ -1,7 +1,7 @@
 [workspace]
 # shortcut: Cargo.lock holds libc at 0.2.189 for GPUI's xattr 0.2.3 on Linux; revisit when GPUI updates xattr.
 resolver = "2"
-exclude = ["vendor/gpui"]
+exclude = ["vendor/gpui", "vendor/html5ever"]
 members = ["crates/lagom-core", "crates/lagom-ffi", "crates/lagom-cli", "apps/desktop", "vendor/imap-proto"]
 
 [workspace.package]
@@ -12,6 +12,9 @@ repository = "https://github.com/alexkerber/lagom-app"
 [patch.crates-io]
 # shortcut: maintain a local recursion bound; drop this patch when upstream bounds parser recursion.
 imap-proto = { path = "vendor/imap-proto" }
+
+# shortcut: bound attributes per tag so tokenizing mail HTML stays linear; drop when upstream checks duplicates in constant time.
+html5ever = { path = "vendor/html5ever" }
 
 # shortcut: GPUI 0.2.2 filters Dock reopen and cannot observe test quit, drop when upstream fixes both.
 gpui = { path = "vendor/gpui" }
