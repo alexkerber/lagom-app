@@ -40,6 +40,7 @@ pub enum Run {
     Sync,
     Settings,
     AddAccount,
+    Shortcuts,
     /// A search hit: the store id of the message.
     Open(i64),
 }
@@ -64,7 +65,7 @@ impl Action {
                 Run::Delete => "icons/trash.svg", Run::Reply => "icons/reply.svg", Run::ReplyAll => "icons/reply-all.svg",
                 Run::Forward => "icons/forward.svg", Run::ToggleRead => "icons/unread.svg", Run::Compose => "icons/compose.svg",
                 Run::InsertFile => "icons/attachment.svg", Run::Sync => "icons/sync.svg", Run::Settings => "icons/settings.svg",
-                Run::AddAccount => "icons/add-account.svg", Run::Open(_) => "icons/mail.svg",
+                Run::AddAccount => "icons/add-account.svg", Run::Shortcuts => "icons/keyboard.svg", Run::Open(_) => "icons/mail.svg",
             }
         }
     }
@@ -78,22 +79,23 @@ struct Command {
 }
 
 const COMMANDS: &[Command] = &[
-    Command { section: "Actions", label: "New task", hint: Hint::Key("T"), action: Action::Run(Run::NewTask) },
-    Command { section: "Actions", label: "Done", hint: Hint::Key("E"), action: Action::Run(Run::Done) },
+    Command { section: "Actions", label: "New task", hint: Hint::Key("t"), action: Action::Run(Run::NewTask) },
+    Command { section: "Actions", label: "Done", hint: Hint::Key("e"), action: Action::Run(Run::Done) },
     Command { section: "Actions", label: LaterWhen::Evening.label(), hint: Hint::Note("18:00"), action: Action::Run(Run::Later(LaterWhen::Evening)) },
-    Command { section: "Actions", label: LaterWhen::Tomorrow.label(), hint: Hint::Key("L"), action: Action::Run(Run::Later(LaterWhen::Tomorrow)) },
+    Command { section: "Actions", label: LaterWhen::Tomorrow.label(), hint: Hint::Key("l"), action: Action::Run(Run::Later(LaterWhen::Tomorrow)) },
     Command { section: "Actions", label: LaterWhen::NextWeek.label(), hint: Hint::Note("Mon 08:00"), action: Action::Run(Run::Later(LaterWhen::NextWeek)) },
     Command { section: "Actions", label: "Move to…", hint: Hint::Note("move"), action: Action::Fill("move ") },
-    Command { section: "Actions", label: "Delete", hint: Hint::Key("⌫"), action: Action::Run(Run::Delete) },
-    Command { section: "Actions", label: "Reply all", hint: Hint::Key("⇧R"), action: Action::Run(Run::ReplyAll) },
-    Command { section: "Actions", label: "Forward", hint: Hint::Key("F"), action: Action::Run(Run::Forward) },
-    Command { section: "Actions", label: "Mark as unread / read", hint: Hint::Key("⇧U"), action: Action::Run(Run::ToggleRead) },
-    Command { section: "Actions", label: "Reply", hint: Hint::Key("R"), action: Action::Run(Run::Reply) },
-    Command { section: "Actions", label: "New message", hint: Hint::Key("C"), action: Action::Run(Run::Compose) },
+    Command { section: "Actions", label: "Delete", hint: Hint::Key("backspace"), action: Action::Run(Run::Delete) },
+    Command { section: "Actions", label: "Reply all", hint: Hint::Key("shift-r"), action: Action::Run(Run::ReplyAll) },
+    Command { section: "Actions", label: "Forward", hint: Hint::Key("f"), action: Action::Run(Run::Forward) },
+    Command { section: "Actions", label: "Mark as unread / read", hint: Hint::Key("shift-u"), action: Action::Run(Run::ToggleRead) },
+    Command { section: "Actions", label: "Reply", hint: Hint::Key("r"), action: Action::Run(Run::Reply) },
+    Command { section: "Actions", label: "New message", hint: Hint::Key("c"), action: Action::Run(Run::Compose) },
     Command { section: "Mail", label: "Insert file…", hint: Hint::Note("Markdown"), action: Action::Run(Run::InsertFile) },
     Command { section: "Mail", label: "Sync now", hint: Hint::Note("IMAP"), action: Action::Run(Run::Sync) },
-    Command { section: "Mail", label: "Settings", hint: Hint::Key("⌘,"), action: Action::Run(Run::Settings) },
+    Command { section: "Mail", label: "Settings", hint: Hint::Key("secondary-,"), action: Action::Run(Run::Settings) },
     Command { section: "Mail", label: "Add account", hint: Hint::Note("IMAP"), action: Action::Run(Run::AddAccount) },
+    Command { section: "Mail", label: "Keyboard shortcuts", hint: Hint::Key("secondary-/"), action: Action::Run(Run::Shortcuts) },
 ];
 
 pub struct PrepareMove(pub String);
@@ -306,7 +308,7 @@ fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
     div().font_family(font::MONO).text_size(px(size::MONO)).text_color(color).child(text.into())
 }
 
-fn key_cap(t: &Theme, key: &'static str, selected: bool) -> Div {
+pub(crate) fn key_cap(t: &Theme, key: impl Into<SharedString>, selected: bool) -> Div {
     mono(key, if selected { t.ink } else { t.ink2 })
         .px(px(6.))
         .py(px(1.))
@@ -370,7 +372,7 @@ impl Render for CommandPalette {
                             .child(StyledText::new(item.label.clone()).with_highlights(item.range.clone().map(|r| (r, bold)))),
                     )
                     .children(match item.hint {
-                        Some(Hint::Key(key)) => Some(key_cap(&t, key, selected)),
+                        Some(Hint::Key(key)) => Some(key_cap(&t, crate::shortcuts::label(key), selected)),
                         Some(Hint::Note(note)) => Some(mono(*note, t.ink2)),
                         // Folder targets show ↵ on the selected row only.
                         None => selected.then(|| key_cap(&t, "↵", true)),

@@ -1023,11 +1023,21 @@ impl MainWindow {
                 let at = chrono::DateTime::from_timestamp(*at, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
                 format!("synced {}", at.unwrap_or_default())
             }
-            Some(SyncState::Failed(e)) => format!("offline: {e}"),
+            // The reason is in the status tooltip; a raw server error does not fit the header.
+            Some(SyncState::Failed(_)) => "not synced".into(),
             Some(SyncState::ReauthRequired) => "Sign in again".into(),
             Some(SyncState::SigningIn) => "Signing in…".into(),
         };
         Some(state.into())
+    }
+
+    /// Why the current account did not sync, if it did not.
+    pub(super) fn sync_error(&self) -> Option<String> {
+        let live = self.live.as_ref()?;
+        match live.sync.get(&live.account()?.id)? {
+            SyncState::Failed(e) => Some(e.clone()),
+            _ => None,
+        }
     }
 
     pub(super) fn reauth_control(&self, ix: usize, slot: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1319,6 +1329,12 @@ impl MainWindow {
         self.confirm_empty_trash = false;
         self.set_page(Page::Settings(None), cx);
         cx.notify();
+    }
+
+    /// Settings, scrolled to the keyboard shortcuts at its end.
+    pub(crate) fn show_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(window, cx);
+        self.settings_scroll.scroll_to_bottom();
     }
 
     /// `Some`: Remove on that account's page waits for a yes; `None`: Keep.
@@ -4126,6 +4142,19 @@ mod tests {
                 assert!(v.toast.is_none());
             });
         }
+    }
+
+    #[gpui::test]
+    fn failed_sync_shows_plain_words_and_keeps_the_reason(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let account = view.update(cx, |v, _| v.live.as_ref().unwrap().accounts[0].id.clone());
+        view.update_in(cx, |v, window, cx| {
+            v.on_events(vec![Event::Sync(account.clone(), SyncState::Failed("connection refused".into()))], window, cx);
+            assert_eq!(v.sync_state().unwrap().as_ref(), "not synced");
+            assert_eq!(v.sync_error().as_deref(), Some("connection refused"));
+            v.on_events(vec![Event::Sync(account, SyncState::Synced(0))], window, cx);
+            assert_eq!(v.sync_error(), None);
+        });
     }
 
     #[gpui::test]
