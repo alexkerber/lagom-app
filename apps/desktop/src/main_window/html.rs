@@ -152,6 +152,11 @@ pub(super) struct Web {
     asked: Option<(Key, u64)>,
     /// Snapshot requests so far: a late answer to an earlier overlay never shows in a later one.
     asks: u64,
+    /// The document asked for last has finished loading; until then the view may still show the
+    /// previous one, so no snapshot is taken.
+    // shortcut: a Loaded for the previous document that is still queued when the next load starts
+    // counts for the new one; wry's load event names no document. Tag loads if a wrong picture shows.
+    settled: bool,
 }
 
 /// What stands in for the web view while an overlay hides it.
@@ -249,6 +254,7 @@ impl Web {
                 if view.load_html(&doc).is_err() {
                     self.ours.set(false);
                 }
+                self.settled = false;
             }
             self.shown = Some(key);
             self.has_remote = has_remote(html);
@@ -270,7 +276,7 @@ impl Web {
             return;
         }
         // `visible`: the view was on screen in the last frame, so the picture matches what was seen.
-        if self.asked.is_some() || !self.visible.get() { return; }
+        if self.asked.is_some() || !self.visible.get() || !self.settled { return; }
         let Some(key) = self.shown else { return };
         self.asks += 1;
         let ask = self.asks;
@@ -385,7 +391,10 @@ impl Web {
                 window.focus(&host.keys());
                 host.new_task(cx);
             }
-            Msg::Loaded => host.web().ready = true,
+            Msg::Loaded => {
+                host.web().ready = true;
+                host.web().settled = true;
+            }
             Msg::CloseWindow => {
                 host.web().unfocus();
                 window.focus(&host.keys());
