@@ -345,7 +345,7 @@ final class MailModel {
             guard selectedID == id, request == selectionRevision else { return }
             messages = loaded
             message = loaded.first { $0.row.id == id } ?? loaded.last
-            expandedIDs = Set(loaded.filter { $0.row.unread || $0.row.id == loaded.last?.row.id }.map { $0.row.id })
+            expandedIDs = Set(loaded.filter { $0.row.id == id || $0.row.unread || $0.row.id == loaded.last?.row.id }.map { $0.row.id })
             for item in loaded where expandedIDs.contains(item.row.id) {
                 guard request == selectionRevision else { return }
                 async let inline: Void = loadInline(id: item.row.id, request: request)
@@ -377,6 +377,10 @@ final class MailModel {
         async let inline: Void = loadInline(id: id, request: request)
         if item.row.unread { await setRead(id: id, read: true) }
         await inline
+    }
+
+    func setRead(row: MailRow) async {
+        for id in row.messageIds { await setRead(id: id, read: row.unread) }
     }
 
     func setRead(id: Int64, read: Bool) async {
@@ -412,7 +416,7 @@ final class MailModel {
 
     func act(_ action: MailAction, id: Int64) async {
         guard let core, !working else { return }
-        let ids = rows.first { $0.id == id }?.messageIds ?? [id]
+        let ids = rows.first { $0.messageIds.contains(id) }?.messageIds ?? [id]
         actingID = id
         defer { actingID = nil }
         do {

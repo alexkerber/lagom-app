@@ -239,7 +239,7 @@ struct MailView: View {
         .buttonStyle(.plain)
         .contextMenu {
             Button(row.unread ? "Mark read" : "Mark unread") {
-                Task { await model.setRead(id: row.id, read: row.unread) }
+                Task { await model.setRead(row: row) }
             }.disabled(model.working)
         }
         .swipeActions(edge: .leading) {

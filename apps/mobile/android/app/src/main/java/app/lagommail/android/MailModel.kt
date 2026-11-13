@@ -254,7 +254,7 @@ internal class MailModel(
             if (request != selectionRevision) return
             messages = loaded
             message = loaded.firstOrNull { it.row.id == id } ?: loaded.lastOrNull()
-            expandedIds = loaded.filter { it.row.unread || it.row.id == loaded.lastOrNull()?.row?.id }.map { it.row.id }.toSet()
+            expandedIds = loaded.filter { it.row.id == id || it.row.unread || it.row.id == loaded.lastOrNull()?.row?.id }.map { it.row.id }.toSet()
             for (item in loaded.filter { it.row.unread }) {
                 if (request != selectionRevision) return
                 setRead(item.row.id, true)
@@ -300,7 +300,7 @@ internal class MailModel(
     suspend fun act(action: MailAction, id: Long, conversation: Boolean = true) {
         val core = core ?: return
         if (working) return
-        val ids = if (conversation) rows.firstOrNull { it.id == id }?.messageIds ?: listOf(id) else listOf(id)
+        val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds ?: listOf(id) else listOf(id)
         actingId = id
         try {
             when (action) {

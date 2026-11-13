@@ -57,6 +57,29 @@ class MailModelTest {
         assertEquals(listOf(3L, 1L), core.deleted)
     }
 
+    @Test fun selectedThreadActionSurvivesRepresentativeChange() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(3)) }
+        val model = model(core); model.start(); model.select(1)
+        core.mail = listOf(row(2).copy(messageCount = 2u, messageIds = listOf(2, 1)), row(3))
+        model.sync()
+        assertEquals(1L, model.selectedId)
+        assertEquals(listOf(2L, 3L), model.rows.map { it.id })
+        model.act(MailAction.Done, model.selectedId!!)
+        assertEquals(listOf(3L), core.mail.map { it.id })
+        assertNull(model.selectedId)
+    }
+
+    @Test fun explicitlyOpenedReadMemberStartsExpanded() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(1), row(2), row(3, unread = true), row(4))
+            conversationIds = listOf(1, 2, 3, 4)
+        }
+        val model = model(core); model.start(); model.select(1)
+        assertEquals(1L, model.message?.row?.id)
+        assertEquals(setOf(1L, 3L, 4L), model.expandedIds)
+        assertEquals(listOf(3L to true), core.readCalls)
+    }
+
     @Test fun notificationContentGroupsAccountsAndTargetsNewestMail() {
         val first = row(1, "a").copy(senderName = "", senderAddress = "sender@example.test", subject = "First", dateUnix = 1)
         assertTrue(mailNotices(emptyList()).isEmpty())

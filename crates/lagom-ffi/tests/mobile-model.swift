@@ -114,6 +114,44 @@ import Foundation
 
 @main
 struct ModelChecks {
+    @MainActor static func listReadActionIncludesOlderUnreadMembers() async {
+        let core = FixtureCore(noHandle: .init())
+        core.mail = Array(core.mail.prefix(3))
+        core.mail[1].unread = false
+        let model = MailModel(); model.core = core
+        var row = core.mail[1]
+        row.messageIds = [2, 1]; row.messageCount = 2; row.unread = true
+        await model.setRead(row: row)
+        precondition(core.flags == [2, 1] && core.mail.map(\.unread) == [false, false, true])
+        row.unread = false
+        await model.setRead(row: row)
+        precondition(core.flags == [2, 1, 2, 1] && core.mail.map(\.unread) == [true, true, true])
+    }
+
+    @MainActor static func selectedThreadActionSurvivesRepresentativeChange() async {
+        let core = FixtureCore(noHandle: .init())
+        core.mail = Array(core.mail.prefix(3))
+        core.mail[0].unread = false
+        let model = MailModel(); model.core = core; model.selectedID = 1
+        await model.select(1)
+        core.mail[1].messageIds = [2, 1]; core.mail[1].messageCount = 2
+        core.mail.removeFirst()
+        await model.sync()
+        precondition(model.selectedID == 1 && model.rows.map(\.id) == [2, 3])
+        await model.act(.done, id: model.selectedID!)
+        precondition(core.mail.map(\.id) == [3] && model.selectedID == nil)
+    }
+
+    @MainActor static func explicitlyOpenedReadMemberStartsExpanded() async {
+        let core = FixtureCore(noHandle: .init())
+        core.conversationIDs = [1, 2, 3, 4]
+        for index in [0, 1, 3] { core.mail[index].unread = false }
+        let model = MailModel(); model.core = core; model.selectedID = 1
+        await model.select(1)
+        precondition(model.message?.row.id == 1 && model.expandedIDs == [1, 3, 4])
+        precondition(core.flags == [3])
+    }
+
     @MainActor static func attachments() async throws {
         for (name, safe) in [("../../file.txt", "file.txt"), ("..\\file.txt", "file.txt"),
                              (" \0\n", "attachment"), ("", "attachment"), ("..", "attachment"),
@@ -150,6 +188,10 @@ struct ModelChecks {
     }
 
     @MainActor static func main() async throws {
+        await listReadActionIncludesOlderUnreadMembers()
+        await selectedThreadActionSurvivesRepresentativeChange()
+        await explicitlyOpenedReadMemberStartsExpanded()
+        print("Conversation row read, changed representative and explicit expansion regressions passed")
         let conversationCore = FixtureCore(noHandle: .init())
         conversationCore.conversationIDs = [1, 2, 3]
         conversationCore.mail[0].unread = false
