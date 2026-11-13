@@ -19,7 +19,7 @@ use crate::command_palette::{CommandPalette, MoveTo, Run};
 use crate::compose::{Compose, ComposeEvent};
 use crate::folders::{self, Folder, Kind};
 use crate::mail::{self, LaterWhen, Mail, ComposeKind, INBOX_LEN, LATER_SAMPLE};
-use crate::motion::spring;
+use crate::motion::{spring, travel};
 use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
@@ -94,9 +94,7 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 // Motion per docs/motion.md: the state changes at once, the animation only paints on top.
-// shortcut: GPUI 0.2.2 exposes no "reduce motion" setting, so motion always plays. Read
-// NSWorkspace.accessibilityDisplayShouldReduceMotion (and the Windows/Linux equivalents) and fall
-// back to a short fade once GPUI or lagom-core can provide it.
+// Under reduced motion (`motion::reduced`) nothing travels: rows fade and close the gap.
 const MOTION: Duration = Duration::from_millis(180);
 /// Colour change behind a swiped row when it crosses a threshold.
 const TINT_FADE: Duration = Duration::from_millis(100);
@@ -230,6 +228,20 @@ impl Ghost {
     }
 }
 
+/// A row that arrives or leaves with a store read (new mail, a move on another device): it fades
+/// and grows or closes in place. `Move::Read` slides nowhere and paints no move colour behind it.
+const ARRIVE: Move = Move::Read(true);
+/// More rows than this changing in one read (a page loading, a big sync) appear at once.
+const SETTLE_MAX: usize = 5;
+
+/// The list as drawn before a store read, so `settle_list` can move rows instead of popping them.
+struct ListBefore {
+    key: (Option<usize>, Option<String>, bool, bool),
+    ids: Vec<usize>,
+    // The first row on screen (its index) and its distance from the top, when the list is scrolled.
+    anchor: Option<(usize, f32)>,
+}
+
 fn row_scale(p: f32) -> f32 {
     1. - ((p - 0.3) / 0.7).clamp(0., 1.)
 }
@@ -272,6 +284,8 @@ pub struct MainWindow {
     ghosts: Vec<Ghost>,
     // Rows that undo put back, still playing the reverse motion.
     entering: Vec<Ghost>,
+    // The list the last store read drew. Only a read of that same list moves rows (`settle_list`).
+    last_read: Option<(Option<usize>, Option<String>, bool, bool)>,
     seq: usize,
     swipe: Swipe,
     // The row under the pointer for the current scroll event. Rows set it before the list reads it.
@@ -405,6 +419,7 @@ impl MainWindow {
             focus,
             ghosts: Vec::new(),
             entering: Vec::new(),
+            last_read: None,
             seq: 0,
             swipe: Swipe::Idle,
             under: None,
@@ -952,6 +967,54 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn list_key(&self) -> (Option<usize>, Option<String>, bool, bool) {
+        (self.inbox.open, self.inbox.account_filter.clone(), self.inbox.group, self.inbox.unread_only)
+    }
+
+    fn list_before(&self) -> ListBefore {
+        let layout = self.row_layout(Instant::now());
+        let top = -f32::from(self.scroll.offset().y);
+        let anchor = (top > 0.).then(|| layout.index_at(top)).filter(|&ix| ix < layout.len).map(|ix| (ix, layout.y(ix) - top));
+        ListBefore { key: self.list_key(), ids: self.inbox.list().clone(), anchor }
+    }
+
+    /// After a store read of the same list: new rows grow in and removed rows fade out where they
+    /// are, and the first row on screen stays put while rows above it change (no layout pop).
+    fn settle_list(&mut self, before: ListBefore) {
+        let list = self.inbox.list().clone();
+        // A list just opened draws at once, even when it held rows from an earlier visit.
+        let opened = self.last_read.replace(self.list_key()) != Some(before.key.clone());
+        if opened || before.key != self.list_key() || before.ids.is_empty() || before.ids == list {
+            return;
+        }
+        // Positions moved under the highlight; the rows paint the selection.
+        self.glide = None;
+        let pos: HashMap<usize, usize> = list.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        // Where old slot `k` is now: the first old row from `k` on that is still listed.
+        let remap = |k: usize| before.ids.get(k..).unwrap_or_default().iter().find_map(|id| pos.get(id).copied()).unwrap_or(list.len());
+        for g in &mut self.ghosts {
+            g.ix = remap(g.ix);
+        }
+        let (old_from, from) = before.anchor.map_or((0, 0), |(k, _)| (k, remap(k)));
+        let old: HashSet<usize> = before.ids.iter().copied().collect();
+        let arrived: Vec<(usize, usize)> = list.iter().enumerate().skip(from).filter(|(_, id)| !old.contains(id)).map(|(ix, &id)| (id, ix)).collect();
+        let left: Vec<(usize, usize)> = before.ids.iter().enumerate().skip(old_from)
+            .filter(|&(_, id)| !pos.contains_key(id) && !self.ghosts.iter().any(|g| g.id == *id))
+            .map(|(k, &id)| (id, remap(k))).collect();
+        // A row back before its exit finished: the real row replaces its ghost.
+        self.ghosts.retain(|g| !arrived.iter().any(|&(id, _)| id == g.id));
+        if arrived.len() + left.len() <= SETTLE_MAX {
+            let at = Instant::now();
+            self.ghosts.extend(left.into_iter().map(|(id, ix)| Ghost { id, ix, what: ARRIVE, at, dx: 0. }));
+            // Entering rows are listed already, so none of these is among them.
+            self.entering.extend(arrived.into_iter().map(|(id, ix)| Ghost { id, ix, what: ARRIVE, at, dx: 0. }));
+        }
+        if let Some((_, y)) = before.anchor {
+            let top = self.row_layout(Instant::now()).y(from) - y;
+            self.scroll.set_offset(gpui::point(px(0.), px(-top.max(0.))));
+        }
+    }
+
     // Ghosts and springs sit at indices in the list on screen, so they go when the list changes.
     fn clear_motion(&mut self) {
         self.message_menu = None;
@@ -1156,7 +1219,8 @@ impl MainWindow {
         }
         self.prune();
         // While rows leave or come back, the rows paint the selection; a glide would start late.
-        self.glide = (self.ghosts.is_empty() && self.entering.is_empty()).then(|| {
+        // Reduced motion: the highlight moves at once, so the rows paint it.
+        self.glide = (!crate::motion::reduced() && self.ghosts.is_empty() && self.entering.is_empty()).then(|| {
             self.seq += 1;
             Glide::new(self.glide, self.row_layout(Instant::now()).y(before), self.row_layout(Instant::now()).y(ix), Instant::now(), self.seq)
         });
@@ -1185,11 +1249,12 @@ fn away<E: Styled>(row: E, t: Theme, what: Move, p: f32, dx: f32) -> E {
     match what {
         Move::Read(_) => row,
         // A move to a folder leaves like Done.
-        Move::Inbox | Move::Done | Move::Folder(_) => row.left(px(dx + p * 200.)),
+        Move::Inbox | Move::Done | Move::Folder(_) => row.left(px(dx + travel(p * 200.))),
         // Delete leaves the other way, at the same speed.
-        Move::Delete => row.left(px(dx - p * 200.)),
+        Move::Delete => row.left(px(dx - travel(p * 200.))),
         // Towards Later in the sidebar: lift (shadow), shrink and move left.
-        Move::Later => row.left(px(dx - p * 80.)).w(relative(1. - 0.3 * p)).shadow_md(),
+        Move::Later if travel(1.) > 0. => row.left(px(dx - p * 80.)).w(relative(1. - 0.3 * p)).shadow_md(),
+        Move::Later => row.left(px(dx)),
     }
 }
 
@@ -1228,6 +1293,9 @@ fn behind(t: Theme, what: Option<Move>, right: bool) -> Div {
 /// A row that leaves (or comes back) over the colour of its move, so E, L and ⌫ look like a swipe.
 /// The colour fades with the row; at rest (p = 0) it is gone, as resting rows are not opaque.
 fn with_behind(row: AnyElement, t: Theme, what: Move, p: f32) -> AnyElement {
+    if what == ARRIVE {
+        return row;
+    }
     let right = !matches!(what, Move::Later | Move::Delete);
     div()
         .relative()
@@ -1242,9 +1310,14 @@ fn with_behind(row: AnyElement, t: Theme, what: Move, p: f32) -> AnyElement {
 /// Counts roll in from below when they change. The id holds the value, so a new value restarts it.
 fn roll(el: Div, id: String) -> AnyElement {
     el.with_animation(ElementId::Name(id.into()), motion(), |el, d| {
-        el.relative().top(px((1. - d) * 6.)).opacity(d)
+        el.relative().top(px((1. - d) * travel(6.))).opacity(d)
     })
     .into_any_element()
+}
+
+/// A loading note that appears only when the wait outlasts `motion::CALM`, so fast loads never flash.
+fn calm(el: Div, id: impl Into<ElementId>) -> AnyElement {
+    el.with_animation(id, Animation::new(2 * crate::motion::CALM), |el, d| el.opacity(crate::motion::calm(d))).into_any_element()
 }
 
 /// Times, counts and other secondary labels: the system font with tabular figures, so digits
@@ -1987,7 +2060,7 @@ impl MainWindow {
                         if self.emptying_trash() {
                             controls.child(mono("Emptying…", t.ink2))
                         } else if !self.can_empty_trash() {
-                            controls.child(mono("Updating…", t.ink2))
+                            controls.child(calm(mono("Updating…", t.ink2), "trash-updating"))
                         } else if self.confirm_empty_trash {
                             controls
                                 .child(button(t, "Delete all", Some(t.danger)).on_click(cx.listener(|this, _, _, cx| this.empty_trash(cx))))
@@ -2210,6 +2283,8 @@ fn reading_view(
             .child(mono(attachment_size(part.size), t.ink2))
             .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
     }).collect::<Vec<_>>();
+    // The text is still being read (the body then holds only `live::LOADING`).
+    let loading = m.text.as_ref().is_some_and(|t| t.borrow().is_none());
     div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().max_w(px(760.))
         .flex().flex_col().gap(px(16.)).p(px(24.))
         .child(div().flex_shrink_0().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
@@ -2234,7 +2309,11 @@ fn reading_view(
                 .child(menu))
             .child(div().flex().flex_col().gap(px(12.)).text_size(px(size::BODY)).line_height(relative(READING_LEADING))
                 .when(m.body.is_empty() && text, |d| d.child(div().text_color(t.ink2).child(m.snippet.clone())))
-                .when(text, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
+                // The preview stands in while the text loads; the note shows only for a slow load.
+                .when(text && loading, |d| d
+                    .child(div().text_color(t.ink2).child(m.snippet.clone()))
+                    .child(calm(div().text_size(px(size::SMALL)).text_color(t.ink2).child(live::LOADING), ("loading-message", id))))
+                .when(text && !loading, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
                 .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
                     div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
             .children(attachment()))
@@ -3771,6 +3850,101 @@ mod dispatch {
         view.update(cx, |v, cx| v.open_box(Some(0), cx));
         frame(cx);
         assert_eq!(view.read_with(cx, |v, _| v.scroll.offset().y), px(0.));
+    }
+
+    fn add_rows(v: &mut MainWindow, n: usize) -> Vec<usize> {
+        let ids: Vec<usize> = (0..n).map(|_| { v.inbox.mail.push(v.inbox.mail[0].clone()); v.inbox.mail.len() - 1 }).collect();
+        v.inbox.items.splice(0..0, ids.iter().copied());
+        v.inbox.regroup();
+        ids
+    }
+
+    #[gpui::test]
+    fn arriving_rows_grow_in_at_the_top_and_leaving_rows_fade(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        view.update(cx, |v, _| {
+            let before = v.list_before();
+            v.settle_list(before);
+            assert!(v.entering.is_empty() && v.ghosts.is_empty(), "the first read of a list moves nothing");
+            let before = v.list_before();
+            let new = add_rows(v, 1)[0];
+            v.settle_list(before);
+            let g = v.entering.iter().find(|g| g.id == new).expect("the new row grows in");
+            assert_eq!((g.ix, g.what), (0, ARRIVE));
+            let at = g.at;
+            let start = v.row_layout(at);
+            assert!((start.y(1) - start.y(0)).abs() < 0.1, "rows below have not moved yet");
+            let end = v.row_layout(at + SPRING);
+            assert!((end.y(1) - end.y(0) - ROW_H).abs() < 0.1, "then the row has its full height");
+            // A row removed by a sync (moved on another device) fades and closes where it was.
+            let before = v.list_before();
+            let gone = v.inbox.items.remove(3);
+            v.inbox.regroup();
+            v.settle_list(before);
+            let g = v.ghosts.iter().find(|g| g.id == gone).expect("the removed row fades out");
+            assert_eq!((g.ix, g.what), (3, ARRIVE));
+            // Back before its exit ends: one row, no ghost beside it.
+            let before = v.list_before();
+            v.inbox.items.insert(3, gone);
+            v.inbox.regroup();
+            v.settle_list(before);
+            assert!(!v.ghosts.iter().any(|g| g.id == gone));
+            assert!(v.entering.iter().any(|g| g.id == gone));
+            // A page of rows, or another list, appears at once.
+            v.entering.clear();
+            v.ghosts.clear();
+            let before = v.list_before();
+            add_rows(v, SETTLE_MAX + 1);
+            v.settle_list(before);
+            assert!(v.entering.is_empty());
+            let before = v.list_before();
+            v.inbox.unread_only = true;
+            add_rows(v, 1);
+            v.settle_list(before);
+            assert!(v.entering.is_empty());
+        });
+        frame(cx);
+    }
+
+    #[gpui::test]
+    fn arriving_rows_above_a_scrolled_list_keep_it_still(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        view.update(cx, |v, _| {
+            v.last_read = Some(v.list_key());
+            v.scroll.set_offset(gpui::point(px(0.), px(-row_y(5000))));
+        });
+        frame(cx);
+        let (top, first) = view.update(cx, |v, _| {
+            let top = -f32::from(v.scroll.offset().y);
+            let before = v.list_before();
+            let first = v.inbox.list()[before.anchor.unwrap().0];
+            add_rows(v, 3);
+            v.settle_list(before);
+            assert!(v.entering.is_empty(), "rows above the screen do not animate");
+            (top, first)
+        });
+        frame(cx);
+        view.read_with(cx, |v, _| {
+            let after = -f32::from(v.scroll.offset().y);
+            assert!((after - top - 3. * ROW_H).abs() < 0.1, "offset {top} -> {after}");
+            let ix = v.inbox.list().iter().position(|&id| id == first).unwrap();
+            assert!(v.row_layout(Instant::now()).y(ix) - after <= ROW_H, "the same row is still first on screen");
+        });
+    }
+
+    #[gpui::test]
+    fn reduced_motion_moves_the_selection_at_once(cx: &mut TestAppContext) {
+        let (view, cx) = large_list(cx);
+        frame(cx);
+        crate::motion::force_reduced(Some(true));
+        cx.simulate_keystrokes("j");
+        assert!(view.read_with(cx, |v, _| v.glide.is_none()));
+        frame(cx);
+        crate::motion::force_reduced(None);
+        cx.simulate_keystrokes("j");
+        assert!(view.read_with(cx, |v, _| v.glide.is_some()));
     }
 
     #[gpui::test]

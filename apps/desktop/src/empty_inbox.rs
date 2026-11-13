@@ -73,8 +73,8 @@ pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
                 .child(mono("G D what you finished", t.ink2))
                 .child(mono("⌘K commands", t.ink2)),
         )
-        // Calm fade-in, no confetti (docs/motion.md). Plays once per element id.
-        // shortcut: ignores the system reduce-motion setting, GPUI 0.2.2 does not expose it.
+        // Calm fade-in, no confetti (docs/motion.md). Plays once per element id. A fade only, so
+        // reduced motion keeps it.
         .with_animation(
             "empty-inbox",
             Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()),

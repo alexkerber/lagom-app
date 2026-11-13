@@ -763,7 +763,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
         .child(div().flex_1().min_w(px(0.)).line_clamp(1).text_ellipsis().child(label))
         .children(undo)
         .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
-            d.opacity(ease_out_quint()(v)).relative().top(px(8. * (1. - spring(v))))
+            d.opacity(ease_out_quint()(v)).relative().top(px(crate::motion::travel(8.) * (1. - spring(v))))
         })
 }
 
@@ -786,14 +786,14 @@ impl Render for Compose {
             .bg(scrim)
             .child(self.sheet(window, cx));
         // Bottom padding shifts the centred sheet up by half its value.
-        let out = |d: Div, v: f32| d.opacity(1. - v).pb(px(160. * v));
+        let out = |d: Div, v: f32| d.opacity(1. - v).pb(px(crate::motion::travel(160.) * v));
         let layer = match self.phase {
             // Leaving: ease-out, as a spring would bounce a sheet that is on its way off screen.
             Phase::Sent => layer.with_animation("compose-out", Animation::new(SLIDE).with_easing(ease_out_quint()), out).into_any_element(),
             // Arriving (open, or back after Undo): rises 12 px into place on a spring and fades in.
             Phase::Open | Phase::Restored => layer
                 .with_animation(if self.phase == Phase::Open { "compose-open" } else { "compose-in" }, Animation::new(SLIDE), |d, v| {
-                    d.opacity(ease_out_quint()(v)).pt(px(24. * (1. - spring(v))))
+                    d.opacity(ease_out_quint()(v)).pt(px(crate::motion::travel(24.) * (1. - spring(v))))
                 })
                 .into_any_element(),
             Phase::Gone => layer.into_any_element(),
