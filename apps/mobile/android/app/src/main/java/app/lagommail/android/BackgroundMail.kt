@@ -63,3 +63,24 @@ class MailRefreshWorker(context: Context, parameters: WorkerParameters) : Corout
         }
     }
 }
+
+class SendWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result = try {
+        val core = withContext(Dispatchers.IO) { (applicationContext as LagomApplication).backgroundCore() }
+        core.syncAll()
+        Result.success()
+    } catch (cancelled: CancellationException) { throw cancelled }
+    // Offline or locked credentials: a few retries, then the next app start sends.
+    catch (_: Exception) { if (runAttemptCount < 3) Result.retry() else Result.success() }
+
+    companion object {
+        /** The delay covers the Undo window; an undone row is gone by then and nothing is sent. */
+        fun schedule(context: Context) {
+            val request = OneTimeWorkRequestBuilder<SendWorker>().setInitialDelay(5, TimeUnit.SECONDS)
+                // Matches the outbox's 60 s doubling, so a retry never runs before the failed mail is due again.
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 60, TimeUnit.SECONDS)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build()
+            WorkManager.getInstance(context).enqueueUniqueWork("lagom-send", ExistingWorkPolicy.REPLACE, request)
+        }
+    }
+}

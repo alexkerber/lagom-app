@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T = MailModel(open = {
                     withContext(Dispatchers.IO) { (application as LagomApplication).core }
-                }, attachmentDirectory = File(cacheDir, "attachments")) as T
+                }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { SendWorker.schedule(applicationContext) }) as T
             })
             LifecycleEventEffect(Lifecycle.Event.ON_START) { model.perform { model.setForeground(true) } }
             LifecycleEventEffect(Lifecycle.Event.ON_STOP) { model.perform { model.setForeground(false) } }

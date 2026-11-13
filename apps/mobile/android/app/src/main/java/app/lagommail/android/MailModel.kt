@@ -76,8 +76,9 @@ internal enum class MailAction { Done, Later, Delete }
 internal class MailModel(
     private val open: suspend () -> LagomCoreInterface,
     private val attachmentDirectory: File,
-    private val tomorrow: () -> Long = ::tomorrowAtEight,
     private val now: () -> Long = { System.currentTimeMillis() },
+    /** Sends the outbox from WorkManager, which outlives a frozen or killed process. */
+    private val sendLater: () -> Unit = {},
 ) : ViewModel() {
     var downloadingAttachments by mutableStateOf<Set<Pair<Long, String>>>(emptySet()); private set
     var core: LagomCoreInterface? = null; private set
@@ -104,6 +105,8 @@ internal class MailModel(
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
+    var undoSendId by mutableStateOf<String?>(null); private set
+    private var sendRevision = 0
     var drafts by mutableStateOf<List<DraftRow>>(emptyList()); private set
     var showingDrafts by mutableStateOf(false); private set
     var savedDraftIds by mutableStateOf<Set<String>>(emptySet()); private set
@@ -168,6 +171,8 @@ internal class MailModel(
         wake?.cancel(); wake = null
         if (active) { start(); reload(); sync() }
         else if (!sending) draft?.let { persist(it) }
+        // Background refresh never sends, so mail inside the Undo window needs its own job.
+        if (!active && undoSendId != null) sendLater()
     }
     suspend fun reload(more: Boolean = false) {
         val core = core ?: return
@@ -297,7 +302,7 @@ internal class MailModel(
             } while (syncAgain)
         } finally { syncing = false }
     }
-    suspend fun act(action: MailAction, id: Long, conversation: Boolean = true) {
+    suspend fun act(action: MailAction, id: Long, conversation: Boolean = true, until: Long? = null) {
         val core = core ?: return
         if (working) return
         val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds ?: listOf(id) else listOf(id)
@@ -305,7 +310,7 @@ internal class MailModel(
         try {
             when (action) {
                 MailAction.Done -> core.done(ids)
-                MailAction.Later -> core.later(ids, withContext(Dispatchers.IO) { tomorrow() })
+                MailAction.Later -> core.later(ids, until ?: core.laterChoices()[1].untilUnix)
                 MailAction.Delete -> core.delete(ids)
             }
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
@@ -442,11 +447,38 @@ internal class MailModel(
                     drafts = drafts.filterNot { it.id == snapshot.id }
                     savedDraftIds = savedDraftIds - snapshot.id
                     finishCompose(snapshot.id)
-                    notice = "Queued for sending"
+                    val request = ++sendRevision
+                    undoSendId = snapshot.id
+                    notice = "Sending…"
+                    perform {
+                        delay(5000)
+                        if (sendRevision == request && undoSendId == snapshot.id) { undoSendId = null; notice = null }
+                        if (foreground) sync() else sendLater()
+                    }
                 }
             }
         } finally { sending = false }
-        sync()
+    }
+    suspend fun undoSend() {
+        val core = core ?: return
+        val id = undoSendId ?: return
+        if (sending || draft != null) return
+        sending = true
+        try {
+            draftLock.withLock {
+                withContext(NonCancellable) {
+                    if (core.undoSend(id)) {
+                        draftRevision++
+                        val saved = core.localDraft(id)
+                        savedDraftIds = savedDraftIds + id
+                        finishedDrafts.remove(id)
+                        if (draft == null) draft = ComposeDraft(saved)
+                        notice = null
+                    } else { notice = "Already sent" }
+                    if (undoSendId == id) undoSendId = null
+                }
+            }
+        } finally { sending = false }
     }
 }
 

@@ -1,0 +1,82 @@
+name: Windows installer
+
+# Builds target\windows\lagom-<version>-windows-x64-setup.exe. On a v* tag it also attaches it to that
+# tag's GitHub release. Optional secrets: LAGOM_GOOGLE_CLIENT_ID, LAGOM_GOOGLE_CLIENT_SECRET and
+# LAGOM_MICROSOFT_CLIENT_ID (sign-in), WINDOWS_CERTIFICATE (base64 .pfx) and
+# WINDOWS_CERTIFICATE_PASSWORD (code signing). Missing secrets give an unsigned build without sign-in.
+on:
+  pull_request:
+    paths:
+      - apps/desktop/**
+      - crates/lagom-core/**
+      - brand/app-icon/**
+      - vendor/**
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/package-windows.*
+      - .github/workflows/package-windows.yml
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Windows installer
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Version from the tag
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [[ $REF_TYPE == tag ]]; then version=${REF_NAME#v}; else version=0.0.0-dev.${SHA:0:7}; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build installer
+        shell: pwsh
+        env:
+          LAGOM_GOOGLE_CLIENT_ID: ${{ secrets.LAGOM_GOOGLE_CLIENT_ID }}
+          LAGOM_GOOGLE_CLIENT_SECRET: ${{ secrets.LAGOM_GOOGLE_CLIENT_SECRET }}
+          LAGOM_MICROSOFT_CLIENT_ID: ${{ secrets.LAGOM_MICROSOFT_CLIENT_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/package-windows.ps1 $env:VERSION
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lagom-windows-x64
+          path: target/windows/lagom-*-setup.exe
+          if-no-files-found: error
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        # Same rule as package-macos.yml: the first platform creates the draft, a human publishes it.
+        # shortcut: two platforms finishing at once can each create a draft; docs/release.md says to check. Upgrade to one draft-creating job when this happens.
+        run: |
+          prerelease=()
+          [[ $TAG != *-* ]] || prerelease=(--prerelease)
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            # A rerun must not swap files under a release people already download.
+            [[ $draft == true ]] || { echo "::error::$TAG is published; upload by hand if you mean it."; exit 1; }
+          else
+            gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag --title "lagom ${TAG#v}" --generate-notes
+          fi
+          gh release upload "$TAG" target/windows/lagom-*-setup.exe --clobber

@@ -33,9 +33,12 @@ struct Smoke {
         } catch MailError.NotFound { }
         let recipients = splitRecipients(value: "\"Example, Sender\" <sender@example.test>, next@example.test")
         precondition(recipients.count == 2)
-        let tomorrow = try tomorrowAtEight()
-        precondition(tomorrow > Int64(Date().timeIntervalSince1970))
+        let choices = core.laterChoices()
+        precondition(choices.map(\.label) == ["Later: this evening 18:00", "Later: tomorrow 08:00", "Later: next week, Monday 08:00"])
+        precondition(choices.allSatisfy { $0.untilUnix > Int64(Date().timeIntervalSince1970) })
+        let undone = try await core.undoSend(id: "missing")
+        precondition(!undone)
         precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true, messageId: 1, remote: false).contains("<x-LINK"))
-        print("Swift FFI smoke: 12 checks passed")
+        print("Swift FFI smoke: 14 checks passed")
     }
 }

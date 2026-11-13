@@ -8,6 +8,7 @@ description = "Shared core for lagom: accounts, sync, local store and search. No
 publish = false
 
 [dependencies]
+chrono = "0.4"
 thiserror = "2"
 dirs = "6"
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }

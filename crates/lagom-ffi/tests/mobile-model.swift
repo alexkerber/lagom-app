@@ -1,6 +1,11 @@
 import Foundation
 
 @MainActor final class FixtureCore: LagomCore, @unchecked Sendable {
+    override func laterChoices() -> [LaterChoice] {
+        [LaterChoice(label: "Later: this evening 18:00", untilUnix: 18_000),
+         LaterChoice(label: "Later: tomorrow 08:00", untilUnix: 86_400),
+         LaterChoice(label: "Later: next week, Monday 08:00", untilUnix: 604_800)]
+    }
     override func cancelBackgroundSync() {}
     override func backgroundSync() async throws -> [MailRow] { [] }
     override func refreshContacts(accountId: String) async throws {}
@@ -16,6 +21,8 @@ import Foundation
         if failAttachment { throw MailError.Failed(reason: "download failed") }
         return Data([0, 255])
     }
+    var snoozed: ([Int64], Int64)?
+    override func later(ids: [Int64], untilUnix: Int64) async throws { snoozed = (ids, untilUnix) }
     var deadline: Int64?
     var reads = 0
     var syncs = 0
@@ -61,6 +68,11 @@ import Foundation
 }
 
 @MainActor final class DraftFixtureCore: LagomCore, @unchecked Sendable {
+    override func laterChoices() -> [LaterChoice] {
+        [LaterChoice(label: "Later: this evening 18:00", untilUnix: 18_000),
+         LaterChoice(label: "Later: tomorrow 08:00", untilUnix: 86_400),
+         LaterChoice(label: "Later: next week, Monday 08:00", untilUnix: 604_800)]
+    }
     override func cancelBackgroundSync() {}
     override func backgroundSync() async throws -> [MailRow] { [] }
     override func refreshContacts(accountId: String) async throws {}
@@ -70,6 +82,13 @@ import Foundation
     var gate: CheckedContinuation<Void, Never>?
     var suspendSave = false
     var fail = false
+    var syncs = 0
+    override func syncAll() async throws { syncs += 1 }
+    override func undoSend(id: String) async throws -> Bool {
+        guard let sent, sent.id == id else { return false }
+        drafts[id] = sent; self.sent = nil
+        return true
+    }
     var sent: LocalDraft?
     var failDraftList = false
     var suspendDraftList = false
@@ -86,7 +105,9 @@ import Foundation
         if failDraftList { throw MailError.Failed(reason: "draft list failed") }
         return rows
     }
+    var onRestore: (() -> Void)?
     override func localDraft(id: String) async throws -> LocalDraft {
+        onRestore?()
         guard let draft = drafts[id] else { throw MailError.NotFound }
         return draft
     }
@@ -114,6 +135,52 @@ import Foundation
 
 @main
 struct ModelChecks {
+    @MainActor static func undoAndLater() async throws {
+        let core = DraftFixtureCore(noHandle: .init())
+        let gate = SendGate()
+        let model = MailModel(sendDelay: { await gate.wait() }); model.core = core
+        var draft = ComposeDraft(account: "fixture"); draft.body = "keep edits"
+        draft.attachments = [SendAttachment(filename: "a.bin", mimeType: "application/octet-stream", data: Data([1, 2]))]
+        model.composeDraft = draft
+        try await model.sendCompose()
+        precondition(model.undoSendID == draft.messageID && model.notice == "Sending…" && core.syncs == 0)
+        await model.undoSend()
+        precondition(model.composeDraft?.messageID == draft.messageID && model.composeDraft?.body == draft.body)
+        precondition(model.composeDraft?.attachments == draft.attachments && model.undoSendID == nil)
+        try await model.sendCompose()
+        await gate.releaseFirst()
+        let firstDeadline = ContinuousClock.now + .seconds(2)
+        while core.syncs < 1 && ContinuousClock.now < firstDeadline { await Task.yield() }
+        precondition(core.syncs == 1 && model.undoSendID == draft.messageID && model.notice == "Sending…",
+                     "an earlier timer must not shorten the restored draft's new Undo window")
+        core.sent = nil
+        await model.undoSend()
+        precondition(model.notice == "Already sent" && model.composeDraft == nil)
+        await gate.release()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while core.syncs < 2 && ContinuousClock.now < deadline { await Task.yield() }
+        precondition(core.syncs == 2, "each send window must request sync")
+        let raceGate = SendGate()
+        let raced = MailModel(sendDelay: { await raceGate.wait() }); raced.core = core
+        raced.composeDraft = draft
+        try await raced.sendCompose()
+        var newer = ComposeDraft(account: "fixture"); newer.body = "new editor"
+        core.onRestore = { raced.composeDraft = newer }
+        await raced.undoSend()
+        precondition(raced.composeDraft?.messageID == newer.messageID && core.drafts[draft.messageID]?.body == draft.body,
+                     "Undo must preserve an editor opened while restoration was pending")
+        core.onRestore = nil
+        await raceGate.release()
+        let mail = FixtureCore(noHandle: .init()); model.core = mail
+        for choice in mail.laterChoices() {
+            await model.act(.later, id: 1, until: choice.untilUnix)
+            precondition(mail.snoozed?.0 == [1] && mail.snoozed?.1 == choice.untilUnix)
+        }
+        await model.act(.later, id: 1)
+        precondition(mail.snoozed?.1 == 86_400)
+        print("MailModel: undo restore, already sent, expiry sync and Later choices passed")
+    }
+
     @MainActor static func listReadActionIncludesOlderUnreadMembers() async {
         let core = FixtureCore(noHandle: .init())
         core.mail = Array(core.mail.prefix(3))
@@ -257,6 +324,7 @@ struct ModelChecks {
             await wake()
             return
         }
+        try await undoAndLater()
         try await attachments()
         try await draftReload()
         try await draftLifecycle()
@@ -442,4 +510,17 @@ struct ModelChecks {
 
 private extension LocalDraft {
     var row: DraftRow { DraftRow(id: id, account: account, to: to, subject: subject, updatedUnix: 42) }
+}
+
+actor SendGate {
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async { if !released { await withCheckedContinuation { waiters.append($0) } } }
+    func releaseFirst() async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while waiters.isEmpty && ContinuousClock.now < deadline { await Task.yield() }
+        precondition(!waiters.isEmpty)
+        waiters.removeFirst().resume()
+    }
+    func release() { released = true; for waiter in waiters { waiter.resume() }; waiters = [] }
 }

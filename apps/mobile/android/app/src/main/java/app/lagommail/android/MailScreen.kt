@@ -77,7 +77,16 @@ import java.time.format.FormatStyle
             })
         }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
-                model.notice?.let { notice -> TextButton(onClick = { model.notice = null }) { Text(notice) } }
+                model.notice?.let { notice ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(notice, Modifier.weight(1f))
+                        if (model.undoSendId != null) {
+                            TextButton(enabled = !model.sending, onClick = { model.perform { model.undoSend() } },
+                                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                                    .semantics { contentDescription = "Undo send" }) { Text("Undo") }
+                        } else { TextButton(onClick = { model.notice = null }) { Text("Dismiss") } }
+                    }
+                }
                 if (model.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (model.accounts.isEmpty() && !model.loading) {
                     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -321,7 +330,19 @@ internal fun Mailbox.label(): String = when (this) {
             val readLabel = if (message.row.unread) "Mark read" else "Mark unread"
             TextButton(enabled = !model.working, onClick = { model.perform { model.setRead(message.row.id, message.row.unread) } },
                 modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = readLabel }) { Text(readLabel) }
-            TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Later, message.row.id, conversation = false) } }) { Text("Later") }
+            Box {
+                var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
+                TextButton(enabled = !model.working, onClick = { choices = model.core?.laterChoices().orEmpty() },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text("Later") }
+                DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {
+                    choices.forEach { choice ->
+                        DropdownMenuItem(text = { Text(choice.label) }, onClick = {
+                            choices = emptyList()
+                            model.perform { model.act(MailAction.Later, message.row.id, conversation = false, until = choice.untilUnix) }
+                        })
+                    }
+                }
+            }
             TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id, conversation = false) } }) { Text("Delete") }
             Button(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Done, message.row.id, conversation = false) } }) { Text("Done") }
         }
