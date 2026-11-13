@@ -75,8 +75,11 @@ internal fun openSignIn(context: Context, url: String) {
 class SignInRedirectActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        startActivity(Intent(this, MainActivity::class.java).setAction(intent.action).setData(intent.data)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        // As an extra, not as data: the system logs an intent's data when it starts an activity.
+        signInRedirect(intent.action, intent.dataString, packageName)?.let {
+            startActivity(Intent(this, MainActivity::class.java).putExtra("signIn", it)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        }
         finish()
     }
 }
@@ -97,7 +100,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         readNotification(intent)
-        signIn = signInRedirect(intent.action, intent.dataString, packageName) ?: signIn
+        signIn = intent.getStringExtra("signIn") ?: signIn
     }
 
     private fun requestNotificationPermission() {
@@ -113,7 +116,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         readNotification(intent)
         // A recreated activity gets the same intent again; its redirect is already used.
-        if (savedInstanceState == null) signIn = signInRedirect(intent.action, intent.dataString, packageName)
+        if (savedInstanceState == null) signIn = intent.getStringExtra("signIn")
         enableEdgeToEdge()
         setContent {
             val model: MailModel = viewModel(factory = object : ViewModelProvider.Factory {

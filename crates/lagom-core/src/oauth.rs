@@ -257,9 +257,11 @@ impl Pending {
     fn code(&self, callback: &str) -> Result<Zeroizing<String>> {
         let invalid = Error::Invalid("invalid sign-in callback");
         let (Ok(url), Ok(ours)) = (Url::parse(callback), Url::parse(&self.redirect)) else { return Err(invalid) };
-        // Providers may add a trailing slash to a redirect without a path.
-        let path = |url: &Url| url.path().trim_end_matches('/').to_owned();
-        if url.scheme() != ours.scheme() || url.host_str() != ours.host_str() || path(&url) != path(&ours) {
+        let mut base = url.clone();
+        base.set_query(None);
+        base.set_fragment(None);
+        // Providers may add one trailing slash to a redirect without a path.
+        if base.as_str().strip_suffix('/').unwrap_or(base.as_str()) != ours.as_str() {
             return Err(invalid);
         }
         response_code(&url, &self.state)

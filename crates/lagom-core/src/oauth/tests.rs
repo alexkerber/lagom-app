@@ -507,6 +507,9 @@ fn mobile_redirect_needs_our_uri_and_the_pending_state() {
             format!("other.scheme:/oauth2redirect?code=c&state={state}"),
             format!("{redirect}/other?code=c&state={state}"),
             format!("{scheme}://evil.example/oauth2redirect?code=c&state={state}"),
+            format!("{scheme}://user@auth?code=c&state={state}"),
+            format!("{scheme}://auth:123?code=c&state={state}"),
+            format!("{redirect}//?code=c&state={state}"),
             "not a url".into(),
             String::new(),
         ] {
