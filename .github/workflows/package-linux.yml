@@ -1,0 +1,95 @@
+name: Linux packages
+
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - 'crates/lagom-core/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'brand/app-icon/export/**'
+      - 'packaging/linux/**'
+      - 'scripts/package-linux.sh'
+      - '.github/workflows/package-linux.yml'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    # The oldest supported Ubuntu: its glibc sets the oldest distribution the packages run on.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The CI build packages, plus Xvfb, a software Vulkan driver and gdbus for the smoke start.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libssl-dev libasound2-dev \
+            libglib2.0-dev libdbus-1-dev libzstd-dev libclang-dev cmake pkg-config \
+            desktop-file-utils xvfb xauth mesa-vulkan-drivers libglib2.0-bin
+      - name: Version
+        id: version
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ $REF == refs/tags/v* ]]; then echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else echo "version=0.0.0~ci${{ github.run_number }}" >> "$GITHUB_OUTPUT"; fi
+      - name: Build packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/package-linux.sh "$VERSION"
+      # Installs the .deb, starts lagom through D-Bus activation as a notification click would,
+      # and checks it is still running. 124 is timeout's exit code: still alive.
+      - name: Smoke start under Xvfb
+        env:
+          TARGET: >-
+            [<'{"account":"none","message":null}'>]
+        run: |
+          sudo apt-get install -y ./target/linux/lagom_*.deb
+          xvfb-run -a dbus-run-session -- sh -euc '
+            gdbus call --session --dest app.lagommail.desktop --object-path /app/lagommail/desktop \
+              --method org.freedesktop.Application.ActivateAction open-message "$TARGET" "{}"
+            sleep 5
+            pgrep -x lagom
+            pkill -x lagom'
+          LAGOM_DEMO=1 APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 10 target/linux/lagom-*.AppImage || test $? = 124
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lagom-linux-${{ steps.version.outputs.version }}
+          path: |
+            target/linux/*.deb
+            target/linux/*.AppImage
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      # Creates the release on the first platform's upload, then adds files to it.
+      - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" dist/* --clobber || gh release create "$TAG" dist/* --draft --title "$TAG" --generate-notes

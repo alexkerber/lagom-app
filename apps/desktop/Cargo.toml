@@ -57,6 +57,9 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 [target.'cfg(target_os = "linux")'.dependencies]
 # D-Bus notifications and activation callbacks without a platform event loop.
 notify-rust = "4.18.2"
+# org.gtk.Notifications and org.freedesktop.Application for clicks that start lagom. Already in
+# Cargo.lock through notify-rust; "service" adds no crates.
+zbus = { version = "6", default-features = false, features = ["service"] }
 
 [package.metadata.bundle]
 name = "lagom"
