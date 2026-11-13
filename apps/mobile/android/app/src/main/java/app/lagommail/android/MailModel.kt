@@ -138,6 +138,17 @@ internal class MailModel(
     private var foreground = false
     private var wake: Job? = null
 
+    /** The browser's redirect after "Sign in with Google" or Microsoft. The core refuses all but the pending sign-in. */
+    fun finishSignIn(redirect: String) = perform {
+        val form = accountForm
+        form?.connecting = true
+        try {
+            requireNotNull(core).finishSignIn(redirect)
+            if (accountForm === form) accountForm = null
+            reload()
+            sync()
+        } finally { form?.connecting = false }
+    }
     fun perform(action: suspend () -> Unit) = viewModelScope.launch {
         try { action() } catch (e: CancellationException) { throw e }
         catch (e: Exception) { error = e.mailMessage() }

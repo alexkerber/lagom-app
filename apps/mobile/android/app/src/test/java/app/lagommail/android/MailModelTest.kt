@@ -25,6 +25,33 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = now, sendLater = { sendLaters++ })
 
+    @Test fun signInRedirectIsOnlyOurSchemesOnAViewIntent() {
+        val (view, app) = "android.intent.action.VIEW" to "com.example.app"
+        val google = "com.googleusercontent.apps.123-abc:/oauth2redirect?code=c&state=s"
+        val microsoft = "msauth.com.example.app://auth?code=c&state=s"
+        assertEquals(google, signInRedirect(view, google, app))
+        assertEquals(microsoft, signInRedirect(view, microsoft, app))
+        for (other in listOf("https://example.test/?code=c&state=s", "msauth.com.example.app.evil://auth?code=c&state=s",
+            "msauth.other.app://auth?code=c&state=s", "lagom://auth?code=c&state=s", ""))
+            assertNull(other, signInRedirect(view, other, app))
+        assertNull(signInRedirect("android.intent.action.MAIN", google, app))
+        assertNull(signInRedirect(null, google, app))
+        assertNull(signInRedirect(view, null, app))
+    }
+
+    @Test fun finishedSignInClosesTheFormAndARefusedRedirectKeepsIt() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        val form = AccountForm(); model.accountForm = form
+        model.finishSignIn("msauth.com.example.app://auth?code=c&state=guess"); runCurrent()
+        assertEquals("Sign-in was interrupted. Try again.", model.error)
+        assertSame(form, model.accountForm); assertFalse(form.connecting)
+        assertTrue(core.redirects.isEmpty())
+        val syncs = core.syncs
+        model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending"); runCurrent()
+        assertNull(model.accountForm); assertFalse(form.connecting)
+        assertEquals(1, core.redirects.size); assertEquals(syncs + 1, core.syncs)
+    }
+
     @Test fun undoRestoresDraftAndExpirySyncsOnlyInForeground() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.setForeground(true)
         val initialSyncs = core.syncs
@@ -939,6 +966,13 @@ private class FakeCore : LagomCoreInterface {
     }
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
+    override fun beginSignIn(provider: SignInProvider) = error("unused fixture operation")
+    var redirects = listOf<String>()
+    override suspend fun finishSignIn(callbackUrl: String): MailAccount {
+        check(callbackUrl.endsWith("state=pending")) { "Sign-in was interrupted. Try again." }
+        redirects += callbackUrl
+        return MailAccount("fixture", "fixture@example.test", "Fixture")
+    }
 }
 
 private fun LocalDraft.row() = DraftRow(id, account, to, subject, 42)

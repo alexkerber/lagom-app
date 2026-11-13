@@ -27,21 +27,27 @@ pub enum Provider {
 
 impl Provider {
     fn config(self) -> Config {
-        let (id, secret, auth, token, scope) = match self {
+        let (auth, token, scope) = match self {
             Self::Google => (
-                env("LAGOM_GOOGLE_CLIENT_ID", option_env!("LAGOM_GOOGLE_CLIENT_ID")),
-                env("LAGOM_GOOGLE_CLIENT_SECRET", option_env!("LAGOM_GOOGLE_CLIENT_SECRET")),
                 "https://accounts.google.com/o/oauth2/v2/auth",
                 "https://oauth2.googleapis.com/token",
                 "https://mail.google.com/ openid email profile",
             ),
             Self::Microsoft => (
-                env("LAGOM_MICROSOFT_CLIENT_ID", option_env!("LAGOM_MICROSOFT_CLIENT_ID")),
-                String::new(),
                 "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token",
                 "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid email profile",
             ),
+        };
+        let (id, secret) = match (MOBILE.get(), self) {
+            // iOS and Android clients are public: the platform's own ID and never the desktop secret.
+            (Some(mobile), Self::Google) => (mobile.google.clone(), String::new()),
+            (Some(mobile), Self::Microsoft) => (mobile.microsoft.clone(), String::new()),
+            (None, Self::Google) => (
+                env("LAGOM_GOOGLE_CLIENT_ID", option_env!("LAGOM_GOOGLE_CLIENT_ID")),
+                env("LAGOM_GOOGLE_CLIENT_SECRET", option_env!("LAGOM_GOOGLE_CLIENT_SECRET")),
+            ),
+            (None, Self::Microsoft) => (env("LAGOM_MICROSOFT_CLIENT_ID", option_env!("LAGOM_MICROSOFT_CLIENT_ID")), String::new()),
         };
         Config {
             id,
@@ -77,6 +83,33 @@ fn env(name: &str, built: Option<&str>) -> String {
 }
 pub fn available(provider: Provider) -> bool {
     !provider.config().id.trim().is_empty()
+}
+
+struct Mobile {
+    app_id: String,
+    google: String,
+    microsoft: String,
+}
+static MOBILE: OnceLock<Mobile> = OnceLock::new();
+/// The app's bundle or application ID and its platform client IDs, set once at start.
+/// Token refresh reads them too, so set them before any sync.
+pub fn configure_mobile(app_id: String, google: String, microsoft: String) {
+    let _ = MOBILE.set(Mobile { app_id, google, microsoft });
+}
+/// The redirect each provider registers for a mobile client: Google's reversed client ID,
+/// Microsoft's `msauth.<app id>://auth`.
+fn mobile_redirect(provider: Provider, client_id: &str, app_id: &str) -> Result<String> {
+    let redirect = match provider {
+        Provider::Google => {
+            let name = client_id
+                .strip_suffix(".apps.googleusercontent.com")
+                .ok_or(Error::Invalid("invalid Google client ID"))?;
+            format!("com.googleusercontent.apps.{name}:/oauth2redirect")
+        }
+        Provider::Microsoft => format!("msauth.{app_id}://auth"),
+    };
+    Url::parse(&redirect).map_err(|_| Error::Invalid("invalid sign-in redirect"))?;
+    Ok(redirect)
 }
 
 pub const GOOGLE_CALENDAR_SCOPES: &str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/tasks";
@@ -162,40 +195,103 @@ async fn sign_in_with(
         let redirect = format!("http://{host}:{}/", listener.local_addr()?.port());
         let state = random();
         let verifier = Zeroizing::new(random());
-        let mut url = Url::parse(&config.auth)
-            .map_err(|_| Error::Invalid("invalid authorization endpoint"))?;
-        url.query_pairs_mut().extend_pairs([
-            ("client_id", config.id.as_str()),
-            ("redirect_uri", &redirect),
-            ("response_type", "code"),
-            ("scope", config.scope.as_str()),
-            ("state", &state),
-            ("code_challenge", &challenge(&verifier)),
-            ("code_challenge_method", "S256"),
-        ]);
-        if provider == Provider::Google {
-            url.query_pairs_mut()
-                .extend_pairs([("access_type", "offline"), ("prompt", "consent")]);
-        }
-        if let Some(account) = existing { url.query_pairs_mut().append_pair("login_hint", &account.email); }
-        open_url(url.as_str());
+        open_url(&authorize_url(provider, &config, &redirect, &state, &verifier, existing.map(|a| a.email.as_str()))?);
         let code = callback(&listener, v6.as_ref(), &state).await?;
-        let mut token = exchange(
-            &config,
-            &[
-                ("grant_type", "authorization_code"),
-                ("code", &code),
-                ("redirect_uri", &redirect),
-                ("code_verifier", &verifier),
-            ],
-        )
-        .await?;
-        // Missing scope means the requested scope set was granted (OAuth 2.0 section 5.1).
-        if token.scope.is_none() { token.scope = Some(config.scope.clone()); }
-        complete_sign_in(provider, existing, &mut token).await
+        redeem(provider, &config, existing, &redirect, &code, &verifier).await
     })
     .await
     .map_err(|_| Error::Network("sign-in timed out"))?
+}
+
+fn authorize_url(provider: Provider, config: &Config, redirect: &str, state: &str, verifier: &str, hint: Option<&str>) -> Result<String> {
+    let mut url = Url::parse(&config.auth).map_err(|_| Error::Invalid("invalid authorization endpoint"))?;
+    url.query_pairs_mut().extend_pairs([
+        ("client_id", config.id.as_str()),
+        ("redirect_uri", redirect),
+        ("response_type", "code"),
+        ("scope", config.scope.as_str()),
+        ("state", state),
+        ("code_challenge", &challenge(verifier)),
+        ("code_challenge_method", "S256"),
+    ]);
+    if provider == Provider::Google {
+        url.query_pairs_mut()
+            .extend_pairs([("access_type", "offline"), ("prompt", "consent")]);
+    }
+    if let Some(email) = hint { url.query_pairs_mut().append_pair("login_hint", email); }
+    Ok(url.into())
+}
+async fn redeem(provider: Provider, config: &Config, existing: Option<&Account>, redirect: &str, code: &str, verifier: &str) -> Result<SignedIn> {
+    let mut token = exchange(
+        config,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect),
+            ("code_verifier", verifier),
+        ],
+    )
+    .await?;
+    // Missing scope means the requested scope set was granted (OAuth 2.0 section 5.1).
+    if token.scope.is_none() { token.scope = Some(config.scope.clone()); }
+    complete_sign_in(provider, existing, &mut token).await
+}
+
+/// A mobile sign-in between opening the system browser and its redirect back to the app.
+pub struct Pending {
+    provider: Provider,
+    config: Config,
+    redirect: String,
+    state: String,
+    verifier: Zeroizing<String>,
+}
+impl Pending {
+    /// The URL scheme the system browser session hands back to the app.
+    pub fn scheme(&self) -> String {
+        self.redirect.split(':').next().unwrap_or_default().to_ascii_lowercase()
+    }
+    /// True only for this sign-in's own redirect. Any app can open our scheme; only our state may end the wait.
+    pub fn accepts(&self, callback: &str) -> bool {
+        !matches!(self.code(callback), Err(Error::Invalid("invalid sign-in callback" | "sign-in state mismatch")))
+    }
+    fn code(&self, callback: &str) -> Result<Zeroizing<String>> {
+        let invalid = Error::Invalid("invalid sign-in callback");
+        let (Ok(url), Ok(ours)) = (Url::parse(callback), Url::parse(&self.redirect)) else { return Err(invalid) };
+        // Providers may add a trailing slash to a redirect without a path.
+        let path = |url: &Url| url.path().trim_end_matches('/').to_owned();
+        if url.scheme() != ours.scheme() || url.host_str() != ours.host_str() || path(&url) != path(&ours) {
+            return Err(invalid);
+        }
+        response_code(&url, &self.state)
+    }
+}
+fn mobile_config(provider: Provider) -> Result<(Config, String)> {
+    let mobile = MOBILE.get().ok_or(Error::Invalid("sign-in provider is not configured"))?;
+    let config = provider.config();
+    if config.id.trim().is_empty() {
+        return Err(Error::Invalid("sign-in provider is not configured"));
+    }
+    let redirect = mobile_redirect(provider, &config.id, &mobile.app_id)?;
+    Ok((config, redirect))
+}
+/// Whether `begin` can start: the mobile UI hides the provider's button otherwise.
+pub fn mobile_available(provider: Provider) -> bool {
+    mobile_config(provider).is_ok()
+}
+/// The authorization URL for the system browser, and the state to keep until its redirect arrives.
+pub fn begin(provider: Provider) -> Result<(String, Pending)> {
+    let (config, redirect) = mobile_config(provider)?;
+    begin_with(provider, config, redirect)
+}
+fn begin_with(provider: Provider, config: Config, redirect: String) -> Result<(String, Pending)> {
+    let pending = Pending { provider, config, redirect, state: random(), verifier: Zeroizing::new(random()) };
+    let url = authorize_url(provider, &pending.config, &pending.redirect, &pending.state, &pending.verifier, None)?;
+    Ok((url, pending))
+}
+/// Exchanges the redirect's code and stores the refresh token. Consumes the sign-in: a code is single use.
+pub async fn finish(pending: Pending, callback: &str) -> Result<SignedIn> {
+    let code = pending.code(callback)?;
+    redeem(pending.provider, &pending.config, None, &pending.redirect, &code, &pending.verifier).await
 }
 
 async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token: &mut Token) -> Result<SignedIn> {
@@ -245,6 +341,9 @@ fn parse_callback(target: &str, state: &str) -> Result<Zeroizing<String>> {
     }
     let url = Url::parse(&format!("http://localhost{target}"))
         .map_err(|_| Error::Invalid("invalid sign-in callback"))?;
+    response_code(&url, state)
+}
+fn response_code(url: &Url, state: &str) -> Result<Zeroizing<String>> {
     let pairs: Vec<_> = url.query_pairs().collect();
     let one = |key: &str| {
         let mut values = pairs

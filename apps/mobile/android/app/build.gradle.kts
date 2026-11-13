@@ -3,6 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Sign-in client IDs come from a Gradle property (for example in ~/.gradle/gradle.properties) or the
+// environment, never from the repository. Empty hides that provider's sign-in button.
+fun clientId(property: String, variable: String) =
+    providers.gradleProperty(property).orElse(providers.environmentVariable(variable)).getOrElse("").trim()
+val googleClientId = clientId("lagom.googleClientId", "LAGOM_GOOGLE_ANDROID_CLIENT_ID")
+val microsoftClientId = clientId("lagom.microsoftClientId", "LAGOM_MICROSOFT_ANDROID_CLIENT_ID")
+
 android {
     namespace = "app.lagommail.android"
     compileSdk { version = release(37) { minorApiLevel = 0 } }
@@ -13,8 +20,14 @@ android {
         versionCode = 1
         versionName = "0.1"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        buildConfigField("String", "GOOGLE_CLIENT_ID", "\"$googleClientId\"")
+        buildConfigField("String", "MICROSOFT_CLIENT_ID", "\"$microsoftClientId\"")
+        // Google redirects to the reversed client ID. Without one the filter repeats the Microsoft scheme.
+        val suffix = ".apps.googleusercontent.com"
+        manifestPlaceholders["googleScheme"] =
+            if (googleClientId.endsWith(suffix)) "com.googleusercontent.apps.${googleClientId.removeSuffix(suffix)}" else "msauth.$applicationId"
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     sourceSets["main"].kotlin.srcDir("build/generated/uniffi")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

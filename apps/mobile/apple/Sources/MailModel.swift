@@ -224,6 +224,10 @@ final class MailModel {
 
     static func openCore() async throws -> LagomCore {
         let directory = try Storage.directory()
+        // Token refresh in every sync needs the client IDs, also in a background wake. Later calls change nothing.
+        let info = Bundle.main.infoDictionary
+        configureSignIn(appId: Bundle.main.bundleIdentifier ?? "", googleClientId: info?["LagomGoogleClientID"] as? String ?? "",
+            microsoftClientId: info?["LagomMicrosoftClientID"] as? String ?? "")
         #if os(iOS)
         // Cached mail stays encrypted while locked (unless open) and out of backups. New files inherit the directory's class.
         let files = FileManager.default
