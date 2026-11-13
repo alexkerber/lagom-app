@@ -822,13 +822,8 @@ impl MainWindow {
             if self.inbox.group {
                 if let Some(live) = &self.live {
                     let m = &self.inbox.mail[id];
-                    let folder = m.folder.clone();
-                    match live.store.thread_messages(&m.account, &m.thread_id) {
-                        Ok(mut rows) => {
-                            // Prefer the visible folder's copy; actions still use every folder member.
-                            rows.sort_by_key(|m| (mail::Place::Folder(m.folder) != folder, m.id));
-                            let mut seen = HashSet::new();
-                            rows.retain(|m| m.message_id.is_empty() || seen.insert(m.message_id.clone()));
+                    match m.store.ok_or(lagom_core::Error::NotFound).and_then(|id| live.store.conversation(id)) {
+                        Ok(rows) => {
                             self.reading_members = rows.iter().map(|m| self.inbox.intern(m, &live.seen, chrono::Local::now())).collect();
                         }
                         Err(e) => self.notify(format!("Could not read conversation: {e}"), cx),

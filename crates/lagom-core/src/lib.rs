@@ -18,7 +18,7 @@ pub mod smtp;
 pub mod outbox;
 mod drafts;
 pub mod store;
-mod threading;
+pub mod threading;
 pub mod tasks;
 
 #[derive(Debug, thiserror::Error)]

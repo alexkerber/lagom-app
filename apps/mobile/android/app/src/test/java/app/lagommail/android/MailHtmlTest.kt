@@ -22,6 +22,15 @@ class MailHtmlTest {
         assertSame(caller, Thread.currentThread())
     }
 
+    @Test fun remoteImagesRequireExplicitConsentForThisDocument() = runBlocking {
+        val result = prepareMailDocument("image", false, 42, remote = true) { _, _, id, remote ->
+            assertEquals(42L, id)
+            assertTrue(remote)
+            "allowed"
+        }
+        assertEquals("allowed", result)
+    }
+
     @Test fun cancelledPreparationCannotPublishItsDocument() = runBlocking {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)

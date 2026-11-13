@@ -24,6 +24,39 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), tomorrow = { 86_400 }, now = now)
 
+    @Test fun conversationExpansionReadStateAndRemoteConsentArePerMessage() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(1), row(2, unread = true), row(3))
+            conversationIds = listOf(1, 2, 3)
+        }
+        val model = model(core); model.start(); model.select(3)
+        assertEquals(listOf(1L, 2L, 3L), model.messages.map { it.row.id })
+        assertEquals(setOf(2L, 3L), model.expandedIds)
+        assertEquals(listOf(2L to true), core.readCalls)
+        assertFalse(model.messages[1].row.unread)
+        model.loadRemoteImages(2)
+        model.toggleMessage(2)
+        assertEquals(setOf(3L), model.expandedIds)
+        model.setRead(2, false); model.toggleMessage(2)
+        assertFalse(model.messages[1].row.unread)
+        assertEquals(setOf(2L), model.remoteImagesIds)
+        model.toggleMessage(1)
+        assertEquals(setOf(1L, 2L, 3L), model.expandedIds)
+        assertEquals(listOf(2L to true, 2L to false, 2L to true), core.readCalls)
+        model.reply(1, ComposeKind.REPLY_ALL)
+        assertEquals(1L, model.draft?.replyTo)
+        model.clearSelection()
+        assertTrue(model.messages.isEmpty()); assertTrue(model.expandedIds.isEmpty()); assertTrue(model.remoteImagesIds.isEmpty())
+    }
+    @Test fun listActionsUseVisibleThreadMembers() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(3).copy(messageCount = 2u, messageIds = listOf(3, 1))) }
+        val model = model(core); model.start()
+        model.act(MailAction.Later, 3)
+        assertEquals(listOf(3L, 1L) to 86_400L, core.snoozed)
+        model.act(MailAction.Delete, 3)
+        assertEquals(listOf(3L, 1L), core.deleted)
+    }
+
     @Test fun notificationContentGroupsAccountsAndTargetsNewestMail() {
         val first = row(1, "a").copy(senderName = "", senderAddress = "sender@example.test", subject = "First", dateUnix = 1)
         assertTrue(mailNotices(emptyList()).isEmpty())
@@ -763,6 +796,8 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun backgroundSync(): List<MailRow> { syncAll(); return emptyList() }
     override suspend fun syncAll() { syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
     override suspend fun sync(accountId: String) = syncAll()
+    var conversationIds = emptyList<Long>()
+    override suspend fun conversation(messageId: Long) = (conversationIds.ifEmpty { listOf(messageId) }).map { message(it) }
     override suspend fun message(id: Long): MailMessage {
         messageThreads += Thread.currentThread()
         val result = MailMessage(mail.first { it.id == id }, "body", null, emptyList())

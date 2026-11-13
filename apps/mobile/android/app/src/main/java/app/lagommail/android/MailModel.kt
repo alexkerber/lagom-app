@@ -91,6 +91,10 @@ internal class MailModel(
     val visibleRows: List<MailRow> get() = if (unreadOnly) rows.filter { it.unread } else rows
     var selectedId by mutableStateOf<Long?>(null); private set
     var message by mutableStateOf<MailMessage?>(null); private set
+    var messages by mutableStateOf<List<MailMessage>>(emptyList()); private set
+    var expandedIds by mutableStateOf<Set<Long>>(emptySet()); private set
+    var remoteImagesIds by mutableStateOf<Set<Long>>(emptySet()); private set
+    fun loadRemoteImages(id: Long) { if (messages.any { it.row.id == id }) remoteImagesIds += id }
     var hasMore by mutableStateOf(false); private set
     var syncing by mutableStateOf(false); private set
     private var actingId by mutableStateOf<Long?>(null)
@@ -239,18 +243,30 @@ internal class MailModel(
         searchText = text; rows = emptyList(); hasMore = false
         reload()
     }
-    fun clearSelection() { selectionRevision++; selectedId = null; message = null }
+    fun clearSelection() { selectionRevision++; selectedId = null; message = null; messages = emptyList(); expandedIds = emptySet(); remoteImagesIds = emptySet() }
     suspend fun select(id: Long) {
         val core = core ?: return
-        val request = ++selectionRevision
-        selectedId = id; message = null
+        clearSelection()
+        val request = selectionRevision
+        selectedId = id
         try {
-            val loaded = withContext(Dispatchers.IO) { core.message(id) }
+            val loaded = withContext(Dispatchers.IO) { core.conversation(id) }
             if (request != selectionRevision) return
-            message = loaded
-            if (loaded.row.unread) setRead(id, true)
+            messages = loaded
+            message = loaded.firstOrNull { it.row.id == id } ?: loaded.lastOrNull()
+            expandedIds = loaded.filter { it.row.unread || it.row.id == loaded.lastOrNull()?.row?.id }.map { it.row.id }.toSet()
+            for (item in loaded.filter { it.row.unread }) {
+                if (request != selectionRevision) return
+                setRead(item.row.id, true)
+            }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == selectionRevision) throw e }
+    }
+    suspend fun toggleMessage(id: Long) {
+        val item = messages.firstOrNull { it.row.id == id } ?: return
+        if (id in expandedIds) { expandedIds -= id; return }
+        expandedIds += id
+        if (item.row.unread) setRead(id, true)
     }
     suspend fun setRead(id: Long, read: Boolean) {
         val core = core ?: return
@@ -258,10 +274,13 @@ internal class MailModel(
         readingIds += id
         try {
             core.markRead(id, read)
-            if (selectedId == id) {
+            if (messages.any { it.row.id == id }) {
                 val selection = selectionRevision
                 val updated = withContext(Dispatchers.IO) { core.message(id) }
-                if (selectedId == id && selection == selectionRevision) message = updated
+                if (selection == selectionRevision) {
+                    messages = messages.map { if (it.row.id == id) updated else it }
+                    if (message?.row?.id == id) message = updated
+                }
             }
         } finally { readingIds -= id; reload() }
     }
@@ -278,17 +297,18 @@ internal class MailModel(
             } while (syncAgain)
         } finally { syncing = false }
     }
-    suspend fun act(action: MailAction, id: Long) {
+    suspend fun act(action: MailAction, id: Long, conversation: Boolean = true) {
         val core = core ?: return
         if (working) return
+        val ids = if (conversation) rows.firstOrNull { it.id == id }?.messageIds ?: listOf(id) else listOf(id)
         actingId = id
         try {
             when (action) {
-                MailAction.Done -> core.done(listOf(id))
-                MailAction.Later -> core.later(listOf(id), withContext(Dispatchers.IO) { tomorrow() })
-                MailAction.Delete -> core.delete(listOf(id))
+                MailAction.Done -> core.done(ids)
+                MailAction.Later -> core.later(ids, withContext(Dispatchers.IO) { tomorrow() })
+                MailAction.Delete -> core.delete(ids)
             }
-            if (selectedId == id) clearSelection()
+            if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
         } finally { actingId = null; reload() }
     }
     suspend fun remove(account: MailAccount) {

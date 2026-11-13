@@ -23,7 +23,7 @@ import Foundation
     var doneContinuation: CheckedContinuation<Void, Error>?
     var flags: [Int64] = []
     var mail = (1...650).map { id in
-        MailRow(id: Int64(id), account: "fixture", senderName: "Sender", senderAddress: "sender@example.test", subject: "Mail", preview: "", dateUnix: Int64(id), unread: true, hasAttachments: false)
+        MailRow(id: Int64(id), account: "fixture", senderName: "Sender", senderAddress: "sender@example.test", subject: "Mail", preview: "", dateUnix: Int64(id), unread: true, hasAttachments: false, threadId: "thread-\(Int64(id))", messageCount: 1, messageIds: [Int64(id)])
     }
     override func accounts() async throws -> [MailAccount] { [] }
     override func sendFailures() async throws -> [SendFailure] { [] }
@@ -34,6 +34,12 @@ import Foundation
         guard mailbox == .inbox else { return [] }
         let visible = mail.filter { $0.id != 1 || deadline == nil || Double(deadline!) <= Date().timeIntervalSince1970 }
         return Array(visible.dropFirst(Int(offset)).prefix(Int(limit)))
+    }
+    var conversationIDs: [Int64] = []
+    override func conversation(messageId: Int64) async throws -> [MailMessage] {
+        var result: [MailMessage] = []
+        for id in conversationIDs.isEmpty ? [messageId] : conversationIDs { result.append(try await message(id: id)) }
+        return result
     }
     override func message(id: Int64) async throws -> MailMessage {
         MailMessage(row: mail.first { $0.id == id }!, textBody: "body", htmlBody: nil, attachments: [])
@@ -72,7 +78,7 @@ import Foundation
     override func nextSnooze() async throws -> Int64? { nil }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
-        [MailRow(id: 1, account: "fixture", senderName: "Sender", senderAddress: "s@example.test", subject: "Inbox", preview: "", dateUnix: 0, unread: false, hasAttachments: false)]
+        [MailRow(id: 1, account: "fixture", senderName: "Sender", senderAddress: "s@example.test", subject: "Inbox", preview: "", dateUnix: 0, unread: false, hasAttachments: false, threadId: "thread-\(1)", messageCount: 1, messageIds: [1])]
     }
     override func localDrafts() async throws -> [DraftRow] {
         let rows = drafts.values.map(\.row)
@@ -144,7 +150,30 @@ struct ModelChecks {
     }
 
     @MainActor static func main() async throws {
-        let first = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: false, hasAttachments: false)
+        let conversationCore = FixtureCore(noHandle: .init())
+        conversationCore.conversationIDs = [1, 2, 3]
+        conversationCore.mail[0].unread = false
+        conversationCore.mail[2].unread = false
+        let conversationModel = MailModel(); conversationModel.core = conversationCore; conversationModel.selectedID = 3
+        await conversationModel.select(3)
+        precondition(conversationModel.messages.map { $0.row.id } == [1, 2, 3])
+        precondition(conversationModel.expandedIDs == [2, 3] && conversationCore.flags == [2])
+        conversationModel.loadRemoteImages(id: 2)
+        await conversationModel.toggleMessage(2)
+        await conversationModel.setRead(id: 2, read: false)
+        await conversationModel.toggleMessage(2)
+        precondition(!conversationModel.messages[1].row.unread && conversationCore.flags == [2, 2, 2])
+        await conversationModel.toggleMessage(1)
+        precondition(conversationModel.expandedIDs == [1, 2, 3] && conversationModel.remoteImagesIDs == [2])
+        conversationModel.rows = [conversationCore.mail[2]]
+        conversationModel.rows[0].messageCount = 2
+        conversationModel.rows[0].messageIds = [3, 1]
+        await conversationModel.act(.done, id: 3)
+        precondition(!conversationCore.mail.contains { $0.id == 1 || $0.id == 3 })
+        await conversationModel.changeScope()
+        precondition(conversationModel.messages.isEmpty && conversationModel.expandedIDs.isEmpty && conversationModel.remoteImagesIDs.isEmpty)
+
+        let first = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: false, hasAttachments: false, threadId: "thread-\(1)", messageCount: 1, messageIds: [1])
         precondition(mailNotices([]).isEmpty)
         precondition(mailNotices([first]) == [MailNotice(target: MailTarget(account: "a", message: 1), title: "sender@example.test", body: "First")])
         var second = first; second.id = 2; second.dateUnix = 2; second.subject = "Second"

@@ -2,7 +2,7 @@ import XCTest
 
 final class MailModelTests: XCTestCase {
     func testNotificationContentGroupsAccountsAndTargetsNewestMail() {
-        let row = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: true, hasAttachments: false)
+        let row = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: true, hasAttachments: false, threadId: "thread-\(1)", messageCount: 1, messageIds: [1])
         XCTAssertTrue(mailNotices([]).isEmpty)
         XCTAssertEqual(mailNotices([row]), [MailNotice(target: MailTarget(account: "a", message: 1), title: "sender@example.test", body: "First")])
         var named = row; named.senderName = "Sender"; named.account = "b"
@@ -94,7 +94,7 @@ final class MailModelTests: XCTestCase {
     }
 
     func testRowMappingKeepsFlagsDateAndFallbacks() {
-        let row = MailRow(id: 42, account: "fixture", senderName: "", senderAddress: "sender@example.test", subject: "", preview: "Preview", dateUnix: 1_700_000_000, unread: true, hasAttachments: true)
+        let row = MailRow(id: 42, account: "fixture", senderName: "", senderAddress: "sender@example.test", subject: "", preview: "Preview", dateUnix: 1_700_000_000, unread: true, hasAttachments: true, threadId: "thread-\(42)", messageCount: 1, messageIds: [42])
         let view = RowPresentation(row)
         XCTAssertEqual(view.sender, "sender@example.test")
         XCTAssertEqual(view.subject, "(No subject)")
@@ -105,7 +105,7 @@ final class MailModelTests: XCTestCase {
     }
 
     func testNamedSenderAndReadMessage() {
-        let row = MailRow(id: 43, account: "fixture", senderName: "Sender", senderAddress: "sender@example.test", subject: "Subject", preview: "", dateUnix: 0, unread: false, hasAttachments: false)
+        let row = MailRow(id: 43, account: "fixture", senderName: "Sender", senderAddress: "sender@example.test", subject: "Subject", preview: "", dateUnix: 0, unread: false, hasAttachments: false, threadId: "thread-\(43)", messageCount: 1, messageIds: [43])
         XCTAssertEqual(RowPresentation(row).sender, "Sender")
         XCTAssertEqual(RowPresentation(row).subject, "Subject")
         XCTAssertFalse(RowPresentation(row).unread)
@@ -164,7 +164,7 @@ final class MailModelTests: XCTestCase {
     override func nextSnooze() async throws -> Int64? { nil }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
-        [MailRow(id: 1, account: "fixture", senderName: "Sender", senderAddress: "s@example.test", subject: "Inbox", preview: "", dateUnix: 0, unread: false, hasAttachments: false)]
+        [MailRow(id: 1, account: "fixture", senderName: "Sender", senderAddress: "s@example.test", subject: "Inbox", preview: "", dateUnix: 0, unread: false, hasAttachments: false, threadId: "thread-\(1)", messageCount: 1, messageIds: [1])]
     }
     override func localDrafts() async throws -> [DraftRow] {
         let rows = saved.map(\.row)
@@ -218,6 +218,14 @@ final class MailModelTests: XCTestCase {
 }
 
 extension MailModelTests {
+    @MainActor func testReplyCanTargetAnOlderConversationMember() async {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core; model.selectedID = 43
+        await model.prepareCompose(id: 42, kind: .replyAll)
+        XCTAssertEqual(core.calls.first?.0, 42)
+        XCTAssertEqual(model.composeDraft?.replyTo, 42)
+    }
+
     @MainActor func testReplyAllUsesMessageAccountAndCoreFields() async throws {
         let core = ComposeFixtureCore(noHandle: .init())
         let model = MailModel()
@@ -325,7 +333,7 @@ extension MailModelTests {
     var mail = (1...205).map { id in
         MailRow(id: Int64(id), account: id == 1 ? "second" : "fixture", senderName: "Sender",
                 senderAddress: "sender@example.test", subject: "Mail", preview: "", dateUnix: Int64(id),
-                unread: false, hasAttachments: false)
+                unread: false, hasAttachments: false, threadId: "thread-\(Int64(id))", messageCount: 1, messageIds: [Int64(id)])
     }
     var queries: [(String?, String, UInt32)] = []
     var flags: [(Int64, Bool)] = []
@@ -349,6 +357,12 @@ extension MailModelTests {
         queries.append((accountId, query, offset))
         if suspendSearch { return try await withCheckedThrowingContinuation { searchContinuation = $0 } }
         return query == "none" ? [] : Array(mail.dropFirst(Int(offset)).prefix(Int(limit)))
+    }
+    var conversationIDs: [Int64] = []
+    override func conversation(messageId: Int64) async throws -> [MailMessage] {
+        var result: [MailMessage] = []
+        for id in conversationIDs.isEmpty ? [messageId] : conversationIDs { result.append(try await message(id: id)) }
+        return result
     }
     override func message(id: Int64) async throws -> MailMessage {
         MailMessage(row: mail.first { $0.id == id }!, textBody: "body", htmlBody: "<img src='cid:logo'>", attachments: [])
@@ -445,20 +459,20 @@ extension MailModelTests {
         model.core = core
         model.selectedID = 1
         await model.select(1)
-        XCTAssertNil(model.remoteImagesID)
+        XCTAssertTrue(model.remoteImagesIDs.isEmpty)
         XCTAssertEqual(model.inlineRevision, 1)
         model.loadRemoteImages(id: 1)
-        XCTAssertEqual(model.remoteImagesID, 1)
+        XCTAssertEqual(model.remoteImagesIDs, [1])
         model.selectedID = 2
         await model.select(2)
         model.loadRemoteImages(id: 1)
-        XCTAssertNil(model.remoteImagesID)
+        XCTAssertTrue(model.remoteImagesIDs.isEmpty)
         model.selectedID = 1
         await model.select(1)
-        XCTAssertNil(model.remoteImagesID)
+        XCTAssertTrue(model.remoteImagesIDs.isEmpty)
         model.loadRemoteImages(id: 1)
         await model.changeScope()
-        XCTAssertNil(model.remoteImagesID)
+        XCTAssertTrue(model.remoteImagesIDs.isEmpty)
     }
 
     @MainActor func testLateInlineLoadCannotRefreshAnotherMessage() async {
@@ -487,7 +501,7 @@ extension MailModelTests {
         await model.select(1)
         XCTAssertEqual(model.message?.row.id, 1)
         XCTAssertEqual(model.inlineRevision, 0)
-        XCTAssertNil(model.remoteImagesID)
+        XCTAssertTrue(model.remoteImagesIDs.isEmpty)
         XCTAssertTrue(model.error?.contains("inline unavailable") == true)
     }
 
@@ -732,5 +746,33 @@ extension MailModelTests {
         XCTAssertTrue(model.drafts.isEmpty)
         XCTAssertNil(model.composeDraft)
         XCTAssertNil(model.error)
+    }
+}
+
+extension MailModelTests {
+    @MainActor func testConversationExpansionReadStateAndRemoteConsentArePerMessage() async {
+        let core = DailyFixtureCore(noHandle: .init())
+        core.conversationIDs = [1, 2, 3]
+        core.mail[1].unread = true
+        let model = MailModel(); model.core = core; model.selectedID = 3
+        await model.select(3)
+        XCTAssertEqual(model.messages.map { $0.row.id }, [1, 2, 3])
+        XCTAssertEqual(model.expandedIDs, [2, 3])
+        XCTAssertEqual(core.flags.map { $0.0 }, [2])
+        XCTAssertFalse(model.messages[1].row.unread)
+        model.loadRemoteImages(id: 2)
+        await model.toggleMessage(2)
+        XCTAssertEqual(model.expandedIDs, [3])
+        await model.setRead(id: 2, read: false)
+        await model.toggleMessage(2)
+        XCTAssertFalse(model.messages[1].row.unread)
+        XCTAssertEqual(model.remoteImagesIDs, [2])
+        await model.toggleMessage(1)
+        XCTAssertEqual(model.expandedIDs, [1, 2, 3])
+        XCTAssertEqual(core.flags.map { $0.0 }, [2, 2, 2])
+        await model.changeScope()
+        XCTAssertTrue(model.messages.isEmpty)
+        XCTAssertTrue(model.expandedIDs.isEmpty)
+        XCTAssertTrue(model.remoteImagesIDs.isEmpty)
     }
 }
