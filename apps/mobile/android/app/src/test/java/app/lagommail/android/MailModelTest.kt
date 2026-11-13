@@ -47,6 +47,82 @@ class MailModelTest {
         gate.complete(Unit); old.await()
         assertTrue(model.rows.isEmpty())
     }
+    @Test fun searchPagesCachedMailAcrossAccountsAndResetsOnQueryAndScopeChanges() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = (1L..250L).map { row(it, account = if (it % 2L == 0L) "second" else "fixture").copy(subject = "Meeting") } +
+                row(251).copy(subject = "Receipt")
+        }
+        val model = model(core); model.start(); model.select(1)
+        model.changeSearch("  Meeting \n")
+        assertNull(model.selectedId)
+        assertEquals(100, model.rows.size)
+        assertEquals(Triple(null, "Meeting", 0u), core.searchCalls.last())
+        model.reload(more = true)
+        assertEquals(200, model.rows.size)
+        model.sync()
+        assertEquals(200, model.rows.size)
+        model.reload(more = true)
+        assertEquals(250, model.rows.size)
+        assertFalse(model.hasMore)
+        model.changeScope("second", Mailbox.SENT)
+        assertEquals(100, model.rows.size)
+        assertEquals(Triple("second", "Meeting", 0u), core.searchCalls.last())
+        assertTrue(model.rows.all { it.account == "second" })
+        model.reload(more = true)
+        assertEquals(125, model.rows.size)
+        model.changeSearch("Receipt")
+        assertTrue(model.rows.isEmpty())
+        model.changeScope(null, Mailbox.INBOX)
+        assertEquals(listOf(251L), model.rows.map { it.id })
+        val searches = core.searchCalls.size
+        model.changeSearch(" \n")
+        assertEquals(100, model.rows.size)
+        assertEquals(searches, core.searchCalls.size)
+        assertTrue(model.hasMore)
+    }
+    @Test fun staleSearchCannotReplaceAnotherQueryOrAccountOrClearedSearch() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1).copy(subject = "Old"), row(2).copy(subject = "New")) }
+        val model = model(core); model.start()
+        for (change in listOf<suspend () -> Unit>(
+            { model.changeSearch("New") },
+            { model.changeScope("other", Mailbox.INBOX) },
+            { model.changeSearch("") },
+        )) {
+            model.changeScope(null, Mailbox.INBOX); model.changeSearch("")
+            val gate = CompletableDeferred<Unit>(); core.searchGate = gate
+            val old = async { model.changeSearch("Old") }; runCurrent()
+            core.searchGate = null
+            change()
+            val expected = model.rows
+            gate.complete(Unit); old.await()
+            assertEquals(expected, model.rows)
+        }
+    }
+    @Test fun unreadFilterKeepsUnfilteredPagingOffsetsAndLoadMoreAvailable() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = (1L..150L).map { row(it, unread = it > 100).copy(subject = "Match") } }
+        val model = model(core); model.start()
+        model.changeSearch("Match"); model.unreadOnly = true
+        assertTrue(model.visibleRows.isEmpty())
+        assertTrue(model.hasMore)
+        model.reload(more = true)
+        assertEquals(Triple(null, "Match", 100u), core.searchCalls.last())
+        assertEquals((101L..150L).toList(), model.visibleRows.map { it.id })
+        assertFalse(model.hasMore)
+        model.unreadOnly = false
+        assertEquals(core.mail, model.visibleRows)
+    }
+    @Test fun staleSearchErrorsAreIgnoredButCurrentErrorsAreReported() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core); model.start()
+        core.rejectSearch = true
+        val gate = CompletableDeferred<Unit>(); core.searchGate = gate
+        val old = model.perform { model.changeSearch("Old") }; runCurrent()
+        model.changeSearch("")
+        gate.complete(Unit); old.join()
+        assertNull(model.error)
+        model.perform { model.changeSearch("New") }.join()
+        assertEquals("Fixture search refused", model.error)
+    }
     @Test fun paginationDuringActionRefreshKeepsRemovedMailOutAndDoesNotSkipRows() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = (1L..250L).reversed().map { row(it) } }
         val model = model(core); model.start()
@@ -259,7 +335,17 @@ class MailModelTest {
 private class FakeCore : LagomCoreInterface {
     override suspend fun inlineResource(id: Long, request: String): InlineResource = error("unused")
     override suspend fun loadInline(id: Long): Unit = error("unused")
-    override suspend fun search(accountId: String?, query: String, limit: UInt, offset: UInt): List<MailRow> = error("unused")
+    val searchCalls = mutableListOf<Triple<String?, String, UInt>>()
+    var searchGate: CompletableDeferred<Unit>? = null
+    var rejectSearch = false
+    override suspend fun search(accountId: String?, query: String, limit: UInt, offset: UInt): List<MailRow> {
+        searchCalls += Triple(accountId, query, offset)
+        val snapshot = mail.filter { (accountId == null || accountId == it.account) && it.subject.contains(query) }
+            .drop(offset.toInt()).take(limit.toInt())
+        searchGate?.await()
+        check(!rejectSearch) { "Fixture search refused" }
+        return snapshot
+    }
     // Planner screens are iOS-only so far; the mail model never calls these.
     override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo = error("unused")
     override suspend fun addTodoList(name: String): TodoList = error("unused")

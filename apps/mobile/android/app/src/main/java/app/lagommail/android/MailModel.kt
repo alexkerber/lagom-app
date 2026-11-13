@@ -43,6 +43,9 @@ internal class MailModel(
     var failures by mutableStateOf<List<SendFailure>>(emptyList()); private set
     var accountId by mutableStateOf<String?>(null); private set
     var mailbox by mutableStateOf(Mailbox.INBOX); private set
+    var searchText by mutableStateOf(""); private set
+    var unreadOnly by mutableStateOf(false)
+    val visibleRows: List<MailRow> get() = if (unreadOnly) rows.filter { it.unread } else rows
     var selectedId by mutableStateOf<Long?>(null); private set
     var message by mutableStateOf<MailMessage?>(null); private set
     var hasMore by mutableStateOf(false); private set
@@ -84,39 +87,51 @@ internal class MailModel(
         // Pending reloads may have changed the rows before the pagination offset.
         val append = more && revision == appliedRevision
         val request = ++revision
-        val old = rows
-        val offset = if (append) old.size else 0
-        val account = accountId
-        val box = mailbox
-        val due = core.nextSnooze()
-        val accounts = core.accounts()
-        val page = mutableListOf<MailRow>()
-        val count = maxOf(100, old.size + if (more) 100 else 0) - offset
-        var hasMore: Boolean
-        do {
-            val batch = core.mailbox(account, box, 100u, (offset + page.size).toUInt())
-            page += batch
-            hasMore = batch.size == 100
-        } while (hasMore && page.size < count)
-        val failures = core.sendFailures()
-        if (request != revision) return
-        this.accounts = accounts
-        this.failures = failures
-        rows = (if (append) old + page else page).distinctBy { it.id }
-        this.hasMore = hasMore
-        appliedRevision = request
-        wake?.cancel()
-        wake = if (foreground && due != null) viewModelScope.launch {
-            delay(maxOf(1, due * 1000 - now()))
-            wake = null
-            try { reload() } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = e.mailMessage() }
-        } else null
+        try {
+            val old = rows
+            val offset = if (append) old.size else 0
+            val account = accountId
+            val box = mailbox
+            val query = searchText.trim()
+            val due = core.nextSnooze()
+            val accounts = core.accounts()
+            val page = mutableListOf<MailRow>()
+            val count = maxOf(100, old.size + if (more) 100 else 0) - offset
+            var hasMore: Boolean
+            do {
+                val batch = if (query.isEmpty()) core.mailbox(account, box, 100u, (offset + page.size).toUInt())
+                    else core.search(account, query, 100u, (offset + page.size).toUInt())
+                page += batch
+                hasMore = batch.size == 100
+            } while (hasMore && page.size < count)
+            val failures = core.sendFailures()
+            if (request != revision) return
+            this.accounts = accounts
+            this.failures = failures
+            rows = (if (append) old + page else page).distinctBy { it.id }
+            this.hasMore = hasMore
+            appliedRevision = request
+            wake?.cancel()
+            wake = if (foreground && due != null) viewModelScope.launch {
+                delay(maxOf(1, due * 1000 - now()))
+                wake = null
+                try { reload() } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { error = e.mailMessage() }
+            } else null
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (request == revision) throw e }
     }
     suspend fun changeScope(account: String?, box: Mailbox) {
         revision++
         clearSelection()
         accountId = account; mailbox = box; rows = emptyList(); hasMore = false
+        reload()
+    }
+    suspend fun changeSearch(text: String) {
+        if (searchText == text) return
+        revision++
+        clearSelection()
+        searchText = text; rows = emptyList(); hasMore = false
         reload()
     }
     fun clearSelection() { selectionRevision++; selectedId = null; message = null }

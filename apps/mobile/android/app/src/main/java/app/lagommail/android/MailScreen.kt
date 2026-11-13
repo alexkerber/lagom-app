@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -16,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import app.lagommail.core.*
 import java.time.ZoneId
@@ -114,22 +116,38 @@ internal fun Mailbox.label(): String = when (this) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun Inbox(model: MailModel, onRetry: (SendFailure) -> Unit) {
-    PullToRefreshBox(isRefreshing = model.syncing, onRefresh = { model.perform { model.sync() } }) {
-        LazyColumn(Modifier.fillMaxSize()) {
-            if (model.rows.isEmpty() && !model.syncing) item {
-                Text("No mail here. Pull to refresh.", Modifier.padding(24.dp))
-            }
-            items(model.failures, key = { "failure-${it.id}" }) { failure ->
-                ListItem(headlineContent = { Text("Outbox: ${failure.subject}") }, supportingContent = { Text(failure.message) },
-                    modifier = Modifier.clickable { onRetry(failure) })
-            }
-            items(model.rows, key = { it.id }) { row ->
-                MailListRow(row, model.working, onSelect = { model.perform { model.select(row.id) } },
-                    onAction = { model.perform { model.act(it, row.id) } })
-                HorizontalDivider()
-            }
-            if (model.hasMore) item {
-                TextButton(onClick = { model.perform { model.reload(more = true) } }, modifier = Modifier.fillMaxWidth()) { Text("Load more") }
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(model.searchText, { model.perform { model.changeSearch(it) } },
+            label = { Text("Search") }, singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Search),
+            trailingIcon = {
+                if (model.searchText.isNotEmpty()) TextButton(onClick = { model.perform { model.changeSearch("") } },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Clear search" }) { Text("Clear") }
+            }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).semantics { contentDescription = "Search" })
+        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!model.unreadOnly, { model.unreadOnly = false }, label = { Text("All") },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "All" })
+            FilterChip(model.unreadOnly, { model.unreadOnly = true }, label = { Text("Unread") },
+                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Unread" })
+        }
+        PullToRefreshBox(isRefreshing = model.syncing, onRefresh = { model.perform { model.sync() } }, modifier = Modifier.weight(1f)) {
+            LazyColumn(Modifier.fillMaxSize()) {
+                if (model.visibleRows.isEmpty() && !model.syncing) item {
+                    Text(if (model.unreadOnly && model.rows.isNotEmpty()) "No unread mail" else "No mail here. Pull to refresh.", Modifier.padding(24.dp))
+                }
+                items(model.failures, key = { "failure-${it.id}" }) { failure ->
+                    ListItem(headlineContent = { Text("Outbox: ${failure.subject}") }, supportingContent = { Text(failure.message) },
+                        modifier = Modifier.clickable { onRetry(failure) })
+                }
+                items(model.visibleRows, key = { it.id }) { row ->
+                    MailListRow(row, model.working, onSelect = { model.perform { model.select(row.id) } },
+                        onAction = { model.perform { model.act(it, row.id) } })
+                    HorizontalDivider()
+                }
+                if (model.hasMore) item {
+                    TextButton(onClick = { model.perform { model.reload(more = true) } },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = "Load more" }) { Text("Load more") }
+                }
             }
         }
     }
