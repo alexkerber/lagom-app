@@ -21,8 +21,37 @@ use super::*;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native;
 
-/// Whether this platform renders HTML mail.
-pub(super) const SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+/// Whether this machine renders HTML mail: macOS always, Windows with the WebView2 runtime.
+#[cfg(not(target_os = "windows"))]
+pub(super) fn supported() -> bool { cfg!(target_os = "macos") }
+
+#[cfg(target_os = "windows")]
+pub(super) fn supported() -> bool {
+    static RUNTIME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RUNTIME.get_or_init(webview2_installed)
+}
+
+/// Microsoft's documented check, the same one the installer makes: a `pv` other than empty or
+/// 0.0.0.0 under the runtime's EdgeUpdate client, per machine (32-bit view) or per user.
+#[cfg(target_os = "windows")]
+fn webview2_installed() -> bool {
+    use windows::{core::w, Win32::System::Registry::*};
+    [(HKEY_LOCAL_MACHINE, RRF_SUBKEY_WOW6432KEY), (HKEY_CURRENT_USER, REG_ROUTINE_FLAGS(0))].into_iter().any(|(root, view)| {
+        let mut buf = [0u16; 64];
+        let mut bytes = std::mem::size_of_val(&buf) as u32;
+        let found = unsafe {
+            RegGetValueW(root, w!(r"SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"), w!("pv"),
+                RRF_RT_REG_SZ | view, None, Some(buf.as_mut_ptr().cast()), Some(&mut bytes))
+        }.is_ok();
+        let pv = String::from_utf16_lossy(&buf[..(bytes as usize / 2).min(buf.len())]);
+        let pv = pv.trim_end_matches('\0');
+        found && !pv.is_empty() && pv != "0.0.0.0"
+    })
+}
+
+/// WebView2 is missing: say so once per run, the first time an HTML message falls back to text.
+#[cfg(target_os = "windows")]
+static TOLD_NO_WEBVIEW2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 use lagom_core::html::{csp, link_allowed, styled, has_remote, inert_tags};
 
@@ -203,7 +232,13 @@ impl MainWindow {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
         let want = self.inbox.single().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
         let overlay = self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
+        #[cfg(target_os = "windows")]
+        let text_fallback = !supported() && want.is_some_and(|(_, m)| m.html.is_some());
         self.web.frame(want, &self.theme, overlay, window, cx);
+        #[cfg(target_os = "windows")]
+        if text_fallback && !TOLD_NO_WEBVIEW2.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            self.notify("Formatted mail needs Microsoft Edge WebView2. Showing plain text.", cx);
+        }
         let overlay = overlay || !matches!(self.page, Page::Mail) || self.toast.is_some() || self.live.as_ref().is_some_and(|l| !l.failed.is_empty());
         for body in self.expanded.values() {
             body.update(cx, |body, cx| body.prepare(self.theme, overlay, window, cx));
@@ -216,7 +251,7 @@ impl Web {
     /// `overlay`: something in GPUI covers the body, so the web view hides.
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
     pub(super) fn frame<T: WebHost>(&mut self, want: Option<(usize, &Mail)>, theme: &Theme, overlay: bool, window: &mut Window, cx: &mut Context<T>) {
-        if !SUPPORTED {
+        if !supported() {
             return;
         }
         let Some((id, m, html)) = want.and_then(|(id, m)| m.html.as_ref().map(|h| (id, m, h))) else {
@@ -510,7 +545,7 @@ mod tests {
 
     #[gpui::test]
     fn html_slot_stays_inside_the_reading_card(cx: &mut gpui::TestAppContext) {
-        if !SUPPORTED { return; }
+        if !supported() { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "html-simple", window, cx));
         cx.run_until_parked();
         let card = cx.debug_bounds("message-card").unwrap();
@@ -563,7 +598,7 @@ mod tests {
 
     #[gpui::test]
     fn review_cmd_toggle_keeps_sole_selected_html(cx: &mut gpui::TestAppContext) {
-        if !SUPPORTED { return; }
+        if !supported() { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
             v.open_box(None, cx);
@@ -583,7 +618,7 @@ mod tests {
 
     #[gpui::test]
     fn review_task_toast_keeps_html_drawable(cx: &mut gpui::TestAppContext) {
-        if !SUPPORTED { return; }
+        if !supported() { return; }
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
         view.update_in(cx, |v, window, cx| {
             v.open_box(None, cx);
