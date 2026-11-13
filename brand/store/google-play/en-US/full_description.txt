@@ -1,0 +1,22 @@
+lagom is Swedish for "not too much, not too little, just right".
+
+lagom is an email app that only does email. It has one job: to get you back to an empty inbox.
+
+Each message gets one of three answers:
+• Done: it leaves the inbox.
+• Reply: write back and move on.
+• Later: pick a time, and the message comes back then.
+
+The list shows the sender, the subject and one line. Unread mail is bold. Reading is plain: clear type and attachments at the end.
+
+Remote images stay off until you tap "Load remote images". Senders cannot see when you open their mail.
+
+Sent too soon? Undo send gives you a moment to take it back.
+
+Your mail stays on your phone and on your mail server. lagom has no account of its own, no ads, no tracking and no AI features. Your password is encrypted with the Android Keystore and goes only to your own mail server.
+
+Works with IMAP accounts: Gmail and iCloud with an app password, Fastmail and most other providers. Type your address and lagom finds the server settings. You can also enter them yourself.
+
+A notification tells you when new mail arrives. Light and dark themes follow your system. Made for phones and tablets.
+
+lagom is open source under the MIT licence. Made in Sweden.

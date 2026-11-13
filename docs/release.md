@@ -35,7 +35,7 @@ branches. Not verified on `main` when this page was written.
 4. Each desktop packaging workflow builds on the tag and uploads its files to one **draft** GitHub
    release. The first workflow to finish creates the draft.
 5. Download every file from the draft. Install and open each one on a clean machine or account.
-6. Check that the tag has one draft with every platform's files (two platforms finishing at once can each create one; move the files and delete the extra). Write the release notes and publish the draft. Publishing makes it the "latest" release.
+6. Check that the tag has one draft with every platform's files. Only `release-draft.yml` creates it, at tag push; the platform uploads wait for it (`scripts/upload-release.sh`). Write the release notes and publish the draft. Publishing makes it the "latest" release.
 7. Upload the iOS and Android builds to the stores (see below). Store review takes one to several days.
 
 ### Before you tag
@@ -108,7 +108,7 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 - Build the installer on `windows-latest` from the tag. Set `FILEVERSION`/`PRODUCTVERSION` in
   `apps/desktop/lagom.rc` from `LAGOM_VERSION` at build time.
-- Upload to the same draft release with `gh release upload --clobber`. Create the draft when it is missing and stop when the release is already published,
+- Upload to the same draft release with `scripts/upload-release.sh` (it waits for the draft from `release-draft.yml`) and stop when the release is already published,
   as `package-macos.yml` does.
 - Human step: get a code signing service. Azure Trusted Signing (Artifact Signing) is the cheapest
   route for an individual. An OV or EV certificate on a hardware token also works. Unsigned installers
@@ -117,9 +117,16 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 ## Linux
 
-- Build on `ubuntu-latest` from the tag. Name files `lagom-<LAGOM_VERSION>-linux-x86_64.*`.
-- Upload to the same draft release, as for Windows.
+Script: `scripts/package-linux.sh [version]`. Workflow: `.github/workflows/package-linux.yml`.
+
+- Builds `lagom-<LAGOM_VERSION>-linux-x86_64.deb` and `.AppImage` on `ubuntu-22.04`, not
+  `ubuntu-latest`: the packages need at least the glibc they were built with, so the oldest
+  supported Ubuntu reaches the most distributions.
+- The .deb version replaces `-` with `~` (`1.2.3~beta.4`), so a pre-release sorts before `1.2.3`.
+- CI installs the .deb, starts lagom through D-Bus activation and the AppImage under Xvfb.
+- Uploads to the same draft release, as for macOS.
 - No signing certificate is needed. Optional: publish a `SHA256SUMS` file with the release.
+- Human step: set `LAGOM_DEB_MAINTAINER` (or the script default) to a real contact address.
 - Human step for a Flathub or Snap listing: create the store account and submit the manifest.
 
 ## iOS and iPadOS
@@ -227,21 +234,61 @@ Per release:
 
 ## Android
 
-1. Build a signed App Bundle with `./gradlew bundleRelease` after `scripts/build-android.sh`.
-   `build.gradle.kts` has no release signing config and no version from `LAGOM_VERSION` yet. The
-   Android branch adds both: read the keystore path and passwords from environment variables or
-   GitHub secrets, never from the repository.
-2. Upload the `.aab` to the Play Console, internal testing track first, then production.
+Workflow: `.github/workflows/package-android.yml`. Store text and Data safety answers:
+`brand/store/google-play/`.
+
+- `build.gradle.kts` reads `LAGOM_VERSION` and sets `versionName` and `versionCode` by the rule above.
+  Without it, the build is `0.0.0-dev` with `versionCode` 1. A version that does not fit the rule
+  stops the build.
+- The release build runs R8 and shrinks resources. `app/proguard-rules.pro` keeps JNA and the UniFFI
+  bindings, which find native code by name.
+- Tags `v*`: build the App Bundle and the APK, sign them with the upload key and attach both to the
+  draft release. Files: `lagom-<LAGOM_VERSION>-android.aab` and `.apk`.
+- Pull requests that change Android packaging: build unsigned, as a workflow artifact only.
+- `workflow_dispatch`: as a tag, but development version and nothing goes to a release.
+- Without the upload key the build is unsigned and the workflow warns. A tag then attaches nothing.
+
+Local release build:
+
+```sh
+scripts/build-android.sh
+LAGOM_VERSION=1.2.3 apps/mobile/android/gradlew -p apps/mobile/android :app:bundleRelease
+```
+
+Signing reads four values from the environment or from `~/.gradle/gradle.properties`, never from the
+repository. Without them the release output is unsigned.
+
+| Secret or property                | Content                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------- |
+| `LAGOM_ANDROID_KEYSTORE`          | Base64 of the upload keystore (`base64 -i lagom-upload.jks`)                  |
+| `LAGOM_ANDROID_KEYSTORE_PASSWORD` | The keystore password                                                         |
+| `LAGOM_ANDROID_KEY_ALIAS`         | The key alias (`upload`)                                                      |
+| `LAGOM_ANDROID_KEY_PASSWORD`      | The key password. Optional; the keystore password is used when it is missing. |
+
+Per release: download the `.aab` from the draft release and upload it to the Play Console, internal
+testing track first, then production.
 
 Human steps (once):
 
-- Create the Play Console developer account and the app `com.alexkerber.lagom`.
-- Create an upload keystore (`keytool -genkeypair -v -keystore lagom-upload.jks -keyalg RSA -keysize 4096 -validity 10000 -alias upload`).
-  Keep it and its passwords in a password manager. Turn on Play App Signing.
-- New personal developer accounts must run a closed test with at least 12 testers for 14 days
-  before production access. Plan for this.
-- Fill in the Data safety form, content rating, target audience and store listing (icon
-  `brand/app-icon/export/play-store-512.png`, feature graphic, screenshots).
+1. Create the Play Console developer account and the app `com.alexkerber.lagom`.
+2. Create the upload keystore and store it as GitHub secrets:
+
+   ```sh
+   keytool -genkeypair -v -keystore lagom-upload.jks -keyalg RSA -keysize 4096 -validity 10000 -alias upload
+   base64 -i lagom-upload.jks | gh secret set LAGOM_ANDROID_KEYSTORE
+   gh secret set LAGOM_ANDROID_KEYSTORE_PASSWORD
+   gh secret set LAGOM_ANDROID_KEY_ALIAS --body upload
+   ```
+
+   Keep the keystore and its password in a password manager, then delete the local copy.
+3. Turn on Play App Signing and upload the first `.aab` by hand. Google keeps the app signing key.
+4. New personal developer accounts must run a closed test with at least 12 testers for 14 days
+   before production access. Plan for this.
+5. Fill in the store listing, Data safety, content rating and target audience from
+   `brand/store/google-play/`. Icon `brand/store/play-icon-512.png`, feature graphic
+   `brand/store/play-feature-1024x500.png`. Take the screenshots from the shot list there.
+6. Run the workflow once with `workflow_dispatch` and check that the log shows the certificate from
+   `apksigner verify --print-certs`.
 
 ## OAuth providers (all platforms)
 
@@ -272,5 +319,3 @@ Not implemented on this branch. Tracked as an open item below.
 ## Open items
 
 - [ ] Desktop: the update check described above.
-- [ ] Android: release signing config and `versionName`/`versionCode` from `LAGOM_VERSION`.
-- [ ] Windows and Linux: packaging workflows that follow this page.
