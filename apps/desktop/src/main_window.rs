@@ -480,7 +480,9 @@ impl MainWindow {
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             _bounds: cx.observe_window_bounds(window, |this, window, cx| {
                 // macOS reports the frame relative to its display, so the display goes with it.
-                let display = window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.as_u128());
+                // X11 gives every display the nil id; that falls back to the primary display.
+                // shortcut: separate X11 screens reopen on the primary one, key on DisplayId if anyone runs that.
+                let display = window.display(cx).and_then(|d| d.uuid().ok()).filter(|u| !u.is_nil()).map(|u| u.as_u128());
                 let Some(saved) = panes::SavedWindow::from_bounds(window.window_bounds(), display) else { return };
                 if this.preferences_path.is_none() || this.panes.window == Some(saved) { return; }
                 this.panes.window = Some(saved);
