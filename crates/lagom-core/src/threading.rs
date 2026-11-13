@@ -118,12 +118,75 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Reading includes the account's entire thread, preferring the selected folder's copy.
+    pub fn conversation(&self, id: i64) -> Result<Vec<MessageSummary>> {
+        let selected = self.message_summary(id)?;
+        let mut rows = self.thread_messages(&selected.account, &selected.thread_id)?;
+        rows.sort_by_key(|m| (m.folder != selected.folder, m.id));
+        let mut seen = BTreeSet::new();
+        rows.retain(|m| m.message_id.is_empty() || seen.insert(m.message_id.clone()));
+        rows.sort_by_key(|m| (m.date, m.id));
+        Ok(rows)
+    }
+
+    /// Uses the same bounded folder queries and global page as desktop.
+    pub fn mailbox_conversations(&self, account: Option<&str>, role: Option<crate::store::FolderRole>, now: i64, limit: u32) -> Result<Vec<MessageSummary>> {
+        let mut rows = Vec::new();
+        for a in self.accounts()?.into_iter().filter(|a| account.is_none_or(|id| a.id == id)) {
+            if let Some(role) = role {
+                for folder in self.folders(&a.id, now)?.into_iter().filter(|f| f.role == role) {
+                    rows.extend(self.list_conversations(&a.id, Some(folder.id), now, limit)?);
+                }
+            } else {
+                rows.extend(self.list_conversations(&a.id, None, now, limit)?);
+            }
+        }
+        conversation_page(&mut rows, limit, account, &[], true);
+        Ok(rows)
+    }
+
+    /// Count and page only matching messages, grouped by account and visible folder like desktop.
+    pub fn search_conversations(&self, account: Option<&str>, query: &str, now: i64, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
+        if query.len() > 4096 { return Err(crate::Error::Invalid("search query too long")); }
+        let mut stmt = self.db.prepare(&format!("WITH hits AS MATERIALIZED (
+            SELECT m.id,m.account,coalesce(m.move_target,m.folder) AS folder,m.thread_id,m.date
+            FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid
+            WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR m.account=?2)
+                AND (m.snoozed_until IS NULL OR m.snoozed_until<=?3)),
+            page AS (SELECT account,folder,thread_id FROM (
+                SELECT *,row_number() OVER (PARTITION BY account,folder,thread_id ORDER BY date DESC,id DESC) AS position FROM hits)
+                WHERE position=1 ORDER BY date DESC,id DESC LIMIT ?4 OFFSET ?5)
+            SELECT {VISIBLE_SUMMARY_COLUMNS} FROM page JOIN hits h USING(account,folder,thread_id)
+            JOIN messages m ON m.id=h.id ORDER BY m.date DESC,m.id DESC"))?;
+        let rows = stmt.query_map(params![query, account, now, limit, offset], summary_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Pages conversations, then includes every member in the selected folder/view.
     pub fn list_conversations(&self, account: &str, folder: Option<i64>, now: i64, limit: u32) -> Result<Vec<MessageSummary>> {
         let mut stmt = self.db.prepare(&conversation_sql(folder))?;
         let rows = stmt.query_map(params![account, folder, now, limit], summary_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// Applies desktop paging, preserving all visible members and pinned conversations.
+pub fn conversation_page(rows: &mut Vec<MessageSummary>, limit: u32, filter: Option<&str>, pins: &[i64], group: bool) -> bool {
+    rows.retain(|m| filter.is_none_or(|account| m.account == account));
+    rows.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
+    let key = |m: &MessageSummary| (m.account.clone(), m.folder,
+        if group && !m.thread_id.is_empty() { m.thread_id.clone() } else { m.id.to_string() });
+    let mut seen = std::collections::HashSet::new();
+    let mut keep = std::collections::HashSet::new();
+    for m in rows.iter() {
+        let key = key(m);
+        if seen.insert(key.clone()) && seen.len() <= limit as usize { keep.insert(key); }
+    }
+    let more = seen.len() > limit as usize;
+    // A pinned member retains its entire conversation, even beyond the global page.
+    keep.extend(rows.iter().filter(|m| pins.contains(&m.id)).map(key));
+    rows.retain(|m| keep.contains(&key(m)));
+    more
 }
 
 fn conversation_sql(folder: Option<i64>) -> String {

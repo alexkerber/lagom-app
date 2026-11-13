@@ -239,7 +239,7 @@ struct MailView: View {
         .buttonStyle(.plain)
         .contextMenu {
             Button(row.unread ? "Mark read" : "Mark unread") {
-                Task { await model.setRead(id: row.id, read: row.unread) }
+                Task { await model.setRead(row: row) }
             }.disabled(model.working)
         }
         .swipeActions(edge: .leading) {
@@ -262,7 +262,7 @@ struct MailView: View {
     /// The desktop reading pane's toolbar over the message: Later, Delete, Mark read, and Done filled.
     @ViewBuilder private var detail: some View {
         if let message = model.message {
-            let id = message.row.id
+            let id = model.selectedID ?? message.row.id
             VStack(spacing: 0) {
                 // Labels where they fit, as on desktop; icons alone in a narrow pane.
                 ViewThatFits(in: .horizontal) {
@@ -271,7 +271,7 @@ struct MailView: View {
                 }
                 .padding(.horizontal, 16).frame(minHeight: 56)
                 .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
-                MessageView(message: message, model: model).id(id)
+                ConversationView(model: model).id(id)
             }
             .background(Theme.background)
             .disabled(model.working)
@@ -293,7 +293,7 @@ struct MailView: View {
 extension MailView {
     /// Back when the message is pushed, Later, Delete, Mark read on iPad, then Done filled at the end.
     func actions(_ message: MailMessage, iconOnly: Bool) -> some View {
-        let id = message.row.id
+        let id = model.selectedID ?? message.row.id
         return HStack(spacing: 8) {
             if !split {
                 IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)

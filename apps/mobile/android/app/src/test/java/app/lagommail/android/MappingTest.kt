@@ -5,7 +5,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 internal fun row(id: Long, account: String = "fixture", unread: Boolean = false) = MailRow(
-    id, account, "", "sender@example.test", "", "Preview", 1_700_000_000, unread, true)
+    id, account, "", "sender@example.test", "", "Preview", 1_700_000_000, unread, true, "thread-$id", 1u, listOf(id))
 
 class MappingTest {
     @Test fun rowMappingPreservesFlagsDateAndFallbacks() {

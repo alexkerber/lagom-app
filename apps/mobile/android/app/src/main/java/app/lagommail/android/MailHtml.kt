@@ -25,13 +25,14 @@ internal fun externalMailLink(url: String): Boolean = try {
 } catch (_: Exception) { false }
 
 internal suspend fun prepareMailDocument(
-    html: String, dark: Boolean, messageId: Long, render: (String, Boolean, Long, Boolean) -> String = ::mailDocument,
-): String = withContext(Dispatchers.Default) { render(html, dark, messageId, false) }
+    html: String, dark: Boolean, messageId: Long, remote: Boolean = false, render: (String, Boolean, Long, Boolean) -> String = ::mailDocument,
+): String = withContext(Dispatchers.Default) { render(html, dark, messageId, remote) }
 
-@Composable internal fun MailHtml(messageId: Long, html: String) {
+@Composable internal fun MailHtml(messageId: Long, html: String, remote: Boolean = false) {
     val dark = isSystemInDarkTheme()
-    val prepared by key(messageId, html, dark) {
-        produceState<String?>(null) { value = prepareMailDocument(html, dark, messageId) }
+    val remoteAllowed by rememberUpdatedState(remote)
+    val prepared by key(messageId, html, dark, remote) {
+        produceState<String?>(null) { value = prepareMailDocument(html, dark, messageId, remote) }
     }
     val document = prepared ?: run { Text("Loading message…"); return }
     AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
@@ -48,8 +49,9 @@ internal suspend fun prepareMailDocument(
             CookieManager.getInstance().setAcceptCookie(false)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
             webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse =
-                    WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(byteArrayOf()))
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                    if (remoteAllowed && !request.isForMainFrame && request.url.scheme in listOf("https", "http")) null
+                    else WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(byteArrayOf()))
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     if (request.isForMainFrame && request.hasGesture() && externalMailLink(request.url.toString())) {
                         try { context.startActivity(Intent(Intent.ACTION_VIEW, request.url).addCategory(Intent.CATEGORY_BROWSABLE)) }
@@ -60,6 +62,8 @@ internal suspend fun prepareMailDocument(
             }
         }
     }, update = { view ->
+        view.settings.blockNetworkLoads = !remote
+        view.settings.blockNetworkImage = !remote
         if (view.tag != document) {
             view.tag = document
             view.loadDataWithBaseURL(null, document, "text/html", "UTF-8", null)

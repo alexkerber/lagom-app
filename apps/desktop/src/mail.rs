@@ -318,28 +318,10 @@ pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::a
         result.inbox_total += other.inbox_total;
         if role.is_some() { result.open.extend(other.open); }
     }
-    let inbox_more = page(&mut result.inbox, limit, filter, &pins, group);
-    let open_more = page(&mut result.open, limit, filter, &pins, group);
+    let inbox_more = lagom_core::threading::conversation_page(&mut result.inbox, limit, filter, &pins, group);
+    let open_more = lagom_core::threading::conversation_page(&mut result.open, limit, filter, &pins, group);
     result.more = if matches!(view, View::Inbox) { inbox_more } else { open_more };
     Ok(result)
-}
-
-fn page(rows: &mut Vec<MessageSummary>, limit: u32, filter: Option<&str>, pins: &[i64], group: bool) -> bool {
-    rows.retain(|m| filter.is_none_or(|account| m.account == account));
-    rows.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
-    let key = |m: &MessageSummary| (m.account.clone(), m.folder,
-        if group && !m.thread_id.is_empty() { m.thread_id.clone() } else { m.id.to_string() });
-    let mut seen = std::collections::HashSet::new();
-    let mut keep = std::collections::HashSet::new();
-    for m in rows.iter() {
-        let key = key(m);
-        if seen.insert(key.clone()) && seen.len() <= limit as usize { keep.insert(key); }
-    }
-    let more = seen.len() > limit as usize;
-    // A pinned member retains its entire conversation, even beyond the global page.
-    keep.extend(rows.iter().filter(|m| pins.contains(&m.id)).map(key));
-    rows.retain(|m| keep.contains(&key(m)));
-    more
 }
 
 struct Sample {

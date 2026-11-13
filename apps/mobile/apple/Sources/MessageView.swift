@@ -2,6 +2,49 @@ import SwiftUI
 import WebKit
 import QuickLook
 
+struct ConversationView: View {
+    @Bindable var model: MailModel
+
+    var body: some View {
+        // Most mail is a single message: keep the full-height reading view for it.
+        if model.messages.count == 1, let message = model.messages.first {
+            MessageView(message: message, model: model)
+        } else {
+            thread
+        }
+    }
+
+    private var thread: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(model.messages, id: \.row.id) { message in
+                    let row = message.row
+                    let sender = RowPresentation(row).sender
+                    let expanded = model.expandedIDs.contains(row.id)
+                    Button { Task { await model.toggleMessage(row.id) } } label: {
+                        HStack(spacing: 8) {
+                            Icon(expanded ? "chevron" : "chevron-right")
+                            Text(sender).lagomFont(.base, row.unread ? .semibold : .regular)
+                            Text(row.preview).lagomFont(.snippet).foregroundStyle(Theme.secondary)
+                            Spacer(minLength: 0)
+                            Text(DateWords().listTime(RowPresentation(row).date)).lagomFont(.small)
+                        }
+                        .lineLimit(1).frame(minHeight: 44).padding(.horizontal, 16).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(expanded ? "Collapse" : "Expand") message from \(sender)")
+                    .accessibilityValue("\(DateWords().readingDate(RowPresentation(row).date)), \(row.preview)")
+                    if expanded {
+                        // shortcut: like desktop, each expanded body scrolls independently; measure HTML for continuous scrolling later.
+                        MessageView(message: message, model: model).frame(height: 560)
+                    }
+                    Theme.line.frame(height: 1)
+                }
+            }
+        }
+    }
+}
+
 /// The desktop reading pane: the subject, then the message card (sender, date, actions menu, body,
 /// attachments), then the reply box.
 struct MessageView: View {
@@ -19,7 +62,7 @@ struct MessageView: View {
                 .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 20) {
                 header
-                if message.htmlBody != nil && !showText && model.remoteImagesID != row.id {
+                if message.htmlBody != nil && !showText && !model.remoteImagesIDs.contains(row.id) {
                     HStack(spacing: 10) {
                         HouseButton(title: "Load remote images", icon: "image") { model.loadRemoteImages(id: row.id) }
                         Text("Remote images are blocked").lagomFont(.small).foregroundStyle(Theme.secondary)
@@ -95,7 +138,7 @@ struct MessageView: View {
         if let html = message.htmlBody, !showText {
             if let core = model.core {
                 MailHTML(document: mailDocument(html: html, dark: scheme == .dark, messageId: message.row.id,
-                                                remote: model.remoteImagesID == message.row.id),
+                                                remote: model.remoteImagesIDs.contains(message.row.id)),
                          messageID: message.row.id, core: core)
                     .id("\(message.row.id)-\(model.inlineRevision)")
             }

@@ -60,12 +60,39 @@ impl Mailbox {
 pub struct MailRow {
     pub id: i64, pub account: String, pub sender_name: String, pub sender_address: String,
     pub subject: String, pub preview: String, pub date_unix: i64, pub unread: bool, pub has_attachments: bool,
+    // List actions use these visible members; reading may include other folders.
+    pub thread_id: String, pub message_count: u32, pub message_ids: Vec<i64>,
 }
 impl From<MessageSummary> for MailRow {
-    fn from(m: MessageSummary) -> Self { Self { id: m.id, account: m.account, sender_name: m.from_name,
+    fn from(m: MessageSummary) -> Self { Self { thread_id: m.thread_id, message_count: 1, message_ids: vec![m.id], id: m.id, account: m.account, sender_name: m.from_name,
         sender_address: m.from_address, subject: m.subject, preview: m.snippet, date_unix: m.date,
         unread: !m.seen, has_attachments: m.has_attachments } }
 }
+fn conversation_rows(messages: Vec<MessageSummary>) -> Vec<MailRow> {
+    let mut rows: Vec<MailRow> = Vec::new();
+    let mut threads = std::collections::HashMap::new();
+    for m in messages {
+        let key = (m.account.clone(), m.folder, m.thread_id.clone());
+        if let Some(&index) = threads.get(&key) {
+            let row: &mut MailRow = &mut rows[index];
+            row.message_count += 1;
+            row.message_ids.push(m.id);
+            row.unread |= !m.seen;
+            row.has_attachments |= m.has_attachments;
+        } else {
+            threads.insert(key, rows.len());
+            rows.push(m.into());
+        }
+    }
+    rows
+}
+
+fn mail_message(s: &Store, id: i64) -> lagom_core::Result<MailMessage> {
+    let m = s.message(id)?;
+    Ok(MailMessage { row: m.summary.into(), text_body: m.body_text, html_body: m.body_html,
+        attachments: s.attachments(id)?.into_iter().map(|a| MailAttachment { section: a.section, filename: a.filename, mime_type: a.mime_type, size: a.size }).collect() })
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MailAttachment { pub section: String, pub filename: String, pub mime_type: String, pub size: u32 }
 #[derive(Clone, Debug, uniffi::Record)]
@@ -301,15 +328,14 @@ impl LagomCore {
         self.run(move |s| {
             if limit > 500 { return Err(lagom_core::Error::Invalid("page limit must be at most 500")); }
             if let Some(id) = &account_id { account(s, id)?; }
-            Ok(s.mailbox_messages(account_id.as_deref(), mailbox.role(), now(), limit, offset)?.into_iter().map(Into::into).collect())
+            Ok(conversation_rows(s.mailbox_conversations(account_id.as_deref(), mailbox.role(), now(), limit.saturating_add(offset))?).into_iter().skip(offset as usize).take(limit as usize).collect())
         }).await
     }
     pub async fn message(&self, id: i64) -> Result<MailMessage> {
-        self.run(move |s| {
-            let m = s.message(id)?;
-            Ok(MailMessage { row: m.summary.into(), text_body: m.body_text, html_body: m.body_html,
-                attachments: s.attachments(id)?.into_iter().map(|a| MailAttachment { section: a.section, filename: a.filename, mime_type: a.mime_type, size: a.size }).collect() })
-        }).await
+        self.run(move |s| mail_message(s, id)).await
+    }
+    pub async fn conversation(&self, message_id: i64) -> Result<Vec<MailMessage>> {
+        self.run(move |s| s.conversation(message_id)?.into_iter().map(|m| mail_message(s, m.id)).collect()).await
     }
     pub async fn attachment(&self, message_id: i64, section: String) -> Result<Vec<u8>> {
         self.attachment_bytes(message_id, section).await
@@ -341,7 +367,7 @@ impl LagomCore {
             if query.len() > 4096 { return Err(lagom_core::Error::Invalid("search query too long")); }
             if let Some(id) = &account_id { account(s, id)?; }
             let Some(query) = lagom_core::store::fts_query(&query) else { return Ok(Vec::new()); };
-            Ok(s.search_accounts(account_id.as_deref(), &query, now(), limit, offset)?.into_iter().map(Into::into).collect())
+            Ok(conversation_rows(s.search_conversations(account_id.as_deref(), &query, now(), limit, offset)?))
         }).await
     }
     pub async fn later(&self, ids: Vec<i64>, until_unix: i64) -> Result<()> {

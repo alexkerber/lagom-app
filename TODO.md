@@ -100,6 +100,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 ## Product line
 
 - [ ] Mobile parity (Alex 2026-11-13): iOS and Android lag far behind desktop. Parity table and ranked gaps first, then close the daily-mail gaps.
+- [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).
 - [x] recipient autocomplete on iOS and Android (2026-11-13).

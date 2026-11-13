@@ -23,15 +23,19 @@ struct Smoke {
         let cancelledRows = try await core.backgroundSync()
         precondition(cancelledRows.isEmpty, "cancelled background sync returned rows")
         do {
-            _ = try await core.message(id: -1)
+            _ = try await core.conversation(messageId: -1)
             preconditionFailure("missing message did not throw")
         } catch MailError.NotFound { }
 
+        do {
+            _ = try await core.message(id: -1)
+            preconditionFailure("missing message did not throw")
+        } catch MailError.NotFound { }
         let recipients = splitRecipients(value: "\"Example, Sender\" <sender@example.test>, next@example.test")
         precondition(recipients.count == 2)
         let tomorrow = try tomorrowAtEight()
         precondition(tomorrow > Int64(Date().timeIntervalSince1970))
         precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true, messageId: 1, remote: false).contains("<x-LINK"))
-        print("Swift FFI smoke: 11 checks passed")
+        print("Swift FFI smoke: 12 checks passed")
     }
 }

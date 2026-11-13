@@ -111,7 +111,7 @@ import java.time.format.FormatStyle
                     if (twoPane || model.selectedId != null) {
                         Box(if (twoPane) Modifier.weight(0.58f) else Modifier.fillMaxSize()) {
                             val message = model.message
-                            if (message != null) MessageScreen(model, message, !twoPane)
+                            if (message != null) ConversationScreen(model, !twoPane)
                             else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (model.selectedId == null) "Select a message" else "Loading message…") }
                         }
                     }
@@ -218,12 +218,43 @@ internal fun Mailbox.label(): String = when (this) {
             supportingContent = { Column { Text(view.subject, maxLines = 1); Text(row.preview, maxLines = 2) } },
             trailingContent = { Column(horizontalAlignment = Alignment.End) {
                 Text(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(view.date), style = MaterialTheme.typography.labelSmall)
+                if (row.messageCount > 1u) Badge {
+                    Text(row.messageCount.toString(), Modifier.semantics { contentDescription = "${row.messageCount} messages" })
+                }
                 if (row.hasAttachments) Text("Attachment", style = MaterialTheme.typography.labelSmall)
             } })
     }
 }
 
-@Composable private fun MessageScreen(model: MailModel, message: MailMessage, back: Boolean) {
+@Composable private fun ConversationScreen(model: MailModel, back: Boolean) {
+    Column(Modifier.fillMaxSize()) {
+        if (back) TextButton(onClick = model::clearSelection) { Text("Back") }
+        // Most mail is a single message: keep the full-height reading view for it.
+        model.messages.singleOrNull()?.let { Box(Modifier.weight(1f)) { MessageScreen(model, it) }; return@Column }
+        LazyColumn(Modifier.weight(1f)) {
+            items(model.messages, key = { it.row.id }) { message ->
+                val row = message.row
+                val view = RowPresentation(row)
+                val expanded = row.id in model.expandedIds
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .clickable(role = Role.Button, onClickLabel = "${if (expanded) "Collapse" else "Expand"} message from ${view.sender}") {
+                        model.perform { model.toggleMessage(row.id) }
+                    }.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (expanded) "⌄" else "›")
+                    Text(view.sender, Modifier.weight(1f), maxLines = 1, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal)
+                    Text(row.preview, Modifier.weight(1f), maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                    Text(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(view.date), style = MaterialTheme.typography.labelSmall)
+                }
+                // shortcut: like desktop, expanded bodies scroll independently; measure HTML for continuous scrolling later.
+                if (expanded) Box(Modifier.height(560.dp)) { MessageScreen(model, message) }
+                HorizontalDivider()
+            }
+        }
+    }
+}
+
+@Composable private fun MessageScreen(model: MailModel, message: MailMessage) {
     var plain by remember(message.row.id) { mutableStateOf(false) }
     val context = LocalContext.current
     fun openAttachment(part: MailAttachment, share: Boolean = false) {
@@ -244,7 +275,6 @@ internal fun Mailbox.label(): String = when (this) {
         }
     }
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (back) TextButton(onClick = model::clearSelection) { Text("Back") }
         SelectionContainer {
             Column {
                 Text(message.row.subject.ifEmpty { "(No subject)" }, style = MaterialTheme.typography.titleLarge)
@@ -255,11 +285,12 @@ internal fun Mailbox.label(): String = when (this) {
         }
         if (message.htmlBody != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(plain, { plain = it }); Text("Plain text · remote images blocked")
+                Checkbox(plain, { plain = it }); Text("Plain text")
+                if (message.row.id !in model.remoteImagesIds) TextButton(onClick = { model.loadRemoteImages(message.row.id) }) { Text("Load remote images") }
             }
         }
         Box(Modifier.weight(1f)) {
-            if (!plain && message.htmlBody != null) MailHtml(message.row.id, message.htmlBody!!)
+            if (!plain && message.htmlBody != null) MailHtml(message.row.id, message.htmlBody!!, message.row.id in model.remoteImagesIds)
             else SelectionContainer { Text(message.textBody, Modifier.fillMaxSize().verticalScroll(rememberScrollState())) }
         }
         if (message.attachments.isNotEmpty()) {
@@ -290,9 +321,9 @@ internal fun Mailbox.label(): String = when (this) {
             val readLabel = if (message.row.unread) "Mark read" else "Mark unread"
             TextButton(enabled = !model.working, onClick = { model.perform { model.setRead(message.row.id, message.row.unread) } },
                 modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = readLabel }) { Text(readLabel) }
-            TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Later, message.row.id) } }) { Text("Later") }
-            TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id) } }) { Text("Delete") }
-            Button(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Done, message.row.id) } }) { Text("Done") }
+            TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Later, message.row.id, conversation = false) } }) { Text("Later") }
+            TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id, conversation = false) } }) { Text("Delete") }
+            Button(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Done, message.row.id, conversation = false) } }) { Text("Done") }
         }
     }
 }

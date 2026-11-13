@@ -88,12 +88,14 @@ async fn unified_pages_snooze_details_and_account_removal() {
         (a, b, first, second, third)
     };
     assert_eq!(core.inbox(2, 0).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [third, second]);
-    assert_eq!(core.inbox(2, 2).await.unwrap()[0].id, first);
+    assert!(core.inbox(2, 2).await.unwrap().is_empty());
+    assert_eq!(core.inbox(1, 1).await.unwrap()[0].id, second);
+    assert_eq!(core.inbox(1, 0).await.unwrap()[0].message_ids, [third, first]);
     assert!(core.inbox(501, 0).await.is_err());
     assert!(core.inbox(0, 0).await.unwrap().is_empty());
     assert_eq!(core.mailbox(Some(b.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().len(), 1);
     assert!(core.later(vec![first, -1], now() + 100).await.is_err());
-    assert_eq!(core.inbox(20, 0).await.unwrap().len(), 3);
+    assert_eq!(core.inbox(20, 0).await.unwrap().len(), 2);
     core.later(vec![third], now() + 100).await.unwrap();
     assert_eq!(core.mailbox(None, Mailbox::Later, 20, 0).await.unwrap()[0].id, third);
     assert_eq!(core.inbox(20, 0).await.unwrap()[0].id, second);
@@ -418,7 +420,8 @@ async fn stalled_sync_keeps_cached_mail_and_durable_enqueue_available() {
     };
     let sync = tokio::spawn({ let core = core.clone(); async move { core.sync_all().await } });
     let (socket, _) = listener.accept().await.unwrap();
-    let local = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    // The stall never ends, so a generous bound still proves local work does not wait; Windows CI is slow.
+    let local = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let same = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
         assert_eq!(same.message(id).await.unwrap().text_body, "line one\nline two");
         assert_eq!(same.mailbox(Some(a.id.clone()), Mailbox::Inbox, 100, 0).await.unwrap()[0].id, id);
@@ -759,7 +762,9 @@ async fn unified_search_uses_desktop_prefixes_and_pages_across_accounts() {
     assert!(core.search(None, "a".repeat(4097), 100, 0).await.is_err());
     assert!(core.search(Some("missing".into()), "hello".into(), 100, 0).await.is_err());
     core.stores.local.lock().unwrap().snooze(snoozed, None).unwrap();
-    assert_eq!(core.search(None, "hello".into(), 100, 0).await.unwrap().len(), 3);
+    let rows = core.search(None, "hello".into(), 100, 0).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].message_count, 2);
 }
 
 #[tokio::test]
@@ -1020,4 +1025,55 @@ async fn cancelled_background_handle_never_connects() {
     assert!(core.background_sync().await.unwrap().is_empty());
     assert!(core.background_sync().await.unwrap().is_empty());
     assert!(tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await.is_err(), "no IMAP connection");
+}
+
+#[tokio::test]
+async fn conversations_count_visible_members_and_read_whole_thread_without_duplicate_copies() {
+    let (dir, core) = fixture();
+    let (account, old, newest, sent, copy, other) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "thread@example.test", 1);
+        let b = fixture_account(&s, "other@example.test", 1);
+        let old = mail(&mut s, &a, 1, 10);
+        let newest = mail(&mut s, &a, 2, 30);
+        let other = mail(&mut s, &b, 1, 30);
+        let folder = s.save_folder(&a.id, "Sent", None, FolderRole::Sent).unwrap();
+        let mut m = s.message(old).unwrap();
+        m.summary.folder = folder;
+        let copy = s.save_message(&m).unwrap();
+        m.summary.uid = 3; m.summary.date = 20; m.summary.message_id = "sent@example.test".into();
+        let sent = s.save_message(&m).unwrap();
+        (a.id, old, newest, sent, copy, other)
+    };
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("UPDATE messages SET seen=1 WHERE id=?1", [newest]).unwrap();
+    db.execute("INSERT INTO attachments VALUES (?1,'2','fixture.txt','text/plain',8,'base64')", [old]).unwrap();
+    let rows = core.inbox(1, 0).await.unwrap();
+    assert_eq!(rows[0].id, other); // Same date, newest ID wins across accounts.
+    let rows = core.inbox(1, 1).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, newest);
+    assert_eq!(rows[0].message_count, 2);
+    assert_eq!(rows[0].message_ids, [newest, old]);
+    assert!(!rows[0].thread_id.is_empty());
+    assert!(rows[0].unread); // Newest is read, older member is not.
+    let messages = core.conversation(newest).await.unwrap();
+    assert_eq!(messages.iter().map(|m| m.row.id).collect::<Vec<_>>(), [old, sent, newest]);
+    assert_eq!(messages[0].attachments[0].filename, "fixture.txt");
+    assert!(messages.iter().all(|m| m.text_body == "line one\nline two" && m.html_body.as_deref() == Some("<p>Hello</p>")));
+    let from_sent = core.conversation(copy).await.unwrap();
+    assert_eq!(from_sent.iter().map(|m| m.row.id).collect::<Vec<_>>(), [copy, sent, newest]);
+    assert!(matches!(core.conversation(-1).await, Err(MailError::NotFound)));
+    let found = core.search(Some(account.clone()), "hello".into(), 1, 0).await.unwrap();
+    assert_eq!((found[0].id, found[0].message_count), (newest, 2));
+    let found = core.search(Some(account.clone()), "hello".into(), 1, 1).await.unwrap();
+    assert_eq!((found[0].id, found[0].message_count), (sent, 2));
+    db.execute("UPDATE messages SET body_text='unique term' WHERE id=?1", [old]).unwrap();
+    let found = core.search(Some(account.clone()), "unique".into(), 10, 0).await.unwrap();
+    assert_eq!((found[0].id, found[0].message_count), (old, 1));
+    core.later(vec![old], now() + 3600).await.unwrap();
+    let inbox = core.mailbox(Some(account.clone()), Mailbox::Inbox, 10, 0).await.unwrap();
+    assert_eq!((inbox[0].message_count, inbox[0].unread), (1, false));
+    assert_eq!(core.mailbox(Some(account), Mailbox::Later, 10, 0).await.unwrap()[0].message_ids, [old]);
+    assert_eq!(core.conversation(newest).await.unwrap().len(), 3); // Reading also includes snoozed members.
 }

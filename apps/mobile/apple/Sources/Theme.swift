@@ -158,6 +158,11 @@ struct MailRowView: View {
                 }
                 Text(value.sender).lagomFont(.base, value.unread ? .semibold : .regular).lineLimit(1)
                 Spacer(minLength: 4)
+                if row.messageCount > 1 {
+                    Text(String(row.messageCount)).lagomFont(.small).monospacedDigit().foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 5).background(Theme.subtle, in: Capsule())
+                        .accessibilityLabel("\(row.messageCount) messages")
+                }
                 if value.hasAttachments {
                     Icon("attachment", size: 15).foregroundStyle(ink2)
                 }

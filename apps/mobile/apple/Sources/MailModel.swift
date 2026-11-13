@@ -170,7 +170,9 @@ final class MailModel {
     var accountID: String?
     var mailbox: MailboxChoice = .inbox
     var searchText = ""
-    var remoteImagesID: Int64?
+    var remoteImagesIDs: Set<Int64> = []
+    var messages: [MailMessage] = []
+    var expandedIDs: Set<Int64> = []
     var inlineRevision = 0
     private var selectionRevision = 0
     var selectedID: Int64?
@@ -315,7 +317,9 @@ final class MailModel {
 
     func changeScope() async {
         selectionRevision += 1
-        remoteImagesID = nil
+        remoteImagesIDs = []
+        messages = []
+        expandedIDs = []
         hasMore = false
         selectedID = nil
         message = nil
@@ -330,32 +334,53 @@ final class MailModel {
     func select(_ id: Int64?) async {
         selectionRevision += 1
         let request = selectionRevision
-        remoteImagesID = nil
+        remoteImagesIDs = []
+        messages = []
+        expandedIDs = []
         inlineRevision = 0
         message = nil
         guard let core, let id else { return }
         do {
-            let loaded = try await core.message(id: id)
+            let loaded = try await core.conversation(messageId: id)
             guard selectedID == id, request == selectionRevision else { return }
-            message = loaded
-            async let inline: Void = loadInline(id: id, request: request)
-            if loaded.row.unread { await setRead(id: id, read: true) }
-            await inline
+            messages = loaded
+            message = loaded.first { $0.row.id == id } ?? loaded.last
+            expandedIDs = Set(loaded.filter { $0.row.id == id || $0.row.unread || $0.row.id == loaded.last?.row.id }.map { $0.row.id })
+            for item in loaded where expandedIDs.contains(item.row.id) {
+                guard request == selectionRevision else { return }
+                async let inline: Void = loadInline(id: item.row.id, request: request)
+                if item.row.unread { await setRead(id: item.row.id, read: true) }
+                await inline
+            }
         } catch { if selectedID == id, request == selectionRevision { self.error = error.localizedDescription } }
     }
 
     private func loadInline(id: Int64, request: Int) async {
-        guard let core, message?.htmlBody != nil else { return }
+        guard let core, messages.contains(where: { $0.row.id == id && $0.htmlBody != nil }) else { return }
         do {
             try await core.loadInline(id: id)
-            guard selectedID == id, request == selectionRevision else { return }
+            guard request == selectionRevision else { return }
             inlineRevision += 1
-        } catch { if selectedID == id, request == selectionRevision { self.error = error.localizedDescription } }
+        } catch { if request == selectionRevision { self.error = error.localizedDescription } }
     }
 
     func loadRemoteImages(id: Int64) {
-        guard selectedID == id, message?.row.id == id else { return }
-        remoteImagesID = id
+        guard messages.contains(where: { $0.row.id == id }) else { return }
+        remoteImagesIDs.insert(id)
+    }
+
+    func toggleMessage(_ id: Int64) async {
+        guard let item = messages.first(where: { $0.row.id == id }) else { return }
+        if expandedIDs.remove(id) != nil { return }
+        expandedIDs.insert(id)
+        let request = selectionRevision
+        async let inline: Void = loadInline(id: id, request: request)
+        if item.row.unread { await setRead(id: id, read: true) }
+        await inline
+    }
+
+    func setRead(row: MailRow) async {
+        for id in row.messageIds { await setRead(id: id, read: row.unread) }
     }
 
     func setRead(id: Int64, read: Bool) async {
@@ -365,10 +390,13 @@ final class MailModel {
         defer { readingIDs.remove(id) }
         do {
             try await core.markRead(id: id, read: read)
-            if selectedID == id {
+            if messages.contains(where: { $0.row.id == id }) {
                 let request = selectionRevision
                 let updated = try await core.message(id: id)
-                if selectedID == id, request == selectionRevision { message = updated }
+                if request == selectionRevision {
+                    messages = messages.map { $0.row.id == id ? updated : $0 }
+                    if message?.row.id == id { message = updated }
+                }
             }
         } catch { self.error = error.localizedDescription }
         await reload()
@@ -388,35 +416,38 @@ final class MailModel {
 
     func act(_ action: MailAction, id: Int64) async {
         guard let core, !working else { return }
+        let ids = rows.first { $0.messageIds.contains(id) }?.messageIds ?? [id]
         actingID = id
         defer { actingID = nil }
         do {
             switch action {
-            case .done: try await core.done(ids: [id])
-            case .later: try await core.later(ids: [id], untilUnix: tomorrowAtEight())
-            case .delete: try await core.delete(ids: [id])
+            case .done: try await core.done(ids: ids)
+            case .later: try await core.later(ids: ids, untilUnix: tomorrowAtEight())
+            case .delete: try await core.delete(ids: ids)
             }
-            if selectedID == id { selectedID = nil; message = nil }
+            if selectedID == id { selectedID = nil; message = nil; messages = []; expandedIDs = []; remoteImagesIDs = [] }
         } catch { self.error = error.localizedDescription }
         await reload()
     }
 
     func prepareCompose(id: Int64, kind: ComposeKind) async {
         guard let core, !preparingCompose, composeDraft == nil else { return }
+        let selection = selectionRevision
+        let selected = selectedID
         preparingCompose = true
         defer { preparingCompose = false }
         do {
             _ = try? await draftWrite?.value
             let saved = kind == .reply ? try await core.savedReply(id: id) : nil
             if let saved {
-                guard selectedID == id, composeDraft == nil else { return }
+                guard selection == selectionRevision, selected == selectedID, composeDraft == nil else { return }
                 restoreDraft(saved)
                 return
             }
             let reply = try await core.composeDraft(id: id, kind: kind)
-            guard selectedID == id, composeDraft == nil else { return }
+            guard selection == selectionRevision, selected == selectedID, composeDraft == nil else { return }
             composeDraft = ComposeDraft(reply: reply, kind: kind, email: accounts.first { $0.id == reply.account }?.email ?? "")
-        } catch { if selectedID == id { self.error = error.localizedDescription } }
+        } catch { if selection == selectionRevision, selected == selectedID { self.error = error.localizedDescription } }
     }
 
     func openDraft(_ row: DraftRow) async {
