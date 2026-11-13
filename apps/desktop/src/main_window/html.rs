@@ -14,6 +14,7 @@
 //! nowhere.
 
 use gpui::{Bounds, Pixels, Rgba};
+use std::sync::Arc;
 
 use super::*;
 
@@ -145,6 +146,25 @@ pub(super) struct Web {
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
     place: Rc<std::cell::Cell<Option<Placement>>>,
+    /// The page as it looked when an overlay hid the view, with the request it answers.
+    cover: Rc<std::cell::RefCell<Option<(u64, Arc<gpui::Image>)>>>,
+    /// The document a snapshot was asked for during this overlay, and that request's number.
+    asked: Option<(Key, u64)>,
+    /// Snapshot requests so far: a late answer to an earlier overlay never shows in a later one.
+    asks: u64,
+    /// The document asked for last has finished loading; until then the view may still show the
+    /// previous one, so no snapshot is taken.
+    // shortcut: a Loaded for the previous document that is still queued when the next load starts
+    // counts for the new one; wry's load event names no document. Tag loads if a wrong picture shows.
+    settled: bool,
+}
+
+/// What stands in for the web view while an overlay hides it.
+pub(super) enum Cover {
+    /// A picture of the page, so the mail looks unchanged under the overlay.
+    Picture(Arc<gpui::Image>),
+    /// The picture is on its way; draw nothing rather than switch to text for a frame.
+    Pending,
 }
 
 /// A window with a mail web view: the main window and each message window.
@@ -234,6 +254,7 @@ impl Web {
                 if view.load_html(&doc).is_err() {
                     self.ours.set(false);
                 }
+                self.settled = false;
             }
             self.shown = Some(key);
             self.has_remote = has_remote(html);
@@ -241,8 +262,63 @@ impl Web {
             self.ready &= self.visible.get();
         }
         self.drawable.set(self.ready && !overlay);
+        self.snapshot(overlay, cx);
         // Native children outside the scroll viewport must stay hidden until their slot is painted.
         self.set_visible(false);
+    }
+
+    /// While an overlay is open, ask once for a picture of the page the reader was looking at.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
+    fn snapshot<T: WebHost>(&mut self, overlay: bool, cx: &mut Context<T>) {
+        if !overlay {
+            self.asked = None;
+            self.cover.borrow_mut().take();
+            return;
+        }
+        // `visible`: the view was on screen in the last frame, so the picture matches what was seen.
+        if self.asked.is_some() || !self.visible.get() || !self.settled { return; }
+        let Some(key) = self.shown else { return };
+        self.asks += 1;
+        let ask = self.asks;
+        self.asked = Some((key, ask));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(view) = &self.view {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            view.snapshot(move |png| { let _ = tx.send(png); });
+            cx.spawn(async move |this, cx| {
+                let png = rx.await.ok().flatten();
+                this.update(cx, |this, cx| {
+                    let web = this.web();
+                    if web.asked.map(|(_, a)| a) != Some(ask) { return; }
+                    match png {
+                        Some(png) => *web.cover.borrow_mut() = Some((ask, Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)))),
+                        // No picture (Windows, or WebKit failed): the text part stands in, as before.
+                        None => web.asked = None,
+                    }
+                    cx.notify();
+                }).ok();
+            }).detach();
+        }
+    }
+
+    /// The body area: the web view's slot, or its picture while an overlay hides it.
+    pub(super) fn surface(&self) -> gpui::AnyElement {
+        match self.cover() {
+            Some(Cover::Picture(picture)) => gpui::img(picture).size_full().into_any_element(),
+            Some(Cover::Pending) => div().into_any_element(),
+            None => self.slot().into_any_element(),
+        }
+    }
+
+    /// What to draw in the web view's place while an overlay hides it; `None` means the text part.
+    pub(super) fn cover(&self) -> Option<Cover> {
+        let (key, ask) = self.asked?;
+        // Another message or theme under the same overlay: no picture of it exists, so the text.
+        if self.shown != Some(key) { return None; }
+        Some(match &*self.cover.borrow() {
+            Some((answer, picture)) if *answer == ask => Cover::Picture(picture.clone()),
+            _ => Cover::Pending,
+        })
     }
 
     fn set_visible(&mut self, visible: bool) {
@@ -315,7 +391,10 @@ impl Web {
                 window.focus(&host.keys());
                 host.new_task(cx);
             }
-            Msg::Loaded => host.web().ready = true,
+            Msg::Loaded => {
+                host.web().ready = true;
+                host.web().settled = true;
+            }
             Msg::CloseWindow => {
                 host.web().unfocus();
                 window.focus(&host.keys());
@@ -411,6 +490,23 @@ fn rgba8(c: Rgba) -> (u8, u8, u8, u8) {
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[test]
+    fn cover_shows_only_the_picture_of_the_document_asked_for() {
+        let mut web = Web::default();
+        assert!(web.cover().is_none(), "no overlay: the slot or the text");
+        let (shown, dark) = ((1, 10, false, true, 0), (1, 10, false, false, 0));
+        web.shown = Some(shown);
+        web.asked = Some((shown, 2));
+        assert!(matches!(web.cover(), Some(Cover::Pending)));
+        let picture = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![]));
+        *web.cover.borrow_mut() = Some((1, picture.clone()));
+        assert!(matches!(web.cover(), Some(Cover::Pending)), "an earlier overlay's picture never shows");
+        *web.cover.borrow_mut() = Some((2, picture));
+        assert!(matches!(web.cover(), Some(Cover::Picture(_))));
+        web.shown = Some(dark);
+        assert!(web.cover().is_none(), "a theme or message change under the overlay falls back to text");
+    }
 
     #[gpui::test]
     fn html_slot_stays_inside_the_reading_card(cx: &mut gpui::TestAppContext) {
