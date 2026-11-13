@@ -34,6 +34,27 @@ internal fun safeAttachmentName(filename: String): String {
     return name.takeUnless { it.isEmpty() || it == "." || it == ".." } ?: "attachment"
 }
 
+// Same boundaries as core split_recipients; desktop keeps the unfinished token in its input.
+internal fun recipientToken(value: String, recipient: String? = null): String {
+    var quoted = false; var escaped = false; var angle = false
+    var comments = 0
+    var start = 0
+    value.forEachIndexed { at, c ->
+        if (escaped) { escaped = false; return@forEachIndexed }
+        when {
+            c == '\\' && (quoted || comments > 0) -> escaped = true
+            c == '"' && comments == 0 -> quoted = !quoted
+            c == '(' && !quoted -> comments++
+            c == ')' && !quoted -> comments = (comments - 1).coerceAtLeast(0)
+            c == '<' && !quoted && comments == 0 -> angle = true
+            c == '>' && !quoted && comments == 0 -> angle = false
+            c in ",;\n\r" && !quoted && !angle && comments == 0 -> start = at + 1
+        }
+    }
+    while (start < value.length && value[start].isWhitespace()) start++
+    return if (recipient != null) value.substring(0, start) + recipient + ", " else value.substring(start).trim()
+}
+
 internal data class ComposeDraft(
     val account: String, val to: String = "", val cc: String = "", val subject: String = "",
     val body: String = "", val replyTo: Long? = null,

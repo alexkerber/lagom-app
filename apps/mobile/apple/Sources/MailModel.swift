@@ -30,6 +30,31 @@ func safeAttachmentName(_ filename: String) -> String {
     return name.isEmpty || name == "." || name == ".." ? "attachment" : name
 }
 
+// Same boundaries as core split_recipients; desktop keeps the unfinished token in its input.
+func recipientToken(_ value: String, replacingWith recipient: String? = nil) -> String {
+    var quoted = false, escaped = false, angle = false
+    var comments = 0
+    var start = value.startIndex
+    for at in value.indices {
+        let c = value[at]
+        if escaped { escaped = false; continue }
+        switch c {
+        case "\\" where quoted || comments > 0: escaped = true
+        case "\"" where comments == 0: quoted.toggle()
+        case "(" where !quoted: comments += 1
+        case ")" where !quoted: comments = max(0, comments - 1)
+        case "<" where !quoted && comments == 0: angle = true
+        case ">" where !quoted && comments == 0: angle = false
+        case ",", ";", "\n", "\r", "\r\n":
+            if !quoted && !angle && comments == 0 { start = value.index(after: at) }
+        default: break
+        }
+    }
+    while start < value.endIndex && value[start].isWhitespace { start = value.index(after: start) }
+    if let recipient { return String(value[..<start]) + recipient + ", " }
+    return value[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 struct ComposeDraft: Identifiable, Equatable {
     let id = UUID()
     var messageID: String

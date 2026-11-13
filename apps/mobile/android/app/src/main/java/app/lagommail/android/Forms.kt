@@ -1,6 +1,7 @@
 package app.lagommail.android
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -8,16 +9,34 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import app.lagommail.core.*
+import kotlinx.coroutines.CancellationException
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ComposeScreen(model: MailModel) {
     val draft = model.draft ?: return
     var cancelling by remember(draft.id) { mutableStateOf(false) }
+    var contactsAccount by remember(draft.id) { mutableStateOf<String?>(null) }
+    var contactsError by remember(draft.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(draft.id, draft.account) {
+        contactsAccount = null
+        contactsError = null
+        try {
+            model.core?.refreshContacts(draft.account)
+            contactsAccount = draft.account
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { contactsError = "Could not load contacts. Enter an address to continue." }
+    }
     BackHandler { if (!model.sending) cancelling = true }
     if (cancelling) {
         AlertDialog(onDismissRequest = { cancelling = false }, title = { Text("Save draft?") },
@@ -46,14 +65,39 @@ import app.lagommail.core.*
                     }
                 }
             }
-            Field("To", draft.to, !model.sending, KeyboardType.Email) { model.draft = draft.copy(to = it) }
-            Field("Cc", draft.cc, !model.sending, KeyboardType.Email) { model.draft = draft.copy(cc = it) }
+            RecipientField("To", draft.to, !model.sending, model.core, draft.account, contactsAccount == draft.account) { model.draft = draft.copy(to = it) }
+            RecipientField("Cc", draft.cc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { model.draft = draft.copy(cc = it) }
+            contactsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Field("Subject", draft.subject, !model.sending) { model.draft = draft.copy(subject = it) }
             if (draft.attachments.isNotEmpty()) {
                 Text(draft.attachments.joinToString(", ") { it.filename }, style = MaterialTheme.typography.bodySmall)
             }
             OutlinedTextField(draft.body, { model.draft = draft.copy(body = it) }, enabled = !model.sending,
                 label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable private fun RecipientField(label: String, value: String, enabled: Boolean, core: LagomCoreInterface?, account: String,
+                                      contactsReady: Boolean, change: (String) -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    val query = recipientToken(value)
+    Column {
+        Field(label, value, enabled, KeyboardType.Email,
+            Modifier.focusRequester(focus).onFocusChanged { focused = it.isFocused }, change)
+        if (focused && enabled && contactsReady && query.isNotEmpty()) {
+            core?.suggestContacts(account, query)?.forEach { contact ->
+                Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .semantics(mergeDescendants = true) { contentDescription = "${contact.name}, ${contact.address}" }
+                    .clickable(role = Role.Button, onClickLabel = "Add recipient") {
+                        change(recipientToken(value, contact.recipient))
+                        focus.requestFocus()
+                    }.padding(vertical = 6.dp), verticalArrangement = Arrangement.Center) {
+                    if (contact.name.isNotEmpty()) Text(contact.name)
+                    Text(contact.address, style = MaterialTheme.typography.bodySmall)
+                }
+            }
         }
     }
 }
@@ -135,11 +179,12 @@ internal class AccountForm {
     }
 }
 
-@Composable private fun Field(label: String, value: String, enabled: Boolean = true, keyboard: KeyboardType = KeyboardType.Text, change: (String) -> Unit) {
+@Composable private fun Field(label: String, value: String, enabled: Boolean = true, keyboard: KeyboardType = KeyboardType.Text,
+                             modifier: Modifier = Modifier, change: (String) -> Unit) {
     OutlinedTextField(value, change, enabled = enabled, label = { Text(label) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = false),
         visualTransformation = if (keyboard == KeyboardType.Password) PasswordVisualTransformation() else VisualTransformation.None,
-        modifier = Modifier.fillMaxWidth())
+        modifier = modifier.fillMaxWidth())
 }
 @Composable private fun SecurityChoice(tls: Boolean, enabled: Boolean, change: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

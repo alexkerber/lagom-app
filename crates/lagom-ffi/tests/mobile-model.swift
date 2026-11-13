@@ -1,6 +1,8 @@
 import Foundation
 
 @MainActor final class FixtureCore: LagomCore, @unchecked Sendable {
+    override func refreshContacts(accountId: String) async throws {}
+    override func suggestContacts(accountId: String, query: String) -> [ContactSuggestion] { [] }
     var attachmentCalls = 0
     var attachmentGate: CheckedContinuation<Void, Never>?
     var suspendAttachment = false
@@ -51,6 +53,8 @@ import Foundation
 }
 
 @MainActor final class DraftFixtureCore: LagomCore, @unchecked Sendable {
+    override func refreshContacts(accountId: String) async throws {}
+    override func suggestContacts(accountId: String, query: String) -> [ContactSuggestion] { [] }
     var drafts: [String: LocalDraft] = [:]
     var saves = 0
     var gate: CheckedContinuation<Void, Never>?
@@ -136,6 +140,24 @@ struct ModelChecks {
     }
 
     @MainActor static func main() async throws {
+        precondition(recipientToken("") == "")
+        precondition(recipientToken("  ") == "")
+        precondition(recipientToken("An") == "An")
+        precondition(recipientToken("one@example.com,  An ") == "An")
+        precondition(recipientToken("one@example.com;\r\nAn") == "An")
+        precondition(recipientToken("one@example.com, ") == "")
+        precondition(recipientToken("\"Team, West\" <west@example.com>, An") == "An")
+        precondition(recipientToken("\"Team, West") == "\"Team, West")
+        precondition(recipientToken("\"Team\\\", West\" <west@example.com>; An") == "An")
+        precondition(recipientToken("One (team, (west; east)) <one@example.com>, An") == "An")
+        precondition(recipientToken("odd <one,two") == "odd <one,two")
+        precondition(recipientToken("Åsa@example.com, Éq") == "Éq")
+        precondition(recipientToken("An", replacingWith: "\"Team, West\" <west@example.com>") == "\"Team, West\" <west@example.com>, ")
+        precondition(recipientToken("one@example.com,  An", replacingWith: "\"Team, West\" <west@example.com>") == "one@example.com,  \"Team, West\" <west@example.com>, ")
+        precondition(recipientToken("\"Team, West\" <west@example.com>, We", replacingWith: "\"Team, West\" <west@example.com>") == "\"Team, West\" <west@example.com>, \"Team, West\" <west@example.com>, ")
+        precondition(recipientToken("one@example.com;\r\nWe", replacingWith: "\"Team, West\" <west@example.com>") == "one@example.com;\r\n\"Team, West\" <west@example.com>, ")
+        precondition(recipientToken("\"Team, W", replacingWith: "\"Team, West\" <west@example.com>") == "\"Team, West\" <west@example.com>, ")
+        print("Recipient token checks passed")
         if CommandLine.arguments.contains("--wake") {
             await wake()
             return

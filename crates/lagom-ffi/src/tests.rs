@@ -45,6 +45,37 @@ fn mail(store: &mut Store, a: &Account, uid: u32, date: i64) -> i64 {
 }
 
 #[tokio::test]
+async fn contacts_are_refreshed_per_account_and_removed_with_the_account() {
+    let (dir, core) = fixture();
+    let (a, b) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        let b = fixture_account(&s, "b@example.test", 1);
+        mail(&mut s, &a, 1, now());
+        (a, b)
+    };
+    assert!(core.suggest_contacts(a.id.clone(), "sen".into()).is_empty());
+    core.refresh_contacts(a.id.clone()).await.unwrap();
+    let expected = vec![ContactSuggestion { name: String::new(), address: "sender@example.test".into(), recipient: "sender@example.test".into() }];
+    assert_eq!(core.suggest_contacts(a.id.clone(), "sen".into()), expected);
+    assert!(core.suggest_contacts(b.id.clone(), "sen".into()).is_empty());
+    core.refresh_contacts(b.id.clone()).await.unwrap();
+    assert!(core.suggest_contacts(b.id, "sen".into()).is_empty());
+    let reopened = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
+    assert_eq!(reopened.suggest_contacts(a.id.clone(), "sen".into()), expected);
+    core.stores.local.lock().unwrap().delete_account(&a.id).unwrap();
+    assert!(core.refresh_contacts(a.id.clone()).await.is_err());
+    // Restore the fixture to exercise successful removal and eviction on both handles.
+    core.stores.local.lock().unwrap().save_account(&a).unwrap();
+    core.refresh_contacts(a.id.clone()).await.unwrap();
+    assert!(core.suggest_contacts(a.id.clone(), "sen".into()).is_empty());
+    mail(&mut core.stores.local.lock().unwrap(), &a, 1, now());
+    core.refresh_contacts(a.id.clone()).await.unwrap();
+    core.remove_account(a.id.clone()).await.unwrap();
+    assert!(reopened.suggest_contacts(a.id, "sen".into()).is_empty());
+}
+
+#[tokio::test]
 async fn unified_pages_snooze_details_and_account_removal() {
     let (dir, core) = fixture();
     let (a, b, first, second, third) = {
