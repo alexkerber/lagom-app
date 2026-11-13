@@ -86,7 +86,7 @@ struct ComposeView: View {
                 }
             }
             .disabled(sending || (draft.to.isEmpty && draft.cc.isEmpty) || draft.account.isEmpty)
-            if sending { ProgressView().accessibilityLabel("Sending") }
+            if sending { CalmProgress(label: "Sending") }
             Spacer(minLength: 0)
             if let error {
                 Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).lineLimit(2)
