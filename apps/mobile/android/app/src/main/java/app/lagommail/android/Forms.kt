@@ -83,7 +83,8 @@ import kotlinx.coroutines.CancellationException
         Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             var fromMenu by remember { mutableStateOf(false) }
             Box {
-                OutlinedButton(enabled = !model.sending && !draft.isReply && !draft.restored, onClick = { fromMenu = true }) {
+                // Changing sender mid-read would give the draft a new id and drop the pending files.
+                OutlinedButton(enabled = !model.sending && !model.attaching && !draft.isReply && !draft.restored, onClick = { fromMenu = true }) {
                     Text("From: ${model.accounts.find { it.id == draft.account }?.email.orEmpty()}")
                 }
                 DropdownMenu(fromMenu, { fromMenu = false }) {

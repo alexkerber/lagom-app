@@ -45,7 +45,8 @@ struct ComposeView: View {
                         .foregroundStyle(Theme.ink)
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                     }
-                    .disabled(draft.isReply || draft.restored)
+                    // Changing sender mid-read would race the pending files.
+                    .disabled(draft.isReply || draft.restored || attaching)
                     .accessibilityLabel("From")
                     .accessibilityValue(from)
                 }
