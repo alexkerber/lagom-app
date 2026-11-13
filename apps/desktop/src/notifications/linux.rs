@@ -20,6 +20,8 @@ impl Application {
     // Starting the process already opened the main window.
     fn activate(&self, _platform_data: HashMap<String, OwnedVariant>) {}
     fn open(&self, _uris: Vec<String>, _platform_data: HashMap<String, OwnedVariant>) {}
+    // shortcut: GPUI cannot take the click's Wayland "activation-token", so GNOME on Wayland may
+    // select the mail without raising a window behind others; pass it on once GPUI can.
     fn activate_action(&self, name: String, parameter: Vec<OwnedVariant>, _platform_data: HashMap<String, OwnedVariant>) {
         if let Some(target) = clicked(&name, &parameter) { let _ = self.0.send(Event::Clicked(target)); }
     }
