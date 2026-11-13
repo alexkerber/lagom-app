@@ -216,17 +216,21 @@ internal class MailModel(
         closeCompose(discard = false)
         accountForm = null
         searchText = ""
-        changeScope(target.account, Mailbox.INBOX)
-        // The user may have navigated while the Inbox loaded; never pull them back.
-        if (accountId != target.account || mailbox != Mailbox.INBOX || showingDrafts || searchText.isNotEmpty() || selectedId != null) return
-        select(target.message)
+        enterScope(target.account, Mailbox.INBOX)
+        // Every navigation bumps selectionRevision; never pull the user back after one.
+        val selection = selectionRevision
+        reload()
+        if (selection == selectionRevision) select(target.message)
     }
     suspend fun changeScope(account: String?, box: Mailbox) {
+        enterScope(account, box)
+        reload()
+    }
+    private fun enterScope(account: String?, box: Mailbox) {
         showingDrafts = false
         revision++
         clearSelection()
         accountId = account; mailbox = box; rows = emptyList(); hasMore = false
-        reload()
     }
     suspend fun changeSearch(text: String) {
         if (searchText == text) return

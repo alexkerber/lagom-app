@@ -271,6 +271,17 @@ class MailModelTest {
         assertEquals("other", model.accountId)
         assertEquals(Mailbox.SENT, model.mailbox)
     }
+    @Test fun notificationDoesNotOverrideNavigationDuringItsReload() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(42, "second")) }
+        val model = model(core); model.start()
+        val gate = CompletableDeferred<Unit>(); core.pageGate = gate
+        val open = async { model.openNotification(MailTarget("second", 42)) }; runCurrent()
+        core.pageGate = null
+        model.changeScope("second", Mailbox.SENT)
+        model.changeScope("second", Mailbox.INBOX)
+        gate.complete(Unit); open.await()
+        assertNull(model.selectedId)
+    }
     @Test fun staleReloadCannotReplaceNewScope() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1)) }
         val model = model(core); model.start()

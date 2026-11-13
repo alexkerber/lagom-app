@@ -28,8 +28,9 @@ internal fun mailNotices(rows: List<MailRow>): List<MailNotice> = rows.groupBy {
 
 class MailRefreshWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result = try {
-        val core = withContext(Dispatchers.IO) { (applicationContext as LagomApplication).core }
-        val rows = core.backgroundSync()
+        val core = withContext(Dispatchers.IO) { (applicationContext as LagomApplication).backgroundCore() }
+        // Dropping the FFI future does not stop Rust's blocking worker; the flag stops it before the next account.
+        val rows = try { core.backgroundSync() } catch (cancelled: CancellationException) { core.cancelBackgroundSync(); throw cancelled }
         val manager = applicationContext.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel("new-mail", "New mail", NotificationManager.IMPORTANCE_DEFAULT))
         if (manager.areNotificationsEnabled()) for (notice in mailNotices(rows)) {

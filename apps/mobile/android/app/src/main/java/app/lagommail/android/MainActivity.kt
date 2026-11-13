@@ -40,6 +40,11 @@ class LagomApplication : Application() {
         check(credentials)
         LagomCore.open(File(noBackupFilesDir, "mail").absolutePath)
     }
+    /** A cancelled background handle stays cancelled, so each run gets its own; the stores are shared. */
+    fun backgroundCore(): LagomCore {
+        check(credentials)
+        return LagomCore.open(File(noBackupFilesDir, "mail").absolutePath)
+    }
 }
 
 class MainActivity : ComponentActivity() {

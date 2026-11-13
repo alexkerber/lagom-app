@@ -41,9 +41,8 @@ final class MailAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
                 } onCancel: {
                     core.cancelBackgroundSync()
                 }
-                try Task.checkCancellation()
+                // Synced Inboxes have advanced past these rows: post them even after expiration.
                 for notice in mailNotices(rows) {
-                    try Task.checkCancellation()
                     let content = UNMutableNotificationContent()
                     content.title = notice.title
                     content.body = notice.body
@@ -59,10 +58,9 @@ final class MailAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
                 finish(false)
             }
         }
-        task.expirationHandler = {
-            sync.cancel()
-            Task { @MainActor in finish(false) }
-        }
+        // The cancel flag stops before the next account; the task then posts what it found and finishes.
+        // shortcut: a sync stuck inside one account outlives expiration and iOS ends the process; add a network timeout if that shows up.
+        task.expirationHandler = { sync.cancel() }
     }
 
     func requestPermission() async {
