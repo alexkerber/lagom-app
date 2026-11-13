@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build lagom for Linux and pack it as a .deb and an AppImage in target/linux.
-# Usage: scripts/package-linux.sh [version]
+# Usage: scripts/package-linux.sh [version]   (version without the "v", e.g. 1.2.3)
 # Needs Debian or Ubuntu (dpkg-deb, dpkg-shlibdeps), curl and the build packages from
 # .github/workflows/ci.yml. Downloads a pinned, hash-checked linuxdeploy for the AppImage.
 # LAGOM_SKIP_BUILD=1 packs an existing release binary; LAGOM_DEB_MAINTAINER sets Maintainer.
@@ -8,10 +8,12 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$repo"
 version=${1:-0.1.0}
-if [[ ! $version =~ ^[0-9][0-9A-Za-z.+~]*$ ]]; then
-    echo "Version must start with a digit, without a leading v: $version" >&2
+if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+    echo "Version must look like 1.2.3 or 1.2.3-beta.1, not '$version'." >&2
     exit 2
 fi
+# The single version source for code that needs it (option_env!), see docs/release.md.
+export LAGOM_VERSION=$version
 id=app.lagommail.desktop
 out=$repo/target/linux
 bin=${CARGO_TARGET_DIR:-$repo/target}/release/lagom
@@ -32,9 +34,9 @@ rm -rf "$out"
 root=$out/root
 install -Dm755 -s "$bin" "$root/usr/bin/lagom"
 install -Dm644 "packaging/linux/$id.desktop" "$root/usr/share/applications/$id.desktop"
-for size in 16x16:16x16 32x32:32x32 64x64:32x32@2x 128x128:128x128 256x256:256x256 512x512:512x512; do
-    install -Dm644 "brand/app-icon/export/AppIcon.iconset/icon_${size#*:}.png" \
-        "$root/usr/share/icons/hicolor/${size%%:*}/apps/$id.png"
+for icon in brand/app-icon/export/hicolor/*/apps/lagom.png; do
+    size=${icon#brand/app-icon/export/hicolor/}
+    install -Dm644 "$icon" "$root/usr/share/icons/hicolor/${size%%/*}/apps/$id.png"
 done
 if command -v desktop-file-validate >/dev/null; then
     desktop-file-validate "$root/usr/share/applications/$id.desktop"
@@ -51,10 +53,12 @@ mkdir -p "$out/shlibs/debian"
 depends=$(cd "$out/shlibs" && dpkg-shlibdeps -O "$deb/usr/bin/lagom" | sed -n 's/^shlibs:Depends=//p')
 size=$(du -sk "$deb" | cut -f1)
 mkdir -p "$deb/DEBIAN"
+# Debian sorts 1.2.3~beta.1 before 1.2.3; a hyphen would mean a Debian revision instead.
+deb_version=$(sed 's/-/~/g' <<< "$version")
 # GPUI loads Vulkan and Wayland at run time, so dpkg-shlibdeps cannot see them.
 cat > "$deb/DEBIAN/control" <<CONTROL
 Package: lagom
-Version: $version
+Version: $deb_version
 Architecture: $arch
 Maintainer: $maintainer
 Installed-Size: $size
@@ -66,7 +70,7 @@ Homepage: https://github.com/alexkerber/lagom-app
 Description: A fast, minimal, keyboard-first email client
  Mail, calendar and tasks. Made in Sweden. Open source.
 CONTROL
-dpkg-deb --build --root-owner-group "$deb" "$out/lagom_${version}_$arch.deb"
+dpkg-deb --build --root-owner-group "$deb" "$out/lagom-$version-linux-$(uname -m).deb"
 
 # AppImage. linuxdeploy bundles the libraries a desktop may lack and skips the base system ones.
 # The runtime is the AppImage's own start code, so pin it too instead of appimagetool's latest.
@@ -97,7 +101,7 @@ cp -a "$root" "$appdir"
 rm -r "$appdir/usr/share/applications"
 # CI runners and containers have no FUSE.
 (cd "$out" && APPIMAGE_EXTRACT_AND_RUN=1 LINUXDEPLOY_OUTPUT_VERSION=$version LDAI_RUNTIME_FILE=$runtime \
-    LDAI_OUTPUT="lagom-$version-$machine.AppImage" "$tool" --appdir "$appdir" \
+    LDAI_OUTPUT="lagom-$version-linux-$machine.AppImage" "$tool" --appdir "$appdir" \
     --desktop-file "$repo/packaging/linux/$id.desktop" \
     --icon-file "$root/usr/share/icons/hicolor/512x512/apps/$id.png" --output appimage)
 ls -1 "$out"/*.deb "$out"/*.AppImage

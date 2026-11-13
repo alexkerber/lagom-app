@@ -117,9 +117,16 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 
 ## Linux
 
-- Build on `ubuntu-latest` from the tag. Name files `lagom-<LAGOM_VERSION>-linux-x86_64.*`.
-- Upload to the same draft release, as for Windows.
+Script: `scripts/package-linux.sh [version]`. Workflow: `.github/workflows/package-linux.yml`.
+
+- Builds `lagom-<LAGOM_VERSION>-linux-x86_64.deb` and `.AppImage` on `ubuntu-22.04`, not
+  `ubuntu-latest`: the packages need at least the glibc they were built with, so the oldest
+  supported Ubuntu reaches the most distributions.
+- The .deb version replaces `-` with `~` (`1.2.3~beta.4`), so a pre-release sorts before `1.2.3`.
+- CI installs the .deb, starts lagom through D-Bus activation and the AppImage under Xvfb.
+- Uploads to the same draft release, as for macOS.
 - No signing certificate is needed. Optional: publish a `SHA256SUMS` file with the release.
+- Human step: set `LAGOM_DEB_MAINTAINER` (or the script default) to a real contact address.
 - Human step for a Flathub or Snap listing: create the store account and submit the manifest.
 
 ## iOS and iPadOS
@@ -192,4 +199,4 @@ Not implemented on this branch. Tracked as an open item below.
 - [ ] Desktop: the update check described above.
 - [ ] iOS: pass `MARKETING_VERSION` from `LAGOM_VERSION` in `release.sh`.
 - [ ] Android: release signing config and `versionName`/`versionCode` from `LAGOM_VERSION`.
-- [ ] Windows and Linux: packaging workflows that follow this page.
+- [ ] Windows: a packaging workflow that follows this page. Linux: `package-linux.yml` (branch `release/linux`).
