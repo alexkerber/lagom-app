@@ -2134,7 +2134,7 @@ impl MainWindow {
         // HTML mail: the web view covers only the body. While an overlay hides it, a picture of the
         // page stands in; the text shows only where there is no picture (Windows, a page not yet shown).
         let web = html::supported() && m.html.is_some();
-        let text = !web || (self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some()) && self.web.cover().is_none();
+        let text = !web || self.web.failed || (self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some()) && self.web.cover().is_none();
         // Toasts sit just above the reply field; the web view would cover them.
         let toasts = self.toast.is_some() as usize + self.sending.iter().filter(|c| c.read(cx).undoable()).count()
             + self.live.as_ref().map_or(0, |live| live.failed.len());

@@ -168,6 +168,8 @@ pub(super) struct Web {
     inline: Inline,
     /// A document finished loading since the view was last hidden for plain text.
     ready: bool,
+    /// The document asked for last did not load: the reading view shows the text part.
+    pub(super) failed: bool,
     visible: Rc<std::cell::Cell<bool>>,
     drawable: Rc<std::cell::Cell<bool>>,
     /// The shown mail has remote images.
@@ -286,8 +288,11 @@ impl Web {
                 let doc = document(&html, theme, m.remote);
                 self.ours.set(true);
                 let _ = view.set_background_color(rgba8(theme.bg));
-                if view.load_html(&doc).is_err() {
+                // WebView2 refuses documents over 2 MB: the text part shows, never the last mail's body.
+                self.failed = view.load_html(&doc).is_err();
+                if self.failed {
                     self.ours.set(false);
+                    self.ready = false;
                 }
                 self.settled = false;
             }

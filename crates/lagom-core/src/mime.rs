@@ -2,6 +2,8 @@ use crate::{
     store::{Message, MessageSummary},
     Error, Result,
 };
+use html5ever::tokenizer::{states::RawKind, BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer};
+use html5ever::{local_name, LocalName};
 use mail_parser::{AddressList, MessageParser, PartKind};
 
 pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
@@ -30,31 +32,244 @@ pub fn metadata_only(header: &[u8]) -> Result<Message> {
 /// out of list previews (`&#847;`, `&zwnj;`, soft hyphens).
 const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
 
+/// The visible text of mail HTML: hidden elements dropped, block structure kept as line breaks.
+/// One pass over html5ever's tokens, without a tree builder: a tree builder re-creates every
+/// unclosed formatting element in each later block, so a 20 KB mail can build millions of nodes
+/// at sync. Time and memory here are linear in the input.
 pub fn html_to_text(html: &str) -> String {
-    let document = dom_query::Document::from(html);
-    document.select("head, style, script, title, template, [hidden]").remove();
-    // shortcut: only simple inline declarations are supported; add a CSS parser/cascade for complex styles or class-based preheaders.
-    for node in document.select("[style]").iter() {
-        let (mut display, mut visibility) = ((false, false), (false, false));
-        for declaration in node.attr_or("style", "").split(';') {
-            let Some((name, value)) = declaration.split_once(':') else { continue; };
-            let (property, hidden) = if name.trim().eq_ignore_ascii_case("display") {
-                (&mut display, "none")
-            } else if name.trim().eq_ignore_ascii_case("visibility") {
-                (&mut visibility, "hidden")
-            } else { continue; };
-            let (value, important) = match value.split_once('!') {
-                Some((value, priority)) if priority.trim().eq_ignore_ascii_case("important") => (value, true),
-                Some(_) => continue,
-                None => (value, false),
-            };
-            if !value.trim().is_empty() && (!property.1 || important) {
-                *property = (value.trim().eq_ignore_ascii_case(hidden), important);
+    let queue = BufferQueue::default();
+    queue.push_back(html.into());
+    let tokenizer = Tokenizer::new(TextSink::default(), Default::default());
+    let _ = tokenizer.feed(&queue);
+    tokenizer.end();
+    clean_lines(tokenizer.sink.0.into_inner().text.trim_end())
+}
+
+#[derive(Default)]
+struct TextSink(std::cell::RefCell<TextState>);
+
+#[derive(Default)]
+struct TextState {
+    text: String,
+    /// The outermost hidden element. Its text is cut when it closes.
+    hidden: Option<Hidden>,
+    /// Open `pre` elements: their text is kept as is, as in dom_query's `formatted_text`.
+    pre: usize,
+    /// A `p` is open: a block start closes it.
+    p: bool,
+    /// The tree builder drops a line feed right after `<pre>`.
+    skip_newline: bool,
+    /// In the text of a raw text element (`title`, `style`, `script`): no tags until its end tag.
+    raw: bool,
+}
+
+/// A hidden element: how many elements of its name are open, and the text length and state when
+/// it started.
+struct Hidden {
+    name: LocalName,
+    open: usize,
+    at: usize,
+    pre: usize,
+    p: bool,
+}
+
+impl TokenSink for TextSink {
+    type Handle = ();
+    fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+        let mut state = self.0.borrow_mut();
+        match token {
+            Token::TagToken(tag) => return state.tag(tag),
+            Token::CharacterTokens(chars) => state.chars(&chars),
+            // Unclosed at the end: `head` and raw text elements stay hidden, as in a DOM. Any other
+            // hidden element shows, so one unmatched end tag cannot hide the rest of a mail.
+            Token::EOFToken => {
+                if let Some(hidden) = &state.hidden {
+                    if raw_kind(&hidden.name).is_some() || hidden.name == local_name!("head") {
+                        let at = hidden.at;
+                        state.text.truncate(at);
+                    }
+                }
             }
+            _ => {}
         }
-        if display.0 || visibility.0 { node.remove(); }
+        TokenSinkResult::Continue
     }
-    clean_lines(&document.formatted_text())
+}
+
+impl TextState {
+    fn in_head(&self) -> bool {
+        self.hidden.as_ref().is_some_and(|h| h.name == local_name!("head"))
+    }
+
+    fn unhide(&mut self) {
+        if let Some(hidden) = self.hidden.take() {
+            self.text.truncate(hidden.at);
+            (self.pre, self.p) = (hidden.pre, hidden.p);
+        }
+    }
+
+    fn tag(&mut self, tag: Tag) -> TokenSinkResult<()> {
+        let (name, start) = (&tag.name, tag.kind == TagKind::StartTag);
+        self.raw = false;
+        self.skip_newline = false;
+        // `head` ends at its end tag or at the first tag that cannot be in it.
+        if self.in_head() && (if start { !matches!(*name, local_name!("head") | local_name!("base") | local_name!("basefont") | local_name!("bgsound") | local_name!("link") | local_name!("meta") | local_name!("title") | local_name!("style") | local_name!("script") | local_name!("noscript") | local_name!("template") | local_name!("noframes")) } else { *name == local_name!("head") }) {
+            self.unhide();
+            if !start { return TokenSinkResult::Continue; }
+        }
+        let void = matches!(*name, local_name!("area") | local_name!("base") | local_name!("br") | local_name!("col") | local_name!("embed") | local_name!("hr") | local_name!("img") | local_name!("image") | local_name!("input") | local_name!("link") | local_name!("meta") | local_name!("source") | local_name!("track") | local_name!("wbr") | local_name!("param") | local_name!("keygen") | local_name!("basefont") | local_name!("bgsound") | local_name!("frame"));
+        let result = match raw_kind(name) {
+            Some(_) if !start => TokenSinkResult::Continue,
+            Some(Some(kind)) => { self.raw = true; TokenSinkResult::RawData(kind) }
+            Some(None) => TokenSinkResult::Plaintext,
+            None => TokenSinkResult::Continue,
+        };
+        // A `p` cannot hold a block: the tree builder closes it.
+        let closes_p = start && closes_p(name);
+        if closes_p && self.hidden.as_ref().is_some_and(|h| h.name == local_name!("p")) {
+            self.unhide();
+        }
+        match &mut self.hidden {
+            Some(hidden) if hidden.name == *name && hidden.name != local_name!("head") => {
+                if start { hidden.open += 1; } else { hidden.open -= 1; }
+                if hidden.open == 0 {
+                    self.unhide();
+                    return result;
+                }
+            }
+            Some(_) => {}
+            None if start && hides(&tag) => {
+                // A hidden void element (`<br hidden>`) breaks no line.
+                if void { return result; }
+                self.hidden = Some(Hidden { name: name.clone(), open: 1, at: self.text.len(), pre: self.pre, p: self.p });
+            }
+            None => {}
+        }
+        if self.pre > 0 {
+            if *name == local_name!("pre") {
+                if start { self.pre += 1; } else { self.pre -= 1; }
+                if self.pre == 0 { self.close(name); }
+            }
+            return result;
+        }
+        if !start {
+            self.p &= *name != local_name!("p");
+            self.close(name);
+            return result;
+        }
+        // An unclosed `p`, `li`, `tr` or cell before this one: the tree builder closes it here.
+        if closes_p && std::mem::take(&mut self.p) {
+            self.close(&local_name!("p"));
+        }
+        self.p |= *name == local_name!("p");
+        match *name {
+            local_name!("li") | local_name!("tr") if !self.text.ends_with('\n') => self.close(name),
+            local_name!("td") | local_name!("th") => self.close(name),
+            _ => {}
+        }
+        if block(name) && !(self.text.is_empty() || self.text.ends_with("\n\n")) {
+            self.text.push('\n');
+        }
+        if *name == local_name!("pre") {
+            self.pre = 1;
+            self.skip_newline = true;
+        }
+        if void { self.close(name); }
+        result
+    }
+
+    fn chars(&mut self, chars: &str) {
+        if self.in_head() && !self.raw && !chars.trim().is_empty() {
+            self.unhide();
+        }
+        let chars = if std::mem::take(&mut self.skip_newline) { chars.strip_prefix('\n').unwrap_or(chars) } else { chars };
+        if self.pre > 0 {
+            self.text.push_str(chars);
+            return;
+        }
+        // As dom_query's `formatted_text`: white space collapses to one space between words.
+        let follows_space = self.text.is_empty() || self.text.ends_with(['\n', ' ']);
+        let mut words = chars.split_whitespace();
+        if let Some(first) = words.next() {
+            if !follows_space && chars.starts_with(char::is_whitespace) { self.text.push(' '); }
+            self.text.push_str(first);
+            for word in words {
+                self.text.push(' ');
+                self.text.push_str(word);
+            }
+        } else if follows_space {
+            return;
+        }
+        if chars.ends_with(char::is_whitespace) && !self.text.ends_with(char::is_whitespace) {
+            self.text.push(' ');
+        }
+    }
+
+    /// The line breaks after an element, as in dom_query's `formatted_text`.
+    fn close(&mut self, name: &LocalName) {
+        if self.text.is_empty() || self.text.ends_with("\n\n") { return; }
+        // Spaces before a hidden element stay: its text is cut back to where it started.
+        let trimmed = self.text.trim_end_matches(' ').len().max(self.hidden.as_ref().map_or(0, |h| h.at));
+        if block(name) {
+            self.text.truncate(trimmed);
+            self.text.push_str("\n\n");
+        } else if matches!(*name, local_name!("br") | local_name!("hr") | local_name!("li") | local_name!("tr")) {
+            self.text.truncate(trimmed);
+            self.text.push('\n');
+        } else if matches!(*name, local_name!("td") | local_name!("th")) && !self.text.ends_with(['\n', ' ']) {
+            self.text.push(' ');
+        }
+    }
+}
+
+fn block(name: &LocalName) -> bool {
+    matches!(*name, local_name!("article") | local_name!("blockquote") | local_name!("section") | local_name!("div") | local_name!("p") | local_name!("pre") | local_name!("h1") | local_name!("h2") | local_name!("h3") | local_name!("h4") | local_name!("h5") | local_name!("h6") | local_name!("ul") | local_name!("ol") | local_name!("dl") | local_name!("table"))
+}
+
+/// The start tags that close an open `p`, except `table`: mail without a doctype is in quirks mode.
+fn closes_p(name: &LocalName) -> bool {
+    block(name) && *name != local_name!("table")
+        || matches!(*name, local_name!("li") | local_name!("dd") | local_name!("dt") | local_name!("hr") | local_name!("address") | local_name!("aside") | local_name!("center") | local_name!("details") | local_name!("dialog") | local_name!("dir") | local_name!("fieldset") | local_name!("figcaption") | local_name!("figure") | local_name!("footer") | local_name!("header") | local_name!("hgroup") | local_name!("main") | local_name!("menu") | local_name!("nav") | local_name!("summary") | local_name!("listing") | local_name!("form") | local_name!("xmp") | local_name!("plaintext"))
+}
+
+/// The tokenizer state the tree builder sets after this start tag; `Some(None)` is plaintext.
+fn raw_kind(name: &LocalName) -> Option<Option<RawKind>> {
+    match *name {
+        local_name!("title") | local_name!("textarea") => Some(Some(RawKind::Rcdata)),
+        local_name!("style") | local_name!("xmp") | local_name!("iframe") | local_name!("noembed") | local_name!("noframes") => Some(Some(RawKind::Rawtext)),
+        local_name!("script") => Some(Some(RawKind::ScriptData)),
+        local_name!("plaintext") => Some(None),
+        _ => None,
+    }
+}
+
+fn hides(tag: &Tag) -> bool {
+    matches!(tag.name, local_name!("head") | local_name!("style") | local_name!("script") | local_name!("title") | local_name!("template"))
+        || tag.attrs.iter().any(|a| a.name.local == local_name!("hidden") || a.name.local == local_name!("style") && style_hides(&a.value))
+}
+
+/// `display: none` or `visibility: hidden` in an inline style. A later declaration wins, unless
+/// an earlier one is `!important`.
+// shortcut: only simple inline declarations are supported; add a CSS parser/cascade for complex styles or class-based preheaders.
+fn style_hides(style: &str) -> bool {
+    let (mut display, mut visibility) = ((false, false), (false, false));
+    for declaration in style.split(';') {
+        let Some((name, value)) = declaration.split_once(':') else { continue; };
+        let (property, hidden) = if name.trim().eq_ignore_ascii_case("display") {
+            (&mut display, "none")
+        } else if name.trim().eq_ignore_ascii_case("visibility") {
+            (&mut visibility, "hidden")
+        } else { continue; };
+        let (value, important) = match value.split_once('!') {
+            Some((value, priority)) if priority.trim().eq_ignore_ascii_case("important") => (value, true),
+            Some(_) => continue,
+            None => (value, false),
+        };
+        if !value.trim().is_empty() && (!property.1 || important) {
+            *property = (value.trim().eq_ignore_ascii_case(hidden), important);
+        }
+    }
+    display.0 || visibility.0
 }
 
 /// Repair an older HTML fallback without replacing a sender's plain-text alternative.
@@ -312,5 +527,44 @@ mod tests {
         assert!(parse(&vec![0; MAX_MIME_BYTES + 1]).is_err());
         let m = metadata_only(b"From: Big <big@example.com>\r\nSubject: Huge\r\nMessage-ID: <big@x>\r\n\r\n").unwrap();
         assert_eq!((m.summary.subject.as_str(), m.summary.from_address.as_str(), m.body_text.as_str()), ("Huge", "big@example.com", BODY_UNAVAILABLE));
+    }
+
+    #[test]
+    fn html_bombs_parse_in_linear_time() {
+        // Unclosed formatting elements, re-created by a tree builder in every later block: 39 KB
+        // took 7.8 s and 1.4 GB with a DOM. Deep nesting and one tag with many attributes were
+        // quadratic in time.
+        let mut formatting = "<p>".to_string();
+        for i in 0..1500 { formatting.push_str(&format!("<b a={i}>")); }
+        formatting.push_str("</p>");
+        formatting.push_str(&"<p>x\r\n</p>".repeat(2500));
+        let mut attributes = "<a".to_string();
+        for i in 0..80_000 { attributes.push_str(&format!(" x{i}")); }
+        attributes.push_str(">Tail");
+        for (html, text) in [(formatting, "x\n\nx"), ("<div>".repeat(30_000) + "Deep", "Deep"), (attributes, "Tail")] {
+            let start = std::time::Instant::now();
+            let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
+            assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?} for {} bytes", start.elapsed(), html.len());
+            assert!(m.body_text.starts_with(text), "{:?}", &m.body_text[..20.min(m.body_text.len())]);
+        }
+    }
+
+    #[test]
+    fn html_text_matches_the_dom_converter() {
+        // Expected text from the earlier dom_query converter on the same input.
+        for (html, text) in [
+            ("<div style=\"display:none\">Preheader &zwnj;&#847;</div><table role=\"presentation\"><tr><td>Name</td><td>Qty</td></tr><tr><td>Tomato</td><td>2</td></tr></table><p>Read <a href=\"https://example.test/x\">the news</a>.<br>Thanks,<br>Anna</p><ul><li>One</li><li>Two</li></ul><pre>\n  keep\n   spacing</pre><p hidden>gone</p><span style=\"visibility:hidden\">gone</span><p>End</p>",
+                "Name Qty\nTomato 2\n\nRead the news.\nThanks,\nAnna\n\nOne\nTwo\n\n  keep\n   spacing\n\nEnd"),
+            ("<p>First<p>Second<br>line<div>Block</div>after", "First\n\nSecond\nline\n\nBlock\n\nafter"),
+            ("<!DOCTYPE html><html><head><meta charset=utf-8><title>T</title><style>p { color: red }</style></head><body><h1>Title</h1><blockquote>Quoted<br>text</blockquote><table><tr><th>A</th><th>B</th></tr><tr><td>1<td>2</table></body></html>",
+                "Title\n\nQuoted\ntext\n\nA B\n1 2"),
+            ("<html><head><title>T</title><style>x</style><p>Body", "Body"),
+            ("<ul><li>a<li>b</ul>c", "a\nb\n\nc"),
+            ("x <em style='display:none'><br> </em>Hello", "x Hello"),
+        ] {
+            assert_eq!(html_to_text(html), text, "{html}");
+        }
+        // An unclosed hidden element shows its text rather than hide the rest of the mail.
+        assert_eq!(html_to_text("<span style='display:none'>Pre<div>Body"), "Pre\nBody");
     }
 }
