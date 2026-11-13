@@ -35,7 +35,7 @@ branches. Not verified on `main` when this page was written.
 4. Each desktop packaging workflow builds on the tag and uploads its files to one **draft** GitHub
    release. The first workflow to finish creates the draft.
 5. Download every file from the draft. Install and open each one on a clean machine or account.
-6. Check that the tag has one draft with every platform's files (two platforms finishing at once can each create one; move the files and delete the extra). Write the release notes and publish the draft. Publishing makes it the "latest" release.
+6. Check that the tag has one draft with every platform's files. `release-draft.yml` creates it at tag push; a second draft only appears if that job failed. Write the release notes and publish the draft. Publishing makes it the "latest" release.
 7. Upload the iOS and Android builds to the stores (see below). Store review takes one to several days.
 
 ### Before you tag

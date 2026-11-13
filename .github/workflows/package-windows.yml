@@ -69,7 +69,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         # Same rule as package-macos.yml: the first platform creates the draft, a human publishes it.
-        # shortcut: two platforms finishing at once can each create a draft; docs/release.md says to check. Upgrade to one draft-creating job when this happens.
+        # release-draft.yml creates the draft at tag push; this create is the fallback.
         run: |
           prerelease=()
           [[ $TAG != *-* ]] || prerelease=(--prerelease)
