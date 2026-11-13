@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Support · lagom</title>
+  <meta name="description" content="How to get help with lagom, and answers to common questions about sign-in, notifications and your data.">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon-180.png">
+  <style>
+    /* The tokens and type of index.html; only what a text page needs. */
+    @font-face { font-family: "Hauora Sans"; font-weight: 400; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-400.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 500; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-500.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 600; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-600.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 700; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-700.woff2") format("woff2"); }
+    @font-face { font-family: "Geist Mono"; font-weight: 400; font-style: normal; font-display: swap; src: url("fonts/geist-mono-400.woff2") format("woff2"); }
+    :root { --bg: #FFFFFF; --card: #F6F6F4; --ink: #111110; --ink2: #6B6B66; --line: #EBEBE7; --accent: #111110; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+    a { color: inherit; }
+    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+    .mono { font-family: "Geist Mono", ui-monospace, monospace; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 56px); }
+    nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 88px; }
+    .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 700; letter-spacing: -0.05em; line-height: 1; }
+    .brand img { border-radius: 22%; }
+    .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
+    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
+    .links a:hover, .links a[aria-current] { background: var(--card); }
+    .text { max-width: 40rem; padding: clamp(32px, 6vw, 72px) 0 0; overflow-wrap: anywhere; }
+    h1 { margin: 0 0 8px; font-size: clamp(40px, 6vw, 64px); font-weight: 700; line-height: 1.05; letter-spacing: -0.04em; }
+    h2 { margin: 48px 0 12px; font-size: 22px; font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; }
+    h3 { margin: 28px 0 6px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+    p, ul, ol { margin: 0 0 14px; }
+    ul, ol { padding-left: 1.2em; }
+    li { margin-bottom: 6px; }
+    .lede { font-size: 19px; color: var(--ink2); }
+    .updated { font-size: 13px; color: var(--ink2); }
+    /* Text Alex must fill in or approve before release. */
+    mark { background: #FFF1A8; padding: 0 3px; border-radius: 3px; }
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: clamp(96px, 12vw, 160px); padding: 24px 0 48px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav aria-label="Site">
+      <a class="brand" href="./">
+        <img src="apple-touch-icon-180.png" width="30" height="30" alt="">
+        lagom
+      </a>
+      <div class="links">
+        <a href="privacy.html">Privacy</a>
+        <a href="support.html" aria-current="page">Support</a>
+      </div>
+    </nav>
+
+    <main class="text">
+      <h1>Support</h1>
+      <p class="lede">Something not working, or a question? Write to us.</p>
+
+      <h2>Get help</h2>
+      <p>Email <mark>[support@ADDRESS: Alex fills in]</mark>.</p>
+      <p>You can also open an issue on <a href="https://github.com/alexkerber/lagom-app/issues">GitHub</a>. Issues are public, so do not paste private mail there.</p>
+      <p>Never send us your password. We never ask for it.</p>
+
+      <h2 id="report">What to put in a report</h2>
+      <ul>
+        <li>Your device and system version, for example "iPhone, iOS 26.1" or "Windows 11".</li>
+        <li>The lagom version, if you know it. On a phone, find it in the system settings under Apps, then lagom.</li>
+        <li>Your mail provider: Gmail, iCloud, Outlook, Fastmail or another.</li>
+        <li>What you did, what you expected and what happened instead.</li>
+        <li>A screenshot helps. Cover any private mail first.</li>
+      </ul>
+
+      <h2>Common questions</h2>
+
+      <h3 id="gmail">How do I add a Gmail account?</h3>
+      <p>Type your address. lagom opens Google sign-in in your browser. Sign in there and come back.</p>
+      <p>If you prefer a password, choose "Use an app password instead". Google needs an app password here, not your normal password. You need 2-Step Verification on your Google account to make one. See <a href="https://support.google.com/accounts/answer/185833">Google's help on app passwords</a>.</p>
+
+      <h3 id="icloud">How do I add an iCloud account?</h3>
+      <p>iCloud Mail needs an app-specific password, not your Apple Account password. Make one at <a href="https://account.apple.com/account/manage">account.apple.com</a> under Sign-In and Security. See <a href="https://support.apple.com/en-us/102654">Apple's help</a>.</p>
+
+      <h3 id="outlook">How do I add an Outlook or Microsoft 365 account?</h3>
+      <p>Type your address. lagom opens Microsoft sign-in in your browser. Sign in there and come back.</p>
+      <p>For a work or school account, your IT admin may have to allow lagom, or IMAP, first. If sign-in asks for admin approval, send them this page.</p>
+
+      <h3 id="other">My provider is not listed</h3>
+      <p>Type your address and password. lagom tries to find the server settings. If it cannot, it asks you for them. Your provider's help pages list the IMAP and SMTP servers. If they offer app passwords, use one.</p>
+
+      <h3 id="notifications">Notifications do not arrive</h3>
+      <p>On macOS, Windows and Linux, turn on "Notifications for new mail" in lagom Settings. Also allow notifications for lagom in your system settings.</p>
+      <p>On a phone, allow notifications for lagom in your system settings. lagom checks for new mail itself, in the background, when the system lets it. Android does this about every 15 minutes. iOS decides when, so a notification can come late. lagom has no push server, so your mail never goes through us.</p>
+
+      <h3 id="data">Where is my mail stored?</h3>
+      <p>On your device and on your mail server. lagom has no server of its own. The <a href="privacy.html">privacy page</a> has the details.</p>
+
+      <h3 id="remove">How do I remove an account?</h3>
+      <ul>
+        <li><strong>macOS, Windows and Linux:</strong> open Settings and choose "Remove account".</li>
+        <li><strong>iPhone and iPad:</strong> touch and hold the account under Accounts in the sidebar, then choose "Remove account".</li>
+        <li><strong>Android:</strong> open the Mailboxes menu and choose "Remove" with the address.</li>
+      </ul>
+      <p>lagom then deletes that account's mail and password from the device. Your mail on the server stays as it is.</p>
+
+      <h3 id="calendar">Which calendars work?</h3>
+      <p>Google Calendar and Google Tasks, for Google accounts. lagom asks for this access only when you allow calendar.</p>
+    </main>
+
+    <footer class="mono">
+      <span><a href="./">lagom</a> · <a href="privacy.html">Privacy</a> · <a href="support.html">Support</a></span>
+      <span>Made in Sweden</span>
+    </footer>
+  </div>
+</body>
+</html>

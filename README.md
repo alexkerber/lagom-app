@@ -7,6 +7,8 @@ A fast, minimal, keyboard-first email client. Made in Sweden. Open source.
 
 Status: early. Nothing to install yet.
 
+[Privacy](site/privacy.html) · [Support](site/support.html)
+
 ## Layout
 
 | Path                | What                                                             |
