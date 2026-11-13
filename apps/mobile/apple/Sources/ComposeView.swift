@@ -82,7 +82,6 @@ struct ComposeView: View {
                         model.composeDraft = draft
                         try await model.sendCompose()
                         dismiss()
-                        await model.sync()
                     } catch { self.error = error.localizedDescription }
                 }
             }

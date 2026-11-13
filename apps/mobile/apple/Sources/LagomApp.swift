@@ -42,6 +42,8 @@ struct MailView: View {
     @Binding var removing: MailAccount?
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
+    @State private var laterChoices: [LaterChoice] = []
+    @State private var laterID: Int64?
     @State private var retrying: SendFailure?
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
@@ -69,6 +71,30 @@ struct MailView: View {
                         .navigationDestination(isPresented: Binding(get: { model.selectedID != nil }, set: { if !$0 { model.selectedID = nil } })) {
                             detail.toolbar(.hidden, for: .navigationBar)
                         }
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let notice = model.notice {
+                HStack {
+                    Text(notice).lagomFont(.snippet).foregroundStyle(Theme.secondary)
+                    Spacer()
+                    if model.undoSendID != nil {
+                        Button("Undo") { Task { await model.undoSend() } }
+                            .frame(minWidth: 44, minHeight: 44).accessibilityLabel("Undo send")
+                            .disabled(model.composeBusy || model.preparingCompose)
+                    } else {
+                        Button("Dismiss") { model.notice = nil }.frame(minWidth: 44, minHeight: 44)
+                    }
+                }.padding(.horizontal, 10).background(Theme.background)
+            }
+        }
+        .confirmationDialog("Later", isPresented: Binding(get: { laterID != nil }, set: { if !$0 { laterID = nil } })) {
+            ForEach(laterChoices, id: \.label) { choice in
+                Button(choice.label) {
+                    guard let id = laterID else { return }
+                    laterID = nil
+                    Task { await model.act(.later, id: id, until: choice.untilUnix) }
                 }
             }
         }
@@ -179,10 +205,6 @@ struct MailView: View {
             header
             List {
                 Group {
-                    if let notice = model.notice {
-                        Text(notice).lagomFont(.snippet).foregroundStyle(Theme.secondary).padding(10)
-                            .onTapGesture { model.notice = nil }
-                    }
                     if !model.failures.isEmpty {
                         GroupHeader(title: "Outbox needs attention")
                         ForEach(model.failures, id: \.id) { failure in
@@ -298,7 +320,9 @@ extension MailView {
             if !split {
                 IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)
             }
-            HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) { Task { await model.act(.later, id: id) } }
+            HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) {
+                laterChoices = model.core?.laterChoices() ?? []; laterID = id
+            }
             if model.mailbox != .trash {
                 HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { Task { await model.act(.delete, id: id) } }
             }

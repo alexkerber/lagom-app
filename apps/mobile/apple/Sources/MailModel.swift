@@ -136,8 +136,13 @@ final class MailModel {
     var attachmentURL: URL?
     private(set) var downloadingAttachments: Set<String> = []
 
-    init(attachmentDirectory: URL = URL.cachesDirectory.appendingPathComponent("attachments", isDirectory: true)) {
+    @ObservationIgnored private let sendDelay: @Sendable () async throws -> Void
+    /// The app sets this to hold a background task; it returns the release. Tests run without UIKit.
+    @ObservationIgnored var keepAlive: @MainActor () -> @MainActor () -> Void = { {} }
+
+    init(sendDelay: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(5)) }, attachmentDirectory: URL = URL.cachesDirectory.appendingPathComponent("attachments", isDirectory: true)) {
         self.attachmentDirectory = attachmentDirectory
+        self.sendDelay = sendDelay
     }
 
     func openAttachment(messageID: Int64, part: MailAttachment) async {
@@ -179,6 +184,8 @@ final class MailModel {
     var message: MailMessage?
     var error: String?
     var notice: String?
+    private(set) var undoSendID: String?
+    private var sendRevision = 0
     var composeDraft: ComposeDraft? {
         didSet {
             guard !endingCompose, !composeBusy, oldValue != composeDraft else { return }
@@ -414,7 +421,7 @@ final class MailModel {
         } while syncAgain
     }
 
-    func act(_ action: MailAction, id: Int64) async {
+    func act(_ action: MailAction, id: Int64, until: Int64? = nil) async {
         guard let core, !working else { return }
         let ids = rows.first { $0.messageIds.contains(id) }?.messageIds ?? [id]
         actingID = id
@@ -422,7 +429,7 @@ final class MailModel {
         do {
             switch action {
             case .done: try await core.done(ids: ids)
-            case .later: try await core.later(ids: ids, untilUnix: tomorrowAtEight())
+            case .later: try await core.later(ids: ids, untilUnix: until ?? core.laterChoices()[1].untilUnix)
             case .delete: try await core.delete(ids: ids)
             }
             if selectedID == id { selectedID = nil; message = nil; messages = []; expandedIDs = []; remoteImagesIDs = [] }
@@ -570,7 +577,36 @@ final class MailModel {
         drafts.removeAll { $0.id == draft.messageID }
         savedDraftIDs.remove(draft.messageID)
         endCompose()
-        notice = "Queued for sending"
+        sendRevision += 1
+        let sending = sendRevision
+        undoSendID = draft.messageID
+        notice = "Sending…"
+        let delay = sendDelay
+        // Background sync never sends, so the mail leaves here even if the user locks the phone inside the Undo window.
+        // shortcut: a sync already in flight ends the keep-alive early, upgrade if mail stalls in the outbox after locking.
+        let release = keepAlive()
+        Task { [weak self] in
+            defer { release() }
+            do { try await delay() } catch { return }
+            guard let self else { return }
+            if self.sendRevision == sending, self.undoSendID == draft.messageID { self.undoSendID = nil; self.notice = nil }
+            await self.sync()
+        }
+    }
+
+    func undoSend() async {
+        guard let core, let id = undoSendID, composeDraft == nil, !composeBusy, !preparingCompose else { return }
+        do {
+            composeBusy = true
+            defer { composeBusy = false }
+            if try await core.undoSend(id: id) {
+                draftRevision += 1
+                let saved = try await core.localDraft(id: id)
+                if composeDraft == nil { restoreDraft(saved) }
+                notice = nil
+            } else { notice = "Already sent" }
+            if undoSendID == id { undoSendID = nil }
+        } catch { self.error = error.localizedDescription }
     }
 
     private func endCompose() {

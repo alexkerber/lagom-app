@@ -10,6 +10,11 @@ final class MailAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        model.keepAlive = {
+            var task = UIBackgroundTaskIdentifier.invalid
+            task = UIApplication.shared.beginBackgroundTask(withName: "Send mail") { UIApplication.shared.endBackgroundTask(task) }
+            return { UIApplication.shared.endBackgroundTask(task) }
+        }
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshIdentifier, using: .main) { task in
             self.refresh(task)
         }

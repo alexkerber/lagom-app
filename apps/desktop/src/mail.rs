@@ -1,7 +1,7 @@
 //! Mail as the UI shows it: rows from the local store or the demo sample, list dates,
 //! Later times and reply headers. Plain Rust, so tests run without a window.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone};
+use chrono::{DateTime, Datelike, Local, TimeZone};
 use lagom_core::{attachment::Attachment, store::MessageSummary};
 
 /// One message in the list and the reading pane.
@@ -145,42 +145,7 @@ pub fn paragraphs(body: &str) -> Vec<String> {
     if out.is_empty() { vec!["(no text)".into()] } else { out }
 }
 
-/// When a message on Later comes back to the inbox. Times are local.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LaterWhen {
-    /// 18:00 today, or tomorrow once 18:00 has passed.
-    Evening,
-    /// 08:00 tomorrow. L and a left swipe use this.
-    Tomorrow,
-    /// 08:00 on the next Monday.
-    NextWeek,
-}
-
-impl LaterWhen {
-    pub const fn label(self) -> &'static str {
-        match self {
-            LaterWhen::Evening => "Later: this evening 18:00",
-            LaterWhen::Tomorrow => "Later: tomorrow 08:00",
-            LaterWhen::NextWeek => "Later: next week, Monday 08:00",
-        }
-    }
-
-    pub fn at(self, now: DateTime<Local>) -> DateTime<Local> {
-        let today = now.date_naive();
-        let (day, hour) = match self {
-            LaterWhen::Evening if now.time() < NaiveTime::from_hms_opt(18, 0, 0).unwrap() => (today, 18),
-            LaterWhen::Evening => (today + Duration::days(1), 18),
-            LaterWhen::Tomorrow => (today + Duration::days(1), 8),
-            LaterWhen::NextWeek => {
-                let ahead = 7 - now.weekday().num_days_from_monday() as i64;
-                (today + Duration::days(ahead), 8)
-            }
-        };
-        let local = day.and_hms_opt(hour, 0, 0).unwrap();
-        // A daylight-saving gap skips the hour: take the first valid time after it.
-        Local.from_local_datetime(&local).earliest().unwrap_or_else(|| Local.from_utc_datetime(&local) + Duration::hours(1))
-    }
-}
+pub use lagom_core::later::LaterWhen;
 
 pub use lagom_core::store::fts_query;
 
@@ -483,24 +448,6 @@ mod tests {
         assert_eq!(reply_all("Sender@EXAMPLE.com", "ME@example.com, sender@example.com, Other@example.com; other@example.com", "alias@EXAMPLE.com, OTHER@example.com, Copy@example.com, copy@example.com", &["me@example.com", "Alias@example.com"]),
             ("Sender@EXAMPLE.com, Other@example.com".into(), "Copy@example.com".into()));
         assert_eq!(reply_all("me@example.com", "", "ME@example.com", &["me@example.com"]), (String::new(), String::new()));
-    }
-
-    #[test]
-    fn later_times_are_local() {
-        // Friday 6 November 2026, 10:12.
-        let now = at(2026, 11, 6, 10, 12);
-        assert_eq!(LaterWhen::Evening.at(now), at(2026, 11, 6, 18, 0));
-        assert_eq!(LaterWhen::Tomorrow.at(now), at(2026, 11, 7, 8, 0));
-        assert_eq!(LaterWhen::NextWeek.at(now), at(2026, 11, 9, 8, 0));
-        // Past 18:00, "this evening" is tomorrow evening; on a Monday, next week is 7 days on.
-        assert_eq!(LaterWhen::Evening.at(at(2026, 11, 6, 19, 0)), at(2026, 11, 7, 18, 0));
-        assert_eq!(LaterWhen::NextWeek.at(at(2026, 11, 9, 7, 0)), at(2026, 11, 16, 8, 0));
-        // Sunday night to Monday morning, and over a month end.
-        assert_eq!(LaterWhen::NextWeek.at(at(2026, 11, 8, 23, 0)), at(2026, 11, 9, 8, 0));
-        assert_eq!(LaterWhen::Tomorrow.at(at(2026, 11, 30, 23, 59)), at(2026, 12, 1, 8, 0));
-        for w in [LaterWhen::Evening, LaterWhen::Tomorrow, LaterWhen::NextWeek] {
-            assert!(w.at(now) > now);
-        }
     }
 
     #[test]

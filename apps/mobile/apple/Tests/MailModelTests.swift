@@ -131,6 +131,11 @@ final class MailModelTests: XCTestCase {
 }
 
 @MainActor final class ComposeFixtureCore: LagomCore, @unchecked Sendable {
+    override func laterChoices() -> [LaterChoice] {
+        [LaterChoice(label: "Later: this evening 18:00", untilUnix: 18_000),
+         LaterChoice(label: "Later: tomorrow 08:00", untilUnix: 86_400),
+         LaterChoice(label: "Later: next week, Monday 08:00", untilUnix: 604_800)]
+    }
     override func cancelBackgroundSync() {}
     override func backgroundSync() async throws -> [MailRow] { [] }
     override func refreshContacts(accountId: String) async throws {}
@@ -152,6 +157,15 @@ final class MailModelTests: XCTestCase {
     var reply = ReplyDraft(account: "source-account", to: "sender@example.test", cc: "copy@example.test",
                            subject: "Re: Fixture", body: "\n\n> Original", replyTo: 42, attachments: [])
 
+    var queued: LocalDraft?
+    override func syncAll() async throws {}
+    override func undoSend(id: String) async throws -> Bool {
+        guard let queued, queued.id == id else { return false }
+        saved.append(queued); self.queued = nil
+        return true
+    }
+    var snoozed: Int64?
+    override func later(ids: [Int64], untilUnix: Int64) async throws { snoozed = untilUnix }
     var saved: [LocalDraft] = []
     var saveCalls = 0
     var saveGate: CheckedContinuation<Void, Never>?
@@ -195,6 +209,7 @@ final class MailModelTests: XCTestCase {
     override func sendDraft(id: String) async throws -> String {
         if fail { throw MailError.Failed(reason: "fixture failure") }
         let draft = saved.first { $0.id == id }!
+        self.queued = draft
         let queued = try await send(accountId: draft.account, to: splitRecipients(value: draft.to), cc: splitRecipients(value: draft.cc),
             subject: draft.subject, bodyMarkdown: draft.body, replyTo: draft.inReplyTo == nil ? nil : 42, attachments: draft.attachments)
         saved.removeAll { $0.id == id }
@@ -250,6 +265,30 @@ extension MailModelTests {
         XCTAssertEqual(core.sent?.body, draft.body)
         XCTAssertEqual(core.sent?.replyTo, 42)
         XCTAssertFalse(model.preparingCompose)
+    }
+
+    @MainActor func testUndoRestoresDraftAndLaterUsesCoreChoices() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(reply: core.reply)
+        let id = model.composeDraft?.messageID
+        try await model.sendCompose()
+        XCTAssertEqual(model.undoSendID, id)
+        XCTAssertEqual(model.notice, "Sending…")
+        await model.undoSend()
+        XCTAssertEqual(model.composeDraft?.messageID, id)
+        XCTAssertEqual(model.composeDraft?.body, core.reply.body)
+        XCTAssertNil(model.undoSendID)
+        for choice in core.laterChoices() {
+            await model.act(.later, id: 42, until: choice.untilUnix)
+            XCTAssertEqual(core.snoozed, choice.untilUnix)
+        }
+        await model.act(.later, id: 42)
+        XCTAssertEqual(core.snoozed, 86_400)
+        try await model.sendCompose()
+        core.queued = nil
+        await model.undoSend()
+        XCTAssertEqual(model.notice, "Already sent")
     }
 
     @MainActor func testForwardKeepsAttachmentsAndHasNoReplyThread() async throws {
@@ -328,6 +367,11 @@ extension MailModelTests {
 }
 
 @MainActor final class DailyFixtureCore: LagomCore, @unchecked Sendable {
+    override func laterChoices() -> [LaterChoice] {
+        [LaterChoice(label: "Later: this evening 18:00", untilUnix: 18_000),
+         LaterChoice(label: "Later: tomorrow 08:00", untilUnix: 86_400),
+         LaterChoice(label: "Later: next week, Monday 08:00", untilUnix: 604_800)]
+    }
     override func cancelBackgroundSync() {}
     override func backgroundSync() async throws -> [MailRow] { [] }
     var mail = (1...205).map { id in
