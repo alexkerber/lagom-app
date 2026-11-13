@@ -286,8 +286,9 @@ private val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
     // Colour and haptics use the release line, so what the row shows is what letting go does.
     val past by remember(state, reach) { derivedStateOf { abs(runCatching { state.requireOffset() }.getOrDefault(0f)) >= reach } }
     LaunchedEffect(past) { if (past) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate) }
-    // The row stays out while Done runs and leaves with the list; if Done failed, it comes back.
-    LaunchedEffect(busy) { if (!busy && state.currentValue == SwipeToDismissBoxValue.StartToEnd) state.reset() }
+    // The row stays out while Done runs and leaves with the list; if Done failed, it comes back. Check the offset, not
+    // currentValue: once Done starts, busy vetoes the settle, so the row can rest at the edge while still "Settled".
+    LaunchedEffect(busy) { if (!busy && state.dismissDirection == SwipeToDismissBoxValue.StartToEnd) state.reset() }
     val revealed = state.currentValue == SwipeToDismissBoxValue.EndToStart
     val view = RowPresentation(row)
     SwipeToDismissBox(state = state, gesturesEnabled = !busy, backgroundContent = {
