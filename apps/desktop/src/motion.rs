@@ -9,8 +9,7 @@ pub const CALM: Duration = Duration::from_millis(150);
 
 /// The system asks for less motion (docs/motion.md rule 6): moving things then only fade.
 /// `LAGOM_REDUCE_MOTION=1` (or `0`) overrides the system on every platform.
-// shortcut: Windows (SPI_GETCLIENTAREAANIMATION) and Linux (gtk-enable-animations) only read the
-// environment override; read their settings when those builds ship to users.
+/// macOS: Reduce motion. Windows: "Show animations in Windows". Linux: GNOME `enable-animations`.
 pub fn reduced() -> bool {
     #[cfg(test)]
     if let Some(on) = FORCE.with(|f| f.get()) {
@@ -44,8 +43,57 @@ fn read_reduced() -> bool {
         let workspace: Option<Retained<AnyObject>> = unsafe { msg_send![class, sharedWorkspace] };
         return workspace.is_some_and(|w| unsafe { msg_send![&*w, accessibilityDisplayShouldReduceMotion] });
     }
+    #[cfg(all(target_os = "windows", not(test)))]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let mut on: i32 = 1; // A Win32 BOOL.
+        // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL through pvParam.
+        let read = unsafe {
+            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut i32 as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+        };
+        return read.is_ok() && on == 0;
+    }
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        // One process per run, not one per second.
+        // shortcut: a change needs a restart; watch the portal's SettingChanged if users ask.
+        static GNOME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        return *GNOME.get_or_init(|| gsettings_reduced("gsettings"));
+    }
     #[allow(unreachable_code)]
     false
+}
+
+/// GNOME's `enable-animations`, read with `program` (gsettings). A missing command, odd output or
+/// no answer within 500 ms all mean "not reduced".
+#[cfg(any(target_os = "linux", test))]
+fn gsettings_reduced(program: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new(program)
+        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let start = Instant::now();
+    while matches!(child.try_wait(), Ok(None)) {
+        if start.elapsed() > Duration::from_millis(500) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    child.wait_with_output().is_ok_and(|out| out.status.success() && animations_off(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `gsettings get` prints `true` or `false` and a newline.
+#[cfg(any(target_os = "linux", test))]
+fn animations_off(out: &str) -> bool {
+    out.trim() == "false"
 }
 
 #[cfg(test)]
@@ -124,5 +172,14 @@ mod tests {
         assert_eq!(calm(0.5), 0.);
         assert!((calm(0.75) - 0.5).abs() < 1e-6);
         assert_eq!(calm(1.), 1.);
+    }
+
+    #[test]
+    fn gnome_animations_off_means_reduced_and_failures_do_not() {
+        assert!(animations_off("false\n"));
+        assert!(!animations_off("true\n"));
+        assert!(!animations_off("No such schema “org.gnome.desktop.interface”\n"));
+        assert!(!animations_off(""));
+        assert!(!gsettings_reduced("lagom-no-such-gsettings"));
     }
 }
