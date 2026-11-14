@@ -69,25 +69,14 @@ fn read_reduced() -> bool {
 #[cfg(any(target_os = "linux", test))]
 fn gsettings_reduced(program: &str) -> bool {
     use std::process::{Command, Stdio};
-    let Ok(mut child) = Command::new(program)
-        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    let start = Instant::now();
-    while matches!(child.try_wait(), Ok(None)) {
-        if start.elapsed() > Duration::from_millis(500) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    child.wait_with_output().is_ok_and(|out| out.status.success() && animations_off(&String::from_utf8_lossy(&out.stdout)))
+    let mut command = Command::new(program);
+    command.args(["get", "org.gnome.desktop.interface", "enable-animations"]).stdin(Stdio::null()).stderr(Stdio::null());
+    let (tx, rx) = std::sync::mpsc::channel();
+    // The deadline covers the exit and the end of stdout: a child of gsettings can hold the pipe.
+    // shortcut: a hung gsettings keeps its thread and process; there is one per run.
+    std::thread::spawn(move || tx.send(command.output()));
+    matches!(rx.recv_timeout(Duration::from_millis(500)),
+        Ok(Ok(out)) if out.status.success() && animations_off(&String::from_utf8_lossy(&out.stdout)))
 }
 
 /// `gsettings get` prints `true` or `false` and a newline.
@@ -181,5 +170,21 @@ mod tests {
         assert!(!animations_off("No such schema “org.gnome.desktop.interface”\n"));
         assert!(!animations_off(""));
         assert!(!gsettings_reduced("lagom-no-such-gsettings"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_gsettings_that_hangs_means_not_reduced_within_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lagom-motion-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("gsettings");
+        // Prints "false", then a background child keeps stdout open after the script exits.
+        std::fs::write(&script, "#!/bin/sh\necho false\nsleep 5 &\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        assert!(!gsettings_reduced(script.to_str().unwrap()));
+        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
