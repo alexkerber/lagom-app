@@ -4,6 +4,10 @@ resolver = "2"
 exclude = ["vendor/gpui", "vendor/html5ever"]
 members = ["crates/lagom-core", "crates/lagom-ffi", "crates/lagom-cli", "apps/desktop", "vendor/imap-proto"]
 
+[profile.release]
+# Drop debug info, keep symbol names for panic backtraces. No packaging step uploads symbols.
+strip = "debuginfo"
+
 [workspace.package]
 edition = "2021"
 license = "MIT"
