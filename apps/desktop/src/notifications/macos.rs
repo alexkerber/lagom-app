@@ -57,7 +57,8 @@ impl Service {
             return;
         };
         let events = self.events.clone();
-        center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &RcBlock::new(move |allowed: Bool, error: *mut NSError| {
+        // Badge too: without it macOS hides the Dock badge of a bundled app (measured: label set, Dock showed none).
+        center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Badge, &RcBlock::new(move |allowed: Bool, error: *mut NSError| {
             let _ = events.send(Event::Authorized(allowed.as_bool() && error.is_null()));
             if !error.is_null() { let _ = events.send(Event::Failed("Could not request notification permission")); }
         }));
