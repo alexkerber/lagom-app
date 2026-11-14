@@ -219,6 +219,8 @@ impl PlatformInput {
                             TouchPhase::Started
                         }
                         NSEventPhase::NSEventPhaseEnded => TouchPhase::Ended,
+                        // lagom: a cancel is not a lift; apps must undo the gesture, not act on it.
+                        NSEventPhase::NSEventPhaseCancelled => TouchPhase::Cancelled,
                         _ => TouchPhase::Moved,
                     };
 

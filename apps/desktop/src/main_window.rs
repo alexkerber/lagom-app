@@ -1153,6 +1153,8 @@ impl MainWindow {
             // Momentum events after Ended also arrive as Moved; Idle ignores them, so none re-acts.
             TouchPhase::Moved => self.swipe.moved(d.x.into(), d.y.into()),
             TouchPhase::Ended => self.release(true, cx),
+            // The system took the gesture (Mission Control, a lost touch): spring back, as Esc does.
+            TouchPhase::Cancelled => self.release(false, cx),
         }
         // A row under the fingers keeps the list still, as in native lists, until the next gesture.
         if matches!(self.swipe, Swipe::Row { .. }) {
@@ -3659,6 +3661,32 @@ mod dispatch {
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
         view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    #[gpui::test]
+    fn cancelled_trackpad_swipe_springs_back_without_acting(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let wheel = |touch_phase, x: f32| ScrollWheelEvent {
+            delta: ScrollDelta::Pixels(gpui::point(px(x), px(0.))),
+            touch_phase,
+            ..Default::default()
+        };
+        // The same gesture past the Done threshold: a cancel keeps the row, a lift moves it.
+        for (end, acts) in [(TouchPhase::Cancelled, false), (TouchPhase::Ended, true)] {
+            view.update(cx, |v, cx| {
+                let (n, id) = (v.inbox.list().len(), v.inbox.list()[0]);
+                v.under = Some(id);
+                v.on_scroll(&wheel(TouchPhase::Started, 0.), cx);
+                v.on_scroll(&wheel(TouchPhase::Moved, THRESHOLD + 30.), cx);
+                assert_eq!(v.swipe.offset(id), Some(THRESHOLD + 30.));
+                v.on_scroll(&wheel(end, 0.), cx);
+                assert_eq!(v.swipe, Swipe::Idle, "{end:?}");
+                assert_eq!(v.inbox.list().len() < n, acts, "{end:?}");
+                if !acts {
+                    assert!(v.ghosts.is_empty() && v.spring.is_some_and(|s| s.0 == id));
+                }
+            });
+        }
     }
 
     #[gpui::test]
