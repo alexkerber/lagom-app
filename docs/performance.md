@@ -108,7 +108,7 @@ Both tests are ignored by default:
 | What                             |    Debug before | Debug after | Release before | Release after |
 | -------------------------------- | --------------: | ----------: | -------------: | ------------: |
 | `load_accounts` (background)     |          234 ms |       80 ms |       70–97 ms |         23 ms |
-| `folders()` for Work, 3 messages |     not measured |     0.03 ms |          15 ms |       0.01 ms |
+| `folders()` for Work, 3 messages |    not measured |     0.03 ms |          15 ms |       0.01 ms |
 | `reload()` on the UI thread      | 129 ms (inline) |     0.31 ms | 39 ms (inline) |       0.09 ms |
 
 `folders()` scanned every message once per folder: the `f.id` column's affinity stopped
@@ -119,8 +119,15 @@ affinity; `folder_unread_counts_seek_each_folder` asserts the query plan in CI.
 The read and the Home unread count now run on the background executor. The old list
 stays on screen until the read lands. One list read runs at a time, and requests made
 meanwhile merge into one follow-up read. A generation counter drops results older than the
-list on screen. A read for another list, or one that finishes while a move is in flight,
-is dropped. `list_reads_run_off_the_ui_thread_and_never_go_back_in_time` covers these rules.
+list on screen. Starting a move or another operation also invalidates reads already
+running. A read for another list is dropped. So is one that finishes while a move is in
+flight, or one that would drop a row selected while it ran (that row is read again, pinned).
+A jump to one message (search hit, notification, task link, Move from a popout) still
+reads inline (`reload_now`), because its next steps need that account's folders and rows.
+That costs one inline read per click (39–42 ms in release at 100k). Tests:
+`list_reads_run_off_the_ui_thread_and_never_go_back_in_time`,
+`a_row_selected_during_a_read_stays_listed` and
+`search_hit_in_a_folder_opens_while_a_read_is_in_flight`.
 
 Still counted per reload: unread per folder and the Inbox and Later totals each visit
 every row of their folder (about 10–13 ms each in release at 100k). A covering partial

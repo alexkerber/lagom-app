@@ -234,6 +234,8 @@ impl Live {
         let account = match &op { Op::EmptyTrash(account) => Some(account.clone()), _ => None };
         self.pending.borrow_mut().insert(id, account);
         self.ops.insert(id, op);
+        // A read started before this optimistic change must not land, even after it completes.
+        self.shown = self.reads;
         id
     }
 }
@@ -312,6 +314,16 @@ impl MainWindow {
     /// list stays on screen until the read lands. Waits while moves are in flight, so a read
     /// never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_with(false, cx);
+    }
+
+    /// A reload whose list is on screen when it returns: for jumps to one message, whose next
+    /// steps need that account's folders and rows.
+    fn reload_now(&mut self, cx: &mut Context<Self>) {
+        self.reload_with(true, cx);
+    }
+
+    fn reload_with(&mut self, inline: bool, cx: &mut Context<Self>) {
         self.reload_draft_rows(cx);
         self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
@@ -349,8 +361,9 @@ impl MainWindow {
             return;
         }
         live.reads += 1;
-        // One read at a time: its completion starts the next, so results land in request order.
-        if live.read.is_none() { self.start_read(cx); }
+        // One background read at a time: its completion starts the next, so results land in
+        // request order. An inline read is newer than one in flight, which then is dropped.
+        if inline || live.read.is_none() { self.start_read(inline, cx); }
     }
 
     /// What a list read for the screen as it is now asks for.
@@ -370,40 +383,55 @@ impl MainWindow {
             limit: live.limit, group: self.panes.group_conversations, pin: live.pin })
     }
 
-    fn start_read(&mut self, cx: &mut Context<Self>) {
+    fn selected_stores(&self) -> Vec<i64> {
+        self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).collect()
+    }
+
+    fn start_read(&mut self, inline: bool, cx: &mut Context<Self>) {
         let Some(key) = self.read_key() else { return };
-        let pins: Vec<i64> = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(key.pin).collect();
+        let mut pins = self.selected_stores();
+        pins.extend(key.pin);
         let Some(live) = &mut self.live else { return };
         live.stale = true;
-        let (generation, path, accounts, request) = (live.reads, live.store.path().to_owned(), live.accounts.clone(), key.clone());
+        let (generation, path, accounts, request, asked) = (live.reads, live.store.path().to_owned(), live.accounts.clone(), key.clone(), pins.clone());
         let at = now();
         let read = move || mail::load_accounts(&Store::open(path)?, &accounts, &request.account, request.filter.as_deref(), request.view, request.limit, at, pins, request.group);
         #[cfg(test)]
-        if INLINE_READS.get() { return self.read_done(generation, key, read(), cx); }
+        let inline = inline || INLINE_READS.get();
+        if inline { return self.read_done(generation, key, asked, read(), cx); }
         let read = cx.background_executor().spawn(async move { read() });
         live.read = Some(cx.spawn(async move |this, cx| {
             let result = read.await;
-            this.update(cx, |this, cx| this.read_done(generation, key, result, cx)).ok();
+            this.update(cx, |this, cx| {
+                if let Some(live) = &mut this.live { live.read = None; }
+                this.read_done(generation, key, asked, result, cx);
+            }).ok();
         }));
     }
 
-    /// Applies a finished read unless it is stale: another list is on screen now, or a move is
-    /// in flight (the read may predate its optimistic removal). Reads again when newer requests
-    /// arrived meanwhile; an unchanged list still takes this result, so steady sync never starves it.
-    fn read_done(&mut self, generation: u64, key: ReadKey, result: lagom_core::Result<mail::Snapshot>, cx: &mut Context<Self>) {
+    /// Applies a finished read unless it is stale: another list is on screen now, a newer read
+    /// or a move came after it, or it drops a row selected while it ran. Reads again when newer
+    /// requests arrived meanwhile; an unchanged list still takes this result, so steady sync
+    /// never starves it.
+    fn read_done(&mut self, generation: u64, key: ReadKey, asked: Vec<i64>, result: lagom_core::Result<mail::Snapshot>, cx: &mut Context<Self>) {
         let current = self.read_key();
         let before = self.list_before();
+        let selected = self.selected_stores();
         let Some(live) = &mut self.live else { return };
-        live.read = None;
-        // Older than the list on screen: never shown. Single flight makes this a backstop.
-        if generation <= live.shown { return; }
         // The move's completion reloads: `stale` stays set.
         if !live.ops.is_empty() { return; }
-        if current.as_ref() != Some(&key) { return self.start_read(cx); }
+        let lost = result.as_ref().is_ok_and(|snap| selected.iter().any(|id| !asked.contains(id)
+            && !snap.inbox.iter().chain(&snap.open).any(|m| m.id == *id)));
+        // Read again with that row pinned.
+        if lost { live.reads += 1; }
+        if lost || generation <= live.shown || current.as_ref() != Some(&key) {
+            if live.reads > live.shown && live.read.is_none() { self.start_read(false, cx); }
+            return;
+        }
+        live.shown = generation;
         let again = generation != live.reads;
         match result {
             Ok(snap) => {
-                live.shown = generation;
                 live.stale = false;
                 live.more = snap.more;
                 self.reading_dirty = true;
@@ -422,7 +450,7 @@ impl MainWindow {
                 self.notify(format!("Could not read mail: {e}"), cx);
             }
         }
-        if again { self.start_read(cx); }
+        if again && self.live.as_ref().is_some_and(|l| l.read.is_none()) { self.start_read(false, cx); }
         cx.notify();
     }
 
@@ -1197,6 +1225,8 @@ impl MainWindow {
         if live.account().is_none_or(|a| a.id != m.summary.account) {
             if let Some(ix) = live.accounts.iter().position(|a| a.id == m.summary.account) { self.switch_account(ix, cx); }
         }
+        // The folder lookup below needs this account's folders on screen.
+        if self.live.as_ref().is_some_and(|l| l.stale) { self.reload_now(cx); }
         self.inbox.account_filter = Some(m.summary.account.clone());
         let list = if m.summary.snoozed_until.is_some_and(|t| t > now()) {
             self.inbox.find_kind(Kind::Later)
@@ -1209,7 +1239,8 @@ impl MainWindow {
         if let Some(live) = &mut self.live {
             (live.pin, live.want) = (Some(store), Some(store));
         }
-        self.reload(cx);
+        // Callers act on the selected hit right away (Move opens its palette).
+        self.reload_now(cx);
     }
 
     pub(super) fn move_message(&mut self, store: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -1581,8 +1612,76 @@ mod tests {
         assert_eq!(rows(cx), 3);
         assert_eq!(view.read_with(cx, |v, _| v.today.unread), 3);
         // A result from an older generation, for the same list, must not overwrite the newer one.
-        view.update(cx, |v, cx| v.read_done(1, key, old, cx));
+        view.update(cx, |v, cx| v.read_done(1, key, vec![], old, cx));
         assert_eq!(rows(cx), 3);
+        // A read that started before an optimistic change never lands, even once the op is done.
+        view.update(cx, |v, cx| {
+            v.reload(cx);
+            let live = v.live.as_mut().unwrap();
+            let op = live.op(Op::Undo(0));
+            live.ops.remove(&op);
+            v.inbox = Inbox::live();
+        });
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 0);
+        view.update(cx, |v, cx| v.reload(cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 3);
+        INLINE_READS.set(true);
+    }
+
+    #[gpui::test]
+    fn a_row_selected_during_a_read_stays_listed(cx: &mut TestAppContext) {
+        INLINE_READS.set(false);
+        let (view, cx, _rx) = window(cx);
+        let picked = view.update(cx, |v, cx| {
+            v.inbox = Inbox::live();
+            v.panes.group_conversations = false;
+            v.live.as_mut().unwrap().limit = 2;
+            let picked = (1..=3).map(|uid| incoming(v, uid)).last().unwrap().id;
+            v.reload(cx);
+            picked
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            v.inbox.select(1);
+            v.reload(cx);
+            // Two newer messages push the page past the row selected next.
+            incoming(v, 4);
+            incoming(v, 5);
+            v.inbox.select(0);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            let selected = v.inbox.single().and_then(|id| v.inbox.mail[id].store);
+            assert_eq!(selected, Some(picked));
+        });
+        INLINE_READS.set(true);
+    }
+
+    #[gpui::test]
+    fn search_hit_in_a_folder_opens_while_a_read_is_in_flight(cx: &mut TestAppContext) {
+        use lagom_core::store::{FolderRole, Message, MessageSummary};
+        INLINE_READS.set(false);
+        let (view, cx, _rx) = window(cx);
+        let (folder, hit) = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            let account = live.account().unwrap().id.clone();
+            let folder = live.store.save_folder(&account, "Projects", Some("/"), FolderRole::Other).unwrap();
+            let summary = MessageSummary { account, folder, uid: 1, date: 1, ..Default::default() };
+            let hit = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
+            // A fresh window: no folders known yet, the first read still running.
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            (folder, hit)
+        });
+        view.update_in(cx, |v, window, cx| v.move_message(hit, window, cx));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.open.map(|f| v.inbox.folders[f].store), Some(Some(folder)));
+            assert_eq!(v.inbox.single().and_then(|id| v.inbox.mail[id].store), Some(hit));
+            assert!(v.palette.is_some(), "Move opens its palette at once");
+        });
+        cx.run_until_parked();
         INLINE_READS.set(true);
     }
 
