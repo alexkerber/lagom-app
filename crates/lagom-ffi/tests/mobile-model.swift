@@ -486,10 +486,11 @@ struct ModelChecks {
         let taxes = await model.createFolder("Taxes", account: "fixture")
         precondition(taxes?.name == "Taxes" && core.created.map(\.0) == ["fixture"])
         precondition(model.folders == [taxes!] && model.moveTargets(account: "fixture") == [taxes!], "the new folder is a Move to target at once")
-        precondition(await model.createFolder("  ", account: "fixture") == nil)
-        precondition(model.error == "Enter a folder name" && model.folders == [taxes!], "a refusal shows core's words and lists nothing")
+        let blank = await model.createFolder("  ", account: "fixture")
+        precondition(blank == nil && model.error == "Enter a folder name" && model.folders == [taxes!], "a refusal shows core's words and lists nothing")
         model.core = nil
-        precondition(await model.createFolder("Later", account: "fixture") == nil && core.created.count == 2, "no core, no call")
+        let offline = await model.createFolder("Later", account: "fixture")
+        precondition(offline == nil && core.created.count == 2, "no core, no call")
         print("MailModel: New folder passed")
     }
 

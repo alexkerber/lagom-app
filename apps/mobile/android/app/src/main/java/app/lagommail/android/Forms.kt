@@ -15,6 +15,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -315,16 +316,16 @@ internal class AccountForm {
 
 /** Desktop's "New folder": a name, then Create. A refusal shows core's words and keeps the name. */
 @Composable internal fun NewFolderDialog(model: MailModel, request: NewFolder) {
-    var name by remember(request) { mutableStateOf("") }
-    var saving by remember(request) { mutableStateOf(false) }
+    // The name survives a rotation; the busy state lives in the model with the call it guards.
+    var name by rememberSaveable(request) { mutableStateOf("") }
+    val saving = model.creatingFolder
     val close = { if (model.newFolder == request) model.newFolder = null }
     AlertDialog(onDismissRequest = { if (!saving) close() }, title = { Text("New folder") }, text = {
         OutlinedTextField(name, { name = it }, enabled = !saving, singleLine = true,
             label = { Text("Folder name") }, modifier = Modifier.fillMaxWidth())
     }, confirmButton = {
-        TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = {
-            saving = true
-            model.perform { try { model.createFolder(request, name) } finally { saving = false } }
+        TextButton(enabled = !model.working, modifier = Modifier.heightIn(min = 48.dp), onClick = {
+            model.perform { model.createFolder(request, name) }
         }) { Text("Create") }
     }, dismissButton = {
         TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = close) { Text("Cancel") }

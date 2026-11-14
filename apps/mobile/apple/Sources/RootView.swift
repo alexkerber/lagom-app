@@ -181,7 +181,7 @@ struct SidebarView: View {
                     .accessibilityLabel(folder.path)
                 }
                 // Desktop's "New folder" row, in each account's group.
-                SidebarRow("New folder", icon: "new-folder") { newFolder = NewFolderTarget(account: account.id) }
+                SidebarRow("New folder", icon: "new-folder") { newFolder = NewFolderTarget(account: account.id) }.disabled(model.working)
                     .accessibilityLabel(model.accounts.count > 1 ? "New folder in \(account.displayName)" : "New folder")
             }
         }

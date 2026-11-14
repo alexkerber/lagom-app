@@ -144,7 +144,8 @@ internal class MailModel(
     var syncing by mutableStateOf(false); private set
     private var actingId by mutableStateOf<Long?>(null)
     private var readingIds by mutableStateOf<Set<Long>>(emptySet())
-    val working: Boolean get() = actingId != null || readingIds.isNotEmpty() || emptyingTrash
+    var creatingFolder by mutableStateOf(false); private set
+    val working: Boolean get() = actingId != null || readingIds.isNotEmpty() || emptyingTrash || creatingFolder
     var sending by mutableStateOf(false); private set
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
@@ -499,11 +500,18 @@ internal class MailModel(
         }
     }
     /** Desktop's "New folder". Core checks the name as desktop does; a refusal throws its words, and the dialog stays. */
+    /** Busy until the folder exists, so Move to's move into it runs next, before any other action. */
     suspend fun createFolder(request: NewFolder, name: String) {
         val core = core ?: return
-        val folder = core.createFolder(request.account, name)
-        // The folder is on the server; a failed list read only delays it to the next reload.
-        folders = try { core.folders(null) } catch (e: CancellationException) { throw e } catch (_: Exception) { folders + folder }
+        if (working) return
+        creatingFolder = true
+        val folder = try {
+            core.createFolder(request.account, name).also {
+                // A new reload: one in flight read the folder list before this folder existed.
+                reload()
+                if (folders.none { f -> f.id == it.id }) folders = folders + it
+            }
+        } finally { creatingFolder = false }
         if (newFolder == request) newFolder = null
         request.move?.let { move(it, folder, request.conversation) }
     }

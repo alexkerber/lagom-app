@@ -126,7 +126,7 @@ internal fun Mailbox.label(): String = when (this) {
                     }
                     owners.forEach { account ->
                         DropdownMenuItem(text = { Text(if (owners.size > 1) "New folder in ${account.displayName}" else "New folder") },
-                            onClick = { menu = false; model.newFolder = NewFolder(account.id) })
+                            enabled = !model.working, onClick = { menu = false; model.newFolder = NewFolder(account.id) })
                     }
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("All accounts") }, onClick = {
@@ -379,7 +379,7 @@ internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
             if (moving) {
                 targets.forEach { folder -> DropdownMenuItem(text = { Text(folder.path) }, onClick = { moving = false; onMove(folder) }) }
                 // Desktop's Move to offers "New folder" too; the message then moves there.
-                DropdownMenuItem(text = { Text("New folder…") }, onClick = { moving = false; onNewFolder() })
+                DropdownMenuItem(text = { Text("New folder…") }, enabled = !busy, onClick = { moving = false; onNewFolder() })
             } else {
                 DropdownMenuItem(text = { Text(readLabel) }, onClick = { menu = false; onRead() })
                 DropdownMenuItem(text = { Text("Move to…") }, onClick = { menu = false; moving = true })
@@ -583,7 +583,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                             model.perform { model.move(message.row.id, folder, conversation = false) }
                         })
                     }
-                    DropdownMenuItem(text = { Text("New folder…") }, onClick = {
+                    DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
                         open = false
                         model.newFolder = NewFolder(message.row.account, message.row.id, conversation = false)
                     })

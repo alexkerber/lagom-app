@@ -94,7 +94,8 @@ class PlannerModelTest {
         val event = AgendaItem("2026-11-14", "fixture", "Personal", "Plan", 10, 20, false, null, null)
         val core = FakeCore().apply { events = listOf(event); connected = true; mail = listOf(row(1, unread = true), row(2), row(3, unread = true)) }
         val planner = planner(core); planner.reload()
-        assertEquals(LocalDate.now().toString() to 14u, core.agendaCalls.single())
+        assertEquals(LocalDate.now().toString() to 14u, core.agendaCalls.first())
+        assertEquals("the tablet week loads with it", PlannerModel.monday(LocalDate.now()).toString() to 7u, core.agendaCalls[1])
         assertEquals(listOf(event), planner.agenda); assertTrue(planner.calendarConnected)
         assertEquals(2, planner.unreadCount)
         assertEquals(listOf(1L, 3L), planner.today?.unread?.map { it.id })

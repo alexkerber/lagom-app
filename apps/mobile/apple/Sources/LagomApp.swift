@@ -142,7 +142,7 @@ struct MailView: View {
                 Button(folder.path) { act(.move(folder), id: row.id) }
             }
             // Desktop's Move to offers "New folder" too; the message then moves there.
-            Button("New folder…") { newFolder = NewFolderTarget(account: row.account, move: row.id) }
+            Button("New folder…") { newFolder = NewFolderTarget(account: row.account, move: row.id) }.disabled(model.working)
         }
         .modifier(NewFolderAlert(target: $newFolder, model: model) { folder, id in act(.move(folder), id: id) })
         // Desktop's words: the subtitle asks, the button deletes.
@@ -204,7 +204,7 @@ struct MailView: View {
                             if model.folder?.id == folder.id { Label(folder.path, systemImage: "checkmark") } else { Text(folder.path) }
                         }
                     }
-                    Button("New folder") { newFolder = NewFolderTarget(account: account.id) }
+                    Button("New folder") { newFolder = NewFolderTarget(account: account.id) }.disabled(model.working)
                 }
             }
             Picker("Account", selection: Binding(get: { model.accountID }, set: { model.folder = nil; model.accountID = $0 })) {

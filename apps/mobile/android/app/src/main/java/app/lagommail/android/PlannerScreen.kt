@@ -439,7 +439,6 @@ private val Gutter = 48.dp
     val days = (0L until 7L).map { planner.weekStart.plusDays(it) }
     val byDay = planner.week.groupBy { it.day }
     var shown by remember { mutableStateOf<AgendaItem?>(null) }
-    LaunchedEffect(Unit) { planner.reloadWeek() }
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         WeekHeader(planner)
         if (!planner.calendarConnected && planner.week.isEmpty()) {
@@ -461,7 +460,7 @@ private val Gutter = 48.dp
                     }
                 }
             }
-            Refreshable(planner, { planner.reloadAgenda(); planner.reloadWeek() }, Modifier.weight(1f).padding(top = 8.dp)) {
+            Refreshable(planner, { planner.reloadAgenda() }, Modifier.weight(1f).padding(top = 8.dp)) {
                 HourGrid(days, byDay) { shown = it }
             }
         }

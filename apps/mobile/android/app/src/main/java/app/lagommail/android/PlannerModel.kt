@@ -121,6 +121,8 @@ internal class PlannerModel : ViewModel() {
             calendarConnected = connected
             this.agenda = agenda
         }
+        // As iOS: the start's reload also fills the tablet week, which may have asked before the store opened.
+        reloadWeek()
     }
 
     suspend fun reloadWeek() {
