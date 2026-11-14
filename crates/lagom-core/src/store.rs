@@ -534,7 +534,7 @@ impl Store {
         self.db.query_row("SELECT id,account,name,delimiter,role,uidvalidity,uidnext,last_uid,highest_modseq,0 FROM folders WHERE id=?1",[id],folder_row).optional()?.ok_or(Error::NotFound)
     }
     pub fn save_message(&self, message: &Message) -> Result<i64> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let id = self.insert_message(message)?;
         tx.commit()?;
         Ok(id)
@@ -561,11 +561,16 @@ impl Store {
         self.db.query_row("SELECT f.uidvalidity FROM messages m JOIN folders f ON f.id=m.folder WHERE m.id=?1 AND m.folder=?2 AND m.uid=?3",
             params![id, folder, uid], |r| r.get(0)).optional()?.ok_or(Error::NotFound)
     }
+    /// Takes the write lock first. A deferred transaction that reads before it writes fails at once
+    /// (busy_timeout does not apply) when another WAL connection wrote meanwhile.
+    fn write_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?)
+    }
     fn save_synced(&self, message: &Message, attachments: &[crate::attachment::Attachment], existing: Option<(i64, u32)>) -> Result<i64> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let kept: Message;
         let message = if let Some((id, validity)) = existing {
-            // Read in the write's transaction: a delete or flag change committed meanwhile fails the write.
+            // Read under the write lock: no delete or flag change can come between this and the write.
             let m = &message.summary;
             let (seen, flagged) = self.db.query_row("SELECT m.seen,m.flagged FROM messages m JOIN folders f ON f.id=m.folder
                 WHERE m.id=?1 AND m.folder=?2 AND m.uid=?3 AND f.uidvalidity=?4",
@@ -709,6 +714,11 @@ impl Store {
         self.db.execute("UPDATE messages SET move_target=NULL WHERE move_target IS NOT NULL", [])?;
         Ok(())
     }
+    /// Only the read flag: a star a sync stored meanwhile stays.
+    pub fn set_seen(&self, folder: i64, uid: u32, seen: bool) -> Result<()> {
+        self.db.execute("UPDATE messages SET seen=?3 WHERE folder=?1 AND uid=?2", params![folder, uid, seen])?;
+        Ok(())
+    }
     pub fn set_flags(&self, folder: i64, uid: u32, seen: bool, flagged: bool) -> Result<()> {
         self.db.execute(
             "UPDATE messages SET seen=?3,flagged=?4 WHERE folder=?1 AND uid=?2",
@@ -789,6 +799,24 @@ impl Store {
 #[cfg(test)]
 mod mail_tests {
     use super::*;
+    #[test]
+    fn a_synced_save_waits_for_a_write_on_another_connection() {
+        let (temp, store, account, folder) = setup();
+        let path = temp.path().join("mail.db");
+        let (ready, wait) = std::sync::mpsc::channel();
+        // A one-message action on its own connection holds the write lock, for example a large attachment.
+        let writer = std::thread::spawn(move || {
+            let mut db = rusqlite::Connection::open(path).unwrap();
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            tx.execute("UPDATE folders SET uidnext=uidnext", []).unwrap();
+            ready.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            tx.commit().unwrap();
+        });
+        wait.recv().unwrap();
+        store.save_synced_message(&mail(&account, folder, 1), &[]).unwrap();
+        writer.join().unwrap();
+    }
     #[test]
     fn a_refetched_body_keeps_newer_flags_and_never_lands_on_another_row() {
         let (_temp, mut store, account, folder) = setup();

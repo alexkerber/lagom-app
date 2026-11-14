@@ -163,10 +163,9 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     sync: Mutex<()>,
     // One-message actions share it; removal takes it alone, so no token refresh writes a removed account's secret back.
     removal: std::sync::RwLock<()>,
-    // Read flags the server confirmed. A folder step's older FETCH may write over them, so each step
-    // writes them again before it lets go of `network`.
+    // Read flags the server confirmed during the current folder step (see `FolderLock`).
     read_flags: Mutex<HashMap<i64, bool>>,
-    // One read flag at a time, so `read_flags` records them in the server's order.
+    // One read flag at a time, in the server's order. A move waits for the one on its way.
     marking: Mutex<()>,
     contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>>,
     // shortcut: one browser sign-in at a time, lost if the app is killed in the browser; the user starts again.
@@ -213,12 +212,7 @@ impl LagomCore {
             // A panic in one action must not disable the app: SQLite transactions keep the store consistent.
             match lane {
                 Lane::Local => action(&mut stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner)),
-                Lane::Network => {
-                    let mut store = stores.network.blocking_lock();
-                    let result = action(&mut store);
-                    stores.rewrite_read_flags(&store);
-                    result
-                }
+                Lane::Network => action(&mut stores.folder_lock()),
                 Lane::Own => {
                     let _removal = stores.removal.read().unwrap_or_else(std::sync::PoisonError::into_inner);
                     Store::open(&stores.path).and_then(|mut store| action(&mut store))
@@ -236,15 +230,25 @@ impl LagomCore {
 }
 #[derive(Clone, Copy)]
 enum Lane { Local, Network, Own }
+/// `network` for one folder-state step. A read flag confirmed before the step is already right, and the
+/// step fetches it fresh. One confirmed during the step may be newer than the step's FETCH, so the
+/// step's end writes those again.
+struct FolderLock<'a> { stores: &'a Stores, store: tokio::sync::MutexGuard<'a, Store> }
 impl Stores {
-    fn rewrite_read_flags(&self, store: &Store) {
-        let flags = std::mem::take(&mut *self.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    fn folder_lock(&self) -> FolderLock<'_> {
+        let store = self.network.blocking_lock();
+        self.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        FolderLock { stores: self, store }
+    }
+}
+impl std::ops::Deref for FolderLock<'_> { type Target = Store; fn deref(&self) -> &Store { &self.store } }
+impl std::ops::DerefMut for FolderLock<'_> { fn deref_mut(&mut self) -> &mut Store { &mut self.store } }
+impl Drop for FolderLock<'_> {
+    fn drop(&mut self) {
+        let flags = std::mem::take(&mut *self.stores.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         for (id, seen) in flags {
-            let written = store.message(id).and_then(|m| store.set_flags(m.summary.folder, m.summary.uid, seen, m.summary.flagged));
-            // A moved or deleted row has nothing to keep; a failed write tries again, unless a newer flag came meanwhile.
-            if !matches!(written, Ok(()) | Err(lagom_core::Error::NotFound)) {
-                self.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(id).or_insert(seen);
-            }
+            // shortcut: a failed write leaves the older flag until the next sync; retry here if that shows up.
+            if let Ok(m) = self.store.message(id) { let _ = self.store.set_seen(m.summary.folder, m.summary.uid, seen); }
         }
     }
 }
@@ -267,7 +271,7 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     let password = a.password()?;
     let mut error = None;
     {
-        let store = &mut *stores.network.blocking_lock();
+        let store = &mut *stores.folder_lock();
         let outbox = (|| -> lagom_core::Result<()> {
             for id in store.due_outbox(&a.id, milliseconds())? {
                 // Undo send may remove the row after due_outbox listed it.
@@ -279,21 +283,19 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
             }
             Ok(())
         })();
-        stores.rewrite_read_flags(store);
         outbox?;
     }
     let mut session = network(ImapSync::login(a, &password))?;
-    let mut folders = network(session.list_folders(&stores.network.blocking_lock()))?;
+    let mut folders = network(session.list_folders(&stores.folder_lock()))?;
     folders.sort_by_key(|f| f.role != FolderRole::Inbox);
     let mut session = Some(session);
     let mut first = None;
     for folder in folders {
-        let mut store = stores.network.blocking_lock();
+        let mut store = stores.folder_lock();
         let result = network(async {
             if session.is_none() { session = Some(ImapSync::login(a, &password).await?); }
             session.as_mut().unwrap().sync_folder(&mut store, folder.id, DEFAULT_LIMIT).await
         });
-        stores.rewrite_read_flags(&store);
         drop(store);
         if let Err(e) = result {
             // A failed session may hold a half-read response; reconnect for the next folder.
@@ -402,7 +404,7 @@ impl LagomCore {
         // A running sync finishes its account, and running one-message actions their token refresh, before the rows go.
         self.run_sync(move |stores| {
             let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let s = &mut *stores.network.blocking_lock();
+            let s = &mut *stores.folder_lock();
             account(s, &id)?.delete_password()?;
             // Serialize with refresh, and evict even if the caller cancels this future.
             let _local = stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -412,12 +414,12 @@ impl LagomCore {
         }).await
     }
     pub async fn sync(&self, account_id: String) -> Result<()> {
-        self.run_sync(move |stores| { let a = account(&stores.network.blocking_lock(), &account_id)?; sync_account(stores, &a) }).await
+        self.run_sync(move |stores| { let a = account(&stores.folder_lock(), &account_id)?; sync_account(stores, &a) }).await
     }
     pub async fn sync_all(&self) -> Result<()> {
         self.run_sync(|stores| {
             let mut first_error = None;
-            let accounts = stores.network.blocking_lock().accounts()?;
+            let accounts = stores.folder_lock().accounts()?;
             for a in accounts {
                 if let Err(error) = sync_account(stores, &a) {
                     first_error.get_or_insert(lagom_core::Error::Folder { folder: a.email, source: Box::new(error) });
@@ -435,9 +437,9 @@ impl LagomCore {
         let cancel = self.background_cancel.clone();
         self.run_sync(move |stores| {
             let mut rows = Vec::new();
-            let accounts = stores.network.blocking_lock().accounts()?;
+            let accounts = stores.folder_lock().accounts()?;
             for a in accounts {
-                let s = &mut *stores.network.blocking_lock();
+                let s = &mut *stores.folder_lock();
                 // After the lock: a cancel may arrive while a move holds it.
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
                 // No Inbox yet means no first sync: new_mail would stay silent anyway.
@@ -448,7 +450,6 @@ impl LagomCore {
                     let _ = session.logout().await;
                     result
                 });
-                stores.rewrite_read_flags(s);
                 // One account's failure (locked secret, network) must not stop the others.
                 if synced.is_err() { continue; }
                 let (after, messages) = (s.folder(before.id)?, s.messages_since(before.id, before.last_uid)?);
@@ -533,7 +534,10 @@ impl LagomCore {
     pub async fn delete(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, true).await }
     /// Puts Done, Later or Delete back: each message returns to the folder it left, with its old snooze.
     pub async fn undo(&self, changes: Vec<MailChange>) -> Result<()> {
+        let stores = self.stores.clone();
         self.run_network(move |s| network(async {
+            // A read flag on its way reaches the server before the message moves.
+            drop(stores.marking.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
             for c in changes {
                 let id = if c.from_folder == c.to_folder { c.id } else {
                     let a = account(s, &c.account)?;
@@ -565,7 +569,10 @@ impl LagomCore {
                 let a = account(s, &s.message_summary(id)?.account)?;
                 let mut session = ImapSync::login(&a, &a.password()?).await?;
                 session.mark_seen(s, id, read).await?;
+                // Recorded, then written again: a folder step that ended between the two writes
+                // cannot leave its older FETCH behind.
                 stores.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, read);
+                if let Ok(m) = s.message(id) { s.set_seen(m.summary.folder, m.summary.uid, read)?; }
                 let _ = session.logout().await;
                 Ok(())
             })
@@ -684,7 +691,10 @@ impl LagomCore {
 }
 impl LagomCore {
     async fn move_messages(&self, ids: Vec<i64>, trash: bool) -> Result<Vec<MailChange>> {
+        let stores = self.stores.clone();
         self.run_network(move |s| network(async {
+            // A read flag on its way reaches the server before the message moves.
+            drop(stores.marking.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
             let mut changes = Vec::new();
             // shortcut: a failure mid-conversation drops Undo for the members already moved; they stay in Done or Trash.
             for id in ids {

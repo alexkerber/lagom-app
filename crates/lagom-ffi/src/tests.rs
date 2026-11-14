@@ -1439,3 +1439,124 @@ async fn a_sync_with_older_flags_does_not_undo_a_read_flag() {
     }).await.unwrap();
     assert!(!core.message(id).await.unwrap().row.unread);
 }
+
+/// One message (UID 1) on a server with INBOX, Archive and Trash. The first command that starts with
+/// `stall_on` waits for `release` before it runs.
+#[derive(Default)]
+struct OneMessage { stall_on: &'static str, stalls: std::sync::atomic::AtomicUsize, stalled: tokio::sync::Notify,
+    release: tokio::sync::Notify, state: Mutex<(String, bool)> }
+fn one_message_server(listener: tokio::net::TcpListener, server: Arc<OneMessage>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    *server.state.lock().unwrap() = ("INBOX".into(), false);
+    tokio::spawn(async move { loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let server = server.clone();
+        tokio::spawn(async move {
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            let mut selected = String::new();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                if !server.stall_on.is_empty() && cmd.starts_with(server.stall_on) && server.stalls.fetch_add(1, SeqCst) == 0 {
+                    server.stalled.notify_one();
+                    server.release.notified().await;
+                }
+                let (location, seen) = server.state.lock().unwrap().clone();
+                let here = selected == location;
+                let flags = if seen { "(\\Seen)" } else { "()" };
+                let data = if cmd.starts_with("LOGIN ") { String::new() }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1 MOVE\r\n".into() }
+                else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n* LIST (\\Archive) NIL \"Archive\"\r\n* LIST (\\Trash) NIL \"Trash\"\r\n".into() }
+                else if let Some(name) = cmd.strip_prefix("SELECT ") {
+                    selected = name.trim_matches('"').into();
+                    "* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+                } else if cmd == "UID SEARCH ALL" { if here { "* SEARCH 1\r\n".into() } else { "* SEARCH\r\n".into() } }
+                else if cmd.contains("BODYSTRUCTURE") {
+                    let header = "From: sender@example.test\r\nSubject: One\r\nMessage-ID: <m1@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                    format!("* 1 FETCH (UID 1 FLAGS {flags} RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                else if cmd == "UID FETCH 1 (UID FLAGS)" { if here { format!("* 1 FETCH (UID 1 FLAGS {flags})\r\n") } else { String::new() } }
+                else if let Some(change) = cmd.strip_prefix("UID STORE 1 ") {
+                    // A STORE on a UID that moved away changes nothing, as on a real server.
+                    if here { server.state.lock().unwrap().1 = change.starts_with('+'); }
+                    String::new()
+                } else if let Some(target) = cmd.strip_prefix("UID MOVE 1 ") {
+                    if here { server.state.lock().unwrap().0 = target.trim_matches('"').into(); }
+                    String::new()
+                } else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+    } });
+}
+fn one_message_fixture(core: &LagomCore, port: u16) -> (Account, i64) {
+    let mut s = core.stores.local.lock().unwrap();
+    let a = fixture_account(&s, "one@example.test", port);
+    let id = mail(&mut s, &a, 1, 1);
+    (a, id)
+}
+
+#[tokio::test]
+async fn a_read_flag_from_before_a_sync_never_overrides_what_that_sync_fetched() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (_, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage::default());
+    one_message_server(listener, server.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        core.mark_read(id, true).await.unwrap();
+        // Later another device marks it unread; the next Inbox sync fetches that.
+        server.state.lock().unwrap().1 = false;
+        core.background_sync().await.unwrap();
+    }).await.unwrap();
+    assert!(core.message(id).await.unwrap().row.unread);
+}
+
+#[tokio::test]
+async fn done_waits_for_a_read_flag_already_on_its_way() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (a, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage { stall_on: "UID STORE", ..Default::default() });
+    one_message_server(listener, server.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // Open an unread message, then tap Done at once.
+        let read = tokio::spawn({ let core = core.clone(); async move { core.mark_read(id, true).await } });
+        server.stalled.notified().await;
+        let done = tokio::spawn({ let core = core.clone(); async move { core.done(vec![id]).await } });
+        // Without the wait, the move runs now. A slow scheduler can only make this pass without testing anything.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        server.release.notify_one();
+        read.await.unwrap().unwrap();
+        done.await.unwrap().unwrap();
+    }).await.unwrap();
+    assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the archived copy must be read");
+    let archived = core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap();
+    assert!(!archived[0].unread);
+}
+
+#[tokio::test]
+async fn a_read_flag_keeps_a_star_set_meanwhile() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (_, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage { stall_on: "UID STORE", ..Default::default() });
+    one_message_server(listener, server.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let read = tokio::spawn({ let core = core.clone(); async move { core.mark_read(id, true).await } });
+        server.stalled.notified().await;
+        // A sync stores a star while the read flag is on its way.
+        let s = core.stores.local.lock().unwrap();
+        let m = s.message(id).unwrap().summary;
+        s.set_flags(m.folder, m.uid, false, true).unwrap();
+        drop(s);
+        server.release.notify_one();
+        read.await.unwrap().unwrap();
+    }).await.unwrap();
+    let m = core.stores.local.lock().unwrap().message(id).unwrap().summary;
+    assert_eq!((m.seen, m.flagged), (true, true));
+}

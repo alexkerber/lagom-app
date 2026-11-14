@@ -619,7 +619,7 @@ impl ImapSync {
         };
         // async-imap's STORE stream discards tagged NO/BAD replies.
         net(self.session.run_command_and_check_ok(format!("UID STORE {} {command}", message.uid))).await?;
-        store.set_flags(message.folder, message.uid, seen, message.flagged)
+        store.set_seen(message.folder, message.uid, seen)
     }
     pub async fn create_folder(&mut self, store: &Store, name: &str) -> Result<i64> {
         validate_folder(name)?;
