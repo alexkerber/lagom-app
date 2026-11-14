@@ -60,6 +60,11 @@ Root: HKCU; Subkey: "Software\Classes\AppUserModelId\{#AppId}"; ValueType: strin
 Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2..."; Check: NeedsWebView2; Flags: waituntilterminated
 Filename: "{app}\lagom.exe"; Description: "Open lagom"; Flags: nowait postinstall skipifsilent
 
+[UninstallDelete]
+; WebView2 keeps its user data folder next to the exe by default (wry passes no other). Mail is
+; InPrivate, but the folder still holds the browser profile.
+Type: filesandordirs; Name: "{app}\lagom.exe.WebView2"
+
 [Code]
 // Microsoft's documented check, the same as lagom's own (apps/desktop/src/main_window/html.rs).
 const WebView2Key = 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
