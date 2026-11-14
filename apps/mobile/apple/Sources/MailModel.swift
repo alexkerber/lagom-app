@@ -258,7 +258,8 @@ final class MailModel {
     var syncing = false
     private var actingID: Int64?
     private var readingIDs: Set<Int64> = []
-    var working: Bool { actingID != nil || !readingIDs.isEmpty || emptyingTrash }
+    private(set) var creatingFolder = false
+    var working: Bool { actingID != nil || !readingIDs.isEmpty || emptyingTrash || creatingFolder }
     var hasMore = false
     private var revision = 0
     private var syncAgain = false
@@ -600,6 +601,24 @@ final class MailModel {
     /// Search covers the whole account, so there the open folder is a target too.
     func moveTargets(account: String) -> [MailFolder] {
         folders.filter { $0.account == account && ($0.id != folder?.id || !searchText.isEmpty) }
+    }
+
+    /// Desktop's "New folder" in `account`. Core checks the name as desktop does; a refusal shows its words.
+    /// Busy until it returns, so Move to's move into the new folder runs next, before any other action.
+    func createFolder(_ name: String, account: String) async -> MailFolder? {
+        guard let core, !working else { return nil }
+        creatingFolder = true
+        defer { creatingFolder = false }
+        do {
+            let folder = try await core.createFolder(accountId: account, name: name)
+            // A new reload: one in flight read the folder list before this folder existed.
+            await reload()
+            if !folders.contains(where: { $0.id == folder.id }) { folders.append(folder) }
+            return folder
+        } catch {
+            self.error = error.localizedDescription
+            return nil
+        }
     }
 
     /// Only after the person confirmed: the scope's Trash is deleted for good on the server.

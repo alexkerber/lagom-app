@@ -615,6 +615,22 @@ impl LagomCore {
     pub async fn move_to_folder(&self, ids: Vec<i64>, folder_id: i64) -> Result<Vec<MailChange>> {
         self.move_messages(ids, MoveTarget::Folder(folder_id)).await
     }
+    /// Desktop's "New folder": a top-level folder on the server, checked as desktop checks it.
+    pub async fn create_folder(&self, account_id: String, name: String) -> Result<MailFolder> {
+        let name = name.trim().to_string();
+        self.run_network(move |s| network(async {
+            let a = account(s, &account_id)?;
+            let server = s.folders(&a.id, now())?;
+            if server.is_empty() { return Err(lagom_core::Error::Invalid("Sync folders before creating a folder")); }
+            lagom_core::imap_sync::validate_folder_name(&name, server.iter().filter_map(|f| f.delimiter.as_deref()), server.iter().map(|f| f.name.as_str()))
+                .map_err(lagom_core::Error::Invalid)?;
+            let mut session = ImapSync::login(&a, &a.password()?).await?;
+            let created = session.create_folder(s, &name).await;
+            let _ = session.logout().await;
+            // No delimiter in the name, so it is its own path at the top.
+            Ok(MailFolder { id: created?, account: a.id, path: name.clone(), name, depth: 0, unread: 0 })
+        })).await
+    }
     /// Deletes everything in Trash for good: the account's, or every account's when None. The app asks first.
     pub async fn empty_trash(&self, account_id: Option<String>) -> Result<()> {
         self.run_network(move |s| network(async {

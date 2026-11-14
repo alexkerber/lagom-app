@@ -59,21 +59,7 @@ pub fn sample() -> Vec<Folder> {
     folders
 }
 
-pub fn validate_name<'a>(name: &str, delimiters: impl Iterator<Item = &'a str>, mut names: impl Iterator<Item = &'a str>) -> Result<(), &'static str> {
-    if name.trim().is_empty() {
-        return Err("Enter a folder name");
-    }
-    if name.len() > 1024 || name.chars().any(char::is_control) {
-        return Err("Invalid folder name");
-    }
-    if delimiters.filter(|d| !d.is_empty()).any(|d| name.contains(d)) {
-        return Err("Folder names cannot contain the hierarchy delimiter");
-    }
-    if names.any(|n| n.eq_ignore_ascii_case(name)) {
-        return Err("A folder with this name already exists");
-    }
-    Ok(())
-}
+pub use lagom_core::imap_sync::validate_folder_name as validate_name;
 
 /// Updates `folders` from the store in place. Indices never move (undo history and the open
 /// list hold them): new folders go last, deleted ones are marked gone.

@@ -50,6 +50,7 @@ struct MailView: View {
     @State private var newName = ""
     /// The message "Move to" asks a folder for, with its account.
     @State private var moving: (account: String, id: Int64)?
+    @State private var newFolder: NewFolderTarget?
     @State private var confirmEmptyTrash = false
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
@@ -140,7 +141,10 @@ struct MailView: View {
             ForEach(model.moveTargets(account: row.account), id: \.id) { folder in
                 Button(folder.path) { act(.move(folder), id: row.id) }
             }
+            // Desktop's Move to offers "New folder" too; the message then moves there.
+            Button("New folder…") { newFolder = NewFolderTarget(account: row.account, move: row.id) }.disabled(model.working)
         }
+        .modifier(NewFolderAlert(target: $newFolder, model: model) { folder, id in act(.move(folder), id: id) })
         // Desktop's words: the subtitle asks, the button deletes.
         .confirmationDialog("Delete all permanently?", isPresented: $confirmEmptyTrash, titleVisibility: .visible) {
             Button("Delete all", role: .destructive) { Task { await model.emptyTrash() } }
@@ -194,15 +198,13 @@ struct MailView: View {
                 ForEach(MailboxChoice.allCases) { Text($0.rawValue).tag(Optional($0)) }
             }
             ForEach(model.accounts.filter { model.accountID == nil || $0.id == model.accountID }, id: \.id) { account in
-                let own = model.folders.filter { $0.account == account.id }
-                if !own.isEmpty {
-                    Section(model.accounts.count > 1 ? account.displayName : "Folders") {
-                        ForEach(own, id: \.id) { folder in
-                            Button { model.open(folder) } label: {
-                                if model.folder?.id == folder.id { Label(folder.path, systemImage: "checkmark") } else { Text(folder.path) }
-                            }
+                Section(model.accounts.count > 1 ? account.displayName : "Folders") {
+                    ForEach(model.folders.filter { $0.account == account.id }, id: \.id) { folder in
+                        Button { model.open(folder) } label: {
+                            if model.folder?.id == folder.id { Label(folder.path, systemImage: "checkmark") } else { Text(folder.path) }
                         }
                     }
+                    Button("New folder") { newFolder = NewFolderTarget(account: account.id) }.disabled(model.working)
                 }
             }
             Picker("Account", selection: Binding(get: { model.accountID }, set: { model.folder = nil; model.accountID = $0 })) {
@@ -352,9 +354,7 @@ struct MailView: View {
             Button(row.unread ? "Mark read" : "Mark unread") {
                 Task { await model.setRead(row: row) }
             }.disabled(model.working)
-            if !model.moveTargets(account: row.account).isEmpty {
-                Button("Move to…") { moving = (row.account, row.id) }.disabled(model.working)
-            }
+            Button("Move to…") { moving = (row.account, row.id) }.disabled(model.working)
         }
         .swipeActions(edge: .leading) {
             Button { act(.done, id: row.id) } label: { Label("Done", image: "done") }.tint(Theme.done)
@@ -450,10 +450,8 @@ extension MailView {
             if model.mailbox != .trash {
                 HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { act(.delete, id: id) }
             }
-            if !model.moveTargets(account: message.row.account).isEmpty {
-                HouseButton(title: "Move to", icon: "move", iconOnly: iconOnly) {
-                    moving = (message.row.account, id)
-                }
+            HouseButton(title: "Move to", icon: "move", iconOnly: iconOnly) {
+                moving = (message.row.account, id)
             }
             if regular {
                 HouseButton(title: message.row.unread ? "Mark read" : "Mark unread", icon: message.row.unread ? "read" : "unread",
@@ -463,6 +461,35 @@ extension MailView {
             }
             Spacer(minLength: 0)
             HouseButton(title: "Done", icon: "done", primary: true) { act(.done, id: id) }
+        }
+    }
+}
+
+/// Where "New folder" puts its folder, and the message Move to then moves there.
+struct NewFolderTarget {
+    let account: String
+    var move: Int64?
+}
+
+/// Desktop's "New folder": the name field and Create. Core checks the name; a refusal shows as an error.
+struct NewFolderAlert: ViewModifier {
+    @Binding var target: NewFolderTarget?
+    let model: MailModel
+    var created: (MailFolder, Int64) -> Void = { _, _ in }
+    @State private var name = ""
+
+    func body(content: Content) -> some View {
+        content.alert("New folder", isPresented: Binding(get: { target != nil }, set: { if !$0 { target = nil } }), presenting: target) { target in
+            TextField("Folder name", text: $name)
+            Button("Create") {
+                let typed = name
+                name = ""
+                Task {
+                    guard let folder = await model.createFolder(typed, account: target.account) else { return }
+                    if let id = target.move { created(folder, id) }
+                }
+            }
+            Button("Cancel", role: .cancel) { name = "" }
         }
     }
 }

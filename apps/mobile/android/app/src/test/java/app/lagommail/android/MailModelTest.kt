@@ -1013,6 +1013,25 @@ class MailModelTest {
         model.setName(model.accounts.single(), "")
         assertEquals("an empty name falls back to the address", "fixture@example.test", model.accounts.single().displayName)
     }
+
+    @Test fun newFolderListsAtOnceMovesTheMessageAndStaysOpenOnRefusal() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = model(core); model.start()
+        val request = NewFolder("fixture", move = 2)
+        model.newFolder = request
+        model.createFolder(request, "Taxes")
+        val taxes = model.folders.single()
+        assertEquals("Taxes", taxes.name); assertEquals(listOf("fixture" to "Taxes"), core.created)
+        assertNull("the dialog closes", model.newFolder)
+        assertEquals("Move to's message moves into the new folder", listOf(listOf(2L) to taxes.id), core.moved)
+        assertEquals("Moved to Taxes", model.notice)
+        // A refusal throws core's words, so the dialog stays with the name and nothing lists.
+        val again = NewFolder("fixture")
+        model.newFolder = again
+        core.rejectAction = true
+        try { model.createFolder(again, "taxes"); fail("expected refusal") } catch (_: IllegalStateException) { }
+        assertEquals(again, model.newFolder); assertEquals(listOf(taxes), model.folders)
+    }
 }
 
 internal class FakeCore : LagomCoreInterface {
@@ -1176,6 +1195,12 @@ internal class FakeCore : LagomCoreInterface {
         check(!rejectAction); moved += ids to folderId
         removed += mail.filter { it.id in ids }; mail = mail.filterNot { it.id in ids }
         return ids.map { change(it).copy(toFolder = folderId) }
+    }
+    val created = mutableListOf<Pair<String, String>>()
+    override suspend fun createFolder(accountId: String, name: String): MailFolder {
+        check(!rejectAction) { "A folder with this name already exists" }
+        created += accountId to name
+        return MailFolder(20L + created.size, accountId, name, name, 0u, 0u).also { folderList = folderList + it }
     }
     val emptied = mutableListOf<String?>()
     override suspend fun emptyTrash(accountId: String?) { emptied += accountId; check(!rejectAction) { "Fixture empty refused" } }

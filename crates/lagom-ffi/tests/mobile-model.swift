@@ -64,6 +64,14 @@ import Foundation
         mail.removeAll { ids.contains($0.id) }
         return ids.map { var c = change($0); c.toFolder = folderId; return c }
     }
+    var created: [(String, String)] = []
+    override func createFolder(accountId: String, name: String) async throws -> MailFolder {
+        created.append((accountId, name))
+        if name.trimmingCharacters(in: .whitespaces).isEmpty { throw MailError.Failed(reason: "Enter a folder name") }
+        let folder = MailFolder(id: 20 + Int64(created.count), account: accountId, name: name, path: name, depth: 0, unread: 0)
+        folderList.append(folder)
+        return folder
+    }
     var emptied: [String?] = []
     var failEmpty = false
     override func emptyTrash(accountId: String?) async throws {
@@ -468,8 +476,27 @@ struct ModelChecks {
         print("MailModel: folders, Move with Undo, Empty Trash and account name passed")
     }
 
+    /// "New folder" lists the folder at once and shows core's refusal in its own words.
+    @MainActor static func newFolderListsAtOnceAndShowsRefusals() async {
+        let core = FixtureCore(noHandle: .init())
+        core.mail = Array(core.mail.prefix(2))
+        core.accountList = [MailAccount(id: "fixture", email: "f@example.test", displayName: "f@example.test")]
+        let model = MailModel(); model.core = core
+        await model.reload()
+        let taxes = await model.createFolder("Taxes", account: "fixture")
+        precondition(taxes?.name == "Taxes" && core.created.map(\.0) == ["fixture"])
+        precondition(model.folders == [taxes!] && model.moveTargets(account: "fixture") == [taxes!], "the new folder is a Move to target at once")
+        let blank = await model.createFolder("  ", account: "fixture")
+        precondition(blank == nil && model.error == "Enter a folder name" && model.folders == [taxes!], "a refusal shows core's words and lists nothing")
+        model.core = nil
+        let offline = await model.createFolder("Later", account: "fixture")
+        precondition(offline == nil && core.created.count == 2, "no core, no call")
+        print("MailModel: New folder passed")
+    }
+
     @MainActor static func main() async throws {
         try await foldersMoveEmptyTrashAndName()
+        await newFolderListsAtOnceAndShowsRefusals()
         try await undoDoneAndNewMailSignature()
         await mailtoOpensANewDraft()
         await listReadActionIncludesOlderUnreadMembers()

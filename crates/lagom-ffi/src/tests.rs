@@ -1789,3 +1789,49 @@ async fn moving_later_mail_to_its_own_folder_ends_the_snooze_and_undo_restores_i
         assert_eq!(core.mailbox(Some(a.id), Mailbox::Later, 20, 0).await.unwrap().len(), 1, "Undo snoozes it again");
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn create_folder_checks_the_name_as_desktop_and_creates_it_on_the_server() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let a = fixture_account(&core.stores.local.lock().unwrap(), "folders@example.test", listener.local_addr().unwrap().port());
+        // No folder list yet: desktop's words, and no connection.
+        let refused = |result: Result<MailFolder>| match result { Err(MailError::Failed { reason }) => reason, other => panic!("{other:?}") };
+        assert_eq!(refused(core.create_folder(a.id.clone(), "Taxes".into()).await), "Sync folders before creating a folder");
+        {
+            let s = core.stores.local.lock().unwrap();
+            s.save_folder(&a.id, "INBOX", Some("/"), FolderRole::Inbox).unwrap();
+            s.save_folder(&a.id, "Receipts", Some("/"), FolderRole::Other).unwrap();
+        }
+        assert_eq!(refused(core.create_folder(a.id.clone(), "   ".into()).await), "Enter a folder name");
+        assert_eq!(refused(core.create_folder(a.id.clone(), "receipts".into()).await), "A folder with this name already exists");
+        assert_eq!(refused(core.create_folder(a.id.clone(), "Travel/Trains".into()).await), "Folder names cannot contain the hierarchy delimiter");
+        assert_eq!(refused(core.create_folder(a.id.clone(), "Tax\nes".into()).await), "Invalid folder name");
+        assert!(matches!(core.create_folder("missing".into(), "Taxes".into()).await, Err(MailError::NotFound)));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            let script = [
+                ("LOGIN \"folders@example.test\" \"fixture\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                ("CREATE \"Taxes\"", ""),
+                ("LIST \"\" \"*\"", "* LIST () \"/\" \"INBOX\"\r\n* LIST () \"/\" \"Receipts\"\r\n* LIST () \"/\" \"Taxes\"\r\n"),
+                ("LOGOUT", "* BYE bye\r\n"),
+            ];
+            for (command, data) in script {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, actual) = line.trim_end().split_once(' ').unwrap();
+                assert_eq!(actual, command);
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        // Trimmed as desktop's input is.
+        let created = core.create_folder(a.id.clone(), "  Taxes ".into()).await.unwrap();
+        server.await.unwrap();
+        assert_eq!((created.name.as_str(), created.path.as_str(), created.depth, created.account.as_str()), ("Taxes", "Taxes", 0, a.id.as_str()));
+        assert!(core.folders(Some(a.id.clone())).await.unwrap().contains(&created), "the new folder lists with the others");
+    }).await.unwrap();
+}

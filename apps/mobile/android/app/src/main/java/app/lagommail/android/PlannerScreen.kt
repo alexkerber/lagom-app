@@ -22,6 +22,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -29,6 +32,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -40,6 +44,7 @@ import app.lagommail.core.*
 import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Date
 
@@ -381,8 +386,9 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     }
 }
 
-/** Cached events by day under the month title, as iOS's phone Calendar. */
-@Composable internal fun CalendarScreen(planner: PlannerModel) {
+/** Cached events by day under the month title, as iOS's phone Calendar. A tablet gets iPad's week grid instead. */
+@Composable internal fun CalendarScreen(planner: PlannerModel, grid: Boolean = false) {
+    if (grid) return WeekGrid(planner)
     val now = nowSeconds()
     val today = LocalDate.now()
     val words = DateWords()
@@ -422,5 +428,180 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
             contentAlignment = Alignment.Center) {
             Text(day.dayOfMonth.toString(), style = MaterialTheme.typography.titleMedium, color = if (today) colors.onPrimary else colors.onSurface)
         }
+    }
+}
+
+private val HourHeight = 60.dp
+private val Gutter = 48.dp
+
+/** iPad's week, desktop `week::week_view`: day columns on an hour grid, all-day events above, the now line across. */
+@Composable private fun WeekGrid(planner: PlannerModel) {
+    val days = (0L until 7L).map { planner.weekStart.plusDays(it) }
+    val byDay = planner.week.groupBy { it.day }
+    var shown by remember { mutableStateOf<AgendaItem?>(null) }
+    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
+        WeekHeader(planner)
+        if (!planner.calendarConnected && planner.week.isEmpty()) {
+            EmptyState("Calendar needs a Google account",
+                "lagom shows your Google Calendar here. Google Calendar sync is coming to Android; mail accounts with a password have no calendar.",
+                Modifier.fillMaxSize())
+        } else {
+            Row(Modifier.padding(top = 8.dp)) {
+                Spacer(Modifier.width(Gutter))
+                days.forEach { WeekDayHead(it, Modifier.weight(1f)) }
+            }
+            val allDay = days.map { day -> byDay[day.toString()].orEmpty().filter { it.allDay } }
+            // Many all-day events scroll in a band, as desktop's strip, so the hours stay visible.
+            if (allDay.any { it.isNotEmpty() }) Row(Modifier.padding(top = 8.dp).heightIn(max = 110.dp).verticalScroll(rememberScrollState())) {
+                Text("All day", Modifier.width(Gutter), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+                allDay.forEach { events ->
+                    Column(Modifier.weight(1f).padding(horizontal = 2.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        events.forEach { event -> WeekEvent(event, compact = true) { shown = event } }
+                    }
+                }
+            }
+            Refreshable(planner, { planner.reloadAgenda() }, Modifier.weight(1f).padding(top = 8.dp)) {
+                HourGrid(days, byDay) { shown = it }
+            }
+        }
+    }
+    shown?.let { EventDetails(planner, it) { shown = null } }
+}
+
+/** The month of the week's Thursday, as ISO weeks count, and the week buttons. */
+@Composable private fun WeekHeader(planner: PlannerModel) {
+    val thursday = planner.weekStart.plusDays(3)
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(localDate(thursday, "MMMM"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(localDate(thursday, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = { planner.perform { planner.showWeek(-1) } },
+            Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Previous week" }) { Text("‹", style = MaterialTheme.typography.titleLarge) }
+        OutlinedButton(onClick = { planner.perform { planner.showWeek(0) } }, Modifier.heightIn(min = 48.dp)) { Text("Today") }
+        TextButton(onClick = { planner.perform { planner.showWeek(1) } },
+            Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Next week" }) { Text("›", style = MaterialTheme.typography.titleLarge) }
+    }
+}
+
+/** "Mon 9", weekends quieter, today in the accent circle. */
+@Composable private fun WeekDayHead(day: LocalDate, modifier: Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val today = day == LocalDate.now()
+    val weekend = day.dayOfWeek.value >= 6
+    Row(modifier.clearAndSetSemantics { contentDescription = localDate(day, "EEEEdMMMM"); heading() },
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(localDate(day, "EEE"), color = colors.onSurfaceVariant)
+        Box(Modifier.sizeIn(minWidth = 32.dp, minHeight = 32.dp).background(if (today) colors.primary else Color.Transparent, CircleShape),
+            contentAlignment = Alignment.Center) {
+            Text(day.dayOfMonth.toString(), style = MaterialTheme.typography.titleMedium,
+                color = if (today) colors.onPrimary else if (weekend) colors.onSurfaceVariant else colors.onSurface)
+        }
+    }
+}
+
+/** The hours with each day's timed events; opens at the week's first event, or 08:00 on an empty week. */
+@Composable private fun HourGrid(days: List<LocalDate>, byDay: Map<String, List<AgendaItem>>, onShow: (AgendaItem) -> Unit) {
+    val blocks = days.map { weekBlocks(byDay[it.toString()].orEmpty(), it) }
+    val first = blocks.flatten().minOfOrNull { it.start }?.let { maxOf(0, (it / 60).toInt() - 1) } ?: 8
+    val scroll = rememberScrollState()
+    val hour = with(LocalDensity.current) { HourHeight.roundToPx() }
+    LaunchedEffect(days.first(), first) { scroll.scrollTo(first * hour) }
+    val colors = MaterialTheme.colorScheme
+    Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(top = 12.dp)) {
+        Row {
+            Column(Modifier.width(Gutter).clearAndSetSemantics {}) {
+                (0 until 24).forEach { h ->
+                    Row(Modifier.height(HourHeight).fillMaxWidth().offset(y = (-8).dp).padding(end = 8.dp), horizontalArrangement = Arrangement.End) {
+                        Text(h.toString().padStart(2, '0'), color = colors.onSurface, style = MaterialTheme.typography.bodyMedium)
+                        Text("00", color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+            days.forEachIndexed { i, day -> DayColumn(day, byDay[day.toString()].orEmpty(), blocks[i], Modifier.weight(1f), onShow) }
+        }
+        NowLine24(days, Modifier.matchParentSize())
+    }
+}
+
+@Composable private fun DayColumn(day: LocalDate, events: List<AgendaItem>, blocks: List<WeekBlock>, modifier: Modifier, onShow: (AgendaItem) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val fill = when {
+        day == LocalDate.now() -> colors.primary.copy(alpha = 0.06f)
+        day.dayOfWeek.value >= 6 -> colors.surfaceVariant
+        else -> colors.background
+    }
+    BoxWithConstraints(modifier.height(HourHeight * 24).background(fill)) {
+        (0 until 24).forEach { h -> Box(Modifier.offset(y = HourHeight * h).fillMaxWidth().height(1.dp).background(colors.outlineVariant)) }
+        Box(Modifier.fillMaxHeight().width(1.dp).background(colors.outlineVariant))
+        blocks.forEach { block ->
+            val width = (maxWidth - 3.dp) / block.lanes
+            val minutes = (block.end - block.start).toFloat()
+            WeekEvent(events[block.index], compact = minutes < 45, Modifier
+                .offset(x = 3.dp + width * block.lane, y = HourHeight * (block.start / 60).toFloat() + 1.dp)
+                .size(width - 2.dp, HourHeight * (minutes / 60) - 2.dp)) { onShow(events[block.index]) }
+        }
+    }
+}
+
+/** An event on the grid, desktop `event_block`: a tint and bar, the title, then the time. A tap shows its details. */
+@Composable private fun WeekEvent(event: AgendaItem, compact: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val tint = colors.primary
+    val title = event.title.ifEmpty { "(No title)" }
+    val start = clock(event.startUnix)
+    val end = clock(maxOf(event.startUnix, event.endUnix))
+    Box(modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(tint.copy(alpha = 0.14f))
+        .drawBehind { drawRect(tint, size = Size(2.dp.toPx(), size.height)) }
+        .clickable(onClickLabel = "Show details", onClick = onClick)
+        .semantics {
+            contentDescription = listOfNotNull(if (event.allDay) "All day" else null, title, event.location?.takeIf { it.isNotEmpty() }).joinToString(", ")
+            if (!event.allDay) stateDescription = "$start – $end"
+        }
+        .padding(start = 7.dp, end = 5.dp, top = 2.dp, bottom = 2.dp)) {
+        Column(Modifier.clearAndSetSemantics {}) {
+            Text(if (compact && !event.allDay) "$title · $start" else title, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium,
+                maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
+            if (!compact && !event.allDay) Text(start, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        }
+    }
+}
+
+/** iPad's event popover: title, when, where, the calendar and a meeting link. */
+@Composable private fun EventDetails(planner: PlannerModel, event: AgendaItem, close: () -> Unit) {
+    val context = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+    val day = Instant.ofEpochSecond(event.startUnix).atZone(ZoneId.systemDefault()).toLocalDate()
+    val start = clock(event.startUnix)
+    val end = clock(maxOf(event.startUnix, event.endUnix))
+    AlertDialog(onDismissRequest = close, title = { Text(event.title.ifEmpty { "(No title)" }) }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (event.allDay) "All day" else "${localDate(day, "EEEdMMMM")}, $start – $end", color = colors.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall)
+            event.location?.takeIf { it.isNotEmpty() }?.let { Text(it) }
+            Text(event.calendar, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+    }, confirmButton = {
+        event.webLink()?.let { link -> TextButton(onClick = { openLink(context, planner, link) }, Modifier.heightIn(min = 48.dp)) { Text("Join meeting") } }
+    }, dismissButton = { TextButton(onClick = close, Modifier.heightIn(min = 48.dp)) { Text("Close") } })
+}
+
+/** The now line across the week, desktop `current-time`: the time in the gutter, a dot on today's column. */
+@Composable private fun NowLine24(days: List<LocalDate>, modifier: Modifier) {
+    val now = nowSeconds()
+    val time = Instant.ofEpochSecond(now).atZone(ZoneId.systemDefault())
+    val today = days.indexOf(time.toLocalDate())
+    if (today < 0) return
+    val gold = MaterialTheme.colorScheme.secondary
+    val label = clock(now)
+    val y = HourHeight * (time.hour + time.minute / 60f)
+    BoxWithConstraints(modifier.clearAndSetSemantics { contentDescription = "Now, $label" }) {
+        val column = (maxWidth - Gutter) / days.size
+        Box(Modifier.offset(x = Gutter, y = y).width(maxWidth - Gutter).height(1.5.dp).background(gold))
+        Box(Modifier.offset(x = Gutter + column * today - 3.5.dp, y = y - 2.75.dp).size(7.dp).background(gold, CircleShape))
+        Text(label, Modifier.offset(y = y - 9.dp).width(Gutter - 4.dp).background(gold, RoundedCornerShape(4.dp)),
+            color = MaterialTheme.colorScheme.onSecondary, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, maxLines = 1)
     }
 }
