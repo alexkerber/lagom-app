@@ -125,6 +125,9 @@ fn plain(detail: &'static str) -> &'static str {
 }
 
 #[cfg(test)]
+mod perf_tests;
+
+#[cfg(test)]
 mod tests {
     /// Every error text a person can read stays free of protocol and programmer words.
     #[test]
