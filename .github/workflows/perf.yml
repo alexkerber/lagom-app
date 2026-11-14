@@ -47,3 +47,11 @@ jobs:
         run: python3 scripts/test-perf.py
       - name: Measure budgets (release)
         run: python3 scripts/perf.py
+      # shortcut: temporary size diagnostic for PR #131, remove before merge.
+      - name: Binary size by crate (Linux, temporary)
+        if: always() && runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          size -A target/release/lagom
+          cargo install cargo-bloat --locked --version 0.12.1
+          cargo bloat --release --locked -p lagom --bin lagom --crates -n 30
