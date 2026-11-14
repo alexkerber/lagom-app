@@ -495,8 +495,8 @@ async fn main() -> Result<()> {
             }
             let mut imap = connection(&account).await?;
             match command {
-                Command::Archive { .. } => imap.archive(&mut store, id).await?,
-                Command::Trash { .. } => imap.trash(&mut store, id).await?,
+                Command::Archive { .. } => { imap.archive(&mut store, id).await?; }
+                Command::Trash { .. } => { imap.trash(&mut store, id).await?; }
                 Command::Move { folder, .. } => {
                     let target = selected_folder(&store, &account, &folder)?;
                     imap.move_message(&mut store, id, target.id).await?;

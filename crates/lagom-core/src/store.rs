@@ -708,6 +708,9 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+    pub fn find_uid(&self, folder: i64, uid: u32) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT id FROM messages WHERE folder=?1 AND uid=?2", params![folder, uid], |r| r.get(0)).optional()?)
+    }
     /// Metadata saved beyond a completed sync checkpoint, including snoozed rows.
     pub fn messages_since(&self, folder: i64, uid: u32) -> Result<Vec<MessageSummary>> {
         let mut stmt = self.db.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM messages m WHERE m.folder=?1 AND m.uid>?2 ORDER BY m.uid"))?;
