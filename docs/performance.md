@@ -168,10 +168,15 @@ Measured 2026-11-14 on macOS 27.2.1, Apple M4 Max, release, other builds running
 | `sync.parse_save_1000`         |  0.8–1.5 s |  2 s |
 | `binary.size`                  | 27.5 MB |  30 MB |
 
-Two findings without a gate yet:
+First CI run (PR #131, 2026-11-14): every time was within 1.3× of the reference Mac, most
+faster. ubuntu-latest: cold start 36 ms, `load_accounts` 35 ms, `sync.parse_save_1000` 1.41 s.
+macos-latest: cold start 29 ms, `load_accounts` 28 ms, `sync.parse_save_1000` 1.11 s.
 
-- The release binary is 27.5 MB, not the 6.0 MB of the 2026-11-06 baseline. It is 2.5 MB
-  under its budget. Not investigated.
+Findings:
+
+- The release binary breaks its budget on Linux: 53.2 MB on ubuntu-latest (PR #131), so the
+  Linux job fails. macOS is 27.4 MB, not the 6.0 MB of the 2026-11-06 baseline. `strip` takes
+  the macOS binary to 21.6 MB; the release profile does not strip. Not investigated further.
 - A jump to one message (`reload_now`, inline) holds the UI thread for 69 ms at 100k
   (`reload.ui_thread_inline`). That breaks the 16 ms "open a message" budget. It has no CI
   budget, because the gate would fail on main today.
