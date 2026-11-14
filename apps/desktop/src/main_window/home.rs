@@ -70,7 +70,11 @@ impl MainWindow {
 
     fn unread_done(&mut self, result: lagom_core::Result<usize>, cx: &mut Context<Self>) {
         match result {
-            Ok(count) => self.today.unread = count,
+            Ok(count) => {
+                self.today.unread = count;
+                #[cfg(all(target_os = "macos", not(test)))]
+                crate::icon::set_badge(count);
+            }
             Err(e) => self.notify(format!("Could not read unread count: {e}"), cx),
         }
         cx.notify();
