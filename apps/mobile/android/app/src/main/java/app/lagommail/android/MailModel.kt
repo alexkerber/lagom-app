@@ -68,14 +68,18 @@ internal data class ComposeDraft(
     val attachments: List<SendAttachment> = emptyList(), val restored: Boolean = false,
     val isReply: Boolean = replyTo != null,
     val title: String = if (replyTo == null) "New message" else "Reply",
+    /** Only a mailto link or a saved draft fills Bcc, and then the field shows, as on desktop. */
+    val bcc: String = "", val showBcc: Boolean = bcc.isNotEmpty(),
+    /** The body a new message starts with, the signature: unchanged, it is not worth a draft. */
+    val startBody: String = "",
 ) {
     constructor(reply: ReplyDraft, kind: ComposeKind = ComposeKind.REPLY, email: String = "") : this(
         reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, id = draftMessageId(email), attachments = reply.attachments,
         title = when (kind) { ComposeKind.REPLY -> "Reply"; ComposeKind.REPLY_ALL -> "Reply all"; ComposeKind.FORWARD -> "Forward" })
     constructor(saved: LocalDraft) : this(saved.account, saved.to, saved.cc, saved.subject, saved.body,
         id = saved.id, attachments = saved.attachments, restored = true, isReply = saved.inReplyTo != null || saved.references.isNotEmpty(),
-        title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft")
-    val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || subject.isNotEmpty() || body.isNotEmpty() || attachments.isNotEmpty()
+        title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft", bcc = saved.bcc)
+    val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || bcc.isNotEmpty() || subject.isNotEmpty() || body != startBody || attachments.isNotEmpty()
     val attachmentsTooLarge get() = attachments.sumOf { it.data.size.toLong() } > ATTACHMENT_WARNING_BYTES
 }
 /** A mailto link or a share from another app, with the shared files. */
@@ -98,12 +102,12 @@ internal fun sharedMail(action: String?, data: String?, email: List<String>, cc:
         link.body.ifEmpty { text.orEmpty().replace("\r\n", "\n").replace('\r', '\n') })
 }
 
-/** Bcc is left out: mobile Compose has no Bcc field, and a hidden recipient must never be sent unseen. */
-internal fun sharedDraft(account: String, email: String, shared: SharedMail) = ComposeDraft(account,
-    shared.mail.to.joinToString(", "), shared.mail.cc.joinToString(", "), shared.mail.subject, shared.mail.body,
-    id = draftMessageId(email), attachments = shared.attachments)
+/** The link's body sits above the signature. Its Bcc shows in its own field, so a link never adds a hidden recipient unseen. */
+internal fun sharedDraft(account: String, email: String, shared: SharedMail, signature: String = "") = ComposeDraft(account,
+    shared.mail.to.joinToString(", "), shared.mail.cc.joinToString(", "), shared.mail.subject, shared.mail.body + signature,
+    id = draftMessageId(email), attachments = shared.attachments, bcc = shared.mail.bcc.joinToString(", "), startBody = signature)
 
-internal enum class MailAction { Done, Later, Delete }
+internal enum class MailAction(val notice: String) { Done("Moved to Done"), Later("Moved to Later"), Delete("Deleted") }
 
 internal class MailModel(
     private val open: suspend () -> LagomCoreInterface,
@@ -139,6 +143,10 @@ internal class MailModel(
     var notice by mutableStateOf<String?>(null)
     var undoSendId by mutableStateOf<String?>(null); private set
     private var sendRevision = 0
+    /** Sends still inside their Undo window. A newer notice may take Undo away, never the delivery. */
+    private var sendsWaiting = 0
+    /** What the last Done, Later or Delete changed, while its notice offers Undo. */
+    var undoChanges by mutableStateOf<List<MailChange>>(emptyList()); private set
     var drafts by mutableStateOf<List<DraftRow>>(emptyList()); private set
     var showingDrafts by mutableStateOf(false); private set
     var savedDraftIds by mutableStateOf<Set<String>>(emptySet()); private set
@@ -226,7 +234,7 @@ internal class MailModel(
         if (active) { start(); reload(); sync() }
         else if (!sending) draft?.let { persist(it) }
         // Background refresh never sends, so mail inside the Undo window needs its own job.
-        if (!active && undoSendId != null) sendLater()
+        if (!active && sendsWaiting > 0) sendLater()
     }
     suspend fun reload(more: Boolean = false) {
         val core = core ?: return
@@ -286,8 +294,18 @@ internal class MailModel(
         closeCompose(discard = false)
         if (draft != null) { error = "Finish the open message first."; return }
         accountForm = null
-        draft = sharedDraft(account, accounts.firstOrNull { it.id == account }?.email.orEmpty(), shared)
-        if (shared.mail.bcc.isNotEmpty()) notice = "The link's Bcc was left out."
+        val signature = requireNotNull(core).newMailBody(account)
+        if (draft != null) return
+        draft = sharedDraft(account, accounts.firstOrNull { it.id == account }?.email.orEmpty(), shared, signature)
+    }
+    /** A new message from the account, starting with its signature. */
+    suspend fun newMessage(account: String) {
+        val core = core ?: return
+        if (draft != null) return
+        val request = ++composeRevision
+        val body = core.newMailBody(account)
+        if (request != composeRevision || draft != null) return
+        draft = ComposeDraft(account, body = body, startBody = body, id = draftMessageId(accounts.firstOrNull { it.id == account }?.email.orEmpty()))
     }
     suspend fun openNotification(target: MailTarget) {
         closeCompose(discard = false)
@@ -400,14 +418,38 @@ internal class MailModel(
         val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds ?: listOf(id) else listOf(id)
         actingId = id
         try {
-            when (action) {
+            val changes = when (action) {
                 MailAction.Done -> core.done(ids)
                 MailAction.Later -> core.later(ids, until ?: core.laterChoices()[1].untilUnix)
                 MailAction.Delete -> core.delete(ids)
             }
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
+            offerUndo(changes, action.notice)
         // Busy until the list shows the result, so a swiped row never comes back before it leaves.
         } finally { try { reload() } finally { actingId = null } }
+    }
+    /** The newest action owns the notice, so its Undo replaces an older one, also Undo send. */
+    private fun offerUndo(changes: List<MailChange>, text: String) {
+        if (changes.isEmpty()) return
+        sendRevision++
+        undoSendId = null
+        undoChanges = changes
+        notice = text
+        // The same 5 s window as Undo send.
+        perform {
+            delay(5000)
+            if (undoChanges === changes) { undoChanges = emptyList(); notice = null }
+        }
+    }
+    /** Undo for the last Done, Later or Delete: each message goes back where it was. */
+    suspend fun undoAction() {
+        val core = core ?: return
+        val changes = undoChanges
+        if (changes.isEmpty() || working) return
+        undoChanges = emptyList()
+        notice = null
+        actingId = changes.first().id
+        try { core.undo(changes) } finally { try { reload() } finally { actingId = null } }
     }
     /** The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session. */
     var unsubscribingId by mutableStateOf<Long?>(null); private set
@@ -467,7 +509,7 @@ internal class MailModel(
         // Rust may finish a write after coroutine cancellation; keep the lock until it completes.
         withContext(NonCancellable) {
             try {
-                val saved = core.saveDraft(snapshot.id, snapshot.account, snapshot.to, snapshot.cc, snapshot.subject,
+                val saved = core.saveDraft(snapshot.id, snapshot.account, snapshot.to, snapshot.cc, snapshot.bcc, snapshot.subject,
                     snapshot.body, snapshot.replyTo, snapshot.attachments)
                 draftRevision++
                 savedDraftIds = savedDraftIds + saved.id
@@ -491,10 +533,12 @@ internal class MailModel(
             autosave?.cancelAndJoin()
             draftLock.withLock {
                 withContext(NonCancellable) {
-                    val replacement = old.copy(id = draftMessageId(accounts.firstOrNull { it.id == account }?.email.orEmpty()), account = account)
+                    var replacement = old.copy(id = draftMessageId(accounts.firstOrNull { it.id == account }?.email.orEmpty()), account = account)
+                    // An untouched body is the old account's signature; the new account brings its own.
+                    if (old.body == old.startBody) core.newMailBody(account).let { replacement = replacement.copy(body = it, startBody = it) }
                     if (old.hasContent || old.id in savedDraftIds) {
                         // Save the replacement first so a failed account change cannot lose the original.
-                        val saved = core.saveDraft(replacement.id, account, old.to, old.cc, old.subject, old.body, null, old.attachments)
+                        val saved = core.saveDraft(replacement.id, account, old.to, old.cc, old.bcc, old.subject, replacement.body, null, old.attachments)
                         draftRevision++
                         drafts = listOf(saved) + drafts
                         savedDraftIds = savedDraftIds + saved.id
@@ -554,10 +598,12 @@ internal class MailModel(
                     savedDraftIds = savedDraftIds - snapshot.id
                     finishCompose(snapshot.id)
                     val request = ++sendRevision
+                    undoChanges = emptyList()
                     undoSendId = snapshot.id
                     notice = "Sending…"
+                    sendsWaiting++
                     perform {
-                        delay(5000)
+                        try { delay(5000) } finally { sendsWaiting-- }
                         if (sendRevision == request && undoSendId == snapshot.id) { undoSendId = null; notice = null }
                         if (foreground) sync() else sendLater()
                     }

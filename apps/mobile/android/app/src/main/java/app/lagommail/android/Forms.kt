@@ -86,7 +86,7 @@ import kotlinx.coroutines.CancellationException
                         })
                     }
                 }
-                TextButton(enabled = !model.sending && !model.attaching && (draft.to.isNotBlank() || draft.cc.isNotBlank()) && draft.account.isNotBlank(),
+                TextButton(enabled = !model.sending && !model.attaching && (draft.to.isNotBlank() || draft.cc.isNotBlank() || draft.bcc.isNotBlank()) && draft.account.isNotBlank(),
                 modifier = Modifier.heightIn(min = 48.dp), onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -104,6 +104,7 @@ import kotlinx.coroutines.CancellationException
             }
             RecipientField("To", draft.to, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(to = it)) }
             RecipientField("Cc", draft.cc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(cc = it)) }
+            if (draft.showBcc) RecipientField("Bcc", draft.bcc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(bcc = it)) }
             contactsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Field("Subject", draft.subject, !model.sending) { edit(draft.copy(subject = it)) }
             if (draft.attachments.isNotEmpty() || model.attaching) {
@@ -259,4 +260,32 @@ internal class AccountForm {
         FilterChip(tls, { change(true) }, label = { Text("TLS") }, enabled = enabled)
         FilterChip(!tls, { change(false) }, label = { Text("STARTTLS") }, enabled = enabled)
     }
+}
+
+/** The desktop's per-account signature: added to new mail, replies and forwards. */
+@Composable internal fun SignatureDialog(model: MailModel, account: MailAccount, close: () -> Unit) {
+    var text by remember(account.id) { mutableStateOf<String?>(null) }
+    var saving by remember(account.id) { mutableStateOf(false) }
+    LaunchedEffect(account.id) {
+        try { text = requireNotNull(model.core).signature(account.id) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (e: Exception) { model.error = e.mailMessage(); close() }
+    }
+    AlertDialog(onDismissRequest = { if (!saving) close() }, title = { Text("Signature") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(account.email, style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(text.orEmpty(), { text = it }, enabled = text != null && !saving, minLines = 4,
+                label = { Text("Added to new mail, replies and forwards") }, modifier = Modifier.fillMaxWidth())
+        }
+    }, confirmButton = {
+        TextButton(enabled = text != null && !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = {
+            saving = true
+            model.perform {
+                try { requireNotNull(model.core).setSignature(account.id, text.orEmpty()); close() }
+                finally { saving = false }
+            }
+        }) { Text("Save") }
+    }, dismissButton = {
+        TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = close) { Text("Cancel") }
+    })
 }

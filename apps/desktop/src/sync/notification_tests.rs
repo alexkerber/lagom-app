@@ -85,7 +85,7 @@ async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
         let mut worker = Worker { store, sessions: [(account.id.clone(), session)].into(), idle: HashMap::new(),
             moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
         if resolving {
-            worker.moved.insert(id, (inbox, "incoming@example.test".into()));
+            worker.moved.insert(id, Place { folder: inbox, uid: None, message_id: "incoming@example.test".into() });
             worker.resolve(id).await.unwrap();
         } else {
             let act = if into_inbox { Act::Move(inbox) } else { Act::Archive };

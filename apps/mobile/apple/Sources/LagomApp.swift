@@ -45,6 +45,7 @@ struct MailView: View {
     @State private var laterChoices: [LaterChoice] = []
     @State private var laterID: Int64?
     @State private var retrying: SendFailure?
+    @State private var signing: MailAccount?
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
@@ -95,6 +96,9 @@ struct MailView: View {
                             Button("Undo") { Task { await model.undoSend() } }
                                 .frame(minWidth: 44, minHeight: 44).accessibilityLabel("Undo send")
                                 .disabled(model.composeBusy || model.preparingCompose)
+                        } else if !model.undoChanges.isEmpty {
+                            Button("Undo") { Task { await model.undoAction() } }
+                                .frame(minWidth: 44, minHeight: 44).disabled(model.working)
                         } else {
                             Button("Dismiss") { model.notice = nil }.frame(minWidth: 44, minHeight: 44)
                         }
@@ -118,6 +122,7 @@ struct MailView: View {
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
+        .sheet(item: $signing) { account in SignatureView(model: model, account: account) }
         .confirmationDialog("Send again? Check Sent first if delivery was uncertain. This can send a duplicate.", isPresented: Binding(get: { retrying != nil }, set: { if !$0 { retrying = nil } })) {
             if let failure = retrying {
                 Button("Send again") {
@@ -141,7 +146,7 @@ struct MailView: View {
                 if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
                 IconButton(title: "New message", icon: "compose") {
                     let account = model.accountID ?? model.accounts.first?.id ?? ""
-                    model.composeDraft = ComposeDraft(account: account, email: model.accounts.first { $0.id == account }?.email ?? "")
+                    Task { await model.newMessage(account: account) }
                 }
                 .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
                 .padding(.trailing, -6)
@@ -167,7 +172,10 @@ struct MailView: View {
             }
             Button("Add account") { addAccount = true }
             ForEach(model.accounts, id: \.id) { account in
-                Button("Remove \(account.email)", role: .destructive) { removing = account }
+                Menu(account.email) {
+                    Button("Signature") { signing = account }
+                    Button("Remove account", role: .destructive) { removing = account }
+                }
             }
         } label: {
             VStack(alignment: .leading, spacing: 1) {

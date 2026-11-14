@@ -171,6 +171,40 @@ async fn move_and_copy_fallback_check_every_tagged_reply_and_rollback() {
 }
 
 #[tokio::test]
+async fn move_and_copy_return_the_destination_uid_from_copyuid() {
+    for (capability, reply, expected) in [
+        // RFC 6851 sends COPYUID untagged before the expunge; some servers tag it.
+        ("MOVE UIDPLUS", "* OK [COPYUID 7 1 42] moved\r\n* 1 EXPUNGE\r\n{tag} OK done\r\n", Some((7, 42))),
+        ("MOVE UIDPLUS", "* 1 EXPUNGE\r\n{tag} OK [COPYUID 7 1:1 42] done\r\n", Some((7, 42))),
+        ("UIDPLUS", "{tag} OK [COPYUID 7 1 43] done\r\n", Some((7, 43))),
+        // Any set other than exactly the moved UID is not this message.
+        ("MOVE UIDPLUS", "* OK [COPYUID 7 2 42] moved\r\n{tag} OK done\r\n", None),
+        ("MOVE UIDPLUS", "* OK [COPYUID 7 1 42:43] moved\r\n{tag} OK done\r\n", None),
+        ("MOVE", "{tag} OK done\r\n", None),
+    ] {
+        let mut steps = login(capability);
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        if capability.contains("MOVE") {
+            steps.push(("UID MOVE 1 \"Projects\"".into(), reply.into()));
+        } else {
+            steps.push(("UID COPY 1 \"Projects\"".into(), reply.into()));
+            steps.push(step("UID STORE 1 +FLAGS.SILENT (\\Deleted)", ""));
+            steps.push(step("UID EXPUNGE 1", ""));
+        }
+        steps.extend(empty_sync("Projects"));
+        steps.extend(empty_sync("INBOX"));
+        let (mut imap, mut store, _temp, server) = fixture(steps).await;
+        let inbox = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let target = store.save_folder(&imap.account.id, "Projects", None, FolderRole::Other).unwrap();
+        store.reset_uidvalidity(inbox, 7).unwrap();
+        let id = message(&store, &imap.account.id, inbox, 1);
+        assert_eq!(imap.move_message(&mut store, id, target).await.unwrap(), Moved { folder: target, uid: expected }, "{reply}");
+        assert!(imap.take_refresh_error().is_none());
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn confirmed_move_is_not_rolled_back_when_refresh_is_refused() {
     let mut steps = login("MOVE");
     steps.push(step("SELECT \"INBOX\"", selected()));

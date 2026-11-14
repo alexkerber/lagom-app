@@ -1,7 +1,7 @@
 import PhotosUI
 import SwiftUI
 
-/// The desktop compose sheet: From, To, Cc and Subject lines, the body, and Send with a word count.
+/// The desktop compose sheet: From, To, Cc (and Bcc from a link or draft) and Subject lines, the body, and Send with a word count.
 struct ComposeView: View {
     let model: MailModel
     @State var draft: ComposeDraft
@@ -54,6 +54,10 @@ struct ComposeView: View {
                 suggestions("To", binding(\.to))
                 FieldRow(label: "Cc") { address("Cc", binding(\.cc)) }
                 suggestions("Cc", binding(\.cc))
+                if draft.showBcc {
+                    FieldRow(label: "Bcc") { address("Bcc", binding(\.bcc)) }
+                    suggestions("Bcc", binding(\.bcc))
+                }
                 if let contactsError { Text(contactsError).lagomFont(.small).foregroundStyle(Theme.danger) }
                 FieldRow(label: "Subject") {
                     TextField("Subject", text: binding(\.subject), prompt: Text("")).fontWeight(.semibold).accessibilityLabel("Subject")
@@ -108,7 +112,7 @@ struct ComposeView: View {
                     } catch { self.error = error.localizedDescription }
                 }
             }
-            .disabled(sending || attaching || (draft.to.isEmpty && draft.cc.isEmpty) || draft.account.isEmpty)
+            .disabled(sending || attaching || (draft.to.isEmpty && draft.cc.isEmpty && draft.bcc.isEmpty) || draft.account.isEmpty)
             Menu {
                 Button("Files") { pickingFiles = true }
                 Button("Photos") { pickingPhotos = true }
