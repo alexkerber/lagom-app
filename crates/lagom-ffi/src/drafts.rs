@@ -6,6 +6,7 @@ pub struct LocalDraft {
     pub id: String, pub account: String, pub to: String, pub cc: String,
     pub subject: String, pub body: String, pub in_reply_to: Option<String>, pub references: Vec<String>,
     pub attachments: Vec<SendAttachment>,
+    #[uniffi(default = "")] pub bcc: String,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -25,7 +26,8 @@ fn record(draft: Draft) -> LocalDraft {
     let (in_reply_to, references) = draft.reply.unwrap_or_default();
     LocalDraft { id: draft.id, account: draft.account, to: draft.to, cc: draft.cc,
         subject: draft.subject, body: draft.text, in_reply_to, references,
-        attachments: draft.attachments.into_iter().map(|a| SendAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect() }
+        attachments: draft.attachments.into_iter().map(|a| SendAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect(),
+        bcc: draft.bcc }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -50,7 +52,7 @@ impl LagomCore {
     }
 
     /// Incomplete recipient text is valid in a draft. Validation belongs to enqueue.
-    pub async fn save_draft(&self, id: String, account_id: String, to: String, cc: String, subject: String,
+    pub async fn save_draft(&self, id: String, account_id: String, to: String, cc: String, bcc: String, subject: String,
         body: String, reply_to: Option<i64>, attachments: Vec<SendAttachment>) -> Result<DraftRow> {
         self.run(move |s| {
             account(s, &account_id)?;
@@ -93,7 +95,7 @@ impl LagomCore {
                 if to == draft.to { old_to } else { split_recipients(to.clone()) },
                 if cc == draft.cc { old_cc } else { split_recipients(cc.clone()) },
             ]);
-            draft.to = to; draft.cc = cc; draft.subject = subject; draft.text = body;
+            draft.to = to; draft.cc = cc; draft.bcc = bcc; draft.subject = subject; draft.text = body;
             draft.attachments = attachments.into_iter().map(|a| smtp::OutgoingAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect();
             s.save_draft(&draft)?;
             Ok(s.draft_row(&draft.id)?.into())

@@ -165,7 +165,7 @@ final class MailModelTests: XCTestCase {
         return true
     }
     var snoozed: Int64?
-    override func later(ids: [Int64], untilUnix: Int64) async throws { snoozed = untilUnix }
+    override func later(ids: [Int64], untilUnix: Int64) async throws -> [MailChange] { snoozed = untilUnix; return [] }
     var saved: [LocalDraft] = []
     var saveCalls = 0
     var saveGate: CheckedContinuation<Void, Never>?
@@ -191,13 +191,13 @@ final class MailModelTests: XCTestCase {
         return draft
     }
     override func savedReply(id: Int64) async throws -> LocalDraft? { restoredReply }
-    override func saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
+    override func saveDraft(id: String, accountId: String, to: String, cc: String, bcc: String, subject: String, body: String,
                             replyTo: Int64?, attachments: [SendAttachment]) async throws -> DraftRow {
         saveCalls += 1
         if suspendSave { await withCheckedContinuation { saveGate = $0 } }
         if fail { throw MailError.Failed(reason: "fixture failure") }
         let draft = LocalDraft(id: id, account: accountId, to: to, cc: cc, subject: subject, body: body,
-                               inReplyTo: replyTo.map { "<\($0)>" }, references: [], attachments: attachments)
+                               inReplyTo: replyTo.map { "<\($0)>" }, references: [], attachments: attachments, bcc: bcc)
         saved.removeAll { $0.id == id }
         saved.append(draft)
         return draft.row
@@ -341,6 +341,20 @@ extension MailModelTests {
         await model.prepareCompose(id: 42, kind: .reply)
         XCTAssertTrue(core.calls.isEmpty)
         XCTAssertEqual(model.composeDraft?.body, "Unsaved text")
+    }
+
+    @MainActor func testBccFromALinkIsSavedAndRestoredInItsField() async throws {
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel()
+        model.core = core
+        let mail = Mailto(to: ["a@example.test"], cc: [], bcc: ["hidden@example.test"], subject: "Hi", body: "")
+        model.composeDraft = ComposeDraft(mailto: mail, account: "fixture")
+        XCTAssertTrue(model.composeDraft?.showBcc == true)
+        try await model.closeCompose(discard: false)
+        let restored = ComposeDraft(saved: try XCTUnwrap(core.saved.first))
+        XCTAssertEqual(restored.bcc, "hidden@example.test")
+        XCTAssertTrue(restored.showBcc)
+        XCTAssertFalse(ComposeDraft(account: "fixture").showBcc)
     }
 
     @MainActor func testPreparationAndEnqueueFailuresRetainEdits() async throws {

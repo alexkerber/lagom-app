@@ -45,13 +45,14 @@ import kotlin.math.abs
 @Composable internal fun MailScreen(model: MailModel, twoPane: Boolean) {
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
     var removing by remember { mutableStateOf<MailAccount?>(null) }
+    var signing by remember { mutableStateOf<MailAccount?>(null) }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
     val rise = with(LocalDensity.current) { 12.dp.roundToPx() }
     Box(Modifier.fillMaxSize()) {
         Box(if (overlay != null) Modifier.clearAndSetSemantics {} else Modifier) {
-            MailHome(model, twoPane, onRemove = { removing = it }, onRetry = { retrying = it })
+            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onRetry = { retrying = it })
         }
         AnimatedContent(overlay, Modifier.fillMaxSize(), contentKey = { it?.let { screen -> screen::class } }, label = "screen", transitionSpec = {
             when {
@@ -79,6 +80,7 @@ import kotlin.math.abs
             confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove") } },
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } })
     }
+    signing?.let { account -> SignatureDialog(model, account) { signing = null } }
     retrying?.let { failure ->
         AlertDialog(onDismissRequest = { retrying = null }, title = { Text("Send again?") },
             text = { Text("Check Sent first if delivery was uncertain. This can send a duplicate.") },
@@ -92,7 +94,7 @@ internal fun Mailbox.label(): String = when (this) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit) {
+@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Scaffold(topBar = {
         TopAppBar(title = {
@@ -121,6 +123,7 @@ internal fun Mailbox.label(): String = when (this) {
                     }
                     DropdownMenuItem(text = { Text("Add account") }, enabled = model.core != null, onClick = { menu = false; model.accountForm = AccountForm() })
                     model.accounts.forEach { account ->
+                        DropdownMenuItem(text = { Text("Signature for ${account.email}") }, onClick = { menu = false; onSign(account) })
                         DropdownMenuItem(text = { Text("Remove ${account.email}") }, onClick = { menu = false; onRemove(account) })
                     }
                 }
@@ -128,7 +131,7 @@ internal fun Mailbox.label(): String = when (this) {
         }, actions = {
             TextButton(enabled = model.accounts.isNotEmpty(), onClick = {
                 val account = model.accountId ?: model.accounts.first().id
-                model.draft = ComposeDraft(account, id = draftMessageId(model.accounts.firstOrNull { it.id == account }?.email.orEmpty()))
+                model.perform { model.newMessage(account) }
             }) { Text("Compose") }
         })
     }, snackbarHost = { Notice(model) }) { padding ->
@@ -173,9 +176,9 @@ internal fun Mailbox.label(): String = when (this) {
     }
 }
 
-/** The Sent notice with Undo: a snackbar that springs up and fades away. */
+/** The Sent, Done, Later and Deleted notice with Undo: a snackbar that springs up and fades away. */
 @Composable private fun Notice(model: MailModel) {
-    val notice = model.notice?.let { it to (model.undoSendId != null) }
+    val notice = model.notice?.let { it to (model.undoSendId != null || model.undoChanges.isNotEmpty()) }
     AnimatedContent(notice, label = "notice", transitionSpec = {
         (fadeIn(Fade) + slideInVertically(landing(IntOffset.VisibilityThreshold)) { it / 2 }) togetherWith fadeOut(Fade) using SizeTransform(clip = false)
     }) { shown ->
@@ -186,8 +189,10 @@ internal fun Mailbox.label(): String = when (this) {
         Snackbar(Modifier.padding(12.dp).semantics { liveRegion = LiveRegionMode.Polite },
             containerColor = MaterialTheme.colorScheme.onSurface, contentColor = ink, action = {
                 val colors = ButtonDefaults.textButtonColors(contentColor = ink)
-                if (undo) TextButton(enabled = !model.sending, colors = colors, onClick = { model.perform { model.undoSend() } },
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Undo send" }) {
+                val sent = model.undoSendId != null
+                if (undo) TextButton(enabled = if (sent) !model.sending else !model.working, colors = colors,
+                    onClick = { model.perform { if (sent) model.undoSend() else model.undoAction() } },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = if (sent) "Undo send" else "Undo" }) {
                     Text("Undo", fontWeight = FontWeight.SemiBold)
                 } else TextButton(colors = colors, onClick = { model.notice = null }) { Text("Dismiss", fontWeight = FontWeight.SemiBold) }
             }) { Text(text) }

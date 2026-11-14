@@ -481,13 +481,113 @@ async fn done_clears_snooze_when_already_in_archive_but_not_on_failure() {
             }
         }
     });
-    core.later(vec![id], now() + 3600).await.unwrap();
+    let until = now() + 3600;
+    core.later(vec![id], until).await.unwrap();
     assert!(core.done(vec![id]).await.is_err());
     assert_eq!(core.mailbox(None, Mailbox::Later, 100, 0).await.unwrap()[0].id, id);
-    core.done(vec![id]).await.unwrap();
+    let changes = core.done(vec![id]).await.unwrap();
     server.await.unwrap();
     assert!(core.mailbox(None, Mailbox::Later, 100, 0).await.unwrap().is_empty());
     assert_eq!(core.mailbox(None, Mailbox::Done, 100, 0).await.unwrap()[0].id, id);
+    // Nothing moved, so Undo needs no server: it only brings the snooze back.
+    assert_eq!((changes.len(), changes[0].from_folder == changes[0].to_folder, changes[0].snoozed_until), (1, true, Some(until)));
+    core.undo(changes).await.unwrap();
+    assert_eq!(core.mailbox(None, Mailbox::Later, 100, 0).await.unwrap()[0].id, id);
+}
+
+#[tokio::test]
+async fn undo_later_restores_the_old_snooze_without_a_server() {
+    let (_dir, core) = fixture();
+    let (first, second) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "later@example.test", 1);
+        (mail(&mut s, &a, 1, 1), mail(&mut s, &a, 2, 2))
+    };
+    let earlier = now() + 100;
+    core.later(vec![second], earlier).await.unwrap();
+    let changes = core.later(vec![first, second], now() + 3600).await.unwrap();
+    assert_eq!(changes.iter().map(|c| (c.id, c.snoozed_until)).collect::<Vec<_>>(), [(first, None), (second, Some(earlier))]);
+    core.undo(changes).await.unwrap();
+    assert_eq!(core.inbox(20, 0).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [first]);
+    assert_eq!(core.stores.local.lock().unwrap().message_summary(second).unwrap().snoozed_until, Some(earlier));
+}
+
+#[tokio::test]
+async fn undo_done_moves_the_message_back_to_the_inbox() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, id) = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "undo@example.test", listener.local_addr().unwrap().port());
+            let id = mail(&mut s, &a, 1, 1);
+            (a, id)
+        };
+        let server = tokio::spawn(async move {
+            let mut location = "INBOX".to_string();
+            for destination in ["Archive", "INBOX"] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                let mut selected = String::new();
+                let mut moved = false;
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                    let data = if cmd.starts_with("LOGIN ") { String::new() }
+                    else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1 MOVE\r\n".into() }
+                    else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n* LIST (\\Archive) NIL \"Archive\"\r\n".into() }
+                    else if let Some(name) = cmd.strip_prefix("SELECT ") {
+                        selected = name.trim_matches('"').into();
+                        "* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+                    } else if cmd.starts_with("UID MOVE ") {
+                        assert_eq!(cmd, format!("UID MOVE 1 \"{destination}\""));
+                        assert_eq!(selected, location);
+                        location = destination.into(); moved = true; String::new()
+                    } else if cmd == "UID SEARCH ALL" {
+                        if selected == location { "* SEARCH 1\r\n".into() } else { "* SEARCH\r\n".into() }
+                    } else if cmd.contains("BODYSTRUCTURE") {
+                        let header = "From: sender@example.test\r\nSubject: Moved\r\nMessage-ID: <m1@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                        format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                    } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                    else if cmd == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
+                    else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                    else { panic!("unexpected command {cmd}"); };
+                    socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                    if cmd == "LOGOUT" { break; }
+                }
+                assert!(moved);
+            }
+        });
+        let changes = core.done(vec![id]).await.unwrap();
+        assert!(core.inbox(20, 0).await.unwrap().is_empty());
+        assert_eq!(changes.len(), 1);
+        assert_eq!((changes[0].id, changes[0].header_id.as_str()), (id, "m1@example.test"));
+        assert_ne!(changes[0].from_folder, changes[0].to_folder);
+        core.undo(changes).await.unwrap();
+        server.await.unwrap();
+        let inbox = core.mailbox(Some(a.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert!(core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap().is_empty());
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn signature_is_per_account_and_starts_new_mail() {
+    let (_dir, core) = fixture();
+    let (a, b) = {
+        let s = core.stores.local.lock().unwrap();
+        (fixture_account(&s, "a@example.test", 1), fixture_account(&s, "b@example.test", 1))
+    };
+    assert_eq!(core.new_mail_body(a.id.clone()).await.unwrap(), "");
+    core.set_signature(a.id.clone(), "**Team**\nContact".into()).await.unwrap();
+    assert_eq!(core.signature(a.id.clone()).await.unwrap(), "**Team**\nContact");
+    assert_eq!(core.new_mail_body(a.id.clone()).await.unwrap(), "\n\n-- \n**Team**\nContact");
+    assert_eq!(core.signature(b.id.clone()).await.unwrap(), "");
+    assert!(core.set_signature("missing".into(), "x".into()).await.is_err());
+    core.set_signature(a.id.clone(), "  ".into()).await.unwrap();
+    assert_eq!(core.new_mail_body(a.id).await.unwrap(), "");
 }
 
 #[tokio::test]
@@ -828,7 +928,7 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     };
     let id = smtp::message_id(&a.email);
     let save = |body: &str, reply| core.save_draft(id.clone(), a.id.clone(), "\"Doe, Jo\" <jo@example.test>".into(),
-        "copy@example.test".into(), "Re: Hello".into(), body.into(), reply,
+        "copy@example.test".into(), "hidden@example.test".into(), "Re: Hello".into(), body.into(), reply,
         vec![SendAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }]);
     let first = save("unfinished", Some(source)).await.unwrap();
     assert!(first.updated_unix >= now() - 1);
@@ -837,7 +937,7 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     assert_eq!(first.references, ["<root@example.test>", "<m1@example.test>"]);
     assert_eq!(core.saved_reply(source).await.unwrap().unwrap().id, id);
     assert!(core.saved_reply(other).await.unwrap().is_none());
-    assert!(core.save_draft(id.clone(), b.id, "".into(), "".into(), "".into(), "wrong account".into(), None, vec![]).await.is_err());
+    assert!(core.save_draft(id.clone(), b.id, "".into(), "".into(), "".into(), "".into(), "wrong account".into(), None, vec![]).await.is_err());
     core.stores.local.lock().unwrap().delete_message(source).unwrap();
     save("latest edits", Some(source)).await.unwrap();
     let last = core.local_draft(id.clone()).await.unwrap();
@@ -848,6 +948,7 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     assert_eq!(restored.len(), 1);
     let restored = core.local_draft(restored[0].id.clone()).await.unwrap();
     assert_eq!(restored.body, "latest edits");
+    assert_eq!(restored.bcc, "hidden@example.test");
     assert_eq!(restored.attachments[0].data, [0, 255]);
     let queued = core.send_draft(id.clone()).await.unwrap();
     assert_eq!(queued, id);
@@ -855,12 +956,13 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     let pending = core.stores.local.lock().unwrap().pending(&id).unwrap();
     assert_eq!(pending.mail.to, ["\"Doe, Jo\" <jo@example.test>"]);
     assert_eq!(pending.mail.cc, ["copy@example.test"]);
+    assert_eq!(pending.mail.bcc, ["hidden@example.test"]);
     assert_eq!(pending.mail.text, "latest edits");
     assert_eq!(pending.mail.in_reply_to, first.in_reply_to);
     assert_eq!(pending.mail.references, first.references);
     assert_eq!(pending.mail.attachments[0].data, [0, 255]);
     assert!(core.send_draft(id.clone()).await.is_err());
-    assert!(core.save_draft(id.clone(), a.id.clone(), "".into(), "".into(), "".into(), "late".into(), None, vec![]).await.is_err());
+    assert!(core.save_draft(id.clone(), a.id.clone(), "".into(), "".into(), "".into(), "".into(), "late".into(), None, vec![]).await.is_err());
     {
         let s = core.stores.local.lock().unwrap();
         assert!(s.due_outbox(&a.id, milliseconds()).unwrap().is_empty());
@@ -886,7 +988,7 @@ async fn draft_invalid_tokens_and_failed_enqueue_preserve_edits_and_discard_is_d
     let mut draft = lagom_core::outbox::Draft { id: id.clone(), account: a.id.clone(), to: "Name, <valid@example.test>".into(),
         recipient_tokens: Some([vec!["Name".into(), "<valid@example.test>".into()], vec![]]), text: "keep me".into(), ..Default::default() };
     core.stores.local.lock().unwrap().save_draft(&draft).unwrap();
-    core.save_draft(id.clone(), a.id, draft.to.clone(), "".into(), "edited".into(), draft.text.clone(), None, vec![]).await.unwrap();
+    core.save_draft(id.clone(), a.id, draft.to.clone(), "".into(), "".into(), "edited".into(), draft.text.clone(), None, vec![]).await.unwrap();
     draft.subject = "edited".into();
     assert!(core.send_draft(id.clone()).await.is_err());
     assert_eq!(core.stores.local.lock().unwrap().draft(&id).unwrap(), draft);
@@ -905,7 +1007,7 @@ async fn mobile_sync_all_keeps_local_drafts_off_the_server() {
         let a = fixture_account(&core.stores.local.lock().unwrap(), "a@example.test", listener.local_addr().unwrap().port());
         let id = smtp::message_id(&a.email);
         // Even an invalid recipient is a valid local draft and must not break refresh.
-        core.save_draft(id.clone(), a.id.clone(), "unfinished".into(), "".into(), "".into(), "local".into(), None, vec![]).await.unwrap();
+        core.save_draft(id.clone(), a.id.clone(), "unfinished".into(), "".into(), "".into(), "".into(), "local".into(), None, vec![]).await.unwrap();
         assert_eq!(core.stores.local.lock().unwrap().due_drafts(&a.id, milliseconds()).unwrap(), [id.clone()]);
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
@@ -942,7 +1044,7 @@ async fn mobile_draft_list_and_reply_resume_only_offer_locally_owned_drafts() {
         (a, source)
     };
     let id = smtp::message_id(&a.email);
-    core.save_draft(id.clone(), a.id, "sender@example.test".into(), "".into(), "".into(), "local".into(), Some(source), vec![]).await.unwrap();
+    core.save_draft(id.clone(), a.id, "sender@example.test".into(), "".into(), "".into(), "".into(), "local".into(), Some(source), vec![]).await.unwrap();
     assert_eq!(core.local_drafts().await.unwrap().len(), 1);
     assert!(core.saved_reply(source).await.unwrap().is_some());
     // The existing folder reader marks imported server drafts as unowned. Server editing is outside this API.
@@ -964,7 +1066,7 @@ async fn first_reply_save_survives_deleted_parent() {
         (a, source)
     };
     let id = smtp::message_id(&a.email);
-    let row = core.save_draft(id.clone(), a.id, "unfinished".into(), "".into(), "Reply".into(),
+    let row = core.save_draft(id.clone(), a.id, "unfinished".into(), "".into(), "".into(), "Reply".into(),
         "keep edits".into(), Some(source), vec![]).await.unwrap();
     assert_eq!(row.id, id);
     let draft = core.local_draft(id.clone()).await.unwrap();

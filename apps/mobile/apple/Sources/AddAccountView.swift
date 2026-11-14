@@ -132,3 +132,60 @@ struct AddAccountView: View {
         } catch { self.error = error.localizedDescription }
     }
 }
+
+extension MailAccount: Identifiable {}
+
+/// The desktop's per-account signature: added to new mail, replies and forwards.
+struct SignatureView: View {
+    let model: MailModel
+    let account: MailAccount
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var loaded = false
+    @State private var saving = false
+    @State private var error: String?
+
+    var body: some View {
+        SheetScaffold(title: "Signature", cancelDisabled: saving, cancel: { dismiss() }) {
+            VStack(alignment: .leading, spacing: 0) {
+                FieldRow(label: "Account") { Text(account.email).lineLimit(1) }
+                    .padding(.horizontal, 16)
+                TextEditor(text: $text)
+                    .lagomFont(.body).lineSpacing(3)
+                    .scrollContentBackground(.hidden)
+                    .overlay(alignment: .topLeading) {
+                        if text.isEmpty {
+                            Text("Added to new mail, replies and forwards. Markdown supported.").lagomFont(.body).foregroundStyle(Theme.secondary)
+                                .padding(.top, 8).padding(.leading, 5).allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .disabled(!loaded)
+                    .accessibilityLabel("Signature")
+                if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(16) }
+            }
+        } footer: {
+            HouseButton(title: "Save", icon: "done", primary: true) { Task { await save() } }
+                .disabled(!loaded || saving)
+            Spacer(minLength: 0)
+        }
+        .interactiveDismissDisabled(saving)
+        .task {
+            guard let core = model.core else { return }
+            do {
+                text = try await core.signature(accountId: account.id)
+                loaded = true
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private func save() async {
+        guard let core = model.core else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            try await core.setSignature(accountId: account.id, text: text)
+            dismiss()
+        } catch { self.error = error.localizedDescription }
+    }
+}
