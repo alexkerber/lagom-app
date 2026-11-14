@@ -150,3 +150,125 @@ async fn roundtrip(legacy: bool, oversized: bool, pending_move: bool) {
     assert!(html.contains(&inline::url(id, &parts[0].cid, false)));
     assert!(inline::resolve(id + 1, &parts, &inline::url(id, &parts[0].cid, false)).is_none());
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Body { Large, Legacy, TooLarge, Lying, Refused }
+
+#[tokio::test]
+async fn opening_a_body_over_4_mib_fetches_it_once() { open_body(Body::Large).await; }
+
+#[tokio::test]
+async fn opening_legacy_text_only_mail_fetches_its_html_once() { open_body(Body::Legacy).await; }
+
+#[tokio::test]
+async fn opening_a_body_over_25_mib_is_not_downloaded_and_not_retried() { open_body(Body::TooLarge).await; }
+
+#[tokio::test]
+async fn opening_a_body_stops_at_the_budget_when_the_server_lies_about_its_size() { open_body(Body::Lying).await; }
+
+#[tokio::test]
+async fn opening_a_body_the_server_refuses_is_retried_on_a_later_open() { open_body(Body::Refused).await; }
+
+async fn open_body(case: Body) {
+    use lagom_core::mime::{BODY_UNAVAILABLE, MAX_MIME_BYTES, MAX_OPEN_BYTES};
+    let line = "x".repeat(76) + "\r\n";
+    let text = if case == Body::Legacy { "Plain text".to_owned() } else { line.repeat(MAX_MIME_BYTES / line.len() + 1) };
+    let html = "<p>Rich</p>";
+    let header = "From: Big <big@example.test>\r\nSubject: Big\r\nMessage-ID: <big@example.test>\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n";
+    // Sizes the server claims; the client must not trust them.
+    let claimed = if case == Body::TooLarge { MAX_OPEN_BYTES + 1 } else { text.len() };
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let wire_text = text.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (read, mut write) = socket.into_split();
+        let mut read = BufReader::new(read);
+        write.write_all(b"* OK fixture\r\n").await.unwrap();
+        let mut bodies = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(read.read_line(&mut line).await.unwrap(), 0);
+            let (tag, command) = line.trim_end().split_once(' ').unwrap();
+            let data = if command.starts_with("LOGIN ") { String::new() }
+            else if command == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n".into() }
+            else if command == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into() }
+            else if command == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
+            else if command == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
+            else if command.contains("BODYSTRUCTURE") {
+                let structure = format!(r#"(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" {claimed} 1)("TEXT" "HTML" ("CHARSET" "utf-8") NIL NIL "7BIT" {} 1) "ALTERNATIVE")"#, html.len());
+                format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE {claimed} BODYSTRUCTURE {structure} BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+            } else if command == "UID FETCH 1 (UID BODY.PEEK[1] BODY.PEEK[2])" {
+                assert!(case != Body::TooLarge, "a part over the limit must not be requested");
+                bodies += 1;
+                if case == Body::Lying {
+                    write.write_all(format!("* 1 FETCH (UID 1 BODY[1] {{{}}}\r\n", MAX_OPEN_BYTES + 1024 * 1024 + 1).as_bytes()).await.unwrap();
+                    std::future::pending::<()>().await;
+                    unreachable!();
+                }
+                if case == Body::Refused {
+                    write.write_all(format!("{tag} NO busy\r\n").as_bytes()).await.unwrap();
+                    continue;
+                }
+                format!("* 1 FETCH (UID 1 BODY[1] {{{}}}\r\n{wire_text} BODY[2] {{{}}}\r\n{html})\r\n", wire_text.len(), html.len())
+            } else if command == "LOGOUT" {
+                assert_eq!(bodies, if case == Body::TooLarge { 0 } else { 1 });
+                write.write_all(format!("* BYE bye\r\n{tag} OK logout\r\n").as_bytes()).await.unwrap();
+                break;
+            } else { panic!("unexpected fixture command: {command}"); };
+            write.write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+    let config = ServerConfig { host: "127.0.0.1".into(), port, username: "fixture".into(), security: Security::Plain };
+    let account = Account::new("fixture@example.test".into(), config.clone(), config).unwrap();
+    store.save_account(&account).unwrap();
+    let folder = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    store.reset_uidvalidity(folder, 7).unwrap();
+    let mut imap = ImapSync::login(&account, "fixture").await.unwrap();
+    let id = if case == Body::Legacy {
+        // Synced before HTML parts were kept: only the text part is stored.
+        let mut message = lagom_core::mime::parse(format!("{header}{text}").as_bytes()).unwrap();
+        message.body_html = None;
+        message.summary.account = account.id.clone();
+        message.summary.folder = folder;
+        message.summary.uid = 1;
+        store.save_message(&message).unwrap()
+    } else {
+        imap.sync_folder(&mut store, folder, 20).await.unwrap();
+        store.list_messages(folder, 0, 20, 0).unwrap()[0].id
+    };
+    let before = store.message(id).unwrap();
+    assert!(before.body_html.is_none());
+    if case != Body::Legacy { assert_eq!(before.body_text, BODY_UNAVAILABLE); }
+    assert!(!store.inline_loaded(id).unwrap());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), imap.fetch_inline(&mut store, id)).await
+        .expect("must reject the literal header without waiting for its body");
+    if matches!(case, Body::Lying | Body::Refused) {
+        assert!(result.is_err());
+        // Not marked: a later open tries again.
+        assert!(!store.inline_loaded(id).unwrap());
+        assert_eq!(store.message(id).unwrap().body_text, BODY_UNAVAILABLE);
+        if case == Body::Lying { server.abort(); } else {
+            imap.logout().await.unwrap();
+            server.await.unwrap();
+        }
+        return;
+    }
+    result.unwrap();
+    assert!(store.inline_loaded(id).unwrap());
+    let after = store.message(id).unwrap();
+    if case == Body::TooLarge {
+        assert_eq!(after.body_text, BODY_UNAVAILABLE);
+        assert!(after.body_html.is_none());
+    } else {
+        assert_eq!(after.body_text.trim_end(), text.trim_end());
+        assert_eq!(after.body_html.as_deref(), Some(html));
+        assert!(!after.summary.snippet.is_empty());
+    }
+    // Loaded once: a second open does not go to the server (the fixture panics on other commands).
+    imap.fetch_inline(&mut store, id).await.unwrap();
+    imap.logout().await.unwrap();
+    server.await.unwrap();
+}

@@ -411,7 +411,8 @@ impl LagomCore {
     pub async fn load_inline(&self, id: i64) -> Result<()> {
         let needed = self.run(move |s| {
             let message = s.message(id)?;
-            Ok(!s.inline_loaded(id)? && message.body_html.as_deref().is_some_and(|html| !lagom_core::inline::referenced_ids(html).is_empty()))
+            // No HTML part and not loaded: sync left the body out, and fetch_inline fetches it.
+            Ok(!s.inline_loaded(id)? && message.body_html.as_deref().is_none_or(|html| !lagom_core::inline::referenced_ids(html).is_empty()))
         }).await?;
         if !needed { return Ok(()); }
         self.run_network(move |s| network(async {
