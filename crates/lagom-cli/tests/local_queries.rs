@@ -79,7 +79,7 @@ fn discovery_and_unconfigured_sign_in() {
             .unwrap();
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("sign-in provider is not configured")
+            String::from_utf8_lossy(&output.stderr).contains("not available in this version")
         );
     }
     assert!(Store::open(&db).unwrap().accounts().unwrap().is_empty());
@@ -150,8 +150,8 @@ fn tasks_reject_missing_ambiguous_and_invalid_inputs() {
         (vec!["tasks", "list", "work"], "ambiguous"),
         (vec!["tasks", "list", "missing"], "missing"),
         (vec!["tasks", "add", "1", "  "], "title cannot be empty"),
-        (vec!["tasks", "done", "999"], "not found"),
-        (vec!["tasks", "from-mail", "999"], "not found"),
+        (vec!["tasks", "done", "999"], "no longer here"),
+        (vec!["tasks", "from-mail", "999"], "no longer here"),
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
             .arg("--database").arg(&db).args(args).output().unwrap();

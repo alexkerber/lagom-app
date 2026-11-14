@@ -92,9 +92,9 @@ const COMMANDS: &[Command] = &[
     Command { section: "Actions", label: "Reply", hint: Hint::Key("r"), action: Action::Run(Run::Reply) },
     Command { section: "Actions", label: "New message", hint: Hint::Key("c"), action: Action::Run(Run::Compose) },
     Command { section: "Mail", label: "Insert file…", hint: Hint::Note("Markdown"), action: Action::Run(Run::InsertFile) },
-    Command { section: "Mail", label: "Sync now", hint: Hint::Note("IMAP"), action: Action::Run(Run::Sync) },
+    Command { section: "Mail", label: "Sync now", hint: Hint::Note("all accounts"), action: Action::Run(Run::Sync) },
     Command { section: "Mail", label: "Settings", hint: Hint::Key("secondary-,"), action: Action::Run(Run::Settings) },
-    Command { section: "Mail", label: "Add account", hint: Hint::Note("IMAP"), action: Action::Run(Run::AddAccount) },
+    Command { section: "Mail", label: "Add account", hint: Hint::Note("any provider"), action: Action::Run(Run::AddAccount) },
     Command { section: "Mail", label: "Keyboard shortcuts", hint: Hint::Key("secondary-/"), action: Action::Run(Run::Shortcuts) },
 ];
 

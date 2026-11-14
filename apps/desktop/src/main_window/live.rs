@@ -75,7 +75,7 @@ fn now() -> i64 {
 pub(super) fn sent_note(delivery: Delivery, error: Option<String>) -> String {
     match (delivery, error) {
         (Delivery::Sent, None) => "Sent".into(),
-        (Delivery::Sent, Some(e)) => format!("Sent. {e}. The Sent copy will retry with backoff."),
+        (Delivery::Sent, Some(e)) => format!("Sent. {e}. lagom tries to save the Sent copy again later."),
         (Delivery::Maybe, _) => "Delivery uncertain. Kept in outbox; choose Send again or Edit draft.".into(),
         (Delivery::NotSent, e) => format!("Kept in outbox: {}. See send status for retry or editing.", e.unwrap_or_default()),
     }
@@ -834,7 +834,7 @@ impl MainWindow {
             }
         }
         let mut error = "Mail stopped working. Restart lagom; pending sends are saved in the outbox.".to_string();
-        if let Err(rollback) = rollback { error.push_str(&format!(" Local rollback failed: {rollback}")); }
+        if let Err(rollback) = rollback { error.push_str(" The list may be wrong until lagom restarts."); eprintln!("lagom: {rollback:?}"); }
         self.notify(error, cx);
     }
 
@@ -1051,7 +1051,7 @@ impl MainWindow {
                     let text = self.inbox.mail[id].text.as_ref().unwrap().borrow();
                     text.as_deref().map(mail::paragraphs).unwrap_or_else(|| vec![LOADING.into()])
                 }
-                Err(_) => vec!["This message is no longer in the local store.".into()],
+                Err(_) => vec!["This message is no longer saved in lagom.".into()],
             };
         }
         if !self.inbox.mail[id].inline_pending
@@ -3523,7 +3523,7 @@ mod tests {
         let started = std::time::Instant::now();
         cx.simulate_keystrokes("enter");
         let elapsed = started.elapsed();
-        assert!(toast(&view, cx).contains("database is locked"));
+        assert!(toast(&view, cx).contains("could not read or save its data on this device"));
         assert!(store.tasks(list, true).unwrap().is_empty());
         fixture.execute_batch("ROLLBACK;").unwrap();
         cx.simulate_input(" and retry");
@@ -3536,7 +3536,7 @@ mod tests {
             let started = std::time::Instant::now();
             cx.simulate_keystrokes(key);
             let elapsed = started.elapsed();
-            assert!(toast(&view, cx).contains("database is locked"));
+            assert!(toast(&view, cx).contains("could not read or save its data on this device"));
             assert_eq!(store.tasks(list, false).unwrap().len(), 1);
             fixture.execute_batch("ROLLBACK;").unwrap();
             assert!(elapsed < Duration::from_millis(750), "{key} blocked for {elapsed:?}");
@@ -3556,7 +3556,7 @@ mod tests {
         cx.simulate_keystrokes("t");
         cx.simulate_input("Keep submitted text");
         cx.simulate_keystrokes("enter");
-        assert!(toast(&view, cx).contains("fixture write failed"));
+        assert!(toast(&view, cx).contains("could not read or save its data on this device"));
         fixture.execute_batch("DROP TRIGGER refuse_task_write;").unwrap();
         cx.simulate_input(" and retry");
         cx.simulate_keystrokes("enter");
@@ -3565,12 +3565,12 @@ mod tests {
         assert_eq!(tasks[0].title, "Keep submitted text and retry");
         fixture.execute_batch("CREATE TRIGGER refuse_task_write BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'fixture write failed'); END;").unwrap();
         cx.simulate_keystrokes("secondary-z");
-        assert!(toast(&view, cx).contains("fixture write failed"), "failed Undo must keep the error toast");
+        assert!(toast(&view, cx).contains("could not read or save its data on this device"), "failed Undo must keep the error toast");
         assert_eq!(store.tasks(tasks[0].list, false).unwrap().len(), 1);
         cx.simulate_keystrokes("enter secondary-a");
         cx.simulate_input("Keep renamed text");
         cx.simulate_keystrokes("enter");
-        assert!(toast(&view, cx).contains("fixture write failed"));
+        assert!(toast(&view, cx).contains("could not read or save its data on this device"));
         fixture.execute_batch("DROP TRIGGER refuse_task_write;").unwrap();
         cx.simulate_input(" and retry");
         cx.simulate_keystrokes("enter");
@@ -3618,7 +3618,7 @@ mod tests {
             let operation = if rename { "UPDATE" } else { "INSERT" };
             fixture.execute_batch(&format!("CREATE TRIGGER refuse_list_write BEFORE {operation} ON task_lists BEGIN SELECT RAISE(ABORT, 'fixture list write failed'); END;")).unwrap();
             cx.simulate_keystrokes("enter");
-            assert!(toast(&view, cx).contains("fixture list write failed"));
+            assert!(toast(&view, cx).contains("could not read or save its data on this device"));
             fixture.execute_batch("DROP TRIGGER refuse_list_write;").unwrap();
             cx.simulate_input(" and retry");
             cx.simulate_keystrokes("enter");

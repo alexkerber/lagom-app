@@ -689,3 +689,13 @@ final class MailModel {
 }
 
 enum MailAction { case done, later, delete }
+
+/// The core's plain text. uniffi.toml drops the generated conformance, which shows the enum's debug form.
+extension MailError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .NotFound: return "It is no longer here."
+        case .Failed(let reason): return reason
+        }
+    }
+}

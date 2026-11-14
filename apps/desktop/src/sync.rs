@@ -168,6 +168,12 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
     (Bridge(cmd_tx), ev_rx)
 }
 
+/// The text the window shows for `error`; the log keeps the technical detail.
+fn shown(error: &Error) -> String {
+    eprintln!("lagom: {error:?}");
+    error.to_string()
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
@@ -176,12 +182,12 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
     let store = match Store::open(&path) {
         Ok(store) => store,
         Err(e) => {
-            let _ = events.send(Event::Sync(String::new(), SyncState::Failed(e.to_string())));
+            let _ = events.send(Event::Sync(String::new(), SyncState::Failed(shown(&e))));
             return;
         }
     };
     if let Err(error) = store.recover_outbox().and_then(|_| store.recover_moves()) {
-        let _ = events.send(Event::Sync(String::new(), SyncState::Failed(error.to_string())));
+        let _ = events.send(Event::Sync(String::new(), SyncState::Failed(shown(&error))));
         return;
     }
     let _ = events.send(Event::Changed);
@@ -195,7 +201,7 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
 async fn work(w: Worker, rx: UnboundedReceiver<Cmd>) {
     let store = match Store::open(w.store.path()) {
         Ok(store) => store,
-        Err(e) => { w.emit(Event::Sync(String::new(), SyncState::Failed(e.to_string()))); return; }
+        Err(e) => { w.emit(Event::Sync(String::new(), SyncState::Failed(shown(&e)))); return; }
     };
     let tasks = TaskWorker::new(store, w.me.clone(), w.events.clone());
     work_with_tasks(w, rx, tasks).await;
@@ -395,38 +401,38 @@ impl Worker {
                 }));
             }
             Cmd::Op { op, id, act } => {
-                let mut error = self.op(id, act).await.err().map(|e| e.to_string());
+                let mut error = self.op(id, act).await.err().map(|e| shown(&e));
                 if let Some(error) = &mut error {
-                    if let Err(rollback) = self.store.cancel_move(id) { error.push_str(&format!("; local rollback failed: {rollback}")); }
+                    if let Err(rollback) = self.store.cancel_move(id) { error.push_str("; the list may be wrong until the next sync"); eprintln!("lagom: {rollback:?}"); }
                 }
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
             }
             Cmd::EmptyTrash { op, folder } => {
-                let error = self.empty_trash(folder).await.err().map(|e| e.to_string());
+                let error = self.empty_trash(folder).await.err().map(|e| shown(&e));
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
             }
             Cmd::CreateEvent { op, account, calendar, event } => {
                 if let Err(error) = self.create_event(op, &account, calendar, event) {
-                    self.emit(Event::EventCreated { op, error: Some(error.to_string()) });
+                    self.emit(Event::EventCreated { op, error: Some(shown(&error)) });
                 }
             }
             Cmd::CreateFolder { op, account, name } => {
-                let error = self.create_folder(&account, &name).await.err().map(|e| e.to_string());
+                let error = self.create_folder(&account, &name).await.err().map(|e| shown(&e));
                 self.emit(Event::Op { op, error });
                 self.emit(Event::Changed);
             }
             Cmd::ForwardAttachments { draft, id } => {
-                let result = self.forward_attachments(id).await.map_err(|e| e.to_string());
+                let result = self.forward_attachments(id).await.map_err(|e| shown(&e));
                 self.emit(Event::ForwardAttachments { draft, result });
             }
             Cmd::Download { id, section } => {
-                let result = self.download(id, &section).await.map_err(|e| e.to_string());
+                let result = self.download(id, &section).await.map_err(|e| shown(&e));
                 self.emit(Event::Downloaded(result));
             }
             Cmd::Inline(id) => {
-                let error = self.load_inline(id).await.err().map(|e| e.to_string());
+                let error = self.load_inline(id).await.err().map(|e| shown(&e));
                 self.emit(Event::Inline { id, error });
             }
             Cmd::MarkSeen(id) => {
@@ -437,7 +443,7 @@ impl Worker {
             }
             Cmd::Send(id) => { self.send(&id).await; }
             Cmd::Unsubscribe(id) => {
-                let error = self.unsubscribe(id).await.err().map(|e| e.to_string());
+                let error = self.unsubscribe(id).await.err().map(|e| shown(&e));
                 self.emit(Event::Unsubscribed { id, error });
             }
             other => self.deferred.push_back(other),
@@ -490,7 +496,7 @@ impl Worker {
             if calendar_consent {
                 let state = match &result {
                     Ok(()) | Err(Error::Cancelled) => SyncState::Synced(now()),
-                    Err(e) => SyncState::Failed(e.to_string()),
+                    Err(e) => SyncState::Failed(shown(&e)),
                 };
                 self.emit(Event::CalendarSync(id.clone(), state));
                 if result.is_err() { return; }
@@ -499,14 +505,14 @@ impl Worker {
                 // A voluntary sign-in that did not finish keeps the working credentials.
                 if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(id.clone())); }
                 self.deferred.push_back(Cmd::Sync(Some(id.clone())));
-                let error = (!matches!(e, Error::Cancelled)).then(|| e.to_string());
+                let error = (!matches!(e, Error::Cancelled)).then(|| shown(&e));
                 self.emit(Event::SignInStopped { account: id, error });
                 return;
             }
             if result.is_err() { self.require_reauth(&id); }
             let result = match result {
                 Err(Error::Cancelled) => return,
-                other => other.map_err(|e| e.to_string()),
+                other => other.map_err(|e| shown(&e)),
             };
             self.emit(Event::Reauthenticated { account: id, result });
             return;
@@ -514,7 +520,7 @@ impl Worker {
         let signed = match result {
             Ok(signed) => signed,
             Err(Error::Cancelled) => { self.emit(Event::SignInCancelled); return; }
-            Err(error) => { self.emit(Event::SignedIn(Err(error.to_string()))); return; }
+            Err(error) => { self.emit(Event::SignedIn(Err(shown(&error)))); return; }
         };
         let account = signed.account;
         if self.duplicate(&account) {
@@ -525,7 +531,7 @@ impl Worker {
         }
         if let Err(error) = self.store.save_authorized_account(&account, &signed.scopes) {
             let _ = account.delete_password();
-            self.emit(Event::SignedIn(Err(error.to_string())));
+            self.emit(Event::SignedIn(Err(shown(&error))));
             return;
         }
         self.emit(Event::SignedIn(Ok(account.id.clone())));
@@ -585,7 +591,7 @@ impl Worker {
                 self.watch(&account);
                 self.sync(Some(account.id), false, rx).await;
             }
-            Err(e) => self.emit(Event::Added(Err(e.to_string()))),
+            Err(e) => self.emit(Event::Added(Err(shown(&e)))),
         }
     }
 
@@ -606,7 +612,7 @@ impl Worker {
                 self.emit(Event::PasswordChanged { account: id.clone(), attempt, result: Ok(()) });
                 self.sync(Some(id), false, rx).await;
             }
-            Err(e) => self.emit(Event::PasswordChanged { account: id, attempt, result: Err(e.to_string()) }),
+            Err(e) => self.emit(Event::PasswordChanged { account: id, attempt, result: Err(shown(&e)) }),
         }
     }
 
@@ -639,7 +645,7 @@ impl Worker {
     async fn sync_drafts(&mut self, only: Option<&str>) {
         let accounts = match self.store.accounts() {
             Ok(accounts) => accounts,
-            Err(e) => { self.emit(Event::Sync(String::new(), SyncState::Failed(e.to_string()))); return; }
+            Err(e) => { self.emit(Event::Sync(String::new(), SyncState::Failed(shown(&e)))); return; }
         };
         let mut changed = false;
         for account in accounts.into_iter().filter(|a| only.is_none_or(|id| id == a.id)) {
@@ -647,7 +653,7 @@ impl Worker {
             let now = chrono::Local::now().timestamp_millis();
             let ids = match self.store.due_drafts(&account.id, now) {
                 Ok(ids) => ids,
-                Err(e) => { self.emit(Event::Sync(account.id, SyncState::Failed(e.to_string()))); continue; }
+                Err(e) => { self.emit(Event::Sync(account.id, SyncState::Failed(shown(&e)))); continue; }
             };
             if ids.is_empty() { continue; }
             changed = true;
@@ -666,7 +672,7 @@ impl Worker {
                 if let Err(error) = result { failure = Some(error); }
                 if let Some(error) = &failure {
                     if let Err(e) = self.store.draft_sync_failed(&id, error, now) {
-                        self.emit(Event::Sync(account.id.clone(), SyncState::Failed(e.to_string())));
+                        self.emit(Event::Sync(account.id.clone(), SyncState::Failed(shown(&e))));
                     }
                     if matches!(error, Error::Invalid(_)) {
                         self.emit(Event::Sync(account.id.clone(), SyncState::Failed(format!("Draft kept locally: {error}"))));
@@ -692,7 +698,7 @@ impl Worker {
             self.emit(Event::Sync(account.id.clone(), SyncState::Syncing));
             match self.store.due_outbox(&account.id, chrono::Local::now().timestamp_millis()) {
                 Ok(ids) => for id in ids { self.send(&id).await; },
-                Err(e) => self.emit(Event::Sync(account.id.clone(), SyncState::Failed(e.to_string()))),
+                Err(e) => self.emit(Event::Sync(account.id.clone(), SyncState::Failed(shown(&e)))),
             }
             if self.reauth_required.contains(&account.id) { continue; }
             let state = match self.sync_account(&account, inbox_only, rx).await {
@@ -701,7 +707,7 @@ impl Worker {
                     self.require_reauth(&account.id);
                     SyncState::ReauthRequired
                 }
-                Err(e) => SyncState::Failed(e.to_string()),
+                Err(e) => SyncState::Failed(shown(&e)),
             };
             self.emit(Event::Sync(account.id.clone(), state));
             self.emit(Event::Changed);
@@ -874,13 +880,13 @@ impl Worker {
                 self.store.set_account_scopes(&account.id, &scopes)
             });
             if let Err(e) = cleared {
-                self.emit(Event::CalendarSync(account.id.clone(), SyncState::Failed(e.to_string())));
+                self.emit(Event::CalendarSync(account.id.clone(), SyncState::Failed(shown(&e))));
                 return;
             }
         }
         if matches!(result, Err(Error::ReauthRequired)) { self.require_reauth(&account.id); }
         self.emit(Event::CalendarSync(account.id.clone(), match result {
-            Ok(()) => SyncState::Synced(now()), Err(e) => SyncState::Failed(e.to_string()),
+            Ok(()) => SyncState::Synced(now()), Err(e) => SyncState::Failed(shown(&e)),
         }));
         self.emit(Event::Changed);
     }
@@ -1008,7 +1014,7 @@ impl Worker {
             follow(&mut self.moved, id, message.folder, &message.message_id, target);
         }
         if let Err(error) = notified {
-            self.emit(Event::Sync(account.id, SyncState::Failed(error.to_string())));
+            self.emit(Event::Sync(account.id, SyncState::Failed(shown(&error))));
         }
         Ok(())
     }
@@ -1139,7 +1145,7 @@ impl Worker {
                     Error::MaybeSent => Delivery::Maybe,
                     _ => Delivery::NotSent,
                 };
-                (delivery, Some(e.to_string()))
+                (delivery, Some(shown(&e)))
             }
         };
         self.emit(Event::Sent { delivery, error });

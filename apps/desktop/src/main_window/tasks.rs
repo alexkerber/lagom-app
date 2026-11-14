@@ -178,7 +178,7 @@ impl MainWindow {
     pub(crate) fn save_task(&mut self, change: TaskChange, cx: &mut Context<Self>) -> bool {
         let Some(live) = &self.live else {
             if self.demo { return self.save_demo_task(change, cx); }
-            self.notify("Tasks need the local store", cx);
+            self.notify("Could not save the task. Restart lagom and try again.", cx);
             return false;
         };
         // shortcut: task writes can block the UI for 250 ms on locks; move off-thread if this budget becomes too large.

@@ -73,7 +73,7 @@ impl TaskWorker {
         match self.store.account_scopes(&account.id) {
             Ok(scopes) if oauth::tasks_allowed(&scopes) => {}
             Ok(_) => return,
-            Err(e) => { self.emit(Event::TasksSync(account.id.clone(), SyncState::Failed(e.to_string()))); return; }
+            Err(e) => { self.emit(Event::TasksSync(account.id.clone(), SyncState::Failed(shown(&e)))); return; }
         }
         let path = self.store.path().to_owned();
         let account = account.clone();
@@ -108,7 +108,7 @@ impl TaskWorker {
             self.pause(&id);
             let _ = self.me.send(Cmd::TasksReauth(id.clone()));
         }
-        self.emit(Event::TasksSync(id, match result { Ok(()) => SyncState::Synced(now()), Err(e) => SyncState::Failed(e.to_string()) }));
+        self.emit(Event::TasksSync(id, match result { Ok(()) => SyncState::Synced(now()), Err(e) => SyncState::Failed(shown(&e)) }));
         self.emit(Event::Changed);
         if again { self.sync_tasks(&account); }
     }

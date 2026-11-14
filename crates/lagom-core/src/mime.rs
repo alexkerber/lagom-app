@@ -9,7 +9,7 @@ use mail_parser::{AddressList, MessageParser, PartKind};
 pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
 /// The stored body of a message whose text is over `MAX_MIME_BYTES`: the headers are kept, the
 /// text is not downloaded. Readers compare against this to show why the body is missing.
-pub const BODY_UNAVAILABLE: &str = "The text of this message is larger than 4 MiB and was not downloaded.";
+pub const BODY_UNAVAILABLE: &str = "The text of this message is larger than 4 MB and was not downloaded.";
 /// The text a message may download when it is opened: sync leaves bodies over `MAX_MIME_BYTES` out.
 pub const MAX_OPEN_BYTES: usize = 25 * 1024 * 1024;
 

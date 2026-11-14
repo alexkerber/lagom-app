@@ -564,4 +564,8 @@ internal class MailModel(
     }
 }
 
-internal fun Exception.mailMessage(): String = if (this is MailException.Failed) reason else message ?: "Mail operation failed"
+internal fun Exception.mailMessage(): String = when (this) {
+    is MailException.Failed -> reason
+    is MailException.NotFound -> "It is no longer here."
+    else -> message?.takeIf { it.isNotBlank() } ?: "Something went wrong. Try again."
+}

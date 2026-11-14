@@ -413,7 +413,7 @@ impl MainWindow {
             true => (None, None),
             false => match Live::start(cx) {
                 Ok(live) => (Some(live), None),
-                Err(e) => (None, Some(format!("Could not open the mail store: {e}"))),
+                Err(e) => (None, Some(format!("Could not open your saved mail: {e}"))),
             },
         };
         let inbox = match &live {
