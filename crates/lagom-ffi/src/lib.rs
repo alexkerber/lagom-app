@@ -158,6 +158,8 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     // Read flags the server confirmed. A folder step's older FETCH may write over them, so each step
     // writes them again before it lets go of `network`.
     read_flags: Mutex<HashMap<i64, bool>>,
+    // One read flag at a time, so `read_flags` records them in the server's order.
+    marking: Mutex<()>,
     contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>>,
     // shortcut: one browser sign-in at a time, lost if the app is killed in the browser; the user starts again.
     sign_in: Mutex<Option<lagom_core::oauth::Pending>> }
@@ -230,8 +232,11 @@ impl Stores {
     fn rewrite_read_flags(&self, store: &Store) {
         let flags = std::mem::take(&mut *self.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         for (id, seen) in flags {
-            // A moved or deleted row has nothing to keep.
-            if let Ok(m) = store.message(id).map(|m| m.summary) { let _ = store.set_flags(m.folder, m.uid, seen, m.flagged); }
+            let written = store.message(id).and_then(|m| store.set_flags(m.summary.folder, m.summary.uid, seen, m.summary.flagged));
+            // A moved or deleted row has nothing to keep; a failed write tries again, unless a newer flag came meanwhile.
+            if !matches!(written, Ok(()) | Err(lagom_core::Error::NotFound)) {
+                self.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(id).or_insert(seen);
+            }
         }
     }
 }
@@ -255,13 +260,19 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     let mut error = None;
     {
         let store = &mut *stores.network.blocking_lock();
-        for id in store.due_outbox(&a.id, milliseconds())? {
-            // Undo send may remove the row after due_outbox listed it.
-            let pending = match store.pending(&id) { Err(lagom_core::Error::NotFound) => continue, other => other? };
-            if store.claim_send(&id, milliseconds())? {
-                if let Err(e) = network(smtp::send_queued(a, &password, &pending, store)) { error = Some(e); }
+        let outbox = (|| -> lagom_core::Result<()> {
+            for id in store.due_outbox(&a.id, milliseconds())? {
+                // Undo send may remove the row after due_outbox listed it.
+                let pending = match store.pending(&id) { Err(lagom_core::Error::NotFound) => continue, other => other? };
+                if store.claim_send(&id, milliseconds())? {
+                    // The Sent copy syncs the Sent folder.
+                    if let Err(e) = network(smtp::send_queued(a, &password, &pending, store)) { error = Some(e); }
+                }
             }
-        }
+            Ok(())
+        })();
+        stores.rewrite_read_flags(store);
+        outbox?;
     }
     let mut session = network(ImapSync::login(a, &password))?;
     let mut folders = network(session.list_folders(&stores.network.blocking_lock()))?;
@@ -304,7 +315,7 @@ impl LagomCore {
         let store = Store::open(&path)?;
         store.recover_outbox()?;
         let local = Store::open(&path)?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
+        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
@@ -512,14 +523,17 @@ impl LagomCore {
     pub async fn delete(&self, ids: Vec<i64>) -> Result<()> { self.move_messages(ids, true).await }
     pub async fn mark_read(&self, id: i64, read: bool) -> Result<()> {
         let stores = self.stores.clone();
-        self.run_own(move |s| network(async {
-            let a = account(s, &s.message_summary(id)?.account)?;
-            let mut session = ImapSync::login(&a, &a.password()?).await?;
-            session.mark_seen(s, id, read).await?;
-            stores.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, read);
-            let _ = session.logout().await;
-            Ok(())
-        })).await
+        self.run_own(move |s| {
+            let _marking = stores.marking.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            network(async {
+                let a = account(s, &s.message_summary(id)?.account)?;
+                let mut session = ImapSync::login(&a, &a.password()?).await?;
+                session.mark_seen(s, id, read).await?;
+                stores.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, read);
+                let _ = session.logout().await;
+                Ok(())
+            })
+        }).await
     }
     pub async fn reply_draft(&self, id: i64) -> Result<ReplyDraft> {
         self.compose_draft(id, ComposeKind::Reply).await
