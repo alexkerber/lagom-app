@@ -45,6 +45,31 @@ import Foundation
     }
     var accountList: [MailAccount] = []
     override func accounts() async throws -> [MailAccount] { accountList }
+    override func setAccountName(accountId: String, name: String) async throws -> MailAccount {
+        let index = accountList.firstIndex { $0.id == accountId }!
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        accountList[index].displayName = trimmed.isEmpty ? accountList[index].email : trimmed
+        return accountList[index]
+    }
+    var folderList: [MailFolder] = []
+    var folderRows: [Int64: [MailRow]] = [:]
+    override func folders(accountId: String?) async throws -> [MailFolder] { folderList.filter { accountId == nil || $0.account == accountId } }
+    override func folderMail(folderId: Int64, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
+        Array((folderRows[folderId] ?? []).dropFirst(Int(offset)).prefix(Int(limit)))
+    }
+    var moved: [([Int64], Int64)] = []
+    override func moveToFolder(ids: [Int64], folderId: Int64) async throws -> [MailChange] {
+        moved.append((ids, folderId))
+        removed += mail.filter { ids.contains($0.id) }
+        mail.removeAll { ids.contains($0.id) }
+        return ids.map { var c = change($0); c.toFolder = folderId; return c }
+    }
+    var emptied: [String?] = []
+    var failEmpty = false
+    override func emptyTrash(accountId: String?) async throws {
+        emptied.append(accountId)
+        if failEmpty { throw MailError.Failed(reason: "empty refused") }
+    }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func localDrafts() async throws -> [DraftRow] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
@@ -116,6 +141,7 @@ import Foundation
     var suspendDraftList = false
     var draftListGate: CheckedContinuation<Void, Never>?
     override func accounts() async throws -> [MailAccount] { [] }
+    override func folders(accountId: String?) async throws -> [MailFolder] { [] }
     override func nextSnooze() async throws -> Int64? { nil }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
@@ -385,7 +411,62 @@ struct ModelChecks {
         print("MailModel: Undo for Done and Later, and new mail signature passed")
     }
 
+    /// Folders open their mail and narrow the account; Move offers Undo; a folder the server dropped closes.
+    @MainActor static func foldersMoveEmptyTrashAndName() async throws {
+        let core = FixtureCore(noHandle: .init())
+        core.mail = Array(core.mail.prefix(3))
+        core.accountList = [MailAccount(id: "fixture", email: "f@example.test", displayName: "f@example.test")]
+        let receipts = MailFolder(id: 10, account: "fixture", name: "Receipts", path: "Receipts", depth: 0, unread: 1)
+        let elsewhere = MailFolder(id: 11, account: "other", name: "Elsewhere", path: "Elsewhere", depth: 0, unread: 0)
+        core.folderList = [receipts, elsewhere]
+        core.folderRows = [10: [MailRow(id: 70, account: "fixture", senderName: "Shop", senderAddress: "shop@example.test", subject: "Receipt", preview: "", dateUnix: 70, unread: true, hasAttachments: false, threadId: "r", messageCount: 1, messageIds: [70])]]
+        let gate = SendGate()
+        let model = MailModel(sendDelay: { await gate.wait() }); model.core = core
+        await model.reload()
+        precondition(model.folders == [receipts, elsewhere], "every account's folders load with the list")
+        precondition(model.moveTargets(account: "fixture") == [receipts], "a message moves only within its account")
+        await model.act(.move(receipts), id: 2)
+        precondition(core.moved.count == 1 && core.moved[0].0 == [2] && core.moved[0].1 == 10)
+        precondition(model.notice == "Moved to Receipts" && model.undoChanges.first?.toFolder == 10 && model.rows.map(\.id) == [1, 3])
+        await model.undoAction()
+        precondition(model.rows.map(\.id) == [1, 2, 3], "Undo brings the moved row back")
+        model.open(receipts)
+        precondition(model.accountID == "fixture" && model.folder == receipts)
+        await model.changeScope()
+        precondition(model.rows.map(\.id) == [70] && model.moveTargets(account: "fixture").isEmpty, "the open folder is no target")
+        model.mailbox = .inbox
+        precondition(model.folder == nil, "choosing a mailbox leaves the folder")
+        model.open(receipts)
+        core.folderList = [elsewhere]
+        await model.changeScope()
+        precondition(model.folder == nil, "a folder the server dropped closes")
+
+        // Empty Trash runs only in Trash, and ends any Undo, which could only point at deleted mail.
+        model.mailbox = .inbox
+        model.accountID = nil
+        await model.changeScope()
+        await model.emptyTrash()
+        precondition(core.emptied.isEmpty, "never outside Trash")
+        await model.act(.done, id: 1)
+        model.mailbox = .trash
+        await model.changeScope()
+        await model.emptyTrash()
+        precondition(core.emptied == [nil] && model.undoChanges.isEmpty && model.notice == nil && !model.working)
+        core.failEmpty = true
+        model.accountID = "fixture"
+        await model.emptyTrash()
+        precondition(core.emptied == [nil, "fixture"] && model.error == "empty refused" && !model.working)
+        await gate.release()
+
+        await model.setName("  Ada ", account: model.accounts[0])
+        precondition(model.accounts[0].displayName == "Ada")
+        await model.setName("", account: model.accounts[0])
+        precondition(model.accounts[0].displayName == "f@example.test", "an empty name falls back to the address")
+        print("MailModel: folders, Move with Undo, Empty Trash and account name passed")
+    }
+
     @MainActor static func main() async throws {
+        try await foldersMoveEmptyTrashAndName()
         try await undoDoneAndNewMailSignature()
         await mailtoOpensANewDraft()
         await listReadActionIncludesOlderUnreadMembers()

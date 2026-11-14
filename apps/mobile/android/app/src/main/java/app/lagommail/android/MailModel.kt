@@ -123,6 +123,11 @@ internal class MailModel(
     var failures by mutableStateOf<List<SendFailure>>(emptyList()); private set
     var accountId by mutableStateOf<String?>(null); private set
     var mailbox by mutableStateOf(Mailbox.INBOX); private set
+    /** A server folder from `folders`; while set, the list shows it instead of `mailbox`. */
+    var folder by mutableStateOf<MailFolder?>(null); private set
+    /** Every account's own folders: desktop's folder group and its "Move to" targets. */
+    var folders by mutableStateOf<List<MailFolder>>(emptyList()); private set
+    var emptyingTrash by mutableStateOf(false); private set
     var searchText by mutableStateOf(""); private set
     var unreadOnly by mutableStateOf(false)
     val visibleRows: List<MailRow> get() = if (unreadOnly) rows.filter { it.unread } else rows
@@ -136,7 +141,7 @@ internal class MailModel(
     var syncing by mutableStateOf(false); private set
     private var actingId by mutableStateOf<Long?>(null)
     private var readingIds by mutableStateOf<Set<Long>>(emptySet())
-    val working: Boolean get() = actingId != null || readingIds.isNotEmpty()
+    val working: Boolean get() = actingId != null || readingIds.isNotEmpty() || emptyingTrash
     var sending by mutableStateOf(false); private set
     var loading by mutableStateOf(true); private set
     var error by mutableStateOf<String?>(null)
@@ -246,21 +251,36 @@ internal class MailModel(
             val offset = if (append) old.size else 0
             val account = accountId
             val box = mailbox
+            val open = folder?.id
             val query = searchText.trim()
             val due = core.nextSnooze()
             val accounts = core.accounts()
+            // Every account's: the menu lists them all, and opening one narrows the account.
+            val folders = core.folders(null)
+            // The folder went from the server: back to the mailbox under it.
+            if (open != null && folders.none { it.id == open && (account == null || it.account == account) }) {
+                if (request != revision) return
+                this.folders = folders
+                folder = null
+                return reload(more = false)
+            }
             val page = mutableListOf<MailRow>()
             val count = maxOf(100, old.size + if (more) 100 else 0) - offset
             var hasMore: Boolean
             do {
-                val batch = if (query.isEmpty()) core.mailbox(account, box, 100u, (offset + page.size).toUInt())
-                    else core.search(account, query, 100u, (offset + page.size).toUInt())
+                val at = (offset + page.size).toUInt()
+                val batch = when {
+                    query.isNotEmpty() -> core.search(account, query, 100u, at)
+                    open != null -> core.folderMail(open, 100u, at)
+                    else -> core.mailbox(account, box, 100u, at)
+                }
                 page += batch
                 hasMore = batch.size == 100
             } while (hasMore && page.size < count)
             val failures = core.sendFailures()
             if (request != revision) return
             this.accounts = accounts
+            this.folders = folders
             this.failures = failures
             rows = (if (append) old + page else page).distinctBy { it.id }
             this.hasMore = hasMore
@@ -325,8 +345,18 @@ internal class MailModel(
         showingDrafts = false
         revision++
         clearSelection()
-        accountId = account; mailbox = box; rows = emptyList(); hasMore = false
+        accountId = account; mailbox = box; folder = null; rows = emptyList(); hasMore = false
     }
+    /** Opens a folder of its account, as desktop's folder group does. */
+    suspend fun openFolder(open: MailFolder) {
+        // Under a folder the mailbox is Inbox, so Drafts and Trash rules never apply to it.
+        enterScope(open.account, Mailbox.INBOX)
+        searchText = ""
+        folder = open
+        reload()
+    }
+    /** The folders a message of `account` can move to: its account's, without the open one. */
+    fun moveTargets(account: String) = folders.filter { it.account == account && it.id != folder?.id }
     suspend fun changeSearch(text: String) {
         if (searchText == text) return
         revision++
@@ -412,19 +442,28 @@ internal class MailModel(
             } while (syncAgain)
         } finally { syncing = false }
     }
-    suspend fun act(action: MailAction, id: Long, conversation: Boolean = true, until: Long? = null) {
+    suspend fun act(action: MailAction, id: Long, conversation: Boolean = true, until: Long? = null) =
+        change(id, conversation, action.notice) { core, ids ->
+            when (action) {
+                MailAction.Done -> core.done(ids)
+                MailAction.Later -> core.later(ids, until ?: core.laterChoices()[1].untilUnix)
+                MailAction.Delete -> core.delete(ids)
+            }
+        }
+    /** "Move to" a folder of the message's account, with Undo like Done. */
+    suspend fun move(id: Long, to: MailFolder, conversation: Boolean = true) =
+        change(id, conversation, "Moved to ${to.path}") { core, ids -> core.moveToFolder(ids, to.id) }
+    /** List read and unread, as on iOS: the whole visible conversation follows the row. */
+    suspend fun setRead(row: MailRow) { for (id in row.messageIds) setRead(id, row.unread) }
+    private suspend fun change(id: Long, conversation: Boolean, text: String, run: suspend (LagomCoreInterface, List<Long>) -> List<MailChange>) {
         val core = core ?: return
         if (working) return
         val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds ?: listOf(id) else listOf(id)
         actingId = id
         try {
-            val changes = when (action) {
-                MailAction.Done -> core.done(ids)
-                MailAction.Later -> core.later(ids, until ?: core.laterChoices()[1].untilUnix)
-                MailAction.Delete -> core.delete(ids)
-            }
+            val changes = run(core, ids)
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
-            offerUndo(changes, action.notice)
+            offerUndo(changes, text)
         // Busy until the list shows the result, so a swiped row never comes back before it leaves.
         } finally { try { reload() } finally { actingId = null } }
     }
@@ -441,7 +480,22 @@ internal class MailModel(
             if (undoChanges === changes) { undoChanges = emptyList(); notice = null }
         }
     }
-    /** Undo for the last Done, Later or Delete: each message goes back where it was. */
+    /** Only after the person confirmed: the scope's Trash is deleted for good on the server. */
+    suspend fun emptyTrash() {
+        val core = core ?: return
+        if (mailbox != Mailbox.TRASH || folder != null || working) return
+        emptyingTrash = true
+        // Undo could only point at mail that is gone now.
+        if (undoChanges.isNotEmpty()) { undoChanges = emptyList(); notice = null }
+        clearSelection()
+        try { core.emptyTrash(accountId) } finally { emptyingTrash = false; reload() }
+    }
+    /** "Your name" on desktop. An empty name falls back to the address. */
+    suspend fun setName(account: MailAccount, name: String) {
+        val saved = core?.setAccountName(account.id, name) ?: return
+        accounts = accounts.map { if (it.id == saved.id) saved else it }
+    }
+    /** Undo for the last Done, Later, Delete or Move: each message goes back where it was. */
     suspend fun undoAction() {
         val core = core ?: return
         val changes = undoChanges
@@ -487,6 +541,7 @@ internal class MailModel(
     suspend fun showDrafts() {
         clearSelection()
         showingDrafts = true
+        folder = null
         reload()
     }
     suspend fun openDraft(row: DraftRow) = draftLock.withLock {

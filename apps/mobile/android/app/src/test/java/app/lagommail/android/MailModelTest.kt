@@ -934,6 +934,66 @@ class MailModelTest {
         assertEquals(listOf(1L) to 86_400L, core.snoozed)
         assertNull(model.selectedId)
     }
+
+    @Test fun foldersOpenTheirMailMoveWithUndoAndCloseWhenGone() = runTest(dispatcher) {
+        val receipts = MailFolder(10, "fixture", "Receipts", "Receipts", 0u, 1u)
+        val elsewhere = MailFolder(11, "other", "Elsewhere", "Elsewhere", 0u, 0u)
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)); folderList = listOf(receipts, elsewhere); folderRows = mapOf(10L to listOf(row(7))) }
+        val model = model(core); model.start()
+        assertEquals(listOf(receipts, elsewhere), model.folders)
+        assertEquals("a message moves only within its account", listOf(receipts), model.moveTargets("fixture"))
+        model.move(2, receipts)
+        assertEquals("Moved to Receipts", model.notice)
+        assertEquals(listOf(listOf(2L) to 10L), core.moved)
+        assertEquals(10L, model.undoChanges.single().toFolder)
+        assertEquals(listOf(1L), model.rows.map { it.id })
+        model.undoAction()
+        assertEquals(listOf(1L, 2L), model.rows.map { it.id })
+        model.openFolder(receipts)
+        assertEquals(receipts, model.folder); assertEquals("fixture", model.accountId)
+        assertEquals(listOf(7L), model.rows.map { it.id })
+        assertTrue("the open folder is no target", model.moveTargets("fixture").isEmpty())
+        model.changeScope("fixture", Mailbox.INBOX)
+        assertNull(model.folder); assertEquals(listOf(1L, 2L), model.rows.map { it.id })
+        // A folder the server dropped closes back to the mailbox under it.
+        model.openFolder(receipts)
+        core.folderList = listOf(elsewhere)
+        model.reload()
+        assertNull(model.folder); assertEquals(listOf(1L, 2L), model.rows.map { it.id })
+    }
+
+    @Test fun listReadActionMarksEveryVisibleMember() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(3, unread = true).copy(messageCount = 2u, messageIds = listOf(3, 1))) }
+        val model = model(core); model.start()
+        model.setRead(model.rows.single())
+        assertEquals(listOf(3L to true, 1L to true), core.readCalls)
+        model.setRead(model.rows.single())
+        assertEquals("a read row marks unread", 3L to false, core.readCalls[2])
+    }
+
+    @Test fun emptyTrashRunsOnlyInTrashAndDropsUndo() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = model(core); model.start()
+        model.emptyTrash()
+        assertTrue("never outside Trash", core.emptied.isEmpty())
+        model.act(MailAction.Delete, 1)
+        model.changeScope(null, Mailbox.TRASH)
+        model.emptyTrash()
+        assertEquals(listOf<String?>(null), core.emptied)
+        assertTrue(model.undoChanges.isEmpty()); assertNull(model.notice); assertFalse(model.working)
+        model.changeScope("fixture", Mailbox.TRASH)
+        core.rejectAction = true
+        try { model.emptyTrash(); fail("expected refusal") } catch (_: IllegalStateException) { }
+        assertEquals(listOf(null, "fixture"), core.emptied); assertFalse(model.working)
+    }
+
+    @Test fun accountNameSavesAndUpdatesTheAccount() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.setName(model.accounts.single(), "  Ada ")
+        assertEquals("Ada", model.accounts.single().displayName)
+        model.setName(model.accounts.single(), "")
+        assertEquals("an empty name falls back to the address", "fixture@example.test", model.accounts.single().displayName)
+    }
 }
 
 private class FakeCore : LagomCoreInterface {
@@ -1058,7 +1118,25 @@ private class FakeCore : LagomCoreInterface {
     var rejectAction = false
     val sent = mutableListOf<ComposeDraft>()
     var snoozed: Pair<List<Long>, Long>? = null
-    override suspend fun accounts() = listOf(MailAccount("fixture", "fixture@example.test", "Fixture"))
+    var accountName = "Fixture"
+    override suspend fun accounts() = listOf(MailAccount("fixture", "fixture@example.test", accountName))
+    override suspend fun setAccountName(accountId: String, name: String): MailAccount {
+        accountName = name.trim().ifEmpty { "fixture@example.test" }
+        return accounts().single()
+    }
+    var folderList = emptyList<MailFolder>()
+    var folderRows = emptyMap<Long, List<MailRow>>()
+    override suspend fun folders(accountId: String?) = folderList.filter { accountId == null || it.account == accountId }
+    override suspend fun folderMail(folderId: Long, limit: UInt, offset: UInt) =
+        folderRows[folderId].orEmpty().drop(offset.toInt()).take(limit.toInt())
+    val moved = mutableListOf<Pair<List<Long>, Long>>()
+    override suspend fun moveToFolder(ids: List<Long>, folderId: Long): List<MailChange> {
+        check(!rejectAction); moved += ids to folderId
+        removed += mail.filter { it.id in ids }; mail = mail.filterNot { it.id in ids }
+        return ids.map { change(it).copy(toFolder = folderId) }
+    }
+    val emptied = mutableListOf<String?>()
+    override suspend fun emptyTrash(accountId: String?) { emptied += accountId; check(!rejectAction) { "Fixture empty refused" } }
     override suspend fun mailbox(accountId: String?, mailbox: Mailbox, limit: UInt, offset: UInt): List<MailRow> {
         pageCalls++
         val snapshot = mail.filter { accountId == null || accountId == it.account }.drop(offset.toInt()).take(limit.toInt())
