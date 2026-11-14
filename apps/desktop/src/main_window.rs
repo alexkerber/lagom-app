@@ -1632,23 +1632,8 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // macOS: the brand shares the traffic lights' row (lights 14 px, x 18..72, centre y 25). A 28 px row
-            // from y 11 keeps the centre; a 16 px gap after the lights and a mark near their size keep it from
-            // reading as a fourth button.
-            .when(cfg!(target_os = "macos"), |d| d.pt(px(11.)))
-            .child(
-                div().id("sidebar-brand").debug_selector(|| "sidebar-brand".into())
-                    .when(cfg!(target_os = "macos"), |d| d.ml(px(66.)).h(px(28.)).gap(px(7.)))
-                    .when(!cfg!(target_os = "macos"), |d| d.h(px(40.)).gap(px(10.)))
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .px(px(8.))
-                    .rounded(px(radius::CONTROL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(app_mark(if cfg!(target_os = "macos") { 20. } else { 26. }))
-                    .child("lagom"),
-            )
+            // macOS: search starts below the traffic lights' row (y 11..39) plus the 20 px gap.
+            .pt(px(if cfg!(target_os = "macos") { 59. } else { 12. }))
             .child(
                 div()
                     .id("search")
