@@ -50,13 +50,13 @@ struct RootView: View {
             }
         }
         // One reload per scope, even when the mailbox and the account change together.
-        .task(id: "\(model.mailbox.rawValue)/\(model.accountID ?? "")/\(model.searchText)/\(model.core == nil)/\(model.notificationRevision)") {
+        .task(id: "\(model.mailbox.rawValue)/\(model.folder?.id ?? 0)/\(model.accountID ?? "")/\(model.searchText)/\(model.core == nil)/\(model.notificationRevision)") {
             await model.changeScope()
             guard !Task.isCancelled else { return }
             let id = pending
             pending = nil
             // A newer scope change cancels this task; never open the message in another scope.
-            if let id, model.mailbox == .inbox, model.accountID == nil, model.searchText.isEmpty { model.selectedID = id }
+            if let id, model.mailbox == .inbox, model.folder == nil, model.accountID == nil, model.searchText.isEmpty { model.selectedID = id }
         }
         // Opens only while lagom is the default mail app, which needs Apple's mail-client entitlement.
         .onOpenURL { url in
@@ -84,7 +84,7 @@ struct RootView: View {
 
     /// Shows the unified Inbox, and a message in it when given.
     private func openMail(_ id: Int64?) {
-        if model.mailbox == .inbox && model.accountID == nil && model.searchText.isEmpty {
+        if model.mailbox == .inbox && model.folder == nil && model.accountID == nil && model.searchText.isEmpty {
             if let id { model.selectedID = id }
         } else {
             pending = id
@@ -129,6 +129,7 @@ struct SidebarView: View {
                                    active: section == page, page: true) { section = page }
                     }
                     if section == .mail { mailboxes.padding(.top, 18) }
+                    if section == .mail && !model.folders.isEmpty { folders.padding(.top, 18) }
                     accounts.padding(.top, 18)
                 }
             }
@@ -144,7 +145,7 @@ struct SidebarView: View {
         if model.accounts.count > 1 {
             ForEach(Array(model.accounts.enumerated()), id: \.element.id) { index, account in
                 SidebarRow(title: account.displayName, count: Int(planner.inboxLeft(account: account.id)),
-                           active: model.mailbox == .inbox && model.accountID == account.id) {
+                           active: model.mailbox == .inbox && model.folder == nil && model.accountID == account.id) {
                     Circle().fill(Theme.account(index)).frame(width: 7, height: 7).frame(width: 18)
                 } action: {
                     open(.inbox, account: account.id)
@@ -155,6 +156,29 @@ struct SidebarView: View {
         }
         mailbox(.later, count: planner.later(account: nil))
         ForEach([MailboxChoice.drafts, .sent, .done, .trash]) { mailbox($0, count: 0) }
+        }
+    }
+
+    /// Desktop's folder group: the server's own folders, by account when there are several.
+    private var folders: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Folders").lagomFont(.small, .medium).foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 10).padding(.bottom, 4).accessibilityAddTraits(.isHeader)
+            ForEach(model.accounts, id: \.id) { account in
+                let own = model.folders.filter { $0.account == account.id }
+                if model.accounts.count > 1 && !own.isEmpty {
+                    Text(account.displayName).lagomFont(.small).foregroundStyle(Theme.secondary).lineLimit(1)
+                        .padding(.horizontal, 10).padding(.top, 6)
+                }
+                ForEach(own, id: \.id) { folder in
+                    SidebarRow(folder.name, icon: "folder", count: Int(folder.unread), active: section == .mail && model.folder?.id == folder.id) {
+                        model.open(folder)
+                        section = .mail
+                    }
+                    .padding(.leading, CGFloat(folder.depth) * 16)
+                    .accessibilityLabel(folder.path)
+                }
+            }
         }
     }
 
@@ -183,7 +207,7 @@ struct SidebarView: View {
 
     private func mailbox(_ box: MailboxChoice, count: UInt64) -> some View {
         SidebarRow(box.rawValue, icon: box.icon, count: Int(count),
-                   active: section == .mail && model.mailbox == box && (box != .inbox || model.accountID == nil)) {
+                   active: section == .mail && model.folder == nil && model.mailbox == box && (box != .inbox || model.accountID == nil)) {
             open(box, account: nil)
         }
     }

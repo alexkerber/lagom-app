@@ -1250,3 +1250,194 @@ async fn unsubscribe_offer_and_a_web_page_is_never_fetched() {
     core.stores.local.lock().unwrap().set_unsubscribe(id, parse("<https://list.example/one>", Some("List-Unsubscribe=One-Click")).as_ref()).unwrap();
     assert_eq!(core.message(id).await.unwrap().unsubscribe.unwrap().link, None);
 }
+
+#[tokio::test]
+async fn folders_list_own_folders_in_tree_order_and_open_their_mail() {
+    let (_dir, core) = fixture();
+    let (a, travel) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "folders@example.test", 1);
+        let other = fixture_account(&s, "other@example.test", 1);
+        mail(&mut s, &a, 1, 1);
+        for (name, role) in [("Travel 2", FolderRole::Other), ("Travel/Trains", FolderRole::Other), ("Spam", FolderRole::Junk),
+                             ("Trash", FolderRole::Trash), ("Archive", FolderRole::Archive), ("Sent", FolderRole::Sent), ("Drafts", FolderRole::Drafts)] {
+            s.save_folder(&a.id, name, Some("/"), role).unwrap();
+        }
+        s.save_folder(&other.id, "Elsewhere", Some("/"), FolderRole::Other).unwrap();
+        let travel = s.save_folder(&a.id, "Travel", Some("/"), FolderRole::Other).unwrap();
+        s.save_message(&Message { summary: MessageSummary { account: a.id.clone(), folder: travel, uid: 1, date: 5,
+            from_address: "trains@example.test".into(), subject: "Tickets".into(), message_id: "t1@example.test".into(), ..Default::default() },
+            body_text: "seat 12".into(), body_html: None }).unwrap();
+        (a, travel)
+    };
+    let folders = core.folders(Some(a.id.clone())).await.unwrap();
+    assert_eq!(folders.iter().map(|f| (f.path.as_str(), f.name.as_str(), f.depth)).collect::<Vec<_>>(),
+        [("Spam", "Spam", 0), ("Travel", "Travel", 0), ("Travel / Trains", "Trains", 1), ("Travel 2", "Travel 2", 0)]);
+    assert_eq!((folders[1].id, folders[1].unread), (travel, 1));
+    assert_eq!(core.folders(None).await.unwrap().len(), 5, "every account's folders without a filter");
+    assert!(matches!(core.folders(Some("missing".into())).await, Err(MailError::NotFound)));
+    let rows = core.folder_mail(travel, 20, 0).await.unwrap();
+    assert_eq!(rows.iter().map(|r| r.subject.as_str()).collect::<Vec<_>>(), ["Tickets"]);
+    assert!(core.folder_mail(travel, 20, 1).await.unwrap().is_empty());
+    assert!(matches!(core.folder_mail(-1, 20, 0).await, Err(MailError::NotFound)));
+}
+
+#[tokio::test]
+async fn account_name_is_trimmed_and_an_empty_name_falls_back_to_the_address() {
+    let (_dir, core) = fixture();
+    let a = fixture_account(&core.stores.local.lock().unwrap(), "name@example.test", 1);
+    assert_eq!(core.set_account_name(a.id.clone(), "  Ada Lovelace ".into()).await.unwrap().display_name, "Ada Lovelace");
+    assert_eq!(core.accounts().await.unwrap()[0].display_name, "Ada Lovelace");
+    assert_eq!(core.set_account_name(a.id.clone(), "   ".into()).await.unwrap().display_name, "name@example.test");
+    assert!(matches!(core.set_account_name("missing".into(), "x".into()).await, Err(MailError::NotFound)));
+}
+
+/// An IMAP server holding one message (UID 1) that moves through `destinations` in order, one connection each.
+async fn moving_server(listener: tokio::net::TcpListener, destinations: &[&str]) {
+    let mut location = "INBOX".to_string();
+    for destination in destinations {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+        let mut selected = String::new();
+        let mut moved = false;
+        loop {
+            let mut line = String::new();
+            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+            let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+            let data = if cmd.starts_with("LOGIN ") { String::new() }
+            else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1 MOVE\r\n".into() }
+            else if let Some(name) = cmd.strip_prefix("SELECT ") {
+                selected = name.trim_matches('"').into();
+                "* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+            } else if cmd.starts_with("UID MOVE ") {
+                assert_eq!(cmd, format!("UID MOVE 1 \"{destination}\""));
+                assert_eq!(selected, location);
+                location = destination.to_string(); moved = true; String::new()
+            } else if cmd == "UID SEARCH ALL" {
+                if selected == location { "* SEARCH 1\r\n".into() } else { "* SEARCH\r\n".into() }
+            } else if cmd.contains("BODYSTRUCTURE") {
+                let header = "From: sender@example.test\r\nSubject: Receipt\r\nMessage-ID: <m1@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+            } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+            else if cmd == "UID FETCH 1 (UID FLAGS)" { "* 1 FETCH (UID 1 FLAGS ())\r\n".into() }
+            else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+            else { panic!("unexpected command {cmd}"); };
+            socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            if cmd == "LOGOUT" { break; }
+        }
+        assert!(moved);
+    }
+}
+
+#[tokio::test]
+async fn move_to_folder_and_undo_move_the_message_back() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, id, receipts) = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "mover@example.test", listener.local_addr().unwrap().port());
+            let id = mail(&mut s, &a, 1, 1);
+            let receipts = s.save_folder(&a.id, "Receipts", None, FolderRole::Other).unwrap();
+            s.reset_uidvalidity(receipts, 7).unwrap();
+            (a, id, receipts)
+        };
+        let server = tokio::spawn(moving_server(listener, &["Receipts", "INBOX"]));
+        let changes = core.move_to_folder(vec![id], receipts).await.unwrap();
+        assert!(core.inbox(20, 0).await.unwrap().is_empty());
+        assert_eq!(core.folder_mail(receipts, 20, 0).await.unwrap().len(), 1);
+        assert_eq!((changes.len(), changes[0].to_folder, changes[0].header_id.as_str()), (1, receipts, "m1@example.test"));
+        core.undo(changes).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(core.mailbox(Some(a.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().len(), 1);
+        assert!(core.folder_mail(receipts, 20, 0).await.unwrap().is_empty());
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_trash_deletes_only_the_chosen_accounts_trash() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, other) = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "trash@example.test", listener.local_addr().unwrap().port());
+            // Port 1 refuses: emptying must never connect to the other account.
+            let other = fixture_account(&s, "other@example.test", 1);
+            for account in [&a, &other] {
+                let trash = s.save_folder(&account.id, "Trash", None, FolderRole::Trash).unwrap();
+                s.reset_uidvalidity(trash, 7).unwrap();
+                s.save_message(&Message { summary: MessageSummary { account: account.id.clone(), folder: trash, uid: 1, date: 1,
+                    subject: "Old".into(), message_id: format!("old@{}", account.email), ..Default::default() },
+                    body_text: String::new(), body_html: None }).unwrap();
+            }
+            (a, other)
+        };
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            let script = [
+                ("LOGIN \"trash@example.test\" \"fixture\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1 UIDPLUS\r\n"),
+                ("SELECT \"Trash\"", "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n"),
+                ("UID SEARCH ALL", "* SEARCH 1\r\n"),
+                ("UID STORE 1 +FLAGS.SILENT (\\Deleted)", ""),
+                ("UID EXPUNGE 1", ""),
+                ("SELECT \"Trash\"", "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n"),
+                ("UID SEARCH ALL", "* SEARCH\r\n"),
+                ("UID SEARCH ALL", "* SEARCH\r\n"),
+                ("LOGOUT", "* BYE bye\r\n"),
+            ];
+            for (command, data) in script {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, actual) = line.trim_end().split_once(' ').unwrap();
+                assert_eq!(actual, command);
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        core.empty_trash(Some(a.id.clone())).await.unwrap();
+        server.await.unwrap();
+        assert!(core.mailbox(Some(a.id), Mailbox::Trash, 20, 0).await.unwrap().is_empty());
+        assert_eq!(core.mailbox(Some(other.id), Mailbox::Trash, 20, 0).await.unwrap().len(), 1);
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn moving_later_mail_to_its_own_folder_ends_the_snooze_and_undo_restores_it() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, id, inbox) = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "later@example.test", listener.local_addr().unwrap().port());
+            let id = mail(&mut s, &a, 1, 1);
+            let inbox = s.message_summary(id).unwrap().folder;
+            (a, id, inbox)
+        };
+        // The server folder is unchanged, so only a login and a logout reach it.
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            for (command, data) in [("LOGIN \"later@example.test\" \"fixture\"", ""), ("CAPABILITY", "* CAPABILITY IMAP4rev1 MOVE\r\n"), ("LOGOUT", "* BYE bye\r\n")] {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, actual) = line.trim_end().split_once(' ').unwrap();
+                assert_eq!(actual, command);
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        let until = now() + 3600;
+        core.later(vec![id], until).await.unwrap();
+        assert!(core.mailbox(Some(a.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().is_empty());
+        let changes = core.move_to_folder(vec![id], inbox).await.unwrap();
+        server.await.unwrap();
+        assert_eq!((changes[0].from_folder, changes[0].to_folder, changes[0].snoozed_until), (inbox, inbox, Some(until)));
+        assert_eq!(core.mailbox(Some(a.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().len(), 1, "back in its folder, out of Later");
+        core.undo(changes).await.unwrap();
+        assert_eq!(core.mailbox(Some(a.id), Mailbox::Later, 20, 0).await.unwrap().len(), 1, "Undo snoozes it again");
+    }).await.unwrap();
+}

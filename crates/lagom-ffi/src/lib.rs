@@ -150,6 +150,36 @@ pub struct MailChange {
     pub header_id: String,
     pub from_folder: i64, pub to_folder: i64, pub snoozed_until: Option<i64>,
 }
+/// A server folder without a fixed mailbox of its own: desktop's folder group and its "Move to" targets.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct MailFolder {
+    pub id: i64, pub account: String,
+    /// The last part of the server name, "Trains"; `path` is the whole name, "Travel / Trains".
+    pub name: String, pub path: String, pub depth: u32, pub unread: u32,
+}
+fn mail_folders(s: &Store, account_id: Option<&str>) -> lagom_core::Result<Vec<MailFolder>> {
+    let mut folders = Vec::new();
+    for a in s.accounts()?.into_iter().filter(|a| account_id.is_none_or(|id| a.id == id)) {
+        let mut parts: Vec<(Vec<String>, MailFolder)> = s.folders(&a.id, now())?.into_iter()
+            // Inbox, Sent, Drafts, Done and Trash have their own places, as in desktop's `folders::merge`.
+            .filter(|f| matches!(f.role, FolderRole::Junk | FolderRole::Other))
+            .map(|f| {
+                let names: Vec<String> = match f.delimiter.as_deref().filter(|d| !d.is_empty()) {
+                    Some(d) => f.name.split(d).map(str::to_string).collect(),
+                    None => vec![f.name.clone()],
+                };
+                let folder = MailFolder { id: f.id, account: f.account, name: names.last().cloned().unwrap_or_default(),
+                    path: names.join(" / "), depth: names.len().saturating_sub(1) as u32, unread: f.unread.min(u32::MAX as u64) as u32 };
+                (names, folder)
+            }).collect();
+        // By path parts, so a folder's children follow it before a sibling such as "Travel 2".
+        parts.sort_by(|a, b| a.0.cmp(&b.0));
+        folders.extend(parts.into_iter().map(|(_, f)| f));
+    }
+    Ok(folders)
+}
+#[derive(Clone, Copy)]
+enum MoveTarget { Done, Trash, Folder(i64) }
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ContactSuggestion { pub name: String, pub address: String, pub recipient: String }
 
@@ -265,6 +295,16 @@ impl LagomCore {
     }
     pub async fn accounts(&self) -> Result<Vec<MailAccount>> {
         self.run(|s| Ok(s.accounts()?.into_iter().map(Into::into).collect())).await
+    }
+    /// "Your name" on desktop: what others see as the sender. An empty name falls back to the address.
+    pub async fn set_account_name(&self, account_id: String, name: String) -> Result<MailAccount> {
+        self.run(move |s| {
+            let mut a = account(s, &account_id)?;
+            let name = name.trim();
+            a.display_name = if name.is_empty() { a.email.clone() } else { name.to_string() };
+            s.save_account(&a)?;
+            Ok(a.into())
+        }).await
     }
     pub async fn refresh_contacts(&self, account_id: String) -> Result<()> {
         let stores = self.stores.clone();
@@ -408,6 +448,20 @@ impl LagomCore {
             Ok(conversation_rows(s.mailbox_conversations(account_id.as_deref(), mailbox.role(), now(), limit.saturating_add(offset))?).into_iter().skip(offset as usize).take(limit as usize).collect())
         }).await
     }
+    /// The account's own folders, or every account's when `account_id` is None, in tree order.
+    pub async fn folders(&self, account_id: Option<String>) -> Result<Vec<MailFolder>> {
+        self.run(move |s| {
+            if let Some(id) = &account_id { account(s, id)?; }
+            mail_folders(s, account_id.as_deref())
+        }).await
+    }
+    pub async fn folder_mail(&self, folder_id: i64, limit: u32, offset: u32) -> Result<Vec<MailRow>> {
+        self.run(move |s| {
+            if limit > 500 { return Err(lagom_core::Error::Invalid("page limit must be at most 500")); }
+            let folder = s.folder(folder_id)?;
+            Ok(conversation_rows(s.list_conversations(&folder.account, Some(folder_id), now(), limit.saturating_add(offset))?).into_iter().skip(offset as usize).take(limit as usize).collect())
+        }).await
+    }
     pub async fn message(&self, id: i64) -> Result<MailMessage> {
         self.run(move |s| mail_message(s, id)).await
     }
@@ -458,8 +512,31 @@ impl LagomCore {
                 from_folder: m.folder, to_folder: m.folder, snoozed_until: m.snoozed_until }).collect())
         }).await
     }
-    pub async fn done(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, false).await }
-    pub async fn delete(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, true).await }
+    pub async fn done(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, MoveTarget::Done).await }
+    pub async fn delete(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, MoveTarget::Trash).await }
+    /// "Move to" a folder of the message's own account. Undo takes the result like Done's.
+    pub async fn move_to_folder(&self, ids: Vec<i64>, folder_id: i64) -> Result<Vec<MailChange>> {
+        self.move_messages(ids, MoveTarget::Folder(folder_id)).await
+    }
+    /// Deletes everything in Trash for good: the account's, or every account's when None. The app asks first.
+    pub async fn empty_trash(&self, account_id: Option<String>) -> Result<()> {
+        self.run_network(move |s| network(async {
+            let mut first = None;
+            for a in s.accounts()?.into_iter().filter(|a| account_id.as_ref().is_none_or(|id| &a.id == id)) {
+                let trash: Vec<i64> = s.folder_metadata(&a.id)?.into_iter().filter(|f| f.role == FolderRole::Trash).map(|f| f.id).collect();
+                if trash.is_empty() { continue; }
+                let result = async {
+                    let mut session = ImapSync::login(&a, &a.password()?).await?;
+                    for folder in trash { session.empty_trash(s, folder).await?; }
+                    let _ = session.logout().await;
+                    Ok(())
+                }.await;
+                // One account's failure must not keep the others' Trash full.
+                if let Err(error) = result { first.get_or_insert(error); }
+            }
+            match first { Some(error) => Err(error), None => Ok(()) }
+        })).await
+    }
     /// Puts Done, Later or Delete back: each message returns to the folder it left, with its old snooze.
     pub async fn undo(&self, changes: Vec<MailChange>) -> Result<()> {
         self.run_network(move |s| network(async {
@@ -607,7 +684,7 @@ impl LagomCore {
     }
 }
 impl LagomCore {
-    async fn move_messages(&self, ids: Vec<i64>, trash: bool) -> Result<Vec<MailChange>> {
+    async fn move_messages(&self, ids: Vec<i64>, target: MoveTarget) -> Result<Vec<MailChange>> {
         self.run_network(move |s| network(async {
             let mut changes = Vec::new();
             // shortcut: a failure mid-conversation drops Undo for the members already moved; they stay in Done or Trash.
@@ -615,18 +692,34 @@ impl LagomCore {
                 let m = s.message_summary(id)?;
                 let a = account(s, &m.account)?;
                 let mut session = ImapSync::login(&a, &a.password()?).await?;
-                if trash { session.trash(s, id).await?; } else {
-                    session.archive(s, id).await?;
-                    // A real move replaces the row; an already archived message keeps its snooze.
-                    match s.snooze(id, None) {
-                        Ok(()) | Err(lagom_core::Error::NotFound) => {},
-                        Err(error) => return Err(error),
+                let role = match target {
+                    MoveTarget::Trash => { session.trash(s, id).await?; Some(FolderRole::Trash) }
+                    MoveTarget::Done => {
+                        session.archive(s, id).await?;
+                        // A real move replaces the row; an already archived message keeps its snooze.
+                        match s.snooze(id, None) {
+                            Ok(()) | Err(lagom_core::Error::NotFound) => {},
+                            Err(error) => return Err(error),
+                        }
+                        Some(FolderRole::Archive)
                     }
-                }
+                    // move_message refuses a folder of another account.
+                    MoveTarget::Folder(folder) => {
+                        session.move_message(s, id, folder).await?;
+                        // Moved out of Later into its own folder: it shows there again. A real move replaced the row.
+                        match s.snooze(id, None) {
+                            Ok(()) | Err(lagom_core::Error::NotFound) => {},
+                            Err(error) => return Err(error),
+                        }
+                        None
+                    }
+                };
                 let _ = session.logout().await;
-                let role = if trash { FolderRole::Trash } else { FolderRole::Archive };
                 // The folder that now holds it: an account can have more than one folder with this role.
-                let folders: Vec<i64> = s.folder_metadata(&a.id)?.into_iter().filter(|f| f.role == role).map(|f| f.id).collect();
+                let folders: Vec<i64> = match (target, role) {
+                    (MoveTarget::Folder(folder), _) => vec![folder],
+                    (_, role) => s.folder_metadata(&a.id)?.into_iter().filter(|f| Some(f.role) == role).map(|f| f.id).collect(),
+                };
                 let mut to = folders.iter().copied().find(|f| *f == m.folder);
                 for f in &folders {
                     if to.is_none() && s.find_message(*f, &m.message_id)?.is_some() { to = Some(*f); }
