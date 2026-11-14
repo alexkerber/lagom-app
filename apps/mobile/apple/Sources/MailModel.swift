@@ -404,11 +404,15 @@ final class MailModel {
             messages = loaded
             message = loaded.first { $0.row.id == id } ?? loaded.last
             expandedIDs = Set(loaded.filter { $0.row.id == id || $0.row.unread || $0.row.id == loaded.last?.row.id }.map { $0.row.id })
-            for item in loaded where expandedIDs.contains(item.row.id) {
+            let open = loaded.filter { expandedIDs.contains($0.row.id) }
+            // The core runs one network call at a time: flags first, so a slow body never holds them back.
+            for item in open where item.row.unread {
                 guard request == selectionRevision else { return }
-                async let inline: Void = loadInline(id: item.row.id, request: request)
-                if item.row.unread { await setRead(id: item.row.id, read: true) }
-                await inline
+                await setRead(id: item.row.id, read: true)
+            }
+            for item in open {
+                guard request == selectionRevision else { return }
+                await loadInline(id: item.row.id, request: request)
             }
         } catch { if selectedID == id, request == selectionRevision { self.error = error.localizedDescription } }
     }

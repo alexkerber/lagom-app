@@ -199,6 +199,27 @@ class MailModelTest {
         try { model.select(2); fail("expected refusal") } catch (_: IllegalStateException) { }
         assertEquals("<p>Second</p>", model.message!!.htmlBody)
     }
+    @Test fun readFlagsDoNotWaitForBodyDownloads() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(1, unread = true), row(2, unread = true))
+            conversationIds = listOf(1, 2)
+            bodies[1] = "Not downloaded" to null
+            bodies[2] = "Not downloaded" to null
+            fetched[1] = "First" to "<p>First</p>"
+            inlineGate = CompletableDeferred()
+        }
+        val model = model(core); model.start()
+        val selection = async { model.select(1) }
+        // The read refresh hops to the IO pool; bounded so a regression fails instead of hanging.
+        repeat(5_000) { if (core.readCalls.size < 2) { runCurrent(); Thread.sleep(1) } }
+        assertEquals(listOf(1L to true, 2L to true), core.readCalls)
+        assertTrue(selection.isActive)
+        core.inlineGate!!.complete(Unit); selection.await()
+        assertEquals("<p>First</p>", model.messages.first().htmlBody)
+        assertEquals(listOf(1L, 2L), core.inlineCalls)
+        // The core runs one network call at a time: every flag went out before the first download.
+        assertEquals(listOf(2, 2), core.readsBeforeInline)
+    }
     @Test fun listActionsUseVisibleThreadMembers() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(3).copy(messageCount = 2u, messageIds = listOf(3, 1))) }
         val model = model(core); model.start()
@@ -893,8 +914,12 @@ private class FakeCore : LagomCoreInterface {
     var fetched = mutableMapOf<Long, Pair<String, String?>>()
     val inlineCalls = mutableListOf<Long>()
     var rejectInline = false
+    var inlineGate: CompletableDeferred<Unit>? = null
+    val readsBeforeInline = mutableListOf<Int>()
     override suspend fun loadInline(id: Long) {
         inlineCalls += id
+        readsBeforeInline += readCalls.size
+        inlineGate?.await()
         check(!rejectInline) { "Fixture fetch refused" }
         fetched.remove(id)?.let { bodies[id] = it }
     }

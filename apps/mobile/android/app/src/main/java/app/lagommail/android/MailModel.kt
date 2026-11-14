@@ -328,14 +328,11 @@ internal class MailModel(
             messages = loaded
             message = loaded.firstOrNull { it.row.id == id } ?: loaded.lastOrNull()
             expandedIds = loaded.filter { it.row.id == id || it.row.unread || it.row.id == loaded.lastOrNull()?.row?.id }.map { it.row.id }.toSet()
-            // Bodies first: a refused read flag throws and must not keep the body out.
-            for (item in loaded.filter { it.row.id in expandedIds }) {
-                if (request != selectionRevision) return
-                loadBody(item.row.id, request)
-            }
-            for (item in loaded.filter { it.row.unread }) {
-                if (request != selectionRevision) return
-                setRead(item.row.id, true)
+            openBodies(loaded.filter { it.row.id in expandedIds }.map { it.row.id }, request) {
+                for (item in loaded.filter { it.row.unread }) {
+                    if (request != selectionRevision) return@openBodies
+                    setRead(item.row.id, true)
+                }
             }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == selectionRevision) throw e }
@@ -344,8 +341,14 @@ internal class MailModel(
         val item = messages.firstOrNull { it.row.id == id } ?: return
         if (id in expandedIds) { expandedIds -= id; return }
         expandedIds += id
-        loadBody(id, selectionRevision)
-        if (item.row.unread) setRead(id, true)
+        openBodies(listOf(id), selectionRevision) { if (item.row.unread) setRead(id, true) }
+    }
+    /** Sends the read flags, then downloads missing bodies; a refused flag stops no download.
+     *  The core runs one network call at a time, so flags first keeps a slow body from holding them back. */
+    private suspend fun openBodies(ids: List<Long>, request: Int, read: suspend () -> Unit) {
+        val refused = try { read(); null } catch (e: CancellationException) { throw e } catch (e: Exception) { e }
+        for (id in ids) { if (request != selectionRevision) break; loadBody(id, request) }
+        refused?.let { throw it }
     }
     /** Sync leaves some bodies out (over 4 MiB, or synced before HTML parts were kept): for mail
      *  without HTML, load_inline fetches the body, at most once per message. */

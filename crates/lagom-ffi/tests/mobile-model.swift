@@ -53,7 +53,13 @@ import Foundation
         MailMessage(row: mail.first { $0.id == id }!, textBody: "body", htmlBody: nil, attachments: [])
     }
     // Mail without HTML asks the core for a body sync may have left out; the fixture has it already.
-    override func loadInline(id: Int64) async throws {}
+    var suspendInline = false
+    var inlineGate: CheckedContinuation<Void, Never>?
+    var flagsBeforeInline: [Int] = []
+    override func loadInline(id: Int64) async throws {
+        flagsBeforeInline.append(flags.count)
+        if suspendInline { await withCheckedContinuation { inlineGate = $0 } }
+    }
     override func markRead(id: Int64, read: Bool) async throws {
         flags.append(id)
         let index = mail.firstIndex { $0.id == id }!
@@ -222,6 +228,22 @@ struct ModelChecks {
         precondition(core.flags == [3])
     }
 
+    @MainActor static func readFlagsDoNotWaitForBodyDownloads() async {
+        let core = FixtureCore(noHandle: .init())
+        core.conversationIDs = [1, 2]
+        core.suspendInline = true
+        let model = MailModel(); model.core = core; model.selectedID = 1
+        let opening = Task { await model.select(1) }
+        // Bounded so a regression fails instead of hanging.
+        for _ in 0..<10_000 where core.flags.count < 2 || core.inlineGate == nil { await Task.yield() }
+        precondition(core.flags == [1, 2] && core.inlineGate != nil, "read flags go out while a body downloads")
+        core.suspendInline = false
+        core.inlineGate?.resume()
+        await opening.value
+        // The core runs one network call at a time: every flag went out before the first download.
+        precondition(core.flagsBeforeInline == [2, 2])
+    }
+
     @MainActor static func attachments() async throws {
         for (name, safe) in [("../../file.txt", "file.txt"), ("..\\file.txt", "file.txt"),
                              (" \0\n", "attachment"), ("", "attachment"), ("..", "attachment"),
@@ -300,7 +322,8 @@ struct ModelChecks {
         await listReadActionIncludesOlderUnreadMembers()
         await selectedThreadActionSurvivesRepresentativeChange()
         await explicitlyOpenedReadMemberStartsExpanded()
-        print("Conversation row read, changed representative and explicit expansion regressions passed")
+        await readFlagsDoNotWaitForBodyDownloads()
+        print("Conversation row read, changed representative, explicit expansion and body download regressions passed")
         let conversationCore = FixtureCore(noHandle: .init())
         conversationCore.conversationIDs = [1, 2, 3]
         conversationCore.mail[0].unread = false
