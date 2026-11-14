@@ -36,7 +36,8 @@ fn glyph(c: u8) -> u16 {
     if c.is_ascii_digit() { GLYPHS[(c - b'0') as usize] } else { GLYPHS[10] }
 }
 
-/// A `size`×`size` accent disc with `text` in white: BGRA rows from the top, straight alpha.
+/// A `size`×`size` accent disc with `text` in white: BGRA rows from the top, straight alpha,
+/// black where transparent.
 /// shortcut: the default light accent, not the accent chosen in Settings; pass it in when the badge must follow it.
 fn pixels(text: &str, size: usize) -> Vec<u8> {
     let accent = crate::theme::Theme::light(crate::theme::DEFAULT_ACCENT).accent;
@@ -44,9 +45,12 @@ fn pixels(text: &str, size: usize) -> Vec<u8> {
     let text = text.as_bytes();
     // A glyph is 3 pixels wide with 1 pixel between glyphs; whole-pixel scale keeps them sharp.
     let width = text.len() * 4 - 1;
-    let scale = (size * 4 / 5 / width).min(size * 7 / 10 / 5).max(1);
-    let (left, top) = (size.saturating_sub(width * scale) / 2, size.saturating_sub(5 * scale) / 2);
     let radius = size as f32 / 2.;
+    // The text box, with a pixel to spare, stays inside the opaque part of the disc.
+    let fits = |s: usize| width * s <= size * 4 / 5 && 5 * s <= size * 7 / 10
+        && ((width * s) as f32 / 2. + 1.).hypot((5 * s) as f32 / 2. + 1.) <= radius;
+    let scale = (2..=size).take_while(|&s| fits(s)).last().unwrap_or(1);
+    let (left, top) = (size.saturating_sub(width * scale) / 2, size.saturating_sub(5 * scale) / 2);
     let mut out = Vec::with_capacity(size * size * 4);
     for y in 0..size {
         for x in 0..size {
@@ -56,7 +60,7 @@ fn pixels(text: &str, size: usize) -> Vec<u8> {
                 let (gx, gy) = ((x - left) / scale, (y - top) / scale);
                 gx < width && gy < 5 && gx % 4 != 3 && glyph(text[gx / 4]) >> (14 - gy * 3 - gx % 4) & 1 == 1
             };
-            let [b, g, r] = if ink { [255; 3] } else { fill };
+            let [b, g, r] = if ink { [255; 3] } else if alpha == 0 { [0; 3] } else { fill };
             out.extend([b, g, r, alpha]);
         }
     }
@@ -70,9 +74,9 @@ mod taskbar {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
-    use windows::Win32::UI::Shell::{DefSubclassProc, ITaskbarList3, SetWindowSubclass, TaskbarList};
+    use windows::Win32::UI::Shell::{DefSubclassProc, ITaskbarList3, RemoveWindowSubclass, SetWindowSubclass, TaskbarList};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyIcon, GetSystemMetrics, RegisterWindowMessageW, HICON, ICONINFO, SM_CXSMICON,
+        CreateIconIndirect, DestroyIcon, GetSystemMetrics, RegisterWindowMessageW, HICON, ICONINFO, SM_CXSMICON, WM_NCDESTROY,
     };
 
     static WINDOW: AtomicIsize = AtomicIsize::new(0);
@@ -100,6 +104,11 @@ mod taskbar {
 
     unsafe extern "system" fn button_created(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _: usize, _: usize) -> LRESULT {
         if msg == BUTTON_CREATED.load(Relaxed) { apply(); }
+        if msg == WM_NCDESTROY {
+            // A closed main window: forget its handle, which Windows may give to another window.
+            let _ = WINDOW.compare_exchange(hwnd.0 as isize, 0, Relaxed, Relaxed);
+            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(button_created), 1) };
+        }
         unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
 
@@ -124,8 +133,12 @@ mod taskbar {
 
     fn icon(text: &str, size: usize) -> Option<HICON> {
         let pixels = super::pixels(text, size);
-        // All zero: the colour bitmap's alpha decides; monochrome rows are 16-bit aligned.
-        let mask = vec![0u8; size.div_ceil(16) * 2 * size];
+        // Set where transparent, for drawing that reads the mask; monochrome rows are 16-bit aligned.
+        let stride = size.div_ceil(16) * 2;
+        let mut mask = vec![0u8; stride * size];
+        for (i, pixel) in pixels.chunks(4).enumerate() {
+            if pixel[3] == 0 { mask[i / size * stride + i % size / 8] |= 0x80 >> (i % size % 8); }
+        }
         let side = size as i32;
         unsafe {
             let color = CreateBitmap(side, side, 1, 32, Some(pixels.as_ptr().cast()));
@@ -194,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_badge_is_a_disc_with_white_text_inside_it() {
-        for (text, size) in [("1", 16), ("99", 16), ("99+", 16), ("99+", 32), ("7", 20)] {
+        for (text, size) in ["1", "8", "20", "99", "99+"].into_iter().flat_map(|t| (16..=64).map(move |s| (t, s))) {
             let px = pixels(text, size);
             assert_eq!(px.len(), size * size * 4, "{text} {size}");
             let at = |x: usize, y: usize| &px[(y * size + x) * 4..][..4];
