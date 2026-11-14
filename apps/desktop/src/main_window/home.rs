@@ -17,6 +17,8 @@ impl MainWindow {
         // A half-typed new password stays only on its own account's page.
         if !matches!(&page, Page::Settings(Some(id)) if self.new_password.as_ref().is_some_and(|p| &p.id == id)) { self.new_password = None; }
         self.page = page;
+        // A pending jump to one message would bring Mail back.
+        if let Some(live) = self.live.as_mut().filter(|_| !matches!(self.page, Page::Mail)) { live.cancel_jump(); }
         if self.demo { return; }
         let saved = match self.page {
             Page::Home => StartPage::Home,
