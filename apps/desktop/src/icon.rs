@@ -19,9 +19,9 @@ pub fn install() {
 
 /// The Dock icon shows the unread count of the unified Inbox, as the Mail row does; none at zero.
 pub fn set_badge(count: usize) {
-    static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    // Set on every count read, not only on change: a label set while the app still launches was
+    // measured not to show (0.1.17, 307 unread, no badge).
     let Some(main_thread) = MainThreadMarker::new() else { return };
-    if SHOWN.swap(count, std::sync::atomic::Ordering::Relaxed) == count { return; }
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     NSApplication::sharedApplication(main_thread).dockTile().setBadgeLabel(label.as_deref());
 }
