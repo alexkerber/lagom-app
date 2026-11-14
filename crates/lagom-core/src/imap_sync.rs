@@ -153,9 +153,9 @@ pub struct ImapSync {
     session: Session<Bounded<Wire>>,
     capabilities: Capabilities,
     refresh_error: Option<Error>,
-    /// Set while a one-message action fetches a body again: the save keeps the row's flags and
-    /// never inserts, so a move or read flag that ran meanwhile stays.
-    refetch: bool,
+    /// The row and UIDVALIDITY a one-message action fetches a body again for: the save keeps the
+    /// row's flags and never inserts, so a move, reset or read flag that ran meanwhile stays.
+    refetch: Option<(i64, u32)>,
     /// Kept to reconnect after a message whose response left the session unusable.
     password: zeroize::Zeroizing<String>,
 }
@@ -181,7 +181,7 @@ impl ImapSync {
             session,
             capabilities,
             refresh_error: None,
-            refetch: false,
+            refetch: None,
             // OAuth reconnects with its own token; do not hold the refresh token for the session's life.
             password: zeroize::Zeroizing::new(if matches!(account.auth, Auth::Password) { password.to_owned() } else { String::new() }),
         })
@@ -283,13 +283,15 @@ impl ImapSync {
         Ok((store.folder(id)?, mailbox))
     }
     /// SELECT for a one-message action. Mobile runs these beside a folder sync, so only the sync
-    /// resets a folder; a changed UIDVALIDITY is `changed`.
-    async fn select_unchanged(&mut self, store: &Store, id: i64, changed: &'static str) -> Result<Folder> {
-        let (folder, _, validity) = self.select_only(store, id).await?;
-        if folder.uidvalidity != Some(validity) {
+    /// resets a folder. `message` must still be the row in the server's UIDVALIDITY, else `changed`.
+    async fn select_unchanged(&mut self, store: &Store, message: &crate::store::MessageSummary, changed: &'static str) -> Result<(Folder, u32)> {
+        // Read after `message`: a reset in between deleted its row, a later one changes the server's value.
+        let before = store.message_uidvalidity(message.id, message.folder, message.uid)?;
+        let (folder, _, validity) = self.select_only(store, message.folder).await?;
+        if before != Some(validity) {
             return Err(Error::Invalid(changed));
         }
-        Ok(folder)
+        Ok((folder, validity))
     }
     async fn select_only(&mut self, store: &Store, id: i64) -> Result<(Folder, async_imap::types::Mailbox, u32)> {
         let folder = store.folder(id)?;
@@ -557,7 +559,10 @@ impl ImapSync {
                 .map(|d| d.timestamp())
                 .unwrap_or_default();
         }
-        let id = if self.refetch { store.refetched_message(&message, attachments)? } else { store.save_synced_message(&message, attachments)? };
+        let id = match self.refetch {
+            Some((id, validity)) => store.refetched_message(id, validity, &message, attachments)?,
+            None => store.save_synced_message(&message, attachments)?,
+        };
         // From the headers already fetched: opening the message never goes to the network for it.
         store.set_unsubscribe(id, fetch.and_then(Fetch::header).and_then(crate::unsubscribe::from_headers).as_ref())?;
         Ok(id)
@@ -573,7 +578,7 @@ impl ImapSync {
         }
         // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
         self.session.get_mut().remaining = Some(part.size as usize + 65536);
-        self.select_unchanged(store, message.folder, "mailbox changed; resync before download").await?;
+        self.select_unchanged(store, &message, "mailbox changed; resync before download").await?;
         let path = SectionPath::Part(path, None);
         let query = format!("(UID BODY.PEEK[{section}])");
         let fetched = net(async {
@@ -601,7 +606,7 @@ impl ImapSync {
     }
     pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
         let message = store.message(id)?.summary;
-        self.select_unchanged(store, message.folder, "mailbox changed; resync before operation").await?;
+        self.select_unchanged(store, &message, "mailbox changed; resync before operation").await?;
         let command = if seen {
             "+FLAGS.SILENT (\\Seen)"
         } else {
@@ -1024,7 +1029,7 @@ mod protocol_tests {
         let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, refetch: false, password: Default::default() };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, refetch: None, password: Default::default() };
         let start = tokio::time::Instant::now();
         let result = imap.all_uids().await;
         assert!(matches!(result, Err(Error::Network("IMAP operation timed out"))), "{result:?}");
@@ -1068,7 +1073,7 @@ mod protocol_tests {
         let id = store.list_messages(inbox, 0, 1, 0).unwrap()[0].id;
         let mut session = Client::new(Bounded::new(Box::new(client) as Wire)).login("fixture", "fixture").await.unwrap();
         let capabilities = session.capabilities().await.unwrap();
-        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, refetch: false, password: Default::default() };
+        let mut imap = ImapSync { account, session, capabilities, refresh_error: None, refetch: None, password: Default::default() };
         let result = tokio::time::timeout(Duration::from_secs(2), imap.fetch_attachment(&mut store, id, "1")).await;
         drop(imap);
         server.await.unwrap();

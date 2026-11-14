@@ -549,20 +549,27 @@ impl Store {
         Ok(id)
     }
     pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
-        self.save_synced(message, attachments, false)
+        self.save_synced(message, attachments, None)
     }
-    /// A body fetched again for an existing row: keeps the row's flags; NotFound when the row is gone.
-    pub(crate) fn refetched_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
-        self.save_synced(message, attachments, true)
+    /// A body fetched again for row `id` in UIDVALIDITY `validity`: keeps the row's flags; NotFound
+    /// when that row is gone or the folder was reset.
+    pub(crate) fn refetched_message(&self, id: i64, validity: u32, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
+        self.save_synced(message, attachments, Some((id, validity)))
     }
-    fn save_synced(&self, message: &Message, attachments: &[crate::attachment::Attachment], existing: bool) -> Result<i64> {
+    /// The folder's UIDVALIDITY if row `id` is still `uid` in `folder`.
+    pub(crate) fn message_uidvalidity(&self, id: i64, folder: i64, uid: u32) -> Result<Option<u32>> {
+        self.db.query_row("SELECT f.uidvalidity FROM messages m JOIN folders f ON f.id=m.folder WHERE m.id=?1 AND m.folder=?2 AND m.uid=?3",
+            params![id, folder, uid], |r| r.get(0)).optional()?.ok_or(Error::NotFound)
+    }
+    fn save_synced(&self, message: &Message, attachments: &[crate::attachment::Attachment], existing: Option<(i64, u32)>) -> Result<i64> {
         let tx = self.db.unchecked_transaction()?;
         let kept: Message;
-        let message = if existing {
+        let message = if let Some((id, validity)) = existing {
             // Read in the write's transaction: a delete or flag change committed meanwhile fails the write.
             let m = &message.summary;
-            let (seen, flagged) = self.db.query_row("SELECT seen,flagged FROM messages WHERE folder=?1 AND uid=?2",
-                params![m.folder, m.uid], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(Error::NotFound)?;
+            let (seen, flagged) = self.db.query_row("SELECT m.seen,m.flagged FROM messages m JOIN folders f ON f.id=m.folder
+                WHERE m.id=?1 AND m.folder=?2 AND m.uid=?3 AND f.uidvalidity=?4",
+                params![id, m.folder, m.uid, validity], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(Error::NotFound)?;
             kept = Message { summary: MessageSummary { seen, flagged, ..m.clone() }, ..message.clone() };
             &kept
         } else { message };
@@ -780,19 +787,25 @@ impl Store {
 mod mail_tests {
     use super::*;
     #[test]
-    fn a_refetched_body_keeps_newer_flags_and_never_brings_a_moved_row_back() {
-        let (_temp, store, account, folder) = setup();
-        let id = store.save_synced_message(&mail(&account, folder, 1), &[]).unwrap();
-        // A read flag confirmed while the body was on its way.
-        store.set_flags(folder, 1, true, true).unwrap();
+    fn a_refetched_body_keeps_newer_flags_and_never_lands_on_another_row() {
+        let (_temp, mut store, account, folder) = setup();
+        store.reset_uidvalidity(folder, 6).unwrap();
+        let old = store.save_synced_message(&mail(&account, folder, 1), &[]).unwrap();
         let mut body = mail(&account, folder, 1);
         body.body_text = "full body".into();
-        assert_eq!(store.refetched_message(&body, &[]).unwrap(), id);
+        // The folder was reset and a new message took UID 1: the old body must not land on it.
+        store.reset_uidvalidity(folder, 7).unwrap();
+        let id = store.save_synced_message(&mail(&account, folder, 1), &[]).unwrap();
+        assert!(matches!(store.refetched_message(old, 6, &body, &[]), Err(Error::NotFound)));
+        assert_ne!(store.message(id).unwrap().body_text, "full body");
+        // A read flag confirmed while the body was on its way.
+        store.set_flags(folder, 1, true, true).unwrap();
+        assert_eq!(store.refetched_message(id, 7, &body, &[]).unwrap(), id);
         let m = store.message(id).unwrap();
         assert_eq!((m.summary.seen, m.summary.flagged, m.body_text.as_str()), (true, true, "full body"));
         // A move deleted the row before the body arrived.
         store.delete_message(id).unwrap();
-        assert!(matches!(store.refetched_message(&body, &[]), Err(Error::NotFound)));
+        assert!(matches!(store.refetched_message(id, 7, &body, &[]), Err(Error::NotFound)));
         assert!(store.known_uids(folder).unwrap().is_empty());
     }
     #[test]

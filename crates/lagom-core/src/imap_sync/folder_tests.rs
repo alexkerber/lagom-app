@@ -21,7 +21,7 @@ async fn fixture(steps: Vec<(String, String)>) -> (ImapSync, Store, tempfile::Te
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("mail.db")).unwrap();
     store.save_account(&account).unwrap();
-    (ImapSync { account, session, capabilities, refresh_error: None, refetch: false, password: Default::default() }, store, temp, server)
+    (ImapSync { account, session, capabilities, refresh_error: None, refetch: None, password: Default::default() }, store, temp, server)
 }
 
 fn step(command: &str, data: &str) -> (String, String) {

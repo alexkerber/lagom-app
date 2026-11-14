@@ -36,14 +36,14 @@ impl ImapSync {
         let stored = store.message(id)?;
         let message = stored.summary;
         if message.account != self.account.id { return Err(Error::NotFound); }
-        let folder = self.select_unchanged(store, message.folder, "mailbox changed; resync before loading inline images").await?;
+        let (folder, validity) = self.select_unchanged(store, &message, "mailbox changed; resync before loading inline images").await?;
         if stored.body_html.is_none() {
             // Sync left this body out (over 4 MiB, or synced before HTML parts were kept). Fetching
             // the message again also loads its inline parts.
             // async-imap drops a tagged NO: no reply is an error, so a later open tries again.
-            self.refetch = true;
+            self.refetch = Some((id, validity));
             let fetched = self.fetch_message(store, &folder, message.uid, mime::MAX_OPEN_BYTES).await;
-            self.refetch = false;
+            self.refetch = None;
             if !fetched? {
                 return Err(Error::Network("the server did not return this message"));
             }

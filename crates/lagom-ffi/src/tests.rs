@@ -1232,8 +1232,10 @@ async fn two_syncs_of_one_account_never_overlap() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let first = tokio::spawn({ let core = core.clone(); let id = a.id.clone(); async move { core.sync(id).await } });
         slow.stalled.notified().await;
+        // Deterministic part: the sync lock is held outside the folder lock too.
+        assert!(core.stores.sync.try_lock().is_err());
         let second = tokio::spawn({ let core = core.clone(); async move { core.sync_all().await } });
-        // A slow scheduler can only make this pass without testing anything, never fail falsely.
+        // A slow scheduler can only make this part pass without testing anything, never fail falsely.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(slow.open.load(SeqCst), 1, "the second sync connected during the first");
         slow.release.notify_one();
@@ -1280,4 +1282,58 @@ async fn a_read_flag_leaves_a_changed_mailbox_to_the_sync() {
     let s = core.stores.local.lock().unwrap();
     let message = s.message(id).unwrap().summary;
     assert_eq!(s.folder(message.folder).unwrap().uidvalidity, Some(7));
+}
+
+#[tokio::test]
+async fn a_sync_with_older_flags_does_not_undo_a_read_flag() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (a, id) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+        let id = mail(&mut s, &a, 1, 1);
+        (a, id)
+    };
+    let stalled = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn({ let (stalled, release) = (stalled.clone(), release.clone()); async move { loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (stalled, release) = (stalled.clone(), release.clone());
+        tokio::spawn(async move {
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { String::new() }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n".into() }
+                else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n".into() }
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n".into() }
+                else if cmd == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
+                else if cmd.contains("BODYSTRUCTURE") {
+                    let header = "From: Sender <sender@example.test>\r\nSubject: Fixture\r\nMessage-ID: <fixture@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                    format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                else if cmd == "UID FETCH 1 (UID FLAGS)" {
+                    // The server read the flags before the read flag; the reply arrives after it.
+                    stalled.notify_one();
+                    release.notified().await;
+                    "* 1 FETCH (UID 1 FLAGS ())\r\n".into()
+                } else if cmd == "UID STORE 1 +FLAGS.SILENT (\\Seen)" { String::new() }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+    } } });
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let sync = tokio::spawn({ let core = core.clone(); async move { core.sync(a.id).await } });
+        stalled.notified().await;
+        core.mark_read(id, true).await.unwrap();
+        release.notify_one();
+        sync.await.unwrap().unwrap();
+    }).await.unwrap();
+    assert!(!core.message(id).await.unwrap().row.unread);
 }
