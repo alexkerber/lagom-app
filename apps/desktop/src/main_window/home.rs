@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn review_section_icons_are_embedded_and_distinct() {
         use gpui::AssetSource;
-        let icons: HashSet<_> = SECTIONS.iter().map(|(_, path, _)| {
+        let icons: HashSet<_> = SECTIONS.iter().map(|(_, path)| {
             let bytes = crate::Assets.load(path).unwrap().expect("sidebar icon must be embedded");
             let svg = String::from_utf8(bytes.to_vec()).unwrap();
             assert!(svg.contains("viewBox=\"0 0 16 16\""));
@@ -435,7 +435,6 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Home)));
         assert_eq!(SECTIONS.map(|s| s.0), ["Today", "Mail", "Calendar", "Todo"]);
-        assert_eq!(SECTIONS.map(|s| s.2), ["⌘1", "⌘2", "⌘3", "⌘4"]);
         let paths: HashSet<_> = SECTIONS.iter().map(|s| s.1).chain(["icons/inbox.svg", "icons/later.svg", "icons/sent.svg", "icons/done.svg", "icons/trash.svg"]).collect();
         assert_eq!(paths.len(), 9);
         cx.run_until_parked();

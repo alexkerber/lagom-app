@@ -212,11 +212,11 @@ pub use live::Live;
 pub(crate) use live::notify_without_window;
 use popout::MessageWindow;
 
-const SECTIONS: [(&str, &str, &str); 4] = [
-    ("Today", "icons/home.svg", "⌘1"),
-    ("Mail", "icons/mail.svg", "⌘2"),
-    ("Calendar", "icons/calendar.svg", "⌘3"),
-    ("Todo", "icons/todo.svg", "⌘4"),
+const SECTIONS: [(&str, &str); 4] = [
+    ("Today", "icons/home.svg"),
+    ("Mail", "icons/mail.svg"),
+    ("Calendar", "icons/calendar.svg"),
+    ("Todo", "icons/todo.svg"),
 ];
 
 /// What fills the main panel.
@@ -1670,16 +1670,15 @@ impl MainWindow {
                     .flex_col()
                     .gap(px(2.))
                     .flex_shrink_0()
-                    .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path, shortcut))| {
+                    .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path))| {
                         let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
-                        // Unread mail is a filled badge, so it never reads as a shortcut; every row keeps its ⌘ key.
+                        // Alex 2026-11-14: no ⌘ keys on the rows; the tooltip still names them.
                         sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
                             .when(ix == 1 && unread > 0, |d| d.child(
                                 div().debug_selector(|| "mail-unread-badge".into()).h(px(16.)).min_w(px(16.)).px(px(5.)).rounded_full()
                                     .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
                                     .text_size(px(size::SMALL)).font_weight(FontWeight::SEMIBOLD).child(unread.to_string())))
-                            .child(mono(shortcut, t.ink2))
                             .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix].into())).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     })))
