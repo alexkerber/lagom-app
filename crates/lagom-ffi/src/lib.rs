@@ -1,6 +1,6 @@
 //! The mobile boundary separates local access from serial network work; records hide core storage types.
 use lagom_core::{account::{Account, Security, ServerConfig}, imap_sync::{ImapSync, DEFAULT_LIMIT},
-    smtp::{self, Outgoing}, store::{FolderRole, MessageSummary, Store}};
+    smtp::{self, Outgoing}, store::{FolderRole, MessageSummary, Store}, unsubscribe::Unsubscribe};
 use std::{collections::HashMap, future::Future, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
 use zeroize::Zeroizing;
 
@@ -104,14 +104,30 @@ fn conversation_rows(messages: Vec<MessageSummary>) -> Vec<MailRow> {
 
 fn mail_message(s: &Store, id: i64) -> lagom_core::Result<MailMessage> {
     let m = s.message(id)?;
-    Ok(MailMessage { row: m.summary.into(), text_body: m.body_text, html_body: m.body_html,
+    let unsubscribe = s.unsubscribe(id)?.map(|choice| UnsubscribeOffer {
+        // shortcut: the sender's name stands for the list; read List-Id when one sender runs several lists.
+        list: if m.summary.from_name.is_empty() { m.summary.from_address.clone() } else { m.summary.from_name.clone() },
+        explain: choice.explain().into(),
+        link: match choice { Unsubscribe::Link(url) => Some(url.into()), _ => None },
+    });
+    Ok(MailMessage { unsubscribe, row: m.summary.into(), text_body: m.body_text, html_body: m.body_html,
         attachments: s.attachments(id)?.into_iter().map(|a| MailAttachment { section: a.section, filename: a.filename, mime_type: a.mime_type, size: a.size }).collect() })
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MailAttachment { pub section: String, pub filename: String, pub mime_type: String, pub size: u32 }
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct MailMessage { pub row: MailRow, pub text_body: String, pub html_body: Option<String>, pub attachments: Vec<MailAttachment> }
+pub struct MailMessage { pub row: MailRow, pub text_body: String, pub html_body: Option<String>, pub attachments: Vec<MailAttachment>,
+    #[uniffi(default = None)] pub unsubscribe: Option<UnsubscribeOffer> }
+/// The quiet "Unsubscribe from <list>" line. Nothing runs until the person confirms.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct UnsubscribeOffer {
+    pub list: String,
+    /// What confirming does, for the confirm step.
+    pub explain: String,
+    /// Set only for a plain web page: the app opens it in the browser after the confirm, and never fetches it.
+    pub link: Option<String>,
+}
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct InlineResource { pub mime_type: String, pub data: Vec<u8> }
 #[derive(Clone, Debug, uniffi::Record)]
@@ -509,6 +525,29 @@ impl LagomCore {
             s.enqueue(&a, &outgoing, milliseconds() + 5000)
         }).await
     }
+    /// After the person confirms: the one-click POST, or the unsubscribe mail sent now. A web page is the app's to open.
+    pub async fn unsubscribe(&self, message_id: i64) -> Result<()> {
+        match self.run(move |s| s.unsubscribe(message_id)?.ok_or(lagom_core::Error::NotFound)).await? {
+            Unsubscribe::OneClick(url) => Ok(lagom_core::unsubscribe::one_click(&url).await?),
+            Unsubscribe::Mail(_) => self.run_network(move |s| network(async {
+                // The password first: a locked keychain must not leave a queued row behind.
+                let a = account(s, &s.message_summary(message_id)?.account)?;
+                let password = a.password()?;
+                let id = s.enqueue_unsubscribe(message_id)?;
+                let pending = s.pending(&id)?;
+                // A failed send stays in the outbox and shows in send_failures, like any other.
+                if s.claim_send(&id, milliseconds())? {
+                    match smtp::send_queued(&a, &password, &pending, s).await {
+                        // Submitted; only the Sent copy failed.
+                        Ok(()) | Err(lagom_core::Error::SentCopy) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(())
+            })).await,
+            Unsubscribe::Link(_) => Err(failure("open the unsubscribe page in the browser")),
+        }
+    }
     pub async fn send_failures(&self) -> Result<Vec<SendFailure>> {
         self.run(|s| Ok(s.failed_outbox()?.into_iter().map(|p| SendFailure { id: p.id, subject: p.mail.subject, message: p.error.unwrap_or(p.state) }).collect())).await
     }
@@ -575,4 +614,13 @@ pub fn mail_document(html: String, dark: bool, message_id: i64, remote: bool) ->
         else { format!("body{{color:{ink}}}a{{color:{accent}}}") };
     let html = lagom_core::inline::rewrite(&html, message_id, false);
     format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{}"><meta http-equiv="x-dns-prefetch-control" content="off"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="{scheme}"><style>html{{background:{background}}}body{{margin:0;font:14px/1.4 system-ui,-apple-system,sans-serif;overflow-wrap:break-word}}img{{max-width:100%;height:auto}}{look}</style></head>{}"#, csp(remote, "lagom-cid:"), inert_tags(&html))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Mailto { pub to: Vec<String>, pub cc: Vec<String>, pub bcc: Vec<String>, pub subject: String, pub body: String }
+
+/// `None`: not a mailto link, or too long. See `lagom_core::compose::parse_mailto`.
+#[uniffi::export]
+pub fn parse_mailto(url: String) -> Option<Mailto> {
+    lagom_core::compose::parse_mailto(&url).map(|m| Mailto { to: m.to, cc: m.cc, bcc: m.bcc, subject: m.subject, body: m.body })
 }

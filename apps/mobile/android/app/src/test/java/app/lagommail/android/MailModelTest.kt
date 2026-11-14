@@ -80,6 +80,21 @@ class MailModelTest {
         assertEquals(initialSyncs + 3, core.syncs)
     }
 
+    @Test fun sharedMailWaitsForTheStoreThenOpensANewDraft() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core)
+        val shared = SharedMail(Mailto(listOf("a@example.test"), listOf("c@example.test"), listOf("hidden@example.test"), "Hi", "Body"))
+        model.openShared(shared)
+        assertNull(model.draft)
+        model.setForeground(true)
+        assertEquals("fixture", model.draft?.account)
+        assertEquals("a@example.test", model.draft?.to); assertEquals("c@example.test", model.draft?.cc)
+        assertEquals("Hi", model.draft?.subject); assertEquals("Body", model.draft?.body)
+        assertEquals("The link's Bcc was left out.", model.notice)
+        val opened = model.draft?.id
+        model.reload()
+        assertEquals("a later reload must not open the link again", opened, model.draft?.id)
+    }
+
     @Test fun leavingInsideUndoWindowHandsSendToWorkManager() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.setForeground(true)
         model.draft = ComposeDraft("fixture", to = "to@example.test", body = "leave now"); model.send(); runCurrent()
@@ -122,6 +137,17 @@ class MailModelTest {
         }
         model.act(MailAction.Later, 1)
         assertEquals(listOf(1L) to 86_400L, core.snoozed)
+    }
+
+    @Test fun unsubscribeMarksOnlyWhatTheCoreConfirmed() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.unsubscribe(1)
+        assertEquals(listOf(1L), core.unsubscribed)
+        assertEquals(setOf(1L), model.unsubscribedIds)
+        model.perform { model.unsubscribe(2) }.join()
+        assertEquals(setOf(1L), model.unsubscribedIds)
+        assertEquals("the list could not be reached", model.error)
+        assertEquals(null, model.unsubscribingId)
     }
 
     @Test fun conversationExpansionReadStateAndRemoteConsentArePerMessage() = runTest(dispatcher) {
@@ -235,6 +261,26 @@ class MailModelTest {
             assertEquals(expected, safeAttachmentName(input))
         }
         assertEquals(120, safeAttachmentName("x".repeat(121)).length)
+    }
+    @Test fun pickedAttachmentsWarnRemoveAutosaveAndRestore() = runTest(dispatcher) {
+        val file = pickedAttachment("../ report.pdf", "application/pdf", byteArrayOf(1, 2))
+        assertEquals("report.pdf", file.filename)
+        assertEquals("application/octet-stream", pickedAttachment(null, null, byteArrayOf()).mimeType)
+        assertEquals("attachment", pickedAttachment(null, null, byteArrayOf()).filename)
+        val core = FakeCore(); val model = model(core); model.start()
+        model.draft = ComposeDraft("fixture")
+        model.attach { listOf(file, SendAttachment("big.bin", "application/octet-stream", ByteArray(ATTACHMENT_WARNING_BYTES))) }
+        assertFalse(model.attaching)
+        assertTrue(model.draft!!.attachmentsTooLarge)
+        model.removeAttachment(1)
+        assertFalse(model.draft!!.attachmentsTooLarge)
+        advanceTimeBy(500); runCurrent()
+        assertEquals(listOf(file), core.saved.values.single().attachments)
+        model.closeCompose(discard = false)
+        model.attach { error("a closed composer must not read") }
+        assertNull(model.draft)
+        model.showDrafts(); model.openDraft(model.drafts.single())
+        assertEquals(listOf(file), model.draft?.attachments)
     }
     @Test fun attachmentClearsOldCacheWritesBytesAndBlocksDoubleTaps() = runTest(dispatcher) {
         val directory = temporary.newFolder("attachments")
@@ -964,6 +1010,11 @@ private class FakeCore : LagomCoreInterface {
     }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit
+    val unsubscribed = mutableListOf<Long>()
+    override suspend fun unsubscribe(messageId: Long) {
+        if (messageId == 2L) throw MailException.Failed("the list could not be reached")
+        unsubscribed += messageId
+    }
     override suspend fun replyDraft(id: Long): ReplyDraft = error("Reply must use composeDraft")
     override suspend fun composeDraft(id: Long, kind: ComposeKind): ReplyDraft {
         composeKinds += kind

@@ -417,6 +417,11 @@ extension MailModelTests {
         if failRead { throw MailError.Failed(reason: "flag refused") }
         mail[mail.firstIndex { $0.id == id }!].unread = !read
     }
+    var unsubscribed: [Int64] = []
+    override func unsubscribe(messageId: Int64) async throws {
+        if messageId == 2 { throw MailError.Failed(reason: "the list could not be reached") }
+        unsubscribed.append(messageId)
+    }
     override func loadInline(id: Int64) async throws {
         if failInline { throw MailError.Failed(reason: "inline unavailable") }
         if suspendInline { try await withCheckedThrowingContinuation { inlineContinuations[id] = $0 } }
@@ -424,6 +429,19 @@ extension MailModelTests {
 }
 
 extension MailModelTests {
+    @MainActor func testUnsubscribeMarksOnlyWhatTheCoreConfirmed() async {
+        let core = DailyFixtureCore(noHandle: .init())
+        let model = MailModel()
+        model.core = core
+        await model.unsubscribe(id: 1)
+        XCTAssertEqual(core.unsubscribed, [1])
+        XCTAssertEqual(model.unsubscribedIDs, [1])
+        await model.unsubscribe(id: 2)
+        XCTAssertFalse(model.unsubscribedIDs.contains(2))
+        XCTAssertEqual(model.error, "the list could not be reached")
+        XCTAssertNil(model.unsubscribingID)
+    }
+
     @MainActor func testSearchPagesAndClearingRestoresMailbox() async {
         let core = DailyFixtureCore(noHandle: .init())
         let model = MailModel()
@@ -666,6 +684,26 @@ extension MailModelTests {
         await model.openDraft(try XCTUnwrap(core.saved.first).row)
         XCTAssertEqual(model.composeDraft?.body, "latest")
         XCTAssertEqual(model.composeDraft?.subject, "Last edit")
+    }
+
+    @MainActor func testPickedAttachmentsWarnRemoveAutosaveAndRestore() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data([1, 2]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let file = try readAttachment(url)
+        XCTAssertEqual(file.mimeType, "application/pdf")
+        let core = ComposeFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.attachments += [file, SendAttachment(filename: "big.bin", mimeType: "application/octet-stream", data: Data(count: attachmentWarningBytes))]
+        XCTAssertEqual(model.composeDraft?.attachmentsTooLarge, true)
+        model.composeDraft?.attachments.remove(at: 1)
+        XCTAssertEqual(model.composeDraft?.attachmentsTooLarge, false)
+        try await model.closeCompose(discard: false)
+        XCTAssertEqual(core.saved.first?.attachments, [file])
+        await model.openDraft(try XCTUnwrap(core.saved.first).row)
+        XCTAssertEqual(model.composeDraft?.attachments, [file])
+        try await model.closeCompose(discard: true)
     }
 
     @MainActor func testOpeningAStaleDraftRowReadsTheLatestSavedBody() async throws {

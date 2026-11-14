@@ -29,6 +29,7 @@ pub struct Data<'a> {
     pub signing_in: Vec<String>,
     pub group: bool,
     pub notifications: bool,
+    pub default_mail: Option<bool>,
     pub task_lists: &'a [lagom_core::tasks::TaskList],
     pub default_list: Option<i64>,
     pub names: &'a HashMap<String, Entity<TextInput>>,
@@ -138,7 +139,8 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .child(section(t, "General", None))
         .child(plate(t).px(px(14.)).py(px(6.))
             .child(stop(t, toggle_row(t, "Group by conversation", d.group)).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
-            .child(stop(t, toggle_row(t, "Notifications for new mail", d.notifications)).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx)))));
+            .child(stop(t, toggle_row(t, "Notifications for new mail", d.notifications)).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
+            .children(d.default_mail.map(|on| default_mail_row(t, on, cx))));
     let lists = (!d.task_lists.is_empty()).then(|| div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(12.))
         .child(section(t, "Default task list", Some("New tasks go here.")))
         .child(plate(t).p(px(4.)).children(d.task_lists.iter().map(|list| {
@@ -264,6 +266,16 @@ fn password_form(t: &Theme, id: &str, form: Option<&NewPassword>, cx: &mut Conte
             .child(stop(t, div().id("save-password").rounded(px(radius::CONTROL)).child(button(t, save, Some(t.accent))))
                 .on_click(cx.listener(|this, _, window, cx| this.save_password(window, cx))))
             .child(stop(t, button(t, "Cancel", None)).on_click(cx.listener(|this, _, window, cx| this.cancel_password_change(window, cx)))))
+}
+
+/// Mail links open in lagom. There is no way back from here: another app takes over in its own settings.
+fn default_mail_row(t: &Theme, on: bool, cx: &mut Context<MainWindow>) -> Div {
+    let row = div().debug_selector(|| "default-mail".into()).flex().items_center().justify_between().gap(px(16.)).min_h(px(32.)).py(px(4.))
+        .border_t_1().border_color(t.line);
+    if on { return row.child("lagom is your default mail app").child(icon("icons/complete-task.svg", t.ink2, 16.)); }
+    row.child("Make lagom the default mail app")
+        .child(stop(t, div().id("make-default-mail").rounded(px(radius::CONTROL)).child(button(t, "Make default", None)))
+            .on_click(cx.listener(|this, _, _, cx| this.make_default_mail(cx))))
 }
 
 pub(crate) fn toggle_row(t: &Theme, label: &'static str, on: bool) -> Stateful<Div> {

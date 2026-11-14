@@ -34,6 +34,12 @@ internal fun safeAttachmentName(filename: String): String {
     return name.takeUnless { it.isEmpty() || it == "." || it == ".." } ?: "attachment"
 }
 
+/** Total size above which compose shows a one-line warning; many servers refuse mail near 25 MB. */
+internal const val ATTACHMENT_WARNING_BYTES = 20 * 1024 * 1024
+
+internal fun pickedAttachment(name: String?, mimeType: String?, data: ByteArray) =
+    SendAttachment(safeAttachmentName(name.orEmpty()), mimeType ?: "application/octet-stream", data)
+
 // Same boundaries as core split_recipients; desktop keeps the unfinished token in its input.
 internal fun recipientToken(value: String, recipient: String? = null): String {
     var quoted = false; var escaped = false; var angle = false
@@ -70,7 +76,33 @@ internal data class ComposeDraft(
         id = saved.id, attachments = saved.attachments, restored = true, isReply = saved.inReplyTo != null || saved.references.isNotEmpty(),
         title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft")
     val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || subject.isNotEmpty() || body.isNotEmpty() || attachments.isNotEmpty()
+    val attachmentsTooLarge get() = attachments.sumOf { it.data.size.toLong() } > ATTACHMENT_WARNING_BYTES
 }
+/** A mailto link or a share from another app, with the shared files. */
+internal data class SharedMail(val mail: Mailto, val attachments: List<SendAttachment> = emptyList())
+
+private fun headerText(value: String) = value.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
+
+/** `parse` is the core mailto parser; extras fill what the link leaves empty. `null`: not mail to open. */
+internal fun sharedMail(action: String?, data: String?, email: List<String>, cc: List<String>, bcc: List<String>,
+    subject: String?, text: String?, parse: (String) -> Mailto?): Mailto? {
+    val link = when (action) {
+        "android.intent.action.SENDTO", "android.intent.action.VIEW" -> parse(data ?: return null) ?: return null
+        "android.intent.action.SEND", "android.intent.action.SEND_MULTIPLE" -> Mailto(emptyList(), emptyList(), emptyList(), "", "")
+        else -> return null
+    }
+    // Extras come from any app, so they get the same CRLF rule as mailto headers.
+    fun addresses(values: List<String>) = values.map(::headerText).filter { it.isNotEmpty() }
+    return Mailto(link.to + addresses(email), link.cc + addresses(cc), link.bcc + addresses(bcc),
+        link.subject.ifEmpty { headerText(subject.orEmpty()) },
+        link.body.ifEmpty { text.orEmpty().replace("\r\n", "\n").replace('\r', '\n') })
+}
+
+/** Bcc is left out: mobile Compose has no Bcc field, and a hidden recipient must never be sent unseen. */
+internal fun sharedDraft(account: String, email: String, shared: SharedMail) = ComposeDraft(account,
+    shared.mail.to.joinToString(", "), shared.mail.cc.joinToString(", "), shared.mail.subject, shared.mail.body,
+    id = draftMessageId(email), attachments = shared.attachments)
+
 internal enum class MailAction { Done, Later, Delete }
 
 internal class MailModel(
@@ -130,6 +162,17 @@ internal class MailModel(
                 perform { persist(old) }
             }
         }
+    var attaching by mutableStateOf(false); private set
+    /** Reads picked files off the main thread and adds them to the draft they were picked for. */
+    suspend fun attach(read: () -> List<SendAttachment>) {
+        val id = draft?.id ?: return
+        attaching = true
+        try {
+            val files = withContext(Dispatchers.IO) { read() }
+            draft?.takeIf { it.id == id }?.let { draft = it.copy(attachments = it.attachments + files) }
+        } finally { attaching = false }
+    }
+    fun removeAttachment(index: Int) { draft?.let { draft = it.copy(attachments = it.attachments.filterIndexed { at, _ -> at != index }) } }
     var accountForm by mutableStateOf<AccountForm?>(null)
     private var revision = 0
     private var appliedRevision = 0
@@ -214,6 +257,7 @@ internal class MailModel(
             rows = (if (append) old + page else page).distinctBy { it.id }
             this.hasMore = hasMore
             appliedRevision = request
+            openPendingShare()
             wake?.cancel()
             wake = if (foreground && due != null) viewModelScope.launch {
                 delay(maxOf(1, due * 1000 - now()))
@@ -231,6 +275,19 @@ internal class MailModel(
             savedDraftIds = savedDraftIds + drafts.map { it.id }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == revision) error = e.mailMessage() }
+    }
+    /** Waits for the store and the accounts; `reload` opens it. */
+    private var pendingShare: SharedMail? = null
+    suspend fun openShared(shared: SharedMail) { pendingShare = shared; reload() }
+    private suspend fun openPendingShare() {
+        val shared = pendingShare ?: return
+        pendingShare = null
+        val account = accountId ?: accounts.firstOrNull()?.id ?: run { error = "Add an account, then open the link again."; return }
+        closeCompose(discard = false)
+        if (draft != null) { error = "Finish the open message first."; return }
+        accountForm = null
+        draft = sharedDraft(account, accounts.firstOrNull { it.id == account }?.email.orEmpty(), shared)
+        if (shared.mail.bcc.isNotEmpty()) notice = "The link's Bcc was left out."
     }
     suspend fun openNotification(target: MailTarget) {
         closeCompose(discard = false)
@@ -327,6 +384,19 @@ internal class MailModel(
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
         // Busy until the list shows the result, so a swiped row never comes back before it leaves.
         } finally { try { reload() } finally { actingId = null } }
+    }
+    /** The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session. */
+    var unsubscribingId by mutableStateOf<Long?>(null); private set
+    var unsubscribedIds by mutableStateOf<Set<Long>>(emptySet()); private set
+    /** Only after the person confirmed. A web page is the screen's to open; the core never fetches it. */
+    suspend fun unsubscribe(id: Long) {
+        val core = core ?: return
+        if (unsubscribingId != null) return
+        unsubscribingId = id
+        try {
+            core.unsubscribe(id)
+            unsubscribedIds += id
+        } finally { unsubscribingId = null }
     }
     suspend fun remove(account: MailAccount) {
         core?.removeAccount(account.id)

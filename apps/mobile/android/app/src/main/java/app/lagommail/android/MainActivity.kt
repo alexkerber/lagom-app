@@ -5,8 +5,10 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.core.content.IntentCompat
 import android.os.Build
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.currentStateAsState
@@ -30,7 +32,9 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.lagommail.core.LagomCore
 import app.lagommail.core.configureSignIn
+import app.lagommail.core.SendAttachment
 import app.lagommail.core.installSecretStore
+import app.lagommail.core.parseMailto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -85,6 +89,16 @@ class SignInRedirectActivity : Activity() {
     }
 }
 
+private const val SHARED_FILES_LIMIT = 25 * 1024 * 1024
+
+/** Stops soon after `limit`, so a huge share never fills memory. InputStream.readNBytes needs API 33. */
+private fun java.io.InputStream.readAtMost(limit: Int): ByteArray {
+    val out = java.io.ByteArrayOutputStream()
+    val buffer = ByteArray(64 * 1024)
+    while (out.size() <= limit) { val read = read(buffer); if (read < 0) break; out.write(buffer, 0, read) }
+    return out.toByteArray()
+}
+
 class MainActivity : ComponentActivity() {
     private var notificationTarget by mutableStateOf<MailTarget?>(null)
     private var signIn by mutableStateOf<String?>(null)
@@ -97,11 +111,35 @@ class MainActivity : ComponentActivity() {
         intent.removeExtra("account"); intent.removeExtra("message")
     }
 
+    private var shareIntent by mutableStateOf<Intent?>(null)
+    private val shareActions = setOf(Intent.ACTION_SENDTO, Intent.ACTION_VIEW, Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         readNotification(intent)
         signIn = intent.getStringExtra("signIn") ?: signIn
+        if (intent.action in shareActions) shareIntent = intent
+    }
+
+    /** Runs off the main thread: shared files are read into the draft. */
+    private fun readShare(intent: Intent): SharedMail? {
+        fun list(name: String) = intent.getStringArrayExtra(name)?.toList().orEmpty()
+        val mail = sharedMail(intent.action, intent.dataString, list(Intent.EXTRA_EMAIL), list(Intent.EXTRA_CC), list(Intent.EXTRA_BCC),
+            intent.getStringExtra(Intent.EXTRA_SUBJECT), intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()) { parseMailto(it) } ?: return null
+        val uris = if (intent.action == Intent.ACTION_SEND_MULTIPLE) IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+        var room = SHARED_FILES_LIMIT
+        val files = uris.map { uri ->
+            // Only another app's content: file:// or our own provider could attach lagom's private mail.
+            require(uri.scheme == "content" && uri.authority != "$packageName.files") { "lagom can't attach this file." }
+            val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null }
+            val data = contentResolver.openInputStream(uri)?.use { it.readAtMost(room) } ?: error("lagom can't read this file.")
+            require(data.size <= room) { "Shared files over 25 MB stay out of mail." }
+            room -= data.size
+            SendAttachment(safeAttachmentName(name ?: "attachment"), contentResolver.getType(uri) ?: "application/octet-stream", data)
+        }
+        return SharedMail(mail, files)
     }
 
     private fun requestNotificationPermission() {
@@ -119,6 +157,8 @@ class MainActivity : ComponentActivity() {
         readNotification(intent)
         // A recreated activity gets the same intent again; its redirect is already used.
         if (savedInstanceState == null) signIn = intent.getStringExtra("signIn")
+        // A recreated activity already opened this share.
+        if (savedInstanceState == null && intent.action in shareActions) shareIntent = intent
         enableEdgeToEdge()
         setContent {
             val model: MailModel = viewModel(factory = object : ViewModelProvider.Factory {
@@ -145,6 +185,16 @@ class MainActivity : ComponentActivity() {
                     catch (error: Exception) { model.error = error.mailMessage() }
                     if (notificationTarget == target) notificationTarget = null
                 }
+            }
+            LaunchedEffect(shareIntent) {
+                val intent = shareIntent ?: return@LaunchedEffect
+                try {
+                    val shared = withContext(Dispatchers.IO) { readShare(intent) }
+                    if (shared == null) model.error = "lagom could not read this mail link." else model.openShared(shared)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) { model.error = error.message ?: error.mailMessage() }
+                // Clearing the key earlier would cancel this effect mid-read; a newer share has its own run.
+                finally { if (shareIntent == intent) shareIntent = null }
             }
             val size = calculateWindowSizeClass(this)
             LagomTheme {

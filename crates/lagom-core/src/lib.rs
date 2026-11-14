@@ -21,6 +21,7 @@ mod drafts;
 pub mod store;
 pub mod threading;
 pub mod tasks;
+pub mod unsubscribe;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

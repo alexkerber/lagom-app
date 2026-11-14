@@ -291,6 +291,9 @@ fn html_privacy_and_recipients_share_core_policy() {
         assert!(document.contains("system-ui,-apple-system,sans-serif"));
     }
     assert_eq!(split_recipients("\"Example, Sender\" <sender@example.test>, next@example.test".into()), ["\"Example, Sender\" <sender@example.test>", "next@example.test"]);
+    assert_eq!(parse_mailto("mailto:a@example.test?cc=b@example.test&subject=Hi".into()), Some(Mailto { to: vec!["a@example.test".into()],
+        cc: vec!["b@example.test".into()], bcc: vec![], subject: "Hi".into(), body: String::new() }));
+    assert_eq!(parse_mailto("https://example.test".into()), None);
 }
 
 #[tokio::test]
@@ -1125,4 +1128,23 @@ async fn browser_sign_in_takes_only_its_own_redirect_once() {
     // The redirect is single use.
     assert!(matches!(core.finish_sign_in(denied).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
     assert!(core.accounts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unsubscribe_offer_and_a_web_page_is_never_fetched() {
+    use lagom_core::unsubscribe::parse;
+    let (_dir, core) = fixture();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "a@example.test", 1);
+        mail(&mut s, &a, 1, now())
+    };
+    assert!(core.message(id).await.unwrap().unsubscribe.is_none());
+    assert!(matches!(core.unsubscribe(id).await, Err(MailError::NotFound)));
+    core.stores.local.lock().unwrap().set_unsubscribe(id, parse("<https://list.example/u>", None).as_ref()).unwrap();
+    let offer = core.message(id).await.unwrap().unsubscribe.unwrap();
+    assert_eq!((offer.list.as_str(), offer.link.as_deref()), ("sender@example.test", Some("https://list.example/u")));
+    assert!(core.unsubscribe(id).await.is_err());
+    core.stores.local.lock().unwrap().set_unsubscribe(id, parse("<https://list.example/one>", Some("List-Unsubscribe=One-Click")).as_ref()).unwrap();
+    assert_eq!(core.message(id).await.unwrap().unsubscribe.unwrap().link, None);
 }

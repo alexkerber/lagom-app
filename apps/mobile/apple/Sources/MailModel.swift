@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UniformTypeIdentifiers
 
 enum MailboxChoice: String, CaseIterable, Identifiable {
     case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", trash = "Trash", drafts = "Drafts"
@@ -28,6 +29,19 @@ func safeAttachmentName(_ filename: String) -> String {
     let clean = String(String.UnicodeScalarView(component.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
     let name = String(clean.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
     return name.isEmpty || name == "." || name == ".." ? "attachment" : name
+}
+
+/// Total size above which compose shows a one-line warning; many servers refuse mail near 25 MB.
+let attachmentWarningBytes = 20 * 1024 * 1024
+
+/// Reads a picked file; callers run it off the main thread. Files app URLs are security scoped.
+// shortcut: reads the whole file into memory with no cap, add a hard limit if people pick very large videos.
+func readAttachment(_ url: URL) throws -> SendAttachment {
+    let scoped = url.startAccessingSecurityScopedResource()
+    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+    let data = try Data(contentsOf: url)
+    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+    return SendAttachment(filename: safeAttachmentName(url.lastPathComponent), mimeType: mime, data: data)
 }
 
 // Same boundaries as core split_recipients; desktop keeps the unfinished token in its input.
@@ -69,6 +83,7 @@ struct ComposeDraft: Identifiable, Equatable {
     var restored = false
     var isReply = false
     var hasContent: Bool { !to.isEmpty || !cc.isEmpty || !subject.isEmpty || !body.isEmpty || !attachments.isEmpty }
+    var attachmentsTooLarge: Bool { attachments.reduce(0) { $0 + $1.data.count } > attachmentWarningBytes }
 
     init(account: String, email: String = "") { self.account = account; messageID = draftMessageID(email: email) }
     init(reply: ReplyDraft, kind: ComposeKind = .reply, email: String = "") {
@@ -96,6 +111,15 @@ struct ComposeDraft: Identifiable, Equatable {
         restored = true
         isReply = saved.inReplyTo != nil || !saved.references.isEmpty
         title = isReply ? "Reply" : "Draft"
+    }
+
+    /// A mailto link's message. Bcc is left out: mobile Compose has no Bcc field, and a hidden recipient must never be sent unseen.
+    init(mailto: Mailto, account: String, email: String = "") {
+        self.init(account: account, email: email)
+        to = mailto.to.joined(separator: ", ")
+        cc = mailto.cc.joined(separator: ", ")
+        subject = mailto.subject
+        body = mailto.body
     }
 
     func save(using core: LagomCore) async throws -> DraftRow {
@@ -184,6 +208,9 @@ final class MailModel {
     var message: MailMessage?
     var error: String?
     var notice: String?
+    /// The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session.
+    private(set) var unsubscribingID: Int64?
+    private(set) var unsubscribedIDs: Set<Int64> = []
     private(set) var undoSendID: String?
     private var sendRevision = 0
     var composeDraft: ComposeDraft? {
@@ -284,6 +311,7 @@ final class MailModel {
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
             self.hasMore = hasMore
             wake(at: due)
+            await openPendingMailto()
         } catch { if request == revision && !Task.isCancelled { self.error = error.localizedDescription } }
         let draftRequest = draftRevision
         do {
@@ -315,6 +343,25 @@ final class MailModel {
             await reload()
             await sync()
         }
+    }
+
+    /// A mailto link waits for the store and the accounts; `reload` opens it.
+    private(set) var pendingMailto: Mailto?
+    func openMailto(_ url: String) async {
+        guard let mail = parseMailto(url: url) else { error = "lagom could not read this mail link."; return }
+        pendingMailto = mail
+        await reload()
+    }
+
+    private func openPendingMailto() async {
+        guard let mail = pendingMailto, !composeBusy, !preparingCompose else { return }
+        pendingMailto = nil
+        guard let account = accountID ?? accounts.first?.id else { error = "Add an account, then open the link again."; return }
+        // An open message goes to Drafts first; a failed save keeps it open, never replaced.
+        do { try await closeCompose(discard: false) } catch { self.error = error.localizedDescription; return }
+        guard composeDraft == nil else { return }
+        composeDraft = ComposeDraft(mailto: mail, account: account, email: accounts.first { $0.id == account }?.email ?? "")
+        if !mail.bcc.isEmpty { notice = "The link's Bcc was left out." }
     }
 
     func openNotification(_ target: MailTarget) {
@@ -423,6 +470,17 @@ final class MailModel {
             do { try await core.syncAll() } catch { self.error = error.localizedDescription }
             await reload()
         } while syncAgain
+    }
+
+    /// Only after the person confirmed. A web page is the view's to open; the core never fetches it.
+    func unsubscribe(id: Int64) async {
+        guard let core, unsubscribingID == nil else { return }
+        unsubscribingID = id
+        defer { unsubscribingID = nil }
+        do {
+            try await core.unsubscribe(messageId: id)
+            unsubscribedIDs.insert(id)
+        } catch { self.error = error.localizedDescription }
     }
 
     func act(_ action: MailAction, id: Int64, until: Int64? = nil) async {

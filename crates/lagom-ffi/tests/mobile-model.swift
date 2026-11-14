@@ -32,7 +32,8 @@ import Foundation
     var mail = (1...650).map { id in
         MailRow(id: Int64(id), account: "fixture", senderName: "Sender", senderAddress: "sender@example.test", subject: "Mail", preview: "", dateUnix: Int64(id), unread: true, hasAttachments: false, threadId: "thread-\(Int64(id))", messageCount: 1, messageIds: [Int64(id)])
     }
-    override func accounts() async throws -> [MailAccount] { [] }
+    var accountList: [MailAccount] = []
+    override func accounts() async throws -> [MailAccount] { accountList }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func localDrafts() async throws -> [DraftRow] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
@@ -254,7 +255,46 @@ struct ModelChecks {
         print("Attachment safe names, bytes, double tap, error and stale selection checks passed")
     }
 
+    @MainActor static func mailtoOpensANewDraft() async {
+        // The real core parser, through the generated binding.
+        let link = "mailto:a@example.test?cc=c@example.test&bcc=hidden@example.test&subject=Hi%0D%0ABcc:%20x@example.test&body=Line%201%0D%0ALine%202"
+        let mail = parseMailto(url: link)!
+        precondition(parseMailto(url: "https://example.test") == nil)
+        let draft = ComposeDraft(mailto: mail, account: "fixture", email: "me@example.test")
+        precondition(draft.to == "a@example.test" && draft.cc == "c@example.test" && draft.account == "fixture")
+        precondition(draft.subject == "Hi  Bcc: x@example.test" && draft.body == "Line 1\nLine 2")
+        precondition(!draft.isReply && draft.replyTo == nil && draft.messageID.hasSuffix("@example.test>"))
+        precondition(![draft.to, draft.cc, draft.subject, draft.body].contains { $0.contains("hidden@example.test") })
+        let core = FixtureCore(noHandle: .init())
+        core.accountList = [MailAccount(id: "fixture", email: "me@example.test", displayName: "Me")]
+        let model = MailModel()
+        await model.openMailto(link)
+        precondition(model.composeDraft == nil && model.pendingMailto != nil, "a link waits for the store")
+        model.core = core
+        await model.reload()
+        precondition(model.composeDraft?.to == "a@example.test" && model.pendingMailto == nil)
+        precondition(model.notice == "The link's Bcc was left out.")
+        let opened = model.composeDraft?.id
+        await model.reload()
+        precondition(model.composeDraft?.id == opened, "a later reload must not open the link again")
+        await model.openMailto("https://example.test")
+        precondition(model.error == "lagom could not read this mail link.")
+        // An open message is saved before the link replaces it; a failed save keeps it open.
+        let drafts = DraftFixtureCore(noHandle: .init())
+        let busy = MailModel(); busy.core = drafts; busy.accountID = "fixture"
+        var open = ComposeDraft(account: "fixture"); open.body = "unsaved"
+        busy.composeDraft = open
+        drafts.fail = true
+        await busy.openMailto(link)
+        precondition(busy.composeDraft?.messageID == open.messageID && busy.error != nil, "a failed save keeps the open message")
+        drafts.fail = false; busy.error = nil
+        await busy.openMailto(link)
+        precondition(busy.composeDraft?.to == "a@example.test" && drafts.drafts[open.messageID]?.body == "unsaved")
+        print("MailModel: mailto link to draft passed")
+    }
+
     @MainActor static func main() async throws {
+        await mailtoOpensANewDraft()
         await listReadActionIncludesOlderUnreadMembers()
         await selectedThreadActionSurvivesRepresentativeChange()
         await explicitlyOpenedReadMemberStartsExpanded()
@@ -328,6 +368,7 @@ struct ModelChecks {
         try await attachments()
         try await draftReload()
         try await draftLifecycle()
+        try await pickedAttachments()
         await openingDuringArchive()
         let core = FixtureCore(noHandle: .init())
         let model = MailModel()
@@ -392,6 +433,33 @@ struct ModelChecks {
         await model.openDraft(row)
         precondition(model.drafts.isEmpty && model.composeDraft == nil)
         print("MailModel: Message-ID, isolated draft reload, discard race and missing draft passed")
+    }
+
+    @MainActor static func pickedAttachments() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pdf = folder.appendingPathComponent(" report.pdf"), odd = folder.appendingPathComponent("notes.zzz")
+        try Data([1, 2, 3]).write(to: pdf); try Data([4]).write(to: odd)
+        let files = try [pdf, odd].map(readAttachment)
+        precondition(files.map(\.filename) == ["report.pdf", "notes.zzz"] && files[0].data == Data([1, 2, 3]))
+        precondition(files.map(\.mimeType) == ["application/pdf", "application/octet-stream"])
+        let core = DraftFixtureCore(noHandle: .init())
+        let model = MailModel(); model.core = core
+        model.composeDraft = ComposeDraft(account: "fixture")
+        model.composeDraft?.attachments += files
+        precondition(model.composeDraft?.attachmentsTooLarge == false)
+        model.composeDraft?.attachments.append(SendAttachment(filename: "big.bin", mimeType: "application/octet-stream", data: Data(count: attachmentWarningBytes)))
+        precondition(model.composeDraft?.attachmentsTooLarge == true, "over 20 MB in total must warn")
+        model.composeDraft?.attachments.remove(at: 2)
+        precondition(model.composeDraft?.attachmentsTooLarge == false)
+        for _ in 0..<50 where core.drafts.values.first?.attachments != files { try await Task.sleep(for: .milliseconds(100)) }
+        precondition(core.drafts.values.first?.attachments == files, "picked files must autosave")
+        try await model.closeCompose(discard: false)
+        await model.openDraft(core.drafts.values.first!.row)
+        precondition(model.composeDraft?.attachments == files, "a restored draft keeps picked files")
+        try await model.closeCompose(discard: true)
+        print("MailModel: picked attachments read, warn, remove, autosave and restore passed")
     }
 
     @MainActor static func draftLifecycle() async throws {
