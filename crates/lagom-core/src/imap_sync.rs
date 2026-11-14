@@ -413,15 +413,18 @@ impl ImapSync {
         self.session.get_mut().remaining = None;
         result
     }
-    /// The first reply for `uid` that `wanted` accepts; other replies are dropped as they arrive.
+    /// The first reply for `uid` that `wanted` accepts, else the first reply for `uid`; other
+    /// replies are dropped as they arrive. A partial reply must fail as incomplete: a connection
+    /// cut after a FLAGS-only row then reaches `try_fetch`'s dropped-connection check.
     async fn fetch_one(&mut self, uid: u32, query: &str, wanted: impl Fn(&Fetch) -> bool) -> Result<Option<Fetch>> {
         net(async {
             let mut stream = self.session.uid_fetch(uid.to_string(), query).await?;
-            let mut found = None;
+            let (mut found, mut first) = (None, None);
             while let Some(fetch) = stream.try_next().await? {
-                if found.is_none() && fetch.uid == Some(uid) && wanted(&fetch) { found = Some(fetch); }
+                if fetch.uid != Some(uid) || found.is_some() { continue; }
+                if wanted(&fetch) { found = Some(fetch); } else if first.is_none() { first = Some(fetch); }
             }
-            Ok::<_, async_imap::error::Error>(found)
+            Ok::<_, async_imap::error::Error>(found.or(first))
         }).await
     }
     async fn fetch_parts(&mut self, store: &Store, folder: &Folder, uid: u32, limit: usize) -> Result<bool> {
