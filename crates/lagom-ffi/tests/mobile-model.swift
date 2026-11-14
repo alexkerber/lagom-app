@@ -52,6 +52,8 @@ import Foundation
     override func message(id: Int64) async throws -> MailMessage {
         MailMessage(row: mail.first { $0.id == id }!, textBody: "body", htmlBody: nil, attachments: [])
     }
+    // Mail without HTML asks the core for a body sync may have left out; the fixture has it already.
+    override func loadInline(id: Int64) async throws {}
     override func markRead(id: Int64, read: Bool) async throws {
         flags.append(id)
         let index = mail.firstIndex { $0.id == id }!

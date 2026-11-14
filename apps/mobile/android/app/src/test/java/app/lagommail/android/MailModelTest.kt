@@ -191,6 +191,13 @@ class MailModelTest {
         // One fetch per open: refreshing the reading view does not ask again, and HTML mail never asks.
         model.select(1)
         assertEquals(listOf(1L, 1L), core.inlineCalls)
+        // A refused read flag does not keep the body out.
+        core.mail = listOf(row(1), row(2, unread = true))
+        core.bodies[2] = "Not downloaded" to null
+        core.fetched[2] = "Second" to "<p>Second</p>"
+        core.rejectRead = true
+        try { model.select(2); fail("expected refusal") } catch (_: IllegalStateException) { }
+        assertEquals("<p>Second</p>", model.message!!.htmlBody)
     }
     @Test fun listActionsUseVisibleThreadMembers() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(3).copy(messageCount = 2u, messageIds = listOf(3, 1))) }

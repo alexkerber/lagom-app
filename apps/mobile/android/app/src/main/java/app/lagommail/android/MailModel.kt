@@ -328,13 +328,14 @@ internal class MailModel(
             messages = loaded
             message = loaded.firstOrNull { it.row.id == id } ?: loaded.lastOrNull()
             expandedIds = loaded.filter { it.row.id == id || it.row.unread || it.row.id == loaded.lastOrNull()?.row?.id }.map { it.row.id }.toSet()
-            for (item in loaded.filter { it.row.unread }) {
-                if (request != selectionRevision) return
-                setRead(item.row.id, true)
-            }
+            // Bodies first: a refused read flag throws and must not keep the body out.
             for (item in loaded.filter { it.row.id in expandedIds }) {
                 if (request != selectionRevision) return
                 loadBody(item.row.id, request)
+            }
+            for (item in loaded.filter { it.row.unread }) {
+                if (request != selectionRevision) return
+                setRead(item.row.id, true)
             }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == selectionRevision) throw e }
@@ -343,9 +344,8 @@ internal class MailModel(
         val item = messages.firstOrNull { it.row.id == id } ?: return
         if (id in expandedIds) { expandedIds -= id; return }
         expandedIds += id
-        val request = selectionRevision
+        loadBody(id, selectionRevision)
         if (item.row.unread) setRead(id, true)
-        loadBody(id, request)
     }
     /** Sync leaves some bodies out (over 4 MiB, or synced before HTML parts were kept): for mail
      *  without HTML, load_inline fetches the body, at most once per message. */
