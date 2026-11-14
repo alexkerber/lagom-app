@@ -175,8 +175,14 @@ macos-latest: cold start 29 ms, `load_accounts` 28 ms, `sync.parse_save_1000` 1.
 Findings:
 
 - The release binary breaks its budget on Linux: 53.2 MB on ubuntu-latest (PR #131), so the
-  Linux job fails. macOS is 27.4 MB, not the 6.0 MB of the 2026-11-06 baseline. `strip` takes
-  the macOS binary to 21.6 MB; the release profile does not strip. Not investigated further.
+  Linux job fails. The release profile strips debug info (`strip = "debuginfo"`, Cargo's
+  default already) and keeps symbol names for panic backtraces. Loaded sections are 39.6 MB;
+  the other 13.6 MB is the symbol table, so stripping symbols too would still leave it over
+  30 MB. `.text` is 27.4 MB. By crate (`cargo bloat --crates`, share of `.text`): gpui 13 %,
+  zbus 11.6 %, std 9.6 %, naga 5.3 %, lagom_core 3.9 %, lagom 3.9 %, rustls, image,
+  rustybuzz and oo7 2 % each. zbus, naga, oo7 and dbus are Linux only.
+- macOS is 27.4 MB (`__text` 14.3 MB), not the 6.0 MB of the 2026-11-06 baseline. `strip` of
+  the symbols takes it to 21.6 MB.
 - A jump to one message (`reload_now`, inline) holds the UI thread for 69 ms at 100k
   (`reload.ui_thread_inline`). That breaks the 16 ms "open a message" budget. It has no CI
   budget, because the gate would fail on main today.
