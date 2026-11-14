@@ -15,7 +15,7 @@ tolerance = 2.0
 "search.from" = { max = 50, unit = "ms", why = "Local search, 100 000 messages" }
 "search.subject" = { max = 50, unit = "ms", why = "Local search, 100 000 messages" }
 "open.message" = { max = 16, unit = "ms", why = "Open a message from the local store: store reads at 100k" }
-"reload.ui_thread_background" = { max = 8, unit = "ms", why = "Key press to updated frame: UI-thread part of a reload at 100k" }
+"reload.ui_thread_background" = { max = 8, unit = "ms", why = "Key press to updated frame: reload() on the UI thread at 100k; applying the read result is not timed" }
 "reload.cold_start_first_list" = { max = 200, unit = "ms", why = "Cold start to first frame: store open and first list read at 100k" }
 "binary.size" = { max = 30, unit = "MB", why = "Release binary" }
 

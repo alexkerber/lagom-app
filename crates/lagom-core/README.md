@@ -81,8 +81,10 @@ subject, sender name/address and body, with stable row-id pagination. It returns
 index order, avoiding a relevance sort over every match.
 
 ```sh
-cargo test -p lagom-core --release search_100k_budget -- --ignored --nocapture
+cargo test -p lagom-core --release --lib perf_tests::search_and_open_100k -- --ignored --nocapture
 ```
+
+CI gates it with `python3 scripts/perf.py` (see `docs/performance.md`, "CI gate").
 
 Measured 2026-11-06 on this Apple silicon host, 100,000 synthetic messages and
 50 first-page results: unique body token 0.205 ms, common body token 0.160 ms,

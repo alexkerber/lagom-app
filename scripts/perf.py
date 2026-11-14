@@ -4,6 +4,7 @@
 Prints a Markdown table, appends it to $GITHUB_STEP_SUMMARY when set, and exits 1 when a
 measurement is over budget × tolerance or a budgeted key was not measured.
 """
+import json
 import os
 from pathlib import Path
 import re
@@ -55,13 +56,16 @@ def main():
         if run.returncode:
             failed.append(" ".join(command))
         measured |= measurements(run.stdout)
-    build = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "lagom"], cwd=ROOT)
-    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
-    binary = target / "release" / ("lagom.exe" if os.name == "nt" else "lagom")
-    if build.returncode:
+    # Cargo names the executable it built, wherever the target directory is.
+    build = subprocess.run(["cargo", "build", "--release", "--locked", "-p", "lagom", "--bin", "lagom",
+                            "--message-format=json"], cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    messages = [json.loads(line) for line in build.stdout.splitlines() if line.startswith("{")]
+    sys.stdout.write("".join(m["message"]["rendered"] or "" for m in messages if m.get("reason") == "compiler-message"))
+    binaries = [m["executable"] for m in messages if m.get("reason") == "compiler-artifact" and m.get("executable")]
+    if build.returncode or len(binaries) != 1:
         failed.append("cargo build --release -p lagom")
     else:
-        measured["binary.size"] = binary.stat().st_size / 1e6
+        measured["binary.size"] = Path(binaries[0]).stat().st_size / 1e6
     table, ok = report(config["budgets"], tolerance, measured)
     summary = f"## Performance budgets ({sys.platform})\n\nTolerance ×{tolerance:g}; best of 5 runs. Budgets: `docs/performance-budgets.toml`.\n\n{table}\n"
     if failed:

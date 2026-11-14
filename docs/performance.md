@@ -147,7 +147,8 @@ GitHub's shared runners, which are slower and noisier than the reference Mac. Me
 without a budget are listed as "no budget".
 
 What the gate cannot measure: first presented frame, frame times, resident memory and idle CPU.
-These need a window and a GPU. "Cold start" here is store open plus the first list read on a
+These need a window and a GPU. `reload.ui_thread_background` times the `reload()` call only;
+applying the finished read to the list also runs on the UI thread and is not timed. "Cold start" here is store open plus the first list read on a
 warm OS file cache, in an already running process.
 
 Measured 2026-11-14 on macOS 27.2.1, Apple M4 Max, release, other builds running meanwhile:
