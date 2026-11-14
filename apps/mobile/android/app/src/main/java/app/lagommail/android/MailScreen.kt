@@ -81,6 +81,7 @@ import kotlin.math.abs
     }
     signing?.let { account -> SignatureDialog(model, account) { signing = null } }
     naming?.let { account -> NameDialog(model, account) { naming = null } }
+    model.newFolder?.let { request -> NewFolderDialog(model, request) }
     retrying?.let { failure ->
         AlertDialog(onDismissRequest = { retrying = null }, title = { Text("Send again?") },
             text = { Text("Check Sent first if delivery was uncertain. This can send a duplicate.") },
@@ -115,12 +116,17 @@ internal fun Mailbox.label(): String = when (this) {
                     })
                     // Desktop's folder group: the server's own folders, with the account when there are several.
                     val folders = model.folders.filter { model.accountId == null || it.account == model.accountId }
-                    if (folders.isNotEmpty()) HorizontalDivider()
+                    val owners = model.accounts.filter { model.accountId == null || it.id == model.accountId }
+                    if (owners.isNotEmpty()) HorizontalDivider()
                     folders.forEach { folder ->
                         val account = model.accounts.find { it.id == folder.account }?.takeIf { model.accounts.size > 1 }
                         DropdownMenuItem(text = { Text(account?.let { "${folder.path} · ${it.displayName}" } ?: folder.path) }, onClick = {
                             menu = false; model.perform { model.openFolder(folder) }
                         })
+                    }
+                    owners.forEach { account ->
+                        DropdownMenuItem(text = { Text(if (owners.size > 1) "New folder in ${account.displayName}" else "New folder") },
+                            onClick = { menu = false; model.newFolder = NewFolder(account.id) })
                     }
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("All accounts") }, onClick = {
@@ -265,7 +271,8 @@ internal fun Mailbox.label(): String = when (this) {
                             onSelect = { model.perform { model.select(row.id) } },
                             onAction = { model.perform { model.act(it, row.id) } },
                             onRead = { model.perform { model.setRead(row) } },
-                            onMove = { folder -> model.perform { model.move(row.id, folder) } })
+                            onMove = { folder -> model.perform { model.move(row.id, folder) } },
+                            onNewFolder = { model.newFolder = NewFolder(row.account, row.id) })
                         HorizontalDivider()
                     }
                 }
@@ -303,7 +310,7 @@ internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, onSelect: () -> Unit,
-    onAction: (MailAction) -> Unit, onRead: () -> Unit, onMove: (MailFolder) -> Unit) {
+    onAction: (MailAction) -> Unit, onRead: () -> Unit, onMove: (MailFolder) -> Unit, onNewFolder: () -> Unit) {
     // A long press opens what iOS's context menu has: Mark read or unread, and Move to.
     var menu by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
@@ -354,7 +361,8 @@ internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
                 CustomAccessibilityAction("Later") { if (!busy) onAction(MailAction.Later); !busy }) +
                 (if (canDelete) listOf(CustomAccessibilityAction("Delete") { if (!busy) onAction(MailAction.Delete); !busy }) else emptyList()) +
                 CustomAccessibilityAction(readLabel) { if (!busy) onRead(); !busy } +
-                targets.map { folder -> CustomAccessibilityAction("Move to ${folder.path}") { if (!busy) onMove(folder); !busy } }
+                targets.map { folder -> CustomAccessibilityAction("Move to ${folder.path}") { if (!busy) onMove(folder); !busy } } +
+                CustomAccessibilityAction("Move to a new folder") { if (!busy) onNewFolder(); !busy }
         }), headlineContent = { Text(view.sender, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             supportingContent = { Column {
                 Text(view.subject, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -368,11 +376,13 @@ internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
                 if (row.hasAttachments) Text("Attachment", style = MaterialTheme.typography.labelSmall)
             } })
         DropdownMenu(menu || moving, { menu = false; moving = false }) {
-            if (moving) targets.forEach { folder ->
-                DropdownMenuItem(text = { Text(folder.path) }, onClick = { moving = false; onMove(folder) })
+            if (moving) {
+                targets.forEach { folder -> DropdownMenuItem(text = { Text(folder.path) }, onClick = { moving = false; onMove(folder) }) }
+                // Desktop's Move to offers "New folder" too; the message then moves there.
+                DropdownMenuItem(text = { Text("New folder…") }, onClick = { moving = false; onNewFolder() })
             } else {
                 DropdownMenuItem(text = { Text(readLabel) }, onClick = { menu = false; onRead() })
-                if (targets.isNotEmpty()) DropdownMenuItem(text = { Text("Move to…") }, onClick = { menu = false; moving = true })
+                DropdownMenuItem(text = { Text("Move to…") }, onClick = { menu = false; moving = true })
             }
         }
         }
@@ -562,7 +572,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                 }
             }
             val targets = model.moveTargets(message.row.account)
-            if (targets.isNotEmpty()) Box {
+            Box {
                 var open by remember { mutableStateOf(false) }
                 TextButton(enabled = !model.working, onClick = { open = true },
                     modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text("Move to") }
@@ -573,6 +583,10 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                             model.perform { model.move(message.row.id, folder, conversation = false) }
                         })
                     }
+                    DropdownMenuItem(text = { Text("New folder…") }, onClick = {
+                        open = false
+                        model.newFolder = NewFolder(message.row.account, message.row.id, conversation = false)
+                    })
                 }
             }
             TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id, conversation = false) } }) { Text("Delete") }

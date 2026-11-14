@@ -106,7 +106,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [ ] parity table and ranked gaps in `docs/mobile-parity.md`; Undo for Done/Later/Delete, signatures and link Bcc on iOS and Android — PR `mobile/parity-round` (2026-11-14). Closes on merge.
   - [ ] folders and Move to folder with Undo, Android list mark read/unread, Empty Trash and account name on iOS and Android — PR `mobile/parity-round-2` (2026-11-14). Closes on merge.
   - [ ] Android Today, Todo and the phone Calendar list with the page bar — PR `android/planner` (2026-11-14). Closes on merge.
-  - [ ] next gaps from the table: Android tablet Calendar week grid; create a folder on mobile.
+  - [ ] next gaps from the table: Android tablet Calendar week grid; create a folder on mobile — PR `mobile/parity-round-3` (2026-11-14). Closes on merge.
 - [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).

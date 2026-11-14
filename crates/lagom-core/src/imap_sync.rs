@@ -825,6 +825,23 @@ fn quoted(mailbox: &str) -> Result<String> {
     if mailbox.contains(['\r', '\n']) { return Err(Error::Invalid("invalid folder name")); }
     Ok(format!("\"{}\"", mailbox.replace('\\', "\\\\").replace('"', "\\\"")))
 }
+/// The check before "New folder" on desktop and mobile: a name, no hierarchy delimiter, and no
+/// folder of that name in any case. `create_folder` checks only what IMAP itself refuses.
+pub fn validate_folder_name<'a>(name: &str, delimiters: impl Iterator<Item = &'a str>, mut names: impl Iterator<Item = &'a str>) -> std::result::Result<(), &'static str> {
+    if name.trim().is_empty() {
+        return Err("Enter a folder name");
+    }
+    if name.len() > 1024 || name.chars().any(char::is_control) {
+        return Err("Invalid folder name");
+    }
+    if delimiters.filter(|d| !d.is_empty()).any(|d| name.contains(d)) {
+        return Err("Folder names cannot contain the hierarchy delimiter");
+    }
+    if names.any(|n| n.eq_ignore_ascii_case(name)) {
+        return Err("A folder with this name already exists");
+    }
+    Ok(())
+}
 fn validate_folder(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 1024 || name.chars().any(char::is_control) {
         Err(Error::Invalid("invalid folder name"))

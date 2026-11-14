@@ -108,6 +108,8 @@ internal fun sharedDraft(account: String, email: String, shared: SharedMail, sig
     id = draftMessageId(email), attachments = shared.attachments, bcc = shared.mail.bcc.joinToString(", "), startBody = signature)
 
 internal enum class MailAction(val notice: String) { Done("Moved to Done"), Later("Moved to Later"), Delete("Deleted") }
+/** Where "New folder" puts its folder; from Move to, the message `move` then moves there, alone or with its conversation. */
+internal data class NewFolder(val account: String, val move: Long? = null, val conversation: Boolean = true)
 
 internal class MailModel(
     private val open: suspend () -> LagomCoreInterface,
@@ -188,6 +190,8 @@ internal class MailModel(
     }
     fun removeAttachment(index: Int) { draft?.let { draft = it.copy(attachments = it.attachments.filterIndexed { at, _ -> at != index }) } }
     var accountForm by mutableStateOf<AccountForm?>(null)
+    /** The open "New folder" dialog. */
+    var newFolder by mutableStateOf<NewFolder?>(null)
     private var revision = 0
     private var appliedRevision = 0
     private var selectionRevision = 0
@@ -493,6 +497,15 @@ internal class MailModel(
             delay(5000)
             if (undoChanges === changes) { undoChanges = emptyList(); notice = null }
         }
+    }
+    /** Desktop's "New folder". Core checks the name as desktop does; a refusal throws its words, and the dialog stays. */
+    suspend fun createFolder(request: NewFolder, name: String) {
+        val core = core ?: return
+        val folder = core.createFolder(request.account, name)
+        // The folder is on the server; a failed list read only delays it to the next reload.
+        folders = try { core.folders(null) } catch (e: CancellationException) { throw e } catch (_: Exception) { folders + folder }
+        if (newFolder == request) newFolder = null
+        request.move?.let { move(it, folder, request.conversation) }
     }
     /** Only after the person confirmed: the scope's Trash is deleted for good on the server. */
     suspend fun emptyTrash() {

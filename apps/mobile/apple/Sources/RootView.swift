@@ -112,6 +112,7 @@ struct SidebarView: View {
     @Binding var section: AppSection
     @Binding var addAccount: Bool
     @Binding var removing: MailAccount?
+    @State private var newFolder: NewFolderTarget?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -129,7 +130,7 @@ struct SidebarView: View {
                                    active: section == page, page: true) { section = page }
                     }
                     if section == .mail { mailboxes.padding(.top, 18) }
-                    if section == .mail && !model.folders.isEmpty { folders.padding(.top, 18) }
+                    if section == .mail && !model.accounts.isEmpty { folders.padding(.top, 18) }
                     accounts.padding(.top, 18)
                 }
             }
@@ -137,6 +138,7 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 12).padding(.top, 8)
         .foregroundStyle(Theme.ink)
+        .modifier(NewFolderAlert(target: $newFolder, model: model))
     }
 
     private var mailboxes: some View {
@@ -166,7 +168,7 @@ struct SidebarView: View {
                 .padding(.horizontal, 10).padding(.bottom, 4).accessibilityAddTraits(.isHeader)
             ForEach(model.accounts, id: \.id) { account in
                 let own = model.folders.filter { $0.account == account.id }
-                if model.accounts.count > 1 && !own.isEmpty {
+                if model.accounts.count > 1 {
                     Text(account.displayName).lagomFont(.small).foregroundStyle(Theme.secondary).lineLimit(1)
                         .padding(.horizontal, 10).padding(.top, 6)
                 }
@@ -178,6 +180,9 @@ struct SidebarView: View {
                     .padding(.leading, CGFloat(folder.depth) * 16)
                     .accessibilityLabel(folder.path)
                 }
+                // Desktop's "New folder" row, in each account's group.
+                SidebarRow("New folder", icon: "new-folder") { newFolder = NewFolderTarget(account: account.id) }
+                    .accessibilityLabel(model.accounts.count > 1 ? "New folder in \(account.displayName)" : "New folder")
             }
         }
     }

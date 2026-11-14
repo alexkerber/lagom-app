@@ -269,7 +269,8 @@ class MainActivity : ComponentActivity() {
                     opening = model.perform { model.openInbox(id) }
                 }
                 AppSection.MAIL -> MailScreen(model, twoPane)
-                AppSection.CALENDAR -> CalendarScreen(planner)
+                // The tablet layouts' breakpoint: a phone, also in landscape, keeps the day list.
+                AppSection.CALENDAR -> CalendarScreen(planner, grid = twoPane)
                 AppSection.TODO -> TodoScreen(planner)
             }
         }

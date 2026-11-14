@@ -14,6 +14,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.time.LocalDate
+import java.time.ZoneOffset
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlannerModelTest {
@@ -97,6 +98,35 @@ class PlannerModelTest {
         assertEquals(listOf(event), planner.agenda); assertTrue(planner.calendarConnected)
         assertEquals(2, planner.unreadCount)
         assertEquals(listOf(1L, 3L), planner.today?.unread?.map { it.id })
+    }
+
+    @Test fun weekStartsOnMondayAndMovesByWeeks() = runTest(dispatcher) {
+        val core = FakeCore(); val planner = planner(core)
+        assertEquals("Sunday belongs to the week before", LocalDate.of(2026, 11, 9), PlannerModel.monday(LocalDate.of(2026, 11, 15)))
+        assertEquals(LocalDate.of(2026, 11, 9), PlannerModel.monday(LocalDate.of(2026, 11, 9)))
+        val thisWeek = PlannerModel.monday(LocalDate.now())
+        planner.showWeek(1)
+        assertEquals(thisWeek.plusWeeks(1), planner.weekStart)
+        assertEquals(thisWeek.plusWeeks(1).toString() to 7u, core.agendaCalls.last())
+        planner.showWeek(-2); planner.showWeek(0)
+        assertEquals(thisWeek, planner.weekStart)
+    }
+
+    @Test fun weekBlocksShareOverlapsInLanesAsOnDesktop() {
+        val day = LocalDate.of(2026, 11, 10)
+        val midnight = day.atStartOfDay(ZoneOffset.UTC).toEpochSecond()
+        fun event(from: Double, to: Double, allDay: Boolean = false) =
+            AgendaItem("2026-11-10", "a", "c", "", midnight + (from * 3600).toLong(), midnight + (to * 3600).toLong(), allDay, null, null)
+        val events = listOf(event(9.0, 10.0), event(9.5, 11.0), event(10.0, 10.25), event(12.0, 12.1), event(-2.0, 1.0), event(23.0, 26.0),
+            event(0.0, 24.0, allDay = true), event(23.98, 24.0))
+        val blocks = weekBlocks(events, day, ZoneOffset.UTC)
+        assertEquals("all-day events stay off the grid", listOf(4, 0, 1, 2, 3, 5, 7), blocks.map { it.index })
+        assertEquals("the 10:00 event reuses the lane the 9:00 one left", listOf(0, 0, 1, 0, 0, 0, 1), blocks.map { it.lane })
+        assertEquals(listOf(1, 2, 2, 2, 1, 2, 2), blocks.map { it.lanes })
+        assertEquals("a 23:59 event moves up to stay 36 minutes tall", 36.0, blocks[6].end - blocks[6].start, 1e-9)
+        assertEquals("yesterday's overnight event starts at the top", 0.0, blocks[0].start, 0.0)
+        assertEquals("a six-minute event draws 36 minutes tall", 12 * 60 + 36.0, blocks[4].end, 1e-9)
+        assertEquals("an event past midnight ends at the bottom", 1440.0, blocks[5].end, 0.0)
     }
 
     @Test fun withoutCoreNothingLoadsOrFails() = runTest(dispatcher) {

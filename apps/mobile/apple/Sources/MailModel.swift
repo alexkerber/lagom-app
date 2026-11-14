@@ -602,6 +602,20 @@ final class MailModel {
         folders.filter { $0.account == account && ($0.id != folder?.id || !searchText.isEmpty) }
     }
 
+    /// Desktop's "New folder" in `account`. Core checks the name as desktop does; a refusal shows its words.
+    func createFolder(_ name: String, account: String) async -> MailFolder? {
+        guard let core else { return nil }
+        do {
+            let folder = try await core.createFolder(accountId: account, name: name)
+            // The folder is on the server; a failed list read only delays it to the next reload.
+            folders = (try? await core.folders(accountId: nil)) ?? folders + [folder]
+            return folder
+        } catch {
+            self.error = error.localizedDescription
+            return nil
+        }
+    }
+
     /// Only after the person confirmed: the scope's Trash is deleted for good on the server.
     func emptyTrash() async {
         guard let core, mailbox == .trash, folder == nil, !working else { return }

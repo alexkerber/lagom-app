@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import app.lagommail.core.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
@@ -68,6 +69,10 @@ internal class PlannerModel : ViewModel() {
     var todos by mutableStateOf<Map<Long, List<Todo>>>(emptyMap()); private set
     var agenda by mutableStateOf<List<AgendaItem>>(emptyList()); private set
     var calendarConnected by mutableStateOf(false); private set
+    /** Tablet Calendar's week, as iPad: its Monday and that week's events. */
+    // shortcut: a time zone change keeps the old Monday until Today is tapped, as on iOS.
+    var weekStart by mutableStateOf(monday(LocalDate.now())); private set
+    var week by mutableStateOf<List<AgendaItem>>(emptyList()); private set
     var error by mutableStateOf<String?>(null)
 
     val unreadCount: Int get() = today?.unreadCount?.toInt() ?: 0
@@ -84,6 +89,7 @@ internal class PlannerModel : ViewModel() {
     private var todayRevision = 0
     private var todosRevision = 0
     private var agendaRevision = 0
+    private var weekRevision = 0
 
     /** Today's summary; cheap, so mail changes call it. */
     suspend fun reloadMail() {
@@ -115,6 +121,19 @@ internal class PlannerModel : ViewModel() {
             calendarConnected = connected
             this.agenda = agenda
         }
+    }
+
+    suspend fun reloadWeek() {
+        val core = core ?: return
+        val request = ++weekRevision
+        guard { core.agenda(weekStart.toString(), 7u).let { if (request == weekRevision) week = it } }
+    }
+
+    /** Moves the week by `weeks`; 0 goes back to this week. */
+    suspend fun showWeek(weeks: Long) {
+        weekStart = if (weeks == 0L) monday(LocalDate.now()) else weekStart.plusWeeks(weeks)
+        week = emptyList()
+        reloadWeek()
     }
 
     /** Returns false, without asking core, for a blank title. */
@@ -153,5 +172,42 @@ internal class PlannerModel : ViewModel() {
     companion object {
         /** How far ahead Calendar lists cached events. */
         const val AGENDA_DAYS = 14u
+        /** The week's Monday; Sunday belongs to the week before. */
+        fun monday(day: LocalDate): LocalDate = day.minusDays(day.dayOfWeek.value - 1L)
     }
+}
+
+/** A timed event placed on the week grid, desktop `week::layout`: minutes from midnight, and its lane among overlaps. */
+internal data class WeekBlock(val index: Int, val start: Double, val end: Double, val lane: Int = 0, val lanes: Int = 1)
+
+/** iOS `weekBlocks`: timed events on `day` as blocks at least 36 minutes tall; overlapping events share the width in lanes. */
+internal fun weekBlocks(events: List<AgendaItem>, day: LocalDate, zone: ZoneId = ZoneId.systemDefault()): List<WeekBlock> {
+    val from = day.atStartOfDay(zone).toEpochSecond()
+    val to = day.plusDays(1).atStartOfDay(zone).toEpochSecond()
+    fun minute(unix: Long): Double = Instant.ofEpochSecond(unix).atZone(zone).toLocalTime().let { it.hour * 60 + it.minute + it.second / 60.0 }
+    // shortcut: a repeated DST hour shares one wall-clock row, as on desktop.
+    val blocks = events.withIndex().filter { (_, e) -> !e.allDay && e.startUnix < to && e.endUnix > from }.map { (i, e) ->
+        val top = if (e.startUnix <= from) 0.0 else minute(e.startUnix)
+        val bottom = if (e.endUnix >= to) 1440.0 else minute(e.endUnix)
+        // A late event keeps its 36 minutes by starting earlier, so it never draws flat at the bottom.
+        val start = minOf(top, 1440.0 - 36)
+        WeekBlock(i, start, minOf(maxOf(bottom, start + 36), 1440.0))
+    }.sortedWith(compareBy({ it.start }, { it.end }, { it.index })).toMutableList()
+    var group = 0
+    var until = 0.0
+    val lanes = mutableListOf<Double>()
+    for (i in blocks.indices) {
+        if (blocks[i].start >= until) {
+            for (j in group until i) blocks[j] = blocks[j].copy(lanes = lanes.size)
+            group = i
+            lanes.clear()
+        }
+        val free = lanes.indexOfFirst { it <= blocks[i].start }
+        val lane = if (free < 0) lanes.size else free
+        if (lane == lanes.size) lanes += blocks[i].end else lanes[lane] = blocks[i].end
+        blocks[i] = blocks[i].copy(lane = lane)
+        until = if (group == i) blocks[i].end else maxOf(until, blocks[i].end)
+    }
+    for (j in group until blocks.size) blocks[j] = blocks[j].copy(lanes = lanes.size)
+    return blocks
 }

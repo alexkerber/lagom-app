@@ -312,3 +312,21 @@ internal class AccountForm {
         TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = close) { Text("Cancel") }
     })
 }
+
+/** Desktop's "New folder": a name, then Create. A refusal shows core's words and keeps the name. */
+@Composable internal fun NewFolderDialog(model: MailModel, request: NewFolder) {
+    var name by remember(request) { mutableStateOf("") }
+    var saving by remember(request) { mutableStateOf(false) }
+    val close = { if (model.newFolder == request) model.newFolder = null }
+    AlertDialog(onDismissRequest = { if (!saving) close() }, title = { Text("New folder") }, text = {
+        OutlinedTextField(name, { name = it }, enabled = !saving, singleLine = true,
+            label = { Text("Folder name") }, modifier = Modifier.fillMaxWidth())
+    }, confirmButton = {
+        TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = {
+            saving = true
+            model.perform { try { model.createFolder(request, name) } finally { saving = false } }
+        }) { Text("Create") }
+    }, dismissButton = {
+        TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = close) { Text("Cancel") }
+    })
+}
