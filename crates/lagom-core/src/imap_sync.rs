@@ -197,7 +197,7 @@ impl ImapSync {
     /// False when the message failed on a fresh session too; the session is usable either way.
     async fn try_fetch(&mut self, store: &mut Store, folder: &Folder, uid: u32) -> Result<bool> {
         for retry in [false, true] {
-            match self.fetch_message(store, folder, uid).await {
+            match self.fetch_message(store, folder, uid, mime::MAX_MIME_BYTES).await {
                 Ok(()) => return Ok(true),
                 Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
                 // The network's fault, not the message's: keep the checkpoint and try again next sync.
@@ -403,7 +403,8 @@ impl ImapSync {
         )?;
         Ok(())
     }
-    async fn fetch_message(&mut self, store: &Store, folder: &Folder, uid: u32) -> Result<()> {
+    /// Stores one message with its first text and HTML parts, if together they fit in `limit` bytes.
+    async fn fetch_message(&mut self, store: &Store, folder: &Folder, uid: u32, limit: usize) -> Result<()> {
         // shortcut: async-imap exposes no X-GM-THRID accessor; add it to this FETCH when the dependency supports it.
         let metadata=net(async {self.session.uid_fetch(uid.to_string(),"(UID ENVELOPE FLAGS BODYSTRUCTURE RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER]<0.262144>)").await?.try_collect::<Vec<_>>().await}).await?;
         let Some(fetch) = metadata.iter().find(|f| f.uid == Some(uid)) else {
@@ -430,7 +431,7 @@ impl ImapSync {
         if picks.is_empty() {
             message = mime::parse(header)?;
         } else {
-            if picks.iter().map(|p| p.2 as usize).sum::<usize>() > mime::MAX_MIME_BYTES {
+            if picks.iter().map(|p| p.2 as usize).sum::<usize>() > limit {
                 return self.save(store, folder, uid, Some(fetch), mime::metadata_only(header)?, &attachments).map(|_| ());
             }
             let section = |path: &[u32]| path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
@@ -442,6 +443,8 @@ impl ImapSync {
                 let items: Vec<String> = picks.iter().map(|p| format!("BODY.PEEK[{}]", section(&p.0))).collect();
                 format!("(UID {})", items.join(" "))
             };
+            // BODYSTRUCTURE sizes come from the server: also bound what this FETCH may read.
+            self.session.get_mut().remaining = Some(limit + 65536);
             let bodies = net(async {
                 self.session
                     .uid_fetch(uid.to_string(), query)
@@ -449,7 +452,9 @@ impl ImapSync {
                     .try_collect::<Vec<_>>()
                     .await
             })
-            .await?;
+            .await;
+            self.session.get_mut().remaining = None;
+            let bodies = bodies?;
             let Some(body) = bodies.iter().find(|f| f.uid == Some(uid)) else {
                 return Ok(());
             };
@@ -464,7 +469,7 @@ impl ImapSync {
                 }
                 .ok_or(Error::Network("MIME text part missing"))?;
                 total += headers.len() + text.len();
-                if headers.len() >= 65536 || total > mime::MAX_MIME_BYTES {
+                if headers.len() >= 65536 || total > limit {
                     return self.save(store, folder, uid, Some(fetch), mime::metadata_only(header)?, &attachments).map(|_| ());
                 }
                 let mut raw = headers.to_vec();
@@ -475,7 +480,8 @@ impl ImapSync {
                     raw.extend_from_slice(b"\r\n");
                 }
                 raw.extend_from_slice(text);
-                let parsed = mime::parse(&raw)?;
+                // +4: the line breaks added above.
+                let parsed = mime::parse_within(&raw, limit + 4)?;
                 if path.is_empty() {
                     message = parsed;
                 } else if *html {

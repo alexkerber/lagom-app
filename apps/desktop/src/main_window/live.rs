@@ -459,12 +459,21 @@ impl MainWindow {
                     read = true;
                 }
                 Event::Inline { id: store, error } => {
+                    // Without an HTML part the worker fetched the whole body, not only inline images.
+                    let mut body_fetch = false;
                     if let Some(mail) = self.inbox.mail.iter_mut().find(|m| m.store == Some(store)) {
                         mail.inline_pending = false;
                         mail.inline_retry_after = error.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_secs(60));
+                        body_fetch = mail.html.is_none();
                     }
-                    if let Some(error) = error { self.notify(format!("Could not load inline images: {error}"), cx); }
-                    else if let Some(id) = self.inbox.mail.iter().position(|m| m.store == Some(store)) {
+                    if let Some(error) = error {
+                        self.notify(if body_fetch { format!("Could not download this message: {error}") } else { format!("Could not load inline images: {error}") }, cx);
+                    } else if let Some(id) = self.inbox.mail.iter().position(|m| m.store == Some(store)) {
+                        if body_fetch {
+                            self.inbox.mail[id].text = None;
+                            // The list snippet changed with the body.
+                            read = true;
+                        }
                         self.inbox.mail[id].body.clear();
                         self.open_message(id, false, cx);
                         if let Some(body) = self.expanded.get(&id) {
@@ -955,7 +964,8 @@ impl MainWindow {
         if !self.inbox.mail[id].inline_pending
             && self.inbox.mail[id].inline_retry_after.is_none_or(|after| std::time::Instant::now() >= after)
             && live.store.inline_loaded(store).is_ok_and(|loaded| !loaded)
-            && self.inbox.mail[id].inline_referenced {
+            // No HTML part and not loaded: sync left the body out (over 4 MiB, or synced before HTML parts were kept).
+            && (self.inbox.mail[id].inline_referenced || self.inbox.mail[id].html.is_none()) {
             self.inbox.mail[id].inline_pending = live.bridge.send(Cmd::Inline(store));
         }
         // Reading a filtered list must not consume the next unread row on every reload.
@@ -1563,6 +1573,9 @@ mod tests {
         let store = Rc::new(Store::open(dir.join("t.sqlite3")).unwrap());
         store.save_account(&account).unwrap();
         store.save_folder(&account.id, "INBOX", Some("/"), lagom_core::store::FolderRole::Inbox).unwrap();
+        // Fixture rows count as synced: opening one does not fetch its body or inline parts again.
+        rusqlite::Connection::open(store.path()).unwrap().execute_batch(
+            "CREATE TRIGGER fixture_synced AFTER INSERT ON messages BEGIN UPDATE messages SET inline_loaded=1 WHERE id=NEW.id; END").unwrap();
         cx.cx.update(|cx| cx.set_global(crate::notifications::State {
             service: crate::notifications::Service::new().0, _events: Task::ready(()),
         }));
@@ -1780,10 +1793,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn opening_a_body_sync_left_out_fetches_it_and_shows_the_html(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            rusqlite::Connection::open(store.path()).unwrap().execute_batch("DROP TRIGGER fixture_synced").unwrap();
+            let summary = incoming(v, 1);
+            let id = summary.id;
+            store.save_message(&lagom_core::store::Message { summary, body_text: lagom_core::mime::BODY_UNAVAILABLE.into(), body_html: None }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            v.open_message(v.inbox.single().unwrap(), false, cx);
+            id
+        });
+        view.update_in(cx, |v, window, cx| {
+            let selected = v.inbox.single().unwrap();
+            assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
+            assert_eq!(v.inbox.mail[selected].body, [lagom_core::mime::BODY_UNAVAILABLE]);
+            v.on_events(vec![Event::Inline { id, error: Some("offline".into()) }], window, cx);
+            assert_eq!(v.toast.as_ref().unwrap().0, "Could not download this message: offline");
+            v.open_message(selected, false, cx);
+            assert!(rx.try_recv().is_err(), "a failed download waits before it retries");
+            // What the worker stores after the fetch.
+            let db = rusqlite::Connection::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            db.execute("UPDATE messages SET body_text='Full text',body_html='<p>Full text</p>',snippet='Full text',inline_loaded=1 WHERE id=?1", [id]).unwrap();
+            v.on_events(vec![Event::Inline { id, error: None }], window, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            let mail = &v.inbox.mail[v.inbox.single().unwrap()];
+            assert_eq!(mail.html.as_ref().map(|h| h.as_ref()), Some("<p>Full text</p>"));
+            assert_eq!(mail.body, ["Full text"]);
+            assert_eq!(mail.snippet, "Full text");
+        });
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[gpui::test]
     fn legacy_inline_failure_waits_before_retry_and_completion_survives_summary_reload(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let id = view.update(cx, |v, cx| {
             let store = v.live.as_ref().unwrap().store.clone();
+            rusqlite::Connection::open(store.path()).unwrap().execute_batch("DROP TRIGGER fixture_synced").unwrap();
             let mut summary = incoming(v, 1);
             summary.has_attachments = true;
             let id = summary.id;

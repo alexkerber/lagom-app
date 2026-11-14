@@ -10,6 +10,8 @@ pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
 /// The stored body of a message whose text is over `MAX_MIME_BYTES`: the headers are kept, the
 /// text is not downloaded. Readers compare against this to show why the body is missing.
 pub const BODY_UNAVAILABLE: &str = "The text of this message is larger than 4 MiB and was not downloaded.";
+/// The text a message may download when it is opened: sync leaves bodies over `MAX_MIME_BYTES` out.
+pub const MAX_OPEN_BYTES: usize = 25 * 1024 * 1024;
 
 /// A row for a message whose headers do not parse: the list shows it, the body says why.
 pub fn placeholder() -> Message {
@@ -682,8 +684,11 @@ fn addresses(list: Option<AddressList<'_>>) -> String {
     .unwrap_or_default()
 }
 pub fn parse(raw: &[u8]) -> Result<Message> {
-    if raw.len() > MAX_MIME_BYTES {
-        return Err(Error::Invalid("MIME input exceeds 4 MiB"));
+    parse_within(raw, MAX_MIME_BYTES)
+}
+pub(crate) fn parse_within(raw: &[u8], limit: usize) -> Result<Message> {
+    if raw.len() > limit {
+        return Err(Error::Invalid("MIME input exceeds the size limit"));
     }
     let parsed = MessageParser::default()
         .parse(raw)

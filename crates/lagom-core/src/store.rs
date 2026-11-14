@@ -540,8 +540,12 @@ impl Store {
     pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
         let tx = self.db.unchecked_transaction()?;
         let id = self.insert_message(message)?;
-        self.db.execute("DELETE FROM attachments WHERE message=?1", [id])?;
-        for part in attachments {
+        // Unchanged parts keep their cached downloads when a body is fetched again.
+        let old = self.attachments(id)?;
+        for part in old.iter().filter(|p| !attachments.contains(p)) {
+            self.db.execute("DELETE FROM attachments WHERE message=?1 AND section=?2", params![id, part.section])?;
+        }
+        for part in attachments.iter().filter(|p| !old.contains(p)) {
             self.db.execute("INSERT INTO attachments VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, part.section, part.filename, part.mime_type, part.size, part.encoding])?;
         }
@@ -1287,8 +1291,16 @@ mod mail_tests {
         store.save_synced_message(&message, std::slice::from_ref(&part)).unwrap();
         assert_eq!(store.attachments(id).unwrap(), std::slice::from_ref(&part));
         assert!(store.missing_metadata(folder, 1).unwrap().is_empty());
-        assert!(store.save_synced_message(&message, &[part.clone(), part.clone()]).is_err());
+        let resized = Attachment { size: 256, ..part.clone() };
+        assert!(store.save_synced_message(&message, &[resized.clone(), resized.clone()]).is_err());
         assert_eq!(store.attachments(id).unwrap(), std::slice::from_ref(&part));
+        // Fetching the body again keeps the download of an unchanged part and drops a changed one.
+        store.cache_attachment(id, "2.1", b"pdf").unwrap();
+        store.save_synced_message(&message, std::slice::from_ref(&part)).unwrap();
+        assert_eq!(store.cached_attachment(id, "2.1").unwrap().as_deref(), Some(b"pdf".as_slice()));
+        store.save_synced_message(&message, std::slice::from_ref(&resized)).unwrap();
+        assert!(store.cached_attachment(id, "2.1").unwrap().is_none());
+        store.save_synced_message(&message, std::slice::from_ref(&part)).unwrap();
         drop(store);
         store = Store::open(&path).unwrap();
         assert_eq!(store.attachments(id).unwrap(), [part]);

@@ -33,19 +33,28 @@ impl ImapSync {
     pub async fn fetch_inline(&mut self, store: &mut Store, id: i64) -> Result<()> {
         if store.inline_loaded(id)? { return Ok(()); }
         // Pending moves change the visible folder before the server folder/UID.
-        let message = store.message(id)?.summary;
+        let stored = store.message(id)?;
+        let message = stored.summary;
         if message.account != self.account.id { return Err(Error::NotFound); }
         let before = store.folder(message.folder)?.uidvalidity;
         let (folder, _) = self.select(store, message.folder).await?;
         if folder.uidvalidity != before {
             return Err(Error::Invalid("mailbox changed; resync before loading inline images"));
         }
+        if stored.body_html.is_none() {
+            // Sync left this body out (over 4 MiB, or synced before HTML parts were kept). Fetching
+            // the message again also loads its inline parts.
+            self.fetch_message(store, &folder, message.uid, mime::MAX_OPEN_BYTES).await?;
+            // One attempt: a message still too large, or gone from the server, is not fetched on every open.
+            if !store.inline_loaded(id)? { store.save_inline_parts(id, &[])?; }
+            return Ok(());
+        }
         let metadata = net(async {
             self.session.uid_fetch(message.uid.to_string(), "(UID BODYSTRUCTURE)").await?.try_collect::<Vec<_>>().await
         }).await?;
         let body = metadata.iter().find(|f| f.uid == Some(message.uid) && f.bodystructure().is_some())
             .and_then(|f| f.bodystructure()).ok_or(Error::Network("IMAP BODYSTRUCTURE missing"))?;
-        let html = store.message(id)?.body_html.unwrap_or_default();
+        let html = stored.body_html.unwrap_or_default();
         let parts = self.inline_parts(message.uid, body, &html).await?;
         store.save_inline_parts(id, &parts)
     }
