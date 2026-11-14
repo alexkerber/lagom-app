@@ -699,20 +699,27 @@ mod tests {
                 run();
                 best = best.min(start.elapsed());
             }
-            eprintln!("100k messages, {name}: best of 5 {best:?}");
+            // scripts/perf.py reads these lines; keys are in docs/performance-budgets.toml.
+            println!("perf reload.{name} {:.3}", best.as_secs_f64() * 1000.);
         };
         time("folders", &|| { store.folders("personal", 0).unwrap(); });
         time("counts", &|| { store.counts("personal", 0).unwrap(); });
         time("next_snooze", &|| { store.next_snooze("personal", 0).unwrap(); });
         let inbox = store.folders("personal", 0).unwrap()[1].id;
         time("list_conversations", &|| { store.list_conversations("personal", Some(inbox), 0, 201).unwrap(); });
-        time("load personal", &|| { load(&store, "personal", View::Inbox, 201, 0, [], true).unwrap(); });
-        time("load work", &|| { load(&store, "work", View::Inbox, 201, 0, [], true).unwrap(); });
-        time("folders work", &|| { store.folders("work", 0).unwrap(); });
-        time("counts work", &|| { store.counts("work", 0).unwrap(); });
+        time("load_personal", &|| { load(&store, "personal", View::Inbox, 201, 0, [], true).unwrap(); });
+        time("load_work", &|| { load(&store, "work", View::Inbox, 201, 0, [], true).unwrap(); });
+        time("folders_work", &|| { store.folders("work", 0).unwrap(); });
+        time("counts_work", &|| { store.counts("work", 0).unwrap(); });
         time("unread_inbox_count", &|| { store.unread_inbox_count(0, &[]).unwrap(); });
         time("load_accounts", &|| { load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 0, vec![], true).unwrap(); });
         drop(store);
+        // Start without a window: open the existing store and read the first list (OS file cache warm).
+        time("store_open", &|| { Store::open(&path).unwrap(); });
+        time("cold_start_first_list", &|| {
+            let store = Store::open(&path).unwrap();
+            assert!(load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 0, vec![], true).unwrap().inbox.len() >= 200);
+        });
         let _ = std::fs::remove_dir_all(dir);
     }
 }

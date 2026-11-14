@@ -1728,7 +1728,8 @@ mod tests {
                 cx.run_until_parked();
             }
             assert!(view.read_with(cx, |v, _| v.inbox.list().len()) >= 200);
-            eprintln!("100k messages, reload on the UI thread, inline read {inline}: best of 5 {best:?}");
+            // scripts/perf.py reads this line; the key is in docs/performance-budgets.toml.
+            println!("perf reload.ui_thread_{} {:.3}", if inline { "inline" } else { "background" }, best.as_secs_f64() * 1000.);
         }
         INLINE_READS.set(true);
     }

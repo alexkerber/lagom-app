@@ -4,7 +4,7 @@ Goal: the most optimised email client there is. Every number below is a budget t
 
 ## Budgets
 
-The targets are ours, set 2026-11-06. None is measured yet.
+The targets are ours, set 2026-11-06. CI measures the parts that run without a window; see [CI gate](#ci-gate).
 
 | What                                    | Budget                                | Measured how                                  |
 | --------------------------------------- | ------------------------------------- | --------------------------------------------- |
@@ -132,3 +132,45 @@ That costs one inline read per click (39–42 ms in release at 100k). Tests:
 Still counted per reload: unread per folder and the Inbox and Later totals each visit
 every row of their folder (about 10–13 ms each in release at 100k). A covering partial
 index needs a schema bump. Not measured: native frame times, a real account.
+
+## CI gate
+
+`.github/workflows/perf.yml` runs `python3 scripts/perf.py` on ubuntu-latest and macos-latest
+for pull requests that touch Rust code, and for every push to main. The script runs the ignored
+benchmarks in release (`lagom-core` `perf_tests`, and `reload_reads_100k` and
+`reload_ui_thread_100k` in `lagom`), builds the release binary, and writes a table to the job
+summary. Each time is the best of five runs.
+
+The numbers live in `docs/performance-budgets.toml`. A run fails when a time is above
+budget × 2, a size is above its budget, or a budgeted key is missing. The factor 2 covers
+GitHub's shared runners, which are slower and noisier than the reference Mac. Measurements
+without a budget are listed as "no budget".
+
+What the gate cannot measure: first presented frame, frame times, resident memory and idle CPU.
+These need a window and a GPU. "Cold start" here is store open plus the first list read on a
+warm OS file cache, in an already running process.
+
+Measured 2026-11-14 on macOS 27.2.1, Apple M4 Max, release, other builds running meanwhile:
+
+| Key                            |   Value | Budget |
+| ------------------------------ | ------: | -----: |
+| `search.*` (four queries)      | ≤ 0.1 ms |  50 ms |
+| `open.message`                 | 0.02 ms |  16 ms |
+| `reload.ui_thread_background`  | 0.17 ms |   8 ms |
+| `reload.cold_start_first_list` |   44 ms | 200 ms |
+| `reload.load_accounts`         |   42 ms | 100 ms |
+| `reload.folders`               |   18 ms |  30 ms |
+| `reload.counts`                |   15 ms |  30 ms |
+| `mime.typical` (25 KB)         | 0.53 ms |   2 ms |
+| `mime.large` (3 MB)            | 0.56 ms |  50 ms |
+| `html.to_text_100kb`           |  2.0 ms |  10 ms |
+| `sync.parse_save_1000`         |  0.8–1.5 s |  2 s |
+| `binary.size`                  | 27.5 MB |  30 MB |
+
+Two findings without a gate yet:
+
+- The release binary is 27.5 MB, not the 6.0 MB of the 2026-11-06 baseline. It is 2.5 MB
+  under its budget. Not investigated.
+- A jump to one message (`reload_now`, inline) holds the UI thread for 69 ms at 100k
+  (`reload.ui_thread_inline`). That breaks the 16 ms "open a message" budget. It has no CI
+  budget, because the gate would fail on main today.

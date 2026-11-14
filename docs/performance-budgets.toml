@@ -1,0 +1,31 @@
+# Budgets that `python3 scripts/perf.py` measures headlessly (release build, no window or GPU).
+# CI runs it in .github/workflows/perf.yml. The prose and the user-facing budgets are in
+# docs/performance.md; this file is the only place the numbers live.
+#
+# `max` is the budget on the reference Mac (Apple M4 Max). A run fails when a time is above
+# max × tolerance, a size is above max, or a budgeted key is not measured at all.
+# Tolerance 2: GitHub's shared runners are slower per core than the reference Mac and noisy
+# between runs. Lower it only together with CI numbers that show the headroom.
+tolerance = 2.0
+
+[budgets]
+# From docs/performance.md, "Budgets". The headless part of each user-facing budget.
+"search.unique" = { max = 50, unit = "ms", why = "Local search, 100 000 messages: < 50 ms to first results" }
+"search.common" = { max = 50, unit = "ms", why = "Local search, 100 000 messages" }
+"search.from" = { max = 50, unit = "ms", why = "Local search, 100 000 messages" }
+"search.subject" = { max = 50, unit = "ms", why = "Local search, 100 000 messages" }
+"open.message" = { max = 16, unit = "ms", why = "Open a message from the local store: store reads at 100k" }
+"reload.ui_thread_background" = { max = 8, unit = "ms", why = "Key press to updated frame: UI-thread part of a reload at 100k" }
+"reload.cold_start_first_list" = { max = 200, unit = "ms", why = "Cold start to first frame: store open and first list read at 100k" }
+"binary.size" = { max = 30, unit = "MB", why = "Release binary" }
+
+# Set 2026-11-14 with this gate: parts of the budgets above.
+"reload.store_open" = { max = 20, unit = "ms", why = "Part of cold start" }
+"reload.load_accounts" = { max = 100, unit = "ms", why = "Part of cold start: the whole list read, two accounts" }
+"reload.list_conversations" = { max = 16, unit = "ms", why = "Part of the list read: one 200-conversation page" }
+"reload.folders" = { max = 30, unit = "ms", why = "Part of the list read: folders with unread counts" }
+"reload.counts" = { max = 30, unit = "ms", why = "Part of the list read: Inbox and Later totals" }
+"mime.typical" = { max = 2, unit = "ms", why = "Sync: parse a 25 KB newsletter once" }
+"mime.large" = { max = 50, unit = "ms", why = "Sync: parse a 3 MB message with an attachment" }
+"html.to_text_100kb" = { max = 10, unit = "ms", why = "Sync: text of 100 KB of mail HTML" }
+"sync.parse_save_1000" = { max = 2000, unit = "ms", why = "Sync: parse and save 1000 messages, at least 500 per second" }

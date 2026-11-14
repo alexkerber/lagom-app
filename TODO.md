@@ -58,7 +58,9 @@
 - [x] Edit menu: Undo, Redo, Cut, Copy, Paste, Select All. A focused text field handles them; Undo falls back to the inbox (`feat/text-input`).
 - [ ] Command palette, compose and empty inbox: structure from B, dressed in D tokens.
 - [ ] Typeface trial: Hauora Sans against Inter.
-- [ ] Performance: CI that measures the budgets in `docs/performance.md` (goal: the most optimised mail app).
+- [x] Performance: CI that measures the budgets in `docs/performance.md` (goal: the most optimised mail app). `scripts/perf.py` runs headless release benchmarks (search, open, reload, cold start to first list, MIME, HTML text, sync save, binary size) against `docs/performance-budgets.toml` in `.github/workflows/perf.yml` on Linux and macOS. Times fail above budget × 2. Frame times, memory and idle CPU need a window and are not gated.
+- [ ] Performance: a jump to one message reads inline and holds the UI thread for 69 ms at 100k (`reload.ui_thread_inline`, release, M4 Max). Move it off the UI thread, then give it a budget in `docs/performance-budgets.toml`.
+- [ ] Performance: the release binary is 27.5 MB (budget 30 MB), not 6.0 MB as on 2026-11-06. Find what grew.
 - [x] Liquid Glass spike: runtime `NSGlassEffectView` behind the macOS sidebar, `NSVisualEffectView` sidebar/behind-window fallback, and opaque tint if native installation fails. Layout prepaint follows sidebar resizing; main content and other windows stay opaque. Mail now shares the filled section selection; mailbox/account/folder selections use accent text and icons without a fill. Held-key hints float at the list's bottom centre without moving rows or covering the header. Unit/headless tests cover backend/failure decisions, frame coordinates, selection levels and hint bounds; native calls and visual contrast remain unverified (no GUI run). Windows/Linux stay opaque; Mica/Acrylic is deferred.
 - [x] Window drags by its top edge on macOS (verified by hand).
 
