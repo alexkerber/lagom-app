@@ -42,6 +42,10 @@ import app.lagommail.core.installSecretStore
 import app.lagommail.core.parseMailto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
+import java.time.LocalDate
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -215,11 +219,29 @@ class MainActivity : ComponentActivity() {
     val settings = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
     var section by remember { mutableStateOf(settings.getString("section", null)?.let { name -> AppSection.entries.find { it.name == name } } ?: AppSection.MAIL) }
     fun show(page: AppSection) { section = page; settings.edit().putString("section", page.name).apply() }
-    // Compose, Add account and an opened message (a notification, a share) live on the Mail page.
+    /** A message Today asked to open; a tap on another page cancels it, and a half-open message with it. */
+    var opening by remember { mutableStateOf<Job?>(null) }
+    fun choose(page: AppSection) {
+        opening?.takeIf { it.isActive && page != AppSection.MAIL }?.let { it.cancel(); model.clearSelection() }
+        show(page)
+    }
+    // Compose, Add account and a newly opened message (a notification, a share) live on the Mail page.
+    // Only changes count: after a rotation the page stays where it was.
     val mailOpen = model.draft != null || model.accountForm != null
-    LaunchedEffect(mailOpen, model.selectedId) { if (mailOpen || model.selectedId != null) show(AppSection.MAIL) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { (model.draft != null || model.accountForm != null) to model.selectedId }.drop(1)
+            .collect { (open, selected) -> if (open || selected != null) show(AppSection.MAIL) }
+    }
     // Local tasks and events load as soon as the store opens, not after the first sync.
     LaunchedEffect(model.core) { model.core?.let { planner.core = it; planner.reload() } }
+    // A page left open past midnight moves to the new day.
+    LaunchedEffect(Unit) {
+        var day = LocalDate.now()
+        while (true) {
+            delay(60_000)
+            if (LocalDate.now() != day) { day = LocalDate.now(); planner.reload() }
+        }
+    }
     // Unread counts and Today's mail follow every mail reload and the end of a sync.
     LaunchedEffect(model.rows, model.syncing) { if (!model.syncing) planner.reloadMail() }
     LaunchedEffect(section) {
@@ -232,7 +254,7 @@ class MainActivity : ComponentActivity() {
         if (bar) NavigationBar {
             AppSection.entries.forEach { page ->
                 val unread = if (page == AppSection.MAIL) planner.unreadCount else 0
-                NavigationBarItem(selected = page == section, onClick = { show(page) }, label = { Text(page.title) }, icon = {
+                NavigationBarItem(selected = page == section, onClick = { choose(page) }, label = { Text(page.title) }, icon = {
                     BadgedBox(badge = { if (unread > 0) Badge { Text("$unread", Modifier.semantics { contentDescription = "$unread unread" }) } }) {
                         Icon(SectionIcons.getValue(page), contentDescription = null)
                     }
@@ -244,7 +266,7 @@ class MainActivity : ComponentActivity() {
             when (section) {
                 AppSection.TODAY -> TodayScreen(planner, model) { id ->
                     show(AppSection.MAIL)
-                    model.perform { model.openInbox(id) }
+                    opening = model.perform { model.openInbox(id) }
                 }
                 AppSection.MAIL -> MailScreen(model, twoPane)
                 AppSection.CALENDAR -> CalendarScreen(planner)

@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -116,7 +117,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 
 /** The calm Today page, as iOS `TodayView`: schedule, what is due, and a short look at unread mail. */
 @Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, openMail: (Long?) -> Unit) {
-    var newTask by remember { mutableStateOf(false) }
+    var newTask by rememberSaveable { mutableStateOf(false) }
     val now = nowSeconds()
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
@@ -213,8 +214,11 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     val colors = MaterialTheme.colorScheme
     Row(modifier.fillMaxWidth().heightIn(min = 48.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(Modifier.size(48.dp).clickable(role = Role.Button, onClick = toggle)
-            .semantics { contentDescription = if (todo.done) "Mark as not done" else "Mark as done" }, contentAlignment = Alignment.Center) {
+        // A checkbox named after its task; iOS's words are the action TalkBack offers.
+        Box(Modifier.size(48.dp).toggleable(todo.done, role = Role.Checkbox) { toggle() }.semantics {
+            contentDescription = todo.title
+            onClick(if (todo.done) "Mark as not done" else "Mark as done") { toggle(); true }
+        }, contentAlignment = Alignment.Center) {
             Box(Modifier.size(21.dp).border(1.dp, colors.onSurfaceVariant, CircleShape), contentAlignment = Alignment.Center) {
                 if (todo.done) Icon(CheckIcon, contentDescription = null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             }
@@ -234,8 +238,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 
 /** Local task lists, as iOS `TodoView` and the desktop's Todo page. */
 @Composable internal fun TodoScreen(planner: PlannerModel) {
-    var adding by remember { mutableStateOf<Long?>(null) }
-    var newList by remember { mutableStateOf(false) }
+    var adding by rememberSaveable { mutableStateOf<Long?>(null) }
+    var newList by rememberSaveable { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var showDone by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val words = DateWords()
@@ -285,8 +289,9 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun DeletableTodoRow(planner: PlannerModel, todo: Todo, words: DateWords) {
     val state = rememberSwipeToDismissBoxState()
-    LaunchedEffect(state.currentValue) {
-        if (state.currentValue != SwipeToDismissBoxValue.EndToStart) return@LaunchedEffect
+    // The settled value changes only after release, so a drag that turns back never deletes.
+    LaunchedEffect(state.settledValue) {
+        if (state.settledValue != SwipeToDismissBoxValue.EndToStart) return@LaunchedEffect
         // In the model's scope, so leaving the page never cuts a delete short. A deleted row leaves with the reload.
         planner.perform { planner.delete(todo) }.join()
         state.reset()
@@ -306,7 +311,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 }
 
 @Composable private fun NewListDialog(planner: PlannerModel, close: () -> Unit) {
-    var name by remember { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
     AlertDialog(onDismissRequest = close, title = { Text("New list") }, text = {
         OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     }, confirmButton = { TextButton(onClick = { close(); planner.perform { planner.addList(name) } }) { Text("Add") } },
@@ -316,9 +321,11 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 /** iOS `NewTaskView`: a title, the list when there are several, and an optional due date. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun NewTaskDialog(planner: PlannerModel, startList: Long?, startDue: LocalDate?, close: () -> Unit) {
-    var title by remember { mutableStateOf("") }
-    var list by remember { mutableStateOf(startList) }
-    var due by remember { mutableStateOf(startDue) }
+    var title by rememberSaveable { mutableStateOf("") }
+    var list by rememberSaveable { mutableStateOf(startList) }
+    // As an epoch day, which saved state can hold.
+    var dueDay by rememberSaveable { mutableStateOf(startDue?.toEpochDay()) }
+    val due = dueDay?.let(LocalDate::ofEpochDay)
     var saving by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
     var choosing by remember { mutableStateOf(false) }
@@ -348,7 +355,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(due != null, role = Role.Switch) { due = if (it) due ?: LocalDate.now() else null },
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(due != null, role = Role.Switch) { dueDay = if (it) (due ?: LocalDate.now()).toEpochDay() else null },
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("Due date", Modifier.weight(1f))
                 Switch(due != null, onCheckedChange = null)
@@ -367,7 +374,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         val state = rememberDatePickerState(initialSelectedDateMillis = (due ?: LocalDate.now()).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
         DatePickerDialog(onDismissRequest = { picking = false }, confirmButton = {
             TextButton(onClick = {
-                state.selectedDateMillis?.let { due = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
+                state.selectedDateMillis?.let { dueDay = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate().toEpochDay() }
                 picking = false
             }) { Text("OK") }
         }, dismissButton = { TextButton(onClick = { picking = false }) { Text("Cancel") } }) { DatePicker(state) }

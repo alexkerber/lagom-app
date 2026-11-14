@@ -1080,8 +1080,13 @@ internal class FakeCore : LagomCoreInterface {
         mail.count { it.unread }.toUInt(), mail.filter { it.unread }.take(unreadLimit.toInt()))
     override suspend fun todoLists(): List<TodoList> = todoLists.toList()
     // Open first, as core orders them.
-    override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> =
-        tasks.filter { it.list == list && (includeDone || !it.done) }.sortedBy { it.done }
+    /** Holds the next `todos` call after it took its snapshot, once. */
+    var todosGate: CompletableDeferred<Unit>? = null
+    override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> {
+        val snapshot = tasks.filter { it.list == list && (includeDone || !it.done) }.sortedBy { it.done }
+        todosGate?.let { todosGate = null; it.await() }
+        return snapshot
+    }
 
     override fun laterChoices() = listOf(LaterChoice("Later: this evening 18:00", 18_000),
         LaterChoice("Later: tomorrow 08:00", 86_400), LaterChoice("Later: next week, Monday 08:00", 604_800))

@@ -1,7 +1,9 @@
 package app.lagommail.android
 
 import app.lagommail.core.*
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.*
 import org.junit.After
@@ -48,6 +50,17 @@ class PlannerModelTest {
         planner.delete(planner.todos.getValue(2).first { it.title == "Bread" })
         assertEquals(listOf("Milk"), planner.todos.getValue(2).map { it.title })
         assertTrue(planner.todos.getValue(1).isEmpty())
+    }
+
+    @Test fun anOlderReloadThatEndsLastNeverUndoesAChange() = runTest(dispatcher) {
+        val core = FakeCore(); val planner = planner(core)
+        planner.add("Milk", 1, null)
+        val gate = CompletableDeferred<Unit>(); core.todosGate = gate
+        val old = async { planner.reloadTodos() }; runCurrent()
+        planner.toggle(planner.todos.getValue(1).single())
+        assertTrue(planner.todos.getValue(1).single().done)
+        gate.complete(Unit); old.await()
+        assertTrue("the older snapshot must not land", planner.todos.getValue(1).single().done)
     }
 
     @Test fun blankListNameAddsNothing() = runTest(dispatcher) {

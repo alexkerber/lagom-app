@@ -80,28 +80,39 @@ internal class PlannerModel : ViewModel() {
 
     suspend fun reload() { reloadMail(); reloadTodos(); reloadAgenda() }
 
+    // Loads overlap (start, pull, a change); only the newest request of each kind lands.
+    private var todayRevision = 0
+    private var todosRevision = 0
+    private var agendaRevision = 0
+
     /** Today's summary; cheap, so mail changes call it. */
     suspend fun reloadMail() {
         val core = core ?: return
-        guard { today = core.today(3u) }
+        val request = ++todayRevision
+        guard { core.today(3u).let { if (request == todayRevision) today = it } }
     }
 
     suspend fun reloadTodos() {
         val core = core ?: return
+        val request = ++todosRevision
         guard {
             val lists = core.todoLists()
             val todos = lists.associate { it.id to core.todos(it.id, true) }
+            if (request != todosRevision) return@guard
             this.lists = lists
             this.todos = todos
-            today = core.today(3u)
         }
+        reloadMail()
     }
 
     suspend fun reloadAgenda() {
         val core = core ?: return
+        val request = ++agendaRevision
         guard {
             val agenda = core.agenda(LocalDate.now().toString(), AGENDA_DAYS)
-            calendarConnected = core.calendarConnected()
+            val connected = core.calendarConnected()
+            if (request != agendaRevision) return@guard
+            calendarConnected = connected
             this.agenda = agenda
         }
     }
