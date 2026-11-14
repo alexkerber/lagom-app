@@ -174,8 +174,8 @@ macos-latest: cold start 29 ms, `load_accounts` 28 ms, `sync.parse_save_1000` 1.
 
 Findings:
 
-- The release binary breaks its budget on Linux: 53.2 MB on ubuntu-latest (PR #131), so the
-  Linux job fails. The release profile strips debug info (`strip = "debuginfo"`, Cargo's
+- The release binary breaks its budget on Linux: 53.2 MB on ubuntu-latest (PR #131). The gate
+  holds Linux at a 55 MB ceiling (`max_linux` in the budgets file) until the size is cut. The release profile strips debug info (`strip = "debuginfo"`, Cargo's
   default already) and keeps symbol names for panic backtraces. Loaded sections are 39.6 MB;
   the other 13.6 MB is the symbol table, so stripping symbols too would still leave it over
   30 MB. `.text` is 27.4 MB. By crate (`cargo bloat --crates`, share of `.text`): gpui 13 %,

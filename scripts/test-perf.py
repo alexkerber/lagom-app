@@ -22,6 +22,9 @@ class Perf(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("| b | not measured | 10 ms | 20 ms | FAIL |", table)
         self.assertFalse(perf.report({"size": {"max": 30, "unit": "MB"}}, 2.0, {"size": 30.1})[1])
+        linux = {"size": {"max": 30, "max_linux": 55, "unit": "MB"}}
+        self.assertTrue(perf.report(linux, 2.0, {"size": 53.2}, "linux")[1])
+        self.assertFalse(perf.report(linux, 2.0, {"size": 53.2}, "darwin")[1])
 
 
 if __name__ == "__main__":

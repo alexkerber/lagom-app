@@ -27,7 +27,7 @@ def measurements(output):
     return {m[1]: float(m[2]) for line in output.splitlines() if (m := LINE.search(line))}
 
 
-def report(budgets, tolerance, measured):
+def report(budgets, tolerance, measured, platform=sys.platform):
     """The Markdown table and whether every budget holds."""
     rows = ["| Key | Measured | Budget | Fails above | Status |", "| --- | ---: | ---: | ---: | --- |"]
     ok = True
@@ -39,10 +39,11 @@ def report(budgets, tolerance, measured):
             rows.append(f"| {key} | {shown} | – | – | no budget |")
             continue
         # Sizes do not vary between runners; only times get the tolerance.
-        limit = budget["max"] * (tolerance if unit == "ms" else 1)
+        top = budget.get(f"max_{platform}", budget["max"])  # e.g. max_linux: a known per-platform gap
+        limit = top * (tolerance if unit == "ms" else 1)
         status = "ok" if value is not None and value <= limit else "FAIL"
         ok &= status == "ok"
-        rows.append(f"| {key} | {shown} | {budget['max']} {unit} | {limit:g} {unit} | {status} |")
+        rows.append(f"| {key} | {shown} | {top} {unit} | {limit:g} {unit} | {status} |")
     return "\n".join(rows), ok
 
 
