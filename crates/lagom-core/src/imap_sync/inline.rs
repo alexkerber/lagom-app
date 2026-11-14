@@ -44,8 +44,11 @@ impl ImapSync {
         if stored.body_html.is_none() {
             // Sync left this body out (over 4 MiB, or synced before HTML parts were kept). Fetching
             // the message again also loads its inline parts.
-            self.fetch_message(store, &folder, message.uid, mime::MAX_OPEN_BYTES).await?;
-            // One attempt: a message still too large, or gone from the server, is not fetched on every open.
+            // async-imap drops a tagged NO: no reply is an error, so a later open tries again.
+            if !self.fetch_message(store, &folder, message.uid, mime::MAX_OPEN_BYTES).await? {
+                return Err(Error::Network("the server did not return this message"));
+            }
+            // One attempt: a message still too large is not fetched on every open.
             if !store.inline_loaded(id)? { store.save_inline_parts(id, &[])?; }
             return Ok(());
         }

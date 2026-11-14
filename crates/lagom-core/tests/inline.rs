@@ -152,7 +152,7 @@ async fn roundtrip(legacy: bool, oversized: bool, pending_move: bool) {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Body { Large, Legacy, TooLarge, Lying }
+enum Body { Large, Legacy, TooLarge, Lying, Refused }
 
 #[tokio::test]
 async fn opening_a_body_over_4_mib_fetches_it_once() { open_body(Body::Large).await; }
@@ -165,6 +165,9 @@ async fn opening_a_body_over_25_mib_is_not_downloaded_and_not_retried() { open_b
 
 #[tokio::test]
 async fn opening_a_body_stops_at_the_budget_when_the_server_lies_about_its_size() { open_body(Body::Lying).await; }
+
+#[tokio::test]
+async fn opening_a_body_the_server_refuses_is_retried_on_a_later_open() { open_body(Body::Refused).await; }
 
 async fn open_body(case: Body) {
     use lagom_core::mime::{BODY_UNAVAILABLE, MAX_MIME_BYTES, MAX_OPEN_BYTES};
@@ -199,9 +202,13 @@ async fn open_body(case: Body) {
                 assert!(case != Body::TooLarge, "a part over the limit must not be requested");
                 bodies += 1;
                 if case == Body::Lying {
-                    write.write_all(format!("* 1 FETCH (UID 1 BODY[1] {{{}}}\r\n", MAX_OPEN_BYTES + 65536 + 1).as_bytes()).await.unwrap();
+                    write.write_all(format!("* 1 FETCH (UID 1 BODY[1] {{{}}}\r\n", MAX_OPEN_BYTES + 1024 * 1024 + 1).as_bytes()).await.unwrap();
                     std::future::pending::<()>().await;
                     unreachable!();
+                }
+                if case == Body::Refused {
+                    write.write_all(format!("{tag} NO busy\r\n").as_bytes()).await.unwrap();
+                    continue;
                 }
                 format!("* 1 FETCH (UID 1 BODY[1] {{{}}}\r\n{wire_text} BODY[2] {{{}}}\r\n{html})\r\n", wire_text.len(), html.len())
             } else if command == "LOGOUT" {
@@ -238,12 +245,15 @@ async fn open_body(case: Body) {
     assert!(!store.inline_loaded(id).unwrap());
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), imap.fetch_inline(&mut store, id)).await
         .expect("must reject the literal header without waiting for its body");
-    if case == Body::Lying {
-        server.abort();
+    if matches!(case, Body::Lying | Body::Refused) {
         assert!(result.is_err());
         // Not marked: a later open tries again.
         assert!(!store.inline_loaded(id).unwrap());
         assert_eq!(store.message(id).unwrap().body_text, BODY_UNAVAILABLE);
+        if case == Body::Lying { server.abort(); } else {
+            imap.logout().await.unwrap();
+            server.await.unwrap();
+        }
         return;
     }
     result.unwrap();
