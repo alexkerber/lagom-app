@@ -293,9 +293,9 @@ struct Worker {
     /// One logged-in session per account, reused between commands. Dropped after any error.
     sessions: HashMap<String, ImapSync>,
     idle: HashMap<String, tokio::task::JoinHandle<()>>,
-    /// Every store id a moved message had, to (its folder now, Message-ID), so undo and later
+    /// Every store id a moved message had, to where it is now, so undo and later
     /// actions that carry an old id still find it.
-    moved: HashMap<i64, (i64, String)>,
+    moved: HashMap<i64, Place>,
     /// Commands that arrived during a sync and wait for it to finish.
     deferred: VecDeque<Cmd>,
     sign_in: Option<tokio::task::JoinHandle<lagom_core::Result<SignedIn>>>,
@@ -976,42 +976,34 @@ impl Worker {
         let message = self.store.message(id)?.summary;
         let account = self.account(&message.account)?;
         let before: Vec<_> = self.store.folders(&account.id, now())?.into_iter().filter(|f| f.role == FolderRole::Inbox).collect();
+        let source_validity = self.store.folder(message.folder)?.uidvalidity;
         let mut session = self.take(&account).await?;
         let store = &mut self.store;
         let result = async {
-            let target = match act {
-                Act::Archive => {
-                    session.archive(store, id).await?;
-                    role(store, &account.id, FolderRole::Archive)
-                }
-                Act::Trash => {
-                    session.trash(store, id).await?;
-                    role(store, &account.id, FolderRole::Trash)
-                }
+            // The core reports the folder it used: it picks Archive and Trash in LIST order.
+            match act {
+                Act::Archive => session.archive(store, id).await,
+                Act::Trash => session.trash(store, id).await,
                 Act::Inbox => {
                     let inbox = role(store, &account.id, FolderRole::Inbox).ok_or(Error::NotFound)?;
-                    session.move_message(store, id, inbox).await?;
-                    Some(inbox)
+                    session.move_message(store, id, inbox).await
                 }
-                Act::Move(folder) => {
-                    session.move_message(store, id, folder).await?;
-                    Some(folder)
-                }
+                Act::Move(folder) => session.move_message(store, id, folder).await,
                 Act::NewFolder(name) => {
                     let folder = ensure_folder(&mut session, store, &account.id, &name).await?;
-                    session.move_message(store, id, folder).await?;
-                    Some(folder)
+                    session.move_message(store, id, folder).await
                 }
                 Act::Snooze(_) | Act::Read(_) => unreachable!("handled above"),
-            };
-            Ok(target)
+            }
         }
         .await;
         self.give(&account.id, session, &result);
         // A move can finish the Inbox sync before a later folder fails.
         let notified = before.iter().try_for_each(|folder| self.notify_new_mail(folder));
-        if let Some(target) = result?.filter(|_| !message.message_id.is_empty()) {
-            follow(&mut self.moved, id, message.folder, &message.message_id, target);
+        let moved = result?;
+        if moved.uid.is_some() || !message.message_id.is_empty() {
+            let from = Place { folder: message.folder, uid: source_validity.map(|v| (v, message.uid)), message_id: message.message_id.clone() };
+            follow(&mut self.moved, id, &from, Place { folder: moved.folder, uid: moved.uid, message_id: message.message_id });
         }
         if let Err(error) = notified {
             self.emit(Event::Sync(account.id, SyncState::Failed(shown(&error))));
@@ -1034,14 +1026,13 @@ impl Worker {
 
     /// The current store id of a message the UI knew as `id`. The core drops a moved row; the
     /// target folder's next sync brings it back, so undo syncs that one folder first.
-    // shortcut: a message without Message-ID cannot be found after a move, so its undo fails with a toast; match on headers when that shows up.
+    // shortcut: without COPYUID (no UIDPLUS) a message without Message-ID cannot be found after a move, so its undo fails with a toast.
     async fn resolve(&mut self, id: i64) -> lagom_core::Result<i64> {
-        let Some((folder, message_id)) = self.moved.get(&id).cloned() else { return Ok(id) };
-        if self.store.find_message(folder, &message_id)?.is_none() {
-            let account = self.account(&self.store.folder(folder)?.account)?;
-            self.sync_folder(&account, folder).await?;
-        }
-        self.store.find_message(folder, &message_id)?.ok_or(Error::NotFound)
+        let Some(place) = self.moved.get(&id).cloned() else { return Ok(id) };
+        if let Some(found) = find(&self.store, &place)? { return Ok(found); }
+        let account = self.account(&self.store.folder(place.folder)?.account)?;
+        self.sync_folder(&account, place.folder).await?;
+        find(&self.store, &place)?.ok_or(Error::NotFound)
     }
 
     async fn load_inline(&mut self, id: i64) -> lagom_core::Result<()> {
@@ -1197,13 +1188,33 @@ fn role(store: &Store, account: &str, role: FolderRole) -> Option<i64> {
 /// The worker against GreenMail: add account, send, sync, archive, trash, new folder, move and
 /// undo, each checked on the server by a fresh sync into a second store. Runs only with
 /// `LAGOM_GREENMAIL=1` and the container from crates/lagom-core/README.md.
-/// Store row `id` (in folder `from`) moved to `target`. Older ids of the same message point
-/// at `from`; the same Message-ID elsewhere (another folder, another account) is another copy.
-fn follow(moved: &mut HashMap<i64, (i64, String)>, id: i64, from: i64, message_id: &str, target: i64) {
-    for place in moved.values_mut().filter(|p| p.0 == from && p.1 == message_id) {
-        place.0 = target;
+/// Where a moved message is now: its folder, its (UIDVALIDITY, UID) there from COPYUID, and its
+/// Message-ID for servers without UIDPLUS.
+#[derive(Clone, Debug, PartialEq)]
+struct Place { folder: i64, uid: Option<(u32, u32)>, message_id: String }
+
+/// Store row `id` at `from` moved to `to`. Older ids of the same message point at `from`; the
+/// same Message-ID elsewhere (another folder, another account) is another copy.
+fn follow(moved: &mut HashMap<i64, Place>, id: i64, from: &Place, to: Place) {
+    // Two known UIDs decide alone: copies in one folder can share a Message-ID.
+    let same = |p: &Place| p.folder == from.folder && match (p.uid, from.uid) {
+        (Some(a), Some(b)) => a == b,
+        _ => !p.message_id.is_empty() && p.message_id == from.message_id,
+    };
+    for place in moved.values_mut().filter(|p| same(p)) {
+        *place = to.clone();
     }
-    moved.insert(id, (target, message_id.to_string()));
+    moved.insert(id, to);
+}
+
+/// The store row at `place`. A known UID decides alone, and only under its UIDVALIDITY: a
+/// Message-ID twin in the same folder is another message.
+fn find(store: &Store, place: &Place) -> lagom_core::Result<Option<i64>> {
+    match place.uid {
+        Some((validity, uid)) if store.folder(place.folder)?.uidvalidity == Some(validity) => store.find_uid(place.folder, uid),
+        Some(_) => Ok(None),
+        None => store.find_message(place.folder, &place.message_id),
+    }
 }
 
 #[cfg(test)]
@@ -1913,6 +1924,98 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn undo_finds_a_mail_without_message_id_by_copyuid() {
+        use lagom_core::account::{Security, ServerConfig};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        // COPYUID's UIDVALIDITY per case: matching, stale, or no COPYUID at all.
+        for copyuid in [Some(7), Some(8), None] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
+            let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+                let (mut inbox, mut moved, mut restored) = (false, false, false);
+                loop {
+                    let mut line = String::new();
+                    if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                    let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                    let data = match command {
+                        "LOGIN \"fixture\" \"fixture\"" => String::new(),
+                        "CAPABILITY" => "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n".into(),
+                        "SELECT \"INBOX\"" | "SELECT \"Projects\"" => {
+                            inbox = command.contains("INBOX");
+                            "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n".into()
+                        }
+                        "UID MOVE 4 \"Projects\"" => {
+                            moved = true;
+                            copyuid.map(|v| format!("* OK [COPYUID {v} 4 9] moved\r\n")).unwrap_or_default()
+                        }
+                        "UID MOVE 9 \"INBOX\"" => { restored = true; "* OK [COPYUID 7 9 5] moved\r\n".into() }
+                        "UID SEARCH ALL" => match (inbox, moved, restored) {
+                            (true, false, _) => "* SEARCH 4\r\n".into(),
+                            (true, true, false) => "* SEARCH\r\n".into(),
+                            (true, true, true) => "* SEARCH 5\r\n".into(),
+                            (false, true, false) => "* SEARCH 3 9\r\n".into(),
+                            (false, _, _) => "* SEARCH 3\r\n".into(),
+                        },
+                        command if command.starts_with("UID FETCH ") && command.ends_with(" (UID FLAGS)") => String::new(),
+                        command if command.starts_with("UID FETCH ") => {
+                            let uid: u32 = command["UID FETCH ".len()..].split(' ').next().unwrap().parse().unwrap();
+                            if command.contains("BODYSTRUCTURE") {
+                                // Same headers as UID 3 in Projects, and no Message-ID.
+                                let header = "Subject: Fixture\r\nContent-Type: text/plain\r\n\r\n";
+                                format!("* 1 FETCH (UID {uid} FLAGS () BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER] {{{}}}\r\n{header})\r\n", header.len())
+                            } else {
+                                format!("* 1 FETCH (UID {uid} BODY[TEXT] {{4}}\r\nbody)\r\n")
+                            }
+                        }
+                        _ => panic!("unexpected fixture command: {command}"),
+                    };
+                    socket.get_mut().write_all(format!("{data}{tag} OK fixture\r\n").as_bytes()).await.unwrap();
+                }
+                assert!(moved);
+                restored
+            });
+            let path = std::env::temp_dir().join(format!("lagom-undo-copyuid-{}-{}.db", std::process::id(), account.id));
+            let mut store = Store::open(&path).unwrap();
+            store.save_account(&account).unwrap();
+            let inbox = store.save_folder(&account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+            let projects = store.save_folder(&account.id, "Projects", None, FolderRole::Other).unwrap();
+            store.reset_uidvalidity(inbox, 7).unwrap();
+            store.reset_uidvalidity(projects, 7).unwrap();
+            let mail = |folder, uid| lagom_core::store::Message { summary: lagom_core::store::MessageSummary {
+                account: account.id.clone(), folder, uid, subject: "Fixture".into(), ..Default::default()
+            }, ..Default::default() };
+            let id = store.save_message(&mail(inbox, 4)).unwrap();
+            let twin = store.save_message(&mail(projects, 3)).unwrap();
+            let (me, _rx) = unbounded_channel();
+            let (events, mut out) = unbounded_channel();
+            let session = ImapSync::login(&account, "fixture").await.unwrap();
+            let mut worker = Worker { store, sessions: HashMap::from([(account.id.clone(), session)]), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+            let mut finished = async |op| loop {
+                if let Some(Event::Op { op: done, error }) = out.recv().await { assert_eq!(done, op); return error; }
+            };
+            worker.quick(Cmd::Op { op: 1, id, act: Act::Move(projects) }).await;
+            assert_eq!(finished(1).await, None);
+            assert_eq!(worker.store.known_uids(projects).unwrap(), [3, 9]);
+            // Undo carries the id the UI knew before the move.
+            worker.quick(Cmd::Op { op: 2, id, act: Act::Inbox }).await;
+            let error = finished(2).await;
+            assert_eq!(error.is_none(), copyuid == Some(7), "{copyuid:?}: {error:?}");
+            assert_eq!(worker.store.message_summary(twin).unwrap().folder, projects, "the twin never moves");
+            if error.is_none() {
+                assert_eq!(worker.store.known_uids(inbox).unwrap(), [5]);
+                assert_eq!(worker.store.known_uids(projects).unwrap(), [3]);
+            }
+            drop(worker);
+            assert_eq!(server.await.unwrap(), copyuid == Some(7));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     #[test]
     fn a_stopped_worker_refuses_commands() {
         let (tx, rx) = unbounded_channel();
@@ -1924,14 +2027,49 @@ mod tests {
 
     #[test]
     fn a_move_redirects_only_this_message_aliases() {
+        let at = |folder, uid: Option<u32>, message_id: &str| Place { folder, uid: uid.map(|u| (7, u)), message_id: message_id.into() };
         let mut moved = HashMap::new();
         // The same newsletter in account A (INBOX 1, Archive 2) and B (INBOX 10, Archive 20).
-        follow(&mut moved, 100, 1, "<n@x>", 2);
-        follow(&mut moved, 200, 10, "<n@x>", 20);
-        assert_eq!((moved[&100].0, moved[&200].0), (2, 20));
+        follow(&mut moved, 100, &at(1, None, "<n@x>"), at(2, None, "<n@x>"));
+        follow(&mut moved, 200, &at(10, None, "<n@x>"), at(20, None, "<n@x>"));
+        assert_eq!((moved[&100].folder, moved[&200].folder), (2, 20));
         // A's copy, now row 101 in Archive 2, goes back to INBOX 1: A's old id follows, B's not.
-        follow(&mut moved, 101, 2, "<n@x>", 1);
-        assert_eq!((moved[&100].0, moved[&101].0, moved[&200].0), (1, 1, 20));
+        follow(&mut moved, 101, &at(2, None, "<n@x>"), at(1, None, "<n@x>"));
+        assert_eq!((moved[&100].folder, moved[&101].folder, moved[&200].folder), (1, 1, 20));
+        // Two mails without Message-ID in INBOX 1 move to Archive 2 as UIDs 30 and 31; only UID 30 comes back.
+        follow(&mut moved, 300, &at(1, Some(3), ""), at(2, Some(30), ""));
+        follow(&mut moved, 400, &at(1, Some(4), ""), at(2, Some(31), ""));
+        follow(&mut moved, 301, &at(2, Some(30), ""), at(1, Some(5), ""));
+        assert_eq!((&moved[&300], &moved[&301], &moved[&400]), (&at(1, Some(5), ""), &at(1, Some(5), ""), &at(2, Some(31), "")));
+        // Two copies of one Message-ID in INBOX 1 become Archive UIDs 60 and 61; UID 61 going back leaves 60's alias.
+        follow(&mut moved, 500, &at(1, Some(6), "<d@x>"), at(2, Some(60), "<d@x>"));
+        follow(&mut moved, 600, &at(1, Some(7), "<d@x>"), at(2, Some(61), "<d@x>"));
+        follow(&mut moved, 601, &at(2, Some(61), "<d@x>"), at(1, Some(8), "<d@x>"));
+        assert_eq!((&moved[&500], &moved[&600]), (&at(2, Some(60), "<d@x>"), &at(1, Some(8), "<d@x>")));
+    }
+
+    #[test]
+    fn a_moved_uid_resolves_only_under_its_uidvalidity() {
+        let path = std::env::temp_dir().join(format!("lagom-find-uid-{}.db", std::process::id()));
+        let mut store = Store::open(&path).unwrap();
+        let config = lagom_core::account::ServerConfig { host: "127.0.0.1".into(), port: 1, security: lagom_core::account::Security::Plain, username: "fixture".into() };
+        let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
+        store.save_account(&account).unwrap();
+        let folder = store.save_folder(&account.id, "Projects", None, FolderRole::Other).unwrap();
+        store.reset_uidvalidity(folder, 7).unwrap();
+        let mail = |uid| lagom_core::store::Message { summary: lagom_core::store::MessageSummary {
+            account: account.id.clone(), folder, uid, message_id: "<d@x>".into(), ..Default::default()
+        }, ..Default::default() };
+        let id = store.save_message(&mail(9)).unwrap();
+        let twin = store.save_message(&mail(3)).unwrap();
+        let place = Place { folder, uid: Some((7, 9)), message_id: "<d@x>".into() };
+        assert_eq!(find(&store, &place).unwrap(), Some(id));
+        assert_eq!(find(&store, &Place { uid: None, ..place.clone() }).unwrap(), Some(twin.max(id)));
+        // A UID not synced yet, or one under a changed UIDVALIDITY, never falls back to the Message-ID twin.
+        assert_eq!(find(&store, &Place { uid: Some((7, 8)), ..place.clone() }).unwrap(), None);
+        assert_eq!(find(&store, &Place { uid: Some((6, 9)), ..place }).unwrap(), None);
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 }
 

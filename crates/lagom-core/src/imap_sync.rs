@@ -148,6 +148,11 @@ impl async_imap::Authenticator for Xoauth2 {
     }
 }
 
+/// Where a move put a message: the destination folder, and its (UIDVALIDITY, UID) there when
+/// the server reported UIDPLUS COPYUID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moved { pub folder: i64, pub uid: Option<(u32, u32)> }
+
 pub struct ImapSync {
     account: Account,
     session: Session<Bounded<Wire>>,
@@ -613,19 +618,19 @@ impl ImapSync {
             .map(|f| f.id)
             .ok_or(Error::NotFound)
     }
-    pub async fn move_message(&mut self, store: &mut Store, id: i64, target: i64) -> Result<()> {
+    pub async fn move_message(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Moved> {
         let result = self.move_on_server(store, id, target).await;
         if result.is_err() { store.cancel_move(id)?; }
-        result
+        result.map(|uid| Moved { folder: target, uid })
     }
-    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64) -> Result<()> {
+    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Option<(u32, u32)>> {
         let message = store.message(id)?.summary;
         let destination = store.folder(target)?;
         if message.account != self.account.id || destination.account != self.account.id {
             return Err(Error::Invalid("cross-account moves unsupported"));
         }
         if message.folder == target {
-            return store.cancel_move(id);
+            return store.cancel_move(id).map(|_| None);
         }
         store.begin_move(id, target)?;
         let before = store.folder(message.folder)?.uidvalidity;
@@ -637,32 +642,60 @@ impl ImapSync {
             // An interrupted empty may have marked the message; MOVE and COPY preserve flags.
             net(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
         }
-        if self.capabilities.has_str("MOVE") {
-            net(self
-                .session
-                .uid_mv(message.uid.to_string(), &encode_mailbox(&destination.name)))
-            .await?;
+        let mailbox = quoted(&encode_mailbox(&destination.name))?;
+        let copied = if self.capabilities.has_str("MOVE") {
+            self.copy_uid(format!("UID MOVE {} {mailbox}", message.uid), message.uid).await?
         } else {
             // shortcut: COPY can leave a destination copy if deletion fails; reconcile duplicates when resumable moves are added.
-            net(self
-                .session
-                .uid_copy(message.uid.to_string(), &encode_mailbox(&destination.name)))
-            .await?;
+            let copied = self.copy_uid(format!("UID COPY {} {mailbox}", message.uid), message.uid).await?;
             self.delete_uids(&message.uid.to_string(), true).await?;
-        }
+            copied
+        };
         // A confirmed move must not be rolled back because a subsequent refresh failed.
         if let Err(error) = store.delete_message(id) {
             self.refresh_error = Some(error);
-            return Ok(());
+            return Ok(copied);
         }
         if let Err(error) = self.sync_folder(store, target, DEFAULT_LIMIT).await {
             self.refresh_error = Some(error);
-            return Ok(());
+            return Ok(copied);
         }
         if let Err(error) = self.sync_folder(store, message.folder, DEFAULT_LIMIT).await {
             self.refresh_error = Some(error);
         }
-        Ok(())
+        Ok(copied)
+    }
+    /// Runs UID COPY or UID MOVE for one `uid` and reads UIDPLUS COPYUID (RFC 4315, RFC 6851)
+    /// from an untagged or the tagged OK. A set other than exactly that one UID gives None.
+    async fn copy_uid(&mut self, command: String, uid: u32) -> Result<Option<(u32, u32)>> {
+        use async_imap::imap_proto::{rfc4315::UidSetMember, Response, ResponseCode, Status};
+        let single = |set: &[UidSetMember]| match set {
+            [UidSetMember::Uid(u)] => Some(*u),
+            [UidSetMember::UidRange(r)] if r.start() == r.end() => Some(*r.start()),
+            _ => None,
+        };
+        // async-imap's uid_mv and uid_copy discard the response codes.
+        tokio::time::timeout(TIMEOUT, async {
+            let tag = net(self.session.run_command(command)).await?;
+            let mut copied = None;
+            loop {
+                let response = net(self.session.read_response()).await?.ok_or(Error::Network(DROPPED))?;
+                let (outcome, done) = match response.parsed() {
+                    Response::Data { status: Status::Ok, outcome } => (outcome, false),
+                    Response::Done { tag: done, status, outcome } if *done == tag => {
+                        if *status != Status::Ok { return Err(Error::Network(FAILED)); }
+                        (outcome, true)
+                    }
+                    _ => continue,
+                };
+                if let Some(ResponseCode::CopyUid(validity, from, to)) = &outcome.code {
+                    if *validity > 0 && single(from) == Some(uid) {
+                        copied = single(to).filter(|u| *u > 0).map(|u| (*validity, u));
+                    }
+                }
+                if done { return Ok(copied); }
+            }
+        }).await.map_err(|_| Error::Network(TIMED_OUT))?
     }
     pub(crate) async fn ensure_role(
         &mut self,
@@ -676,7 +709,7 @@ impl ImapSync {
         }
         self.create_folder(store, fallback).await
     }
-    pub async fn archive(&mut self, store: &mut Store, id: i64) -> Result<()> {
+    pub async fn archive(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
         if store.message(id)?.summary.account != self.account.id {
             return Err(Error::Invalid("message belongs to another account"));
         }
@@ -690,7 +723,7 @@ impl ImapSync {
             .await?;
         self.move_message(store, id, target).await
     }
-    pub async fn trash(&mut self, store: &mut Store, id: i64) -> Result<()> {
+    pub async fn trash(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
         if store.message(id)?.summary.account != self.account.id {
             return Err(Error::Invalid("message belongs to another account"));
         }
@@ -772,6 +805,11 @@ fn uid_set(uids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",")
+}
+/// Quotes a mailbox as async-imap does for its own commands.
+fn quoted(mailbox: &str) -> Result<String> {
+    if mailbox.contains(['\r', '\n']) { return Err(Error::Invalid("invalid folder name")); }
+    Ok(format!("\"{}\"", mailbox.replace('\\', "\\\\").replace('"', "\\\"")))
 }
 fn validate_folder(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 1024 || name.chars().any(char::is_control) {
