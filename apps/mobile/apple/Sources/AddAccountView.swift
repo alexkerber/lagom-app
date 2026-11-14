@@ -54,14 +54,14 @@ struct AddAccountView: View {
                 .padding(.horizontal, 16)
             }
         } footer: {
-            HouseButton(title: passwordStep ? "Connect" : "Continue", icon: "account-add", primary: true) {
+            HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
                 if passwordStep { Task { await connect() } }
                 else { passwordStep = true; imapUser = email; smtpUser = email }
             }
             .disabled(email.isEmpty || connecting || (passwordStep && password.isEmpty))
             if connecting {
                 ProgressView()
-                Text("Connecting…").lagomFont(.small).foregroundStyle(Theme.secondary)
+                Text("Signing in…").lagomFont(.small).foregroundStyle(Theme.secondary)
             }
             Spacer(minLength: 0)
         }

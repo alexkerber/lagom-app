@@ -41,8 +41,7 @@ impl Writes {
         let target = path.clone();
         let tail = cx.background_executor().spawn(async move {
             if let Some(previous) = previous { previous.await; }
-            let result = panes.save(&target).map_err(|e| format!("Could not save window preferences: {e}"));
-            if let Err(error) = &result { eprintln!("{error}"); }
+            let result = panes.save(&target).map_err(|e| { eprintln!("lagom: window layout: {e:#}"); "Could not save the window layout.".to_string() });
             let _ = tx.send(result);
         });
         cx.global_mut::<Self>().tail = Some(tail);

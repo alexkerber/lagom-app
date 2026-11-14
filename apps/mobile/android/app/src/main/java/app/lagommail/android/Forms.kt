@@ -211,7 +211,7 @@ internal class AccountForm {
                             } finally { connecting = false }
                         }
                     }
-                }) { Text(if (passwordStep) "Connect" else "Continue") }
+                }) { Text(if (passwordStep) "Sign in" else "Continue") }
             })
         }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {

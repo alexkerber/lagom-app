@@ -73,12 +73,12 @@ fn plain(detail: &'static str) -> &'static str {
     match detail {
         "IMAP operation timed out" | "IMAP login timed out" | "IMAP folder listing timed out" | "draft fetch timed out"
         | "calendar sync timed out" | "Google Tasks sync timed out" => "your mail provider did not answer in time",
-        "IMAP connection lost" | "IMAP operation failed" | "IMAP greeting missing" | "IMAP IDLE failed" | "IMAP IDLE connection closed"
+        "IMAP connection lost" | "IMAP greeting missing" | "IMAP IDLE failed" | "IMAP IDLE connection closed"
         | "IMAP folder listing interrupted" | "IMAP search interrupted" | "draft fetch interrupted" | "IMAP TLS handshake failed"
         | "SMTP TLS handshake failed" | "TLS configuration failed" | "HTTP client failed" | "HTTP response failed"
         | "IMAP authentication failed" | "token endpoint unavailable" | "invalid calendar endpoint" | "invalid Google Tasks endpoint" => "could not reach your mail provider",
-        "IMAP folder listing failed" | "IMAP search failed" | "IMAP expunge failed" | "draft fetch failed" | "calendar request failed"
-        | "Google Tasks request failed" => "your mail provider refused the request; try again later",
+        "IMAP operation failed" | "IMAP folder listing failed" | "IMAP search failed" | "IMAP expunge failed" | "draft fetch failed"
+        | "calendar request failed" | "Google Tasks request failed" => "your mail provider did not finish the request; try again later",
         "IMAP UIDVALIDITY missing" | "IMAP BODYSTRUCTURE missing" | "IMAP message header missing" | "HTTP response too large"
         | "invalid token response" | "invalid access token" | "invalid Google Tasks page" | "invalid Google Tasks response"
         | "invalid Google task" | "invalid Google task list" | "invalid Google default task list" | "Google task ID missing"
@@ -105,7 +105,8 @@ fn plain(detail: &'static str) -> &'static str {
         "invalid TLS server name" | "invalid SMTP TLS host" => "the server address is not valid",
         "invalid server configuration" => "check the server address, port and username",
         "unencrypted connections require localhost or a loopback IP" | "unencrypted peer must be loopback" => "the server needs encryption",
-        "unknown account authentication" | "unknown transport security" | "invalid account" => "lagom could not read this account's settings",
+        "unknown account authentication" | "unknown transport security" => "lagom could not read this account's settings",
+        "invalid account" => "that email address is not valid",
         "Mail access is required; saved credentials were not replaced" => "lagom needs access to your mail; your saved sign-in did not change",
         "empty Trash requires UIDPLUS" => "your mail provider does not let lagom empty Trash",
         "server does not support IDLE" => "your mail provider does not report new mail right away",
