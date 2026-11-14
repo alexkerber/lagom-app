@@ -438,8 +438,9 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
         model.perform {
             val file = model.openAttachment(message.row.id, part) ?: return@perform
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-            val mime = part.mimeType.takeIf { it.isNotBlank() && it != "application/octet-stream" }
-                ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase(java.util.Locale.ROOT))
+            // From the extension the user sees, as FileProvider reports it, not the sender's claim:
+            // invoice.pdf sent as text/html would open in a browser.
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase(java.util.Locale.ROOT))
                 ?: "application/octet-stream"
             val intent = if (share) Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
                 else Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
