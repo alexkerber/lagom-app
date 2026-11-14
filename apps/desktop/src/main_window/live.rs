@@ -235,7 +235,9 @@ impl Live {
         self.pending.borrow_mut().insert(id, account);
         self.ops.insert(id, op);
         // A read started before this optimistic change must not land, even after it completes.
+        // The bump makes its completion read again, also when the op ends without a reload.
         self.shown = self.reads;
+        self.reads += 1;
         id
     }
 }
@@ -1254,7 +1256,8 @@ impl MainWindow {
             return;
         }
         self.open_found(store, cx);
-        if self.live.as_ref().is_some_and(|l| !l.stale && l.want.is_none())
+        // `want` is taken only when the inline read landed; selecting may start a page read.
+        if self.live.as_ref().is_some_and(|l| l.want.is_none())
             && self.inbox.single().is_some_and(|id| self.inbox.members(id).iter().any(|&id| self.inbox.mail[id].store == Some(store))) {
             self.open_palette("move ", window, cx);
         }
@@ -1600,33 +1603,35 @@ mod tests {
         assert_eq!(rows(cx), 0);
         cx.run_until_parked();
         assert_eq!(rows(cx), 2);
-        let (key, old) = view.read_with(cx, |v, _| {
+        let (key, old, before_op) = view.read_with(cx, |v, _| {
             let live = v.live.as_ref().unwrap();
             assert!(live.read.is_none() && live.shown == live.reads);
             let key = v.read_key().unwrap();
-            let old = mail::load_accounts(&live.store, &live.accounts, &key.account, None, key.view, key.limit, now(), vec![], key.group);
-            (key, old)
+            let old = || mail::load_accounts(&live.store, &live.accounts, &key.account, None, key.view, key.limit, now(), vec![], key.group);
+            (key.clone(), old(), old())
         });
         view.update(cx, |v, cx| { incoming(v, 3); v.reload(cx); });
         cx.run_until_parked();
         assert_eq!(rows(cx), 3);
         assert_eq!(view.read_with(cx, |v, _| v.today.unread), 3);
         // A result from an older generation, for the same list, must not overwrite the newer one.
-        view.update(cx, |v, cx| v.read_done(1, key, vec![], old, cx));
+        view.update(cx, |v, cx| v.read_done(1, key.clone(), vec![], old, cx));
         assert_eq!(rows(cx), 3);
-        // A read that started before an optimistic change never lands, even once the op is done.
+        // A read requested before an optimistic change never lands, even once the op is done
+        // without a reload (a stopped worker); its completion reads again instead.
         view.update(cx, |v, cx| {
-            v.reload(cx);
             let live = v.live.as_mut().unwrap();
+            live.reads += 1;
+            let generation = live.reads;
             let op = live.op(Op::Undo(0));
             live.ops.remove(&op);
-            v.inbox = Inbox::live();
+            v.read_done(generation, key, vec![], before_op, cx);
+            assert!(v.live.as_ref().unwrap().read.is_some());
         });
-        cx.run_until_parked();
-        assert_eq!(rows(cx), 0);
-        view.update(cx, |v, cx| v.reload(cx));
+        assert_eq!(rows(cx), 3);
         cx.run_until_parked();
         assert_eq!(rows(cx), 3);
+        view.read_with(cx, |v, _| assert_eq!(v.live.as_ref().unwrap().shown, v.live.as_ref().unwrap().reads));
         INLINE_READS.set(true);
     }
 
@@ -1668,10 +1673,13 @@ mod tests {
             let live = v.live.as_ref().unwrap();
             let account = live.account().unwrap().id.clone();
             let folder = live.store.save_folder(&account, "Projects", Some("/"), FolderRole::Other).unwrap();
-            let summary = MessageSummary { account, folder, uid: 1, date: 1, ..Default::default() };
-            let hit = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
+            // The hit is the oldest, past a two-row page: selecting it reads the next page.
+            let hit = (1..=3).map(|uid| live.store.save_message(&Message { summary: MessageSummary {
+                account: account.clone(), folder, uid, date: uid as i64, message_id: format!("{uid}@test"), ..Default::default() }, ..Default::default() }).unwrap()).collect::<Vec<_>>()[0];
             // A fresh window: no folders known yet, the first read still running.
             v.inbox = Inbox::live();
+            v.live.as_mut().unwrap().limit = 2;
+            v.panes.group_conversations = false;
             v.reload(cx);
             (folder, hit)
         });
