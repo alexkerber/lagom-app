@@ -3,6 +3,7 @@
 #[cfg(target_os = "macos")]
 mod icon;
 mod accounts;
+mod badge;
 mod command_palette;
 mod compose;
 #[cfg(target_os = "macos")]
@@ -180,7 +181,11 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
             ..Default::default()
         },
         // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
-        move |window, cx| cx.new(|cx| MainWindow::new(demo, window, cx)),
+        move |window, cx| {
+            #[cfg(target_os = "windows")]
+            badge::attach(window);
+            cx.new(|cx| MainWindow::new(demo, window, cx))
+        },
     )
 }
 
