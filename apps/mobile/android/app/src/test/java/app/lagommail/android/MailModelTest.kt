@@ -68,10 +68,11 @@ class MailModelTest {
         assertEquals(initialSyncs + 1, core.syncs)
         model.send(); runCurrent(); core.queued.clear(); model.undoSend()
         assertEquals("Already sent", model.notice); assertNull(model.draft)
+        // "Already sent" can mean mid-delivery: a send still in its window goes to WorkManager on leaving.
         model.setForeground(false)
-        assertEquals(0, sendLaters)
+        assertEquals(1, sendLaters)
         advanceTimeBy(5000); runCurrent()
-        assertEquals(initialSyncs + 1, core.syncs); assertEquals(1, sendLaters)
+        assertEquals(initialSyncs + 1, core.syncs); assertEquals(2, sendLaters)
         model.setForeground(true)
         assertEquals(initialSyncs + 2, core.syncs)
         model.draft = draft.copy(id = "next"); model.send(); runCurrent()
@@ -148,6 +149,9 @@ class MailModelTest {
         assertNotNull(model.undoSendId)
         model.act(MailAction.Later, 2)
         assertNull(model.undoSendId); assertEquals("Moved to Later", model.notice)
+        // Undo send is gone, but leaving still hands the waiting send to WorkManager.
+        model.setForeground(false)
+        assertEquals(1, sendLaters)
     }
 
     @Test fun newMessageStartsWithTheSignatureAndAnUntouchedOneIsNoDraft() = runTest(dispatcher) {

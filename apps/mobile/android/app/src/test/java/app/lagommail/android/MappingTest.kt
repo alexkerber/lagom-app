@@ -78,6 +78,8 @@ class MappingTest {
         assertEquals("hidden@example.test", draft.bcc); assertTrue(draft.showBcc)
         assertEquals("Line 1\nLine 2\n\n-- \nTeam", sharedDraft("account", "me@example.test", SharedMail(link), "\n\n-- \nTeam").body)
         assertFalse(ComposeDraft("account").showBcc)
+        val empty = SharedMail(Mailto(emptyList(), emptyList(), emptyList(), "", ""))
+        assertFalse("a link's signature alone is no draft", sharedDraft("account", "me@example.test", empty, "\n\n-- \nTeam").hasContent)
         assertTrue(ComposeDraft(LocalDraft("id", "account", "", "", "", "", null, emptyList(), emptyList(), "b@example.test")).showBcc)
     }
 }

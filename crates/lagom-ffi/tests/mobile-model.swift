@@ -347,14 +347,26 @@ struct ModelChecks {
         await model.undoAction()
         precondition(core.undone == [core.change(2)] && model.undoChanges.isEmpty && model.notice == nil)
         precondition(model.rows.map(\.id) == [1, 2, 3], "Undo brings the row back")
+        // An older timer must not end a newer window, even for equal changes.
+        let windows = SendGate()
+        let again = MailModel(sendDelay: { await windows.wait() }); again.core = core
+        await again.reload()
+        await again.act(.later, id: 1)
+        await again.undoAction()
+        await again.act(.later, id: 1)
+        await windows.releaseFirst()
+        for _ in 0..<50 { await Task.yield() }
+        precondition(again.notice == "Moved to Later" && !again.undoChanges.isEmpty, "the first window's timer ended the second")
+        await windows.release()
         await model.act(.later, id: 1)
         precondition(model.notice == "Moved to Later" && !model.undoChanges.isEmpty)
+        core.undone = []
         await gate.release()
         let deadline = ContinuousClock.now + .seconds(2)
         while model.notice != nil && ContinuousClock.now < deadline { await Task.yield() }
         precondition(model.notice == nil && model.undoChanges.isEmpty, "the Undo window ends")
         await model.undoAction()
-        precondition(core.undone.count == 1, "nothing to undo after the window")
+        precondition(core.undone.isEmpty, "nothing to undo after the window")
 
         let drafts = DraftFixtureCore(noHandle: .init())
         drafts.signatures = ["work": "Work team"]
@@ -367,6 +379,9 @@ struct ModelChecks {
         var edited = compose.composeDraft!; edited.body = "Hello"; compose.composeDraft = edited
         try await compose.changeComposeAccount("work")
         precondition(compose.composeDraft?.body == "Hello", "an edited body stays")
+        let empty = Mailto(to: [], cc: [], bcc: [], subject: "", body: "")
+        precondition(!ComposeDraft(mailto: empty, account: "work", signature: "\n\n-- \nWork team").hasContent, "a link's signature alone is no draft")
+        precondition(ComposeDraft(mailto: Mailto(to: [], cc: [], bcc: [], subject: "", body: "Hi"), account: "work", signature: "s").hasContent)
         print("MailModel: Undo for Done and Later, and new mail signature passed")
     }
 

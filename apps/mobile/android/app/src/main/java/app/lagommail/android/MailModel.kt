@@ -105,7 +105,7 @@ internal fun sharedMail(action: String?, data: String?, email: List<String>, cc:
 /** The link's body sits above the signature. Its Bcc shows in its own field, so a link never adds a hidden recipient unseen. */
 internal fun sharedDraft(account: String, email: String, shared: SharedMail, signature: String = "") = ComposeDraft(account,
     shared.mail.to.joinToString(", "), shared.mail.cc.joinToString(", "), shared.mail.subject, shared.mail.body + signature,
-    id = draftMessageId(email), attachments = shared.attachments, bcc = shared.mail.bcc.joinToString(", "))
+    id = draftMessageId(email), attachments = shared.attachments, bcc = shared.mail.bcc.joinToString(", "), startBody = signature)
 
 internal enum class MailAction(val notice: String) { Done("Moved to Done"), Later("Moved to Later"), Delete("Deleted") }
 
@@ -143,6 +143,8 @@ internal class MailModel(
     var notice by mutableStateOf<String?>(null)
     var undoSendId by mutableStateOf<String?>(null); private set
     private var sendRevision = 0
+    /** Sends still inside their Undo window. A newer notice may take Undo away, never the delivery. */
+    private var sendsWaiting = 0
     /** What the last Done, Later or Delete changed, while its notice offers Undo. */
     var undoChanges by mutableStateOf<List<MailChange>>(emptyList()); private set
     var drafts by mutableStateOf<List<DraftRow>>(emptyList()); private set
@@ -232,7 +234,7 @@ internal class MailModel(
         if (active) { start(); reload(); sync() }
         else if (!sending) draft?.let { persist(it) }
         // Background refresh never sends, so mail inside the Undo window needs its own job.
-        if (!active && undoSendId != null) sendLater()
+        if (!active && sendsWaiting > 0) sendLater()
     }
     suspend fun reload(more: Boolean = false) {
         val core = core ?: return
@@ -599,8 +601,9 @@ internal class MailModel(
                     undoChanges = emptyList()
                     undoSendId = snapshot.id
                     notice = "Sending…"
+                    sendsWaiting++
                     perform {
-                        delay(5000)
+                        try { delay(5000) } finally { sendsWaiting-- }
                         if (sendRevision == request && undoSendId == snapshot.id) { undoSendId = null; notice = null }
                         if (foreground) sync() else sendLater()
                     }

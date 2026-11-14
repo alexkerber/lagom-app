@@ -128,6 +128,7 @@ struct ComposeDraft: Identifiable, Equatable {
         showBcc = !bcc.isEmpty
         subject = mailto.subject
         body = mailto.body + signature
+        startBody = signature
     }
 
     func save(using core: LagomCore) async throws -> DraftRow {
@@ -223,6 +224,7 @@ final class MailModel {
     private var sendRevision = 0
     /// What the last Done, Later or Delete changed, while its notice offers Undo.
     private(set) var undoChanges: [MailChange] = []
+    private var undoRevision = 0
     var composeDraft: ComposeDraft? {
         didSet {
             guard !endingCompose, !composeBusy, oldValue != composeDraft else { return }
@@ -552,11 +554,13 @@ final class MailModel {
         undoSendID = nil
         undoChanges = changes
         self.notice = notice
+        undoRevision += 1
+        let revision = undoRevision
         // The same 5 s window as Undo send.
         let delay = sendDelay
         Task { [weak self] in
             do { try await delay() } catch { return }
-            guard let self, self.undoChanges == changes else { return }
+            guard let self, self.undoRevision == revision else { return }
             self.undoChanges = []
             self.notice = nil
         }

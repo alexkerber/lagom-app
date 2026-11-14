@@ -468,6 +468,7 @@ impl LagomCore {
                     let a = account(s, &c.account)?;
                     let mut session = ImapSync::login(&a, &a.password()?).await?;
                     // The move dropped the old row; the target folder's sync made a new one.
+                    // shortcut: a second copy with the same Message-ID in that folder may go back instead; track UIDs if that shows up.
                     let current = match s.find_message(c.to_folder, &c.header_id)? {
                         Some(id) => id,
                         None => {
@@ -477,6 +478,7 @@ impl LagomCore {
                     };
                     session.move_message(s, current, c.from_folder).await?;
                     let _ = session.logout().await;
+                    // shortcut: a failed refresh after the move back leaves no row, so an old snooze is lost; the mail is back either way.
                     match s.find_message(c.from_folder, &c.header_id)? { Some(id) => id, None => continue }
                 };
                 s.snooze(id, c.snoozed_until)?;
@@ -608,6 +610,7 @@ impl LagomCore {
     async fn move_messages(&self, ids: Vec<i64>, trash: bool) -> Result<Vec<MailChange>> {
         self.run_network(move |s| network(async {
             let mut changes = Vec::new();
+            // shortcut: a failure mid-conversation drops Undo for the members already moved; they stay in Done or Trash.
             for id in ids {
                 let m = s.message_summary(id)?;
                 let a = account(s, &m.account)?;
@@ -622,9 +625,14 @@ impl LagomCore {
                 }
                 let _ = session.logout().await;
                 let role = if trash { FolderRole::Trash } else { FolderRole::Archive };
+                // The folder that now holds it: an account can have more than one folder with this role.
+                let folders: Vec<i64> = s.folder_metadata(&a.id)?.into_iter().filter(|f| f.role == role).map(|f| f.id).collect();
+                let mut to = folders.iter().copied().find(|f| *f == m.folder);
+                for f in &folders {
+                    if to.is_none() && s.find_message(*f, &m.message_id)?.is_some() { to = Some(*f); }
+                }
                 // shortcut: a message without Message-ID cannot be found after a move, so Undo leaves it there, as on desktop.
-                if let Some(to) = s.folder_metadata(&a.id)?.into_iter().find(|f| f.role == role).map(|f| f.id)
-                    .filter(|to| *to == m.folder || !m.message_id.is_empty()) {
+                if let Some(to) = to {
                     changes.push(MailChange { id, account: m.account, header_id: m.message_id, from_folder: m.folder, to_folder: to, snoozed_until: m.snoozed_until });
                 }
             }
