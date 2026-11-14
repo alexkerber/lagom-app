@@ -9,8 +9,7 @@ pub const CALM: Duration = Duration::from_millis(150);
 
 /// The system asks for less motion (docs/motion.md rule 6): moving things then only fade.
 /// `LAGOM_REDUCE_MOTION=1` (or `0`) overrides the system on every platform.
-// shortcut: Windows (SPI_GETCLIENTAREAANIMATION) and Linux (gtk-enable-animations) only read the
-// environment override; read their settings when those builds ship to users.
+/// macOS: Reduce motion. Windows: "Show animations in Windows". Linux: GNOME `enable-animations`.
 pub fn reduced() -> bool {
     #[cfg(test)]
     if let Some(on) = FORCE.with(|f| f.get()) {
@@ -44,8 +43,46 @@ fn read_reduced() -> bool {
         let workspace: Option<Retained<AnyObject>> = unsafe { msg_send![class, sharedWorkspace] };
         return workspace.is_some_and(|w| unsafe { msg_send![&*w, accessibilityDisplayShouldReduceMotion] });
     }
+    #[cfg(all(target_os = "windows", not(test)))]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let mut on: i32 = 1; // A Win32 BOOL.
+        // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL through pvParam.
+        let read = unsafe {
+            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut i32 as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+        };
+        return read.is_ok() && on == 0;
+    }
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        // One process per run, not one per second.
+        // shortcut: a change needs a restart; watch the portal's SettingChanged if users ask.
+        static GNOME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        return *GNOME.get_or_init(|| gsettings_reduced("gsettings"));
+    }
     #[allow(unreachable_code)]
     false
+}
+
+/// GNOME's `enable-animations`, read with `program` (gsettings). A missing command, odd output or
+/// no answer within 500 ms all mean "not reduced".
+#[cfg(any(target_os = "linux", test))]
+fn gsettings_reduced(program: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(program);
+    command.args(["get", "org.gnome.desktop.interface", "enable-animations"]).stdin(Stdio::null()).stderr(Stdio::null());
+    let (tx, rx) = std::sync::mpsc::channel();
+    // The deadline covers the exit and the end of stdout: a child of gsettings can hold the pipe.
+    // shortcut: a hung gsettings keeps its thread and process; there is one per run.
+    std::thread::spawn(move || tx.send(command.output()));
+    matches!(rx.recv_timeout(Duration::from_millis(500)),
+        Ok(Ok(out)) if out.status.success() && animations_off(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `gsettings get` prints `true` or `false` and a newline.
+#[cfg(any(target_os = "linux", test))]
+fn animations_off(out: &str) -> bool {
+    out.trim() == "false"
 }
 
 #[cfg(test)]
@@ -124,5 +161,30 @@ mod tests {
         assert_eq!(calm(0.5), 0.);
         assert!((calm(0.75) - 0.5).abs() < 1e-6);
         assert_eq!(calm(1.), 1.);
+    }
+
+    #[test]
+    fn gnome_animations_off_means_reduced_and_failures_do_not() {
+        assert!(animations_off("false\n"));
+        assert!(!animations_off("true\n"));
+        assert!(!animations_off("No such schema “org.gnome.desktop.interface”\n"));
+        assert!(!animations_off(""));
+        assert!(!gsettings_reduced("lagom-no-such-gsettings"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_gsettings_that_hangs_means_not_reduced_within_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lagom-motion-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("gsettings");
+        // Prints "false", then a background child keeps stdout open after the script exits.
+        std::fs::write(&script, "#!/bin/sh\necho false\nsleep 5 &\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        assert!(!gsettings_reduced(script.to_str().unwrap()));
+        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
