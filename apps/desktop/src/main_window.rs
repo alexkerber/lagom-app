@@ -1166,6 +1166,7 @@ impl MainWindow {
             // The system took the gesture (Mission Control, a lost touch): spring back, as Esc does.
             TouchPhase::Cancelled => self.release(false, cx),
         }
+        tick_crossings(before, self.swipe);
         // A row under the fingers keeps the list still, as in native lists, until the next gesture.
         if matches!(self.swipe, Swipe::Row { .. }) {
             self.scroll_hold.1 = true;
@@ -1196,6 +1197,7 @@ impl MainWindow {
         self.drag = Some(e.position);
         let before = self.swipe;
         self.swipe.moved_with((e.position.x - last.x).into(), (e.position.y - last.y).into(), MOUSE_SLOP);
+        tick_crossings(before, self.swipe);
         self.retint();
         if self.swipe != before {
             cx.notify();
@@ -1214,8 +1216,6 @@ impl MainWindow {
     }
 
     /// Starts a short cross-fade when the move a release would make changes.
-    // shortcut: no trackpad haptic at the thresholds; GPUI 0.2.2 has no API for
-    // NSHapticFeedbackManager. Add one with a small objc call or a GPUI patch.
     fn retint(&mut self) {
         let to = match self.swipe {
             Swipe::Row { dx, .. } => reach(dx),
@@ -2692,6 +2692,43 @@ fn reach(dx: f32) -> Option<Move> {
     }
 }
 
+/// Thresholds a moving row crossed from `before` to `after`, in either direction. One event can
+/// cross two (Later and Delete). Ending the swipe crosses none: the row is no longer under the fingers.
+fn crossings(before: Swipe, after: Swipe) -> u32 {
+    let stage = |s: Swipe| match s {
+        Swipe::Row { dx, .. } => match reach(dx) {
+            Some(Move::Delete) => -2i32,
+            Some(Move::Later) => -1,
+            None => 0,
+            Some(_) => 1,
+        },
+        _ => 0,
+    };
+    if matches!(after, Swipe::Row { .. }) { stage(after).abs_diff(stage(before)) } else { 0 }
+}
+
+/// One haptic tick per threshold crossed. Haptics are not motion, so reduced motion keeps them.
+fn tick_crossings(before: Swipe, after: Swipe) {
+    for _ in 0..crossings(before, after) {
+        threshold_tick();
+    }
+}
+
+/// The trackpad tick. Windows and Linux have no trackpad haptics.
+fn threshold_tick() {
+    #[cfg(test)]
+    TICKS.with(|t| t.set(t.get() + 1));
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        use objc2_app_kit::{NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime, NSHapticFeedbackPerformer};
+        NSHapticFeedbackManager::defaultPerformer()
+            .performFeedbackPattern_performanceTime(NSHapticFeedbackPattern::LevelChange, NSHapticFeedbackPerformanceTime::Now);
+    }
+}
+
+#[cfg(test)]
+thread_local!(static TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
 /// A two-finger swipe on one row, as ids into `INBOX`. Plain Rust, so tests run without a window.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Swipe {
@@ -3408,6 +3445,17 @@ mod tests {
     }
 
     #[test]
+    fn crossings_count_stages_but_not_the_end() {
+        let row = |dx| Swipe::Row { id: 7, dx };
+        assert_eq!(crossings(Swipe::start(7), row(THRESHOLD)), 1);
+        assert_eq!(crossings(row(THRESHOLD), row(-THRESHOLD)), 2);
+        assert_eq!(crossings(row(0.), row(-DELETE_THRESHOLD)), 2);
+        assert_eq!(crossings(row(-DELETE_THRESHOLD), row(-DELETE_THRESHOLD - 50.)), 0);
+        assert_eq!(crossings(row(-DELETE_THRESHOLD), Swipe::Idle), 0);
+        assert_eq!(crossings(Swipe::start(7), Swipe::Scroll), 0);
+    }
+
+    #[test]
     fn long_left_swipe_deletes() {
         // Left has two stages: Later past 120 px, Delete past 60 % of the row.
         assert_eq!(swipe(&[(-DELETE_THRESHOLD + 1., 0.)]).end(), Some((7, -DELETE_THRESHOLD + 1., Some(Move::Later))));
@@ -3655,6 +3703,35 @@ mod dispatch {
 
     fn inbox_len(view: &Entity<MainWindow>, cx: &mut VisualTestContext) -> usize {
         view.read_with(cx, |v, _| v.inbox.list().len())
+    }
+
+    #[gpui::test]
+    fn swipe_ticks_once_per_threshold_crossing(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let wheel = |touch_phase, x: f32| ScrollWheelEvent {
+            delta: ScrollDelta::Pixels(gpui::point(px(x), px(0.))),
+            touch_phase,
+            ..Default::default()
+        };
+        let ticks = || TICKS.with(|t| t.get());
+        view.update(cx, |v, cx| {
+            v.under = Some(v.inbox.list()[0]);
+            let start = ticks();
+            v.on_scroll(&wheel(TouchPhase::Started, 0.), cx);
+            // (row offset, ticks so far): past Done and held there, back, Later, Delete, back to
+            // Later, back to neutral, Done again.
+            let d = DELETE_THRESHOLD;
+            let mut at = 0.;
+            // Then one jump across Later and Delete and back: two ticks each way.
+            for (to, want) in [(125., 1), (126., 1), (127., 1), (117., 2), (-125., 3), (-d, 4), (-d - 30., 4), (-d + 5., 5), (-100., 6), (130., 7), (-100., 8), (-d - 15., 10), (-100., 12)] {
+                v.on_scroll(&wheel(TouchPhase::Moved, to - at), cx);
+                at = to;
+                assert_eq!(ticks() - start, want, "at {to}");
+            }
+            // Lifting the fingers acts without a tick of its own.
+            v.on_scroll(&wheel(TouchPhase::Ended, 0.), cx);
+            assert_eq!(ticks() - start, 12);
+        });
     }
 
     #[gpui::test]
