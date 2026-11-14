@@ -174,6 +174,52 @@ class MailModelTest {
         model.clearSelection()
         assertTrue(model.messages.isEmpty()); assertTrue(model.expandedIds.isEmpty()); assertTrue(model.remoteImagesIds.isEmpty())
     }
+    @Test fun openingABodySyncLeftOutDownloadsItOnceAndShowsTheHtml() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(1))
+            bodies[1] = "The text of this message is larger than 4 MiB and was not downloaded." to null
+            rejectInline = true
+        }
+        val model = model(core); model.start(); model.select(1)
+        assertEquals("Could not download this message: Fixture fetch refused", model.error)
+        assertNull(model.message!!.htmlBody)
+        core.rejectInline = false
+        core.fetched[1] = "Full text" to "<p>Full text</p>"
+        model.select(1)
+        assertEquals("<p>Full text</p>", model.message!!.htmlBody)
+        assertEquals("Full text", model.messages.single().textBody)
+        // One fetch per open: refreshing the reading view does not ask again, and HTML mail never asks.
+        model.select(1)
+        assertEquals(listOf(1L, 1L), core.inlineCalls)
+        // A refused read flag does not keep the body out.
+        core.mail = listOf(row(1), row(2, unread = true))
+        core.bodies[2] = "Not downloaded" to null
+        core.fetched[2] = "Second" to "<p>Second</p>"
+        core.rejectRead = true
+        try { model.select(2); fail("expected refusal") } catch (_: IllegalStateException) { }
+        assertEquals("<p>Second</p>", model.message!!.htmlBody)
+    }
+    @Test fun readFlagsDoNotWaitForBodyDownloads() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(1, unread = true), row(2, unread = true))
+            conversationIds = listOf(1, 2)
+            bodies[1] = "Not downloaded" to null
+            bodies[2] = "Not downloaded" to null
+            fetched[1] = "First" to "<p>First</p>"
+            inlineGate = CompletableDeferred()
+        }
+        val model = model(core); model.start()
+        val selection = async { model.select(1) }
+        // The read refresh hops to the IO pool; bounded so a regression fails instead of hanging.
+        repeat(5_000) { if (core.readCalls.size < 2) { runCurrent(); Thread.sleep(1) } }
+        assertEquals(listOf(1L to true, 2L to true), core.readCalls)
+        assertTrue(selection.isActive)
+        core.inlineGate!!.complete(Unit); selection.await()
+        assertEquals("<p>First</p>", model.messages.first().htmlBody)
+        assertEquals(listOf(1L, 2L), core.inlineCalls)
+        // The core runs one network call at a time: every flag went out before the first download.
+        assertEquals(listOf(2, 2), core.readsBeforeInline)
+    }
     @Test fun listActionsUseVisibleThreadMembers() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(3).copy(messageCount = 2u, messageIds = listOf(3, 1))) }
         val model = model(core); model.start()
@@ -863,7 +909,20 @@ private class FakeCore : LagomCoreInterface {
         return byteArrayOf(0, -1)
     }
     override suspend fun inlineResource(id: Long, request: String): InlineResource = error("unused")
-    override suspend fun loadInline(id: Long): Unit = error("unused")
+    /** Text and HTML per message; the default is HTML. `fetched` is what loadInline stores. */
+    var bodies = mutableMapOf<Long, Pair<String, String?>>()
+    var fetched = mutableMapOf<Long, Pair<String, String?>>()
+    val inlineCalls = mutableListOf<Long>()
+    var rejectInline = false
+    var inlineGate: CompletableDeferred<Unit>? = null
+    val readsBeforeInline = mutableListOf<Int>()
+    override suspend fun loadInline(id: Long) {
+        inlineCalls += id
+        readsBeforeInline += readCalls.size
+        inlineGate?.await()
+        check(!rejectInline) { "Fixture fetch refused" }
+        fetched.remove(id)?.let { bodies[id] = it }
+    }
     val searchCalls = mutableListOf<Triple<String?, String, UInt>>()
     var searchGate: CompletableDeferred<Unit>? = null
     var rejectSearch = false
@@ -978,7 +1037,8 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun conversation(messageId: Long) = (conversationIds.ifEmpty { listOf(messageId) }).map { message(it) }
     override suspend fun message(id: Long): MailMessage {
         messageThreads += Thread.currentThread()
-        val result = MailMessage(mail.first { it.id == id }, "body", null, emptyList())
+        val body = bodies[id] ?: ("body" to "<p>body</p>")
+        val result = MailMessage(mail.first { it.id == id }, body.first, body.second, emptyList())
         val gate = messageGate
         messageStarted?.complete(Unit)
         gate?.await()
