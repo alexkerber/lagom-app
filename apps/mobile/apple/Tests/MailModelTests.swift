@@ -175,6 +175,7 @@ final class MailModelTests: XCTestCase {
     var suspendDraftList = false
     var draftListGate: CheckedContinuation<Void, Never>?
     override func accounts() async throws -> [MailAccount] { [] }
+    override func folders(accountId: String?) async throws -> [MailFolder] { [] }
     override func nextSnooze() async throws -> Int64? { nil }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func mailbox(accountId: String?, mailbox: Mailbox, limit: UInt32, offset: UInt32) async throws -> [MailRow] {
@@ -405,6 +406,7 @@ extension MailModelTests {
     var failInline = false
 
     override func accounts() async throws -> [MailAccount] { [] }
+    override func folders(accountId: String?) async throws -> [MailFolder] { [] }
     override func sendFailures() async throws -> [SendFailure] { [] }
     override func localDrafts() async throws -> [DraftRow] { [] }
     override func nextSnooze() async throws -> Int64? { nil }

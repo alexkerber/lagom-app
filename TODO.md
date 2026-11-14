@@ -22,6 +22,7 @@
 - [x] Desktop UI framework: GPUI.
 - [x] Build and start on macOS (2026-11-06).
 - [ ] Build on Linux and Windows (CI).
+- [ ] Linux smoke start under Xvfb is flaky: 2 of the last 24 package runs failed once and passed on a rerun. #110 fixed the X11 `_NET_WM_STATE` panic; run 43593157854 (attempt 1) then failed with Vulkan `ERROR_SURFACE_LOST_KHR` (lavapipe, Xvfb, no window manager). Root cause not known.
 - [x] RustSec CI audit on every push and pull request with cargo-audit 0.23.0; vulnerabilities fail and informational/yanked warnings remain visible. Local audit: no vulnerabilities or ignored advisories.
 - [x] Protocol fixture deadlines exclude SQLite migration setup; outbox retries and independent FFI scenarios each get their own unchanged hang guard. Mail flags, forwarding, notifications, reauthentication and mobile fixtures retain their behavior assertions.
 - [x] First native iPhone/iPad mail slice in `apps/mobile/apple`: SwiftUI size-class split navigation, unified/account Inbox/Later/Done/Sent, server Done/Delete/read actions, local Later, replies and Markdown outbox, email-first/manual account setup, shared HTML privacy policy, desktop theme colours and platform icons. XcodeGen, arm64 device/simulator XCFramework builder and a separate macOS CI job. No background fetch, push, mobile OAuth, attachment transfer yet.
@@ -103,7 +104,8 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] Mobile parity (Alex 2026-11-13): iOS and Android lag far behind desktop. Parity table and ranked gaps first, then close the daily-mail gaps.
   - [x] undo send and Later choices on iOS and Android — done 2026-11-13.
   - [ ] parity table and ranked gaps in `docs/mobile-parity.md`; Undo for Done/Later/Delete, signatures and link Bcc on iOS and Android — PR `mobile/parity-round` (2026-11-14). Closes on merge.
-  - [ ] next gaps from the table: folders and Move to folder, Android Today/Calendar/Todo, Android list mark unread, Empty Trash, account name.
+  - [ ] folders and Move to folder with Undo, Android list mark read/unread, Empty Trash and account name on iOS and Android — PR `mobile/parity-round-2` (2026-11-14). Closes on merge.
+  - [ ] next gaps from the table: Android Today/Calendar/Todo; create a folder on mobile.
 - [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).

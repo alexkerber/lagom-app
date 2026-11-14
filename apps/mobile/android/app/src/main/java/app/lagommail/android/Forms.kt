@@ -289,3 +289,26 @@ internal class AccountForm {
         TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = close) { Text("Cancel") }
     })
 }
+
+/** Desktop's "Your name": shown to the people you write to. An empty name falls back to the address. */
+@Composable internal fun NameDialog(model: MailModel, account: MailAccount, close: () -> Unit) {
+    var text by remember(account.id) { mutableStateOf(if (account.displayName == account.email) "" else account.displayName) }
+    var saving by remember(account.id) { mutableStateOf(false) }
+    AlertDialog(onDismissRequest = { if (!saving) close() }, title = { Text("Your name") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(account.email, style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(text, { text = it }, enabled = !saving, singleLine = true,
+                label = { Text("Shown to the people you write to") }, modifier = Modifier.fillMaxWidth())
+        }
+    }, confirmButton = {
+        TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = {
+            saving = true
+            model.perform {
+                try { model.setName(account, text); close() }
+                finally { saving = false }
+            }
+        }) { Text("Save") }
+    }, dismissButton = {
+        TextButton(enabled = !saving, modifier = Modifier.heightIn(min = 48.dp), onClick = close) { Text("Cancel") }
+    })
+}
