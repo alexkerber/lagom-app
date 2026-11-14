@@ -1270,7 +1270,10 @@ impl MainWindow {
         if let Some(live) = self.live.as_mut().filter(|l| l.stale) {
             (live.jump, live.want) = (Some((from + 1, store, then)), None);
             // An account switch above already requested that read.
-            if live.reads == from { self.reload(cx); }
+            let read = live.reads == from;
+            // An earlier read can land first (a caller's reload): its row 0 is not the hit either.
+            self.inbox.chosen = Some(HashSet::new());
+            if read { self.reload(cx); }
             return;
         }
         self.inbox.account_filter = Some(m.summary.account.clone());
@@ -1766,6 +1769,10 @@ mod tests {
         view.update(cx, |v, cx| { v.open_found(hit, None, cx); v.open_box(None, cx); });
         cx.run_until_parked();
         assert_eq!(selected(cx), Some(newest));
+        // So does another section: the jump waiting for a fresh read must not bring Mail back.
+        view.update(cx, |v, cx| { v.reload(cx); v.open_found(hit, None, cx); v.set_page(Page::Todo, cx); });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Todo)));
         INLINE_READS.set(true);
     }
 

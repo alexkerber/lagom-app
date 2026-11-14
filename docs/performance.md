@@ -130,7 +130,7 @@ list, and the next read selects the message and runs the follow-up (the Move pal
 the popout's Done or Later). The old list stays on screen until then. Rules: the account's
 folders come from a read requested after the message was found; nothing is selected between
 opening the list and selecting the message, so no key or render acts on row 0; another
-account or list cancels the pending jump; a read error ends it; a new jump is refused with
+account, list or section cancels the pending jump; a read error ends it; a new jump is refused with
 "Wait for the message to open" while one with a follow-up is pending.
 
 `reload_ui_thread_100k` also times the jump (`reload.ui_thread_jump`): `open_found` for an
