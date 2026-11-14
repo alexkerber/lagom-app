@@ -4,7 +4,7 @@
 // Only Windows draws the badge itself; tests call no platform code.
 #![cfg_attr(any(test, not(target_os = "windows")), allow(dead_code))]
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
 pub use taskbar::attach;
 
 pub fn set(count: usize) {

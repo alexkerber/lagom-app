@@ -182,7 +182,8 @@ fn open_main_window(demo: bool, cx: &mut App) -> anyhow::Result<gpui::WindowHand
         },
         // `LAGOM_DEMO=1`: the sample mail, for screenshots and design work. No store, no network.
         move |window, cx| {
-            #[cfg(target_os = "windows")]
+            // GPUI's test windows panic on a raw window handle.
+            #[cfg(all(target_os = "windows", not(test)))]
             badge::attach(window);
             cx.new(|cx| MainWindow::new(demo, window, cx))
         },
