@@ -50,16 +50,30 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// An account-wide count: read on the background executor, the old count shows meanwhile.
     pub(super) fn reload_unread(&mut self, cx: &mut Context<Self>) {
-        if let Some(live) = &self.live {
-            let pending = self.pending_moves();
-            match live.store.unread_inbox_count(chrono::Local::now().timestamp(), &pending.into_iter().collect::<Vec<_>>()) {
-                Ok(count) => self.today.unread = count,
-                Err(e) => self.notify(format!("Could not read unread count: {e}"), cx),
-            }
-        } else {
+        let Some(live) = &self.live else {
             self.today.unread = self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count();
+            return;
+        };
+        let pending: Vec<i64> = self.pending_moves().into_iter().collect();
+        let path = live.store.path().to_owned();
+        let read = move || Store::open(path)?.unread_inbox_count(chrono::Local::now().timestamp(), &pending);
+        #[cfg(test)]
+        if INLINE_READS.get() { return self.unread_done(read(), cx); }
+        let read = cx.background_executor().spawn(async move { read() });
+        self.unread_read = Some(cx.spawn(async move |this, cx| {
+            let result = read.await;
+            this.update(cx, |this, cx| { this.unread_read = None; this.unread_done(result, cx); }).ok();
+        }));
+    }
+
+    fn unread_done(&mut self, result: lagom_core::Result<usize>, cx: &mut Context<Self>) {
+        match result {
+            Ok(count) => self.today.unread = count,
+            Err(e) => self.notify(format!("Could not read unread count: {e}"), cx),
         }
+        cx.notify();
     }
 
     pub(super) fn unread_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {

@@ -29,12 +29,12 @@ The targets are ours, set 2026-11-06. None is measured yet.
 
 Measured 2026-11-06 on macOS 27.2, Apple silicon, release build of the static main window (commit after `d21c5ce`). One sample, taken about one second after launch.
 
-| What | Value | Budget |
-|------|-------|--------|
-| Release binary | 6.0 MB | < 30 MB |
-| Resident memory (`ps` RSS) | 107 MB | < 100 MB |
+| What                             | Value  | Budget                       |
+| -------------------------------- | ------ | ---------------------------- |
+| Release binary                   | 6.0 MB | < 30 MB                      |
+| Resident memory (`ps` RSS)       | 107 MB | < 100 MB                     |
 | Physical footprint (`footprint`) | 326 MB | not set; includes GPU memory |
-| CPU in the sample | 23 % | startup, not idle |
+| CPU in the sample                | 23 %   | startup, not idle            |
 
 Not measured yet: start time, frame times, idle CPU.
 
@@ -46,10 +46,10 @@ on macOS in GPUI's headless `TestAppContext`, debug build. The fixture contains
 10 forced full-window frames including element construction, layout and paint.
 No native app, GPU presentation or real account is involved.
 
-| | Before (`e163ce1` + measurement test) | Virtualised |
-|---|---:|---:|
-| Row elements built at the top | 10,000 | 9 |
-| Mean full-frame time | 1,093.18 ms | 10.99 ms |
+|                               | Before (`e163ce1` + measurement test) | Virtualised |
+| ----------------------------- | ------------------------------------: | ----------: |
+| Row elements built at the top |                                10,000 |           9 |
+| Mean full-frame time          |                           1,093.18 ms |    10.99 ms |
 
 The old list built empty row boxes outside its text-rendering range. The new
 list builds two spacers and visible rows with two row heights of overscan on
@@ -68,10 +68,10 @@ Measured with `cargo test -p lagom-core conversation_page_does_not_scan -- --noc
 in a debug build on macOS, using 100,000 fixture messages in about 50,000 threads
 and a 200-conversation page. No app or native view is started.
 
-| Query | Before | Indexed page |
-| --- | ---: | ---: |
-| Inbox | 176.63 ms / 4,169,009 SQLite VM steps | 2.95 ms / 34,912 steps |
-| Later (all messages snoozed) | — | 2.97 ms / 32,520 steps |
+| Query                        |                                Before |           Indexed page |
+| ---------------------------- | ------------------------------------: | ---------------------: |
+| Inbox                        | 176.63 ms / 4,169,009 SQLite VM steps | 2.95 ms / 34,912 steps |
+| Later (all messages snoozed) |                                     — | 2.97 ms / 32,520 steps |
 
 The regression test asserts fewer than 100,000 VM steps, independent of machine
 speed. The query walks the date index to select each thread's latest visible
@@ -92,3 +92,43 @@ Compose builds this account-local snapshot on the background executor when opene
 then reads only the in-memory prefix index while typing. Reopening refreshes it;
 an already open sheet keeps its snapshot until reopened. Dormant restored drafts
 do not build an index. No network call, migration or real account is involved.
+
+## Window reload
+
+Measured 2026-11-14 on macOS 27.2.1, Apple M4 Max. Best of 5 runs, `--test-threads=1`.
+Both tests are ignored by default:
+
+- `cargo test -p lagom [--release] reload_reads_100k -- --ignored --nocapture` times the
+  store reads of one reload. Fixture: two accounts with Inbox, Archive and Sent. Personal
+  holds 100,000 messages (50k Inbox, 40k Archive, 10k Sent, two of three unread). Work holds three.
+- `cargo test -p lagom [--release] reload_ui_thread_100k -- --ignored --nocapture` times
+  `reload()` on the UI thread in GPUI's headless `TestAppContext`. Fixture: one account,
+  100,000 Inbox messages. The inline row runs the reads on the UI thread, as before this change.
+
+| What                             |    Debug before | Debug after | Release before | Release after |
+| -------------------------------- | --------------: | ----------: | -------------: | ------------: |
+| `load_accounts` (background)     |          234 ms |       80 ms |       70–97 ms |         23 ms |
+| `folders()` for Work, 3 messages |    not measured |     0.03 ms |          15 ms |       0.01 ms |
+| `reload()` on the UI thread      | 129 ms (inline) |     0.31 ms | 39 ms (inline) |       0.09 ms |
+
+`folders()` scanned every message once per folder: the `f.id` column's affinity stopped
+SQLite from seeking the `coalesce(move_target,folder)` index. `+f.id` removes the
+affinity; `folder_unread_counts_seek_each_folder` asserts the query plan in CI.
+`load_accounts` also reuses the current account's folders instead of reading them twice.
+
+The read and the Home unread count now run on the background executor. The old list
+stays on screen until the read lands. One list read runs at a time, and requests made
+meanwhile merge into one follow-up read. A generation counter drops results older than the
+list on screen. Starting a move or another operation also invalidates reads already
+running. A read for another list is dropped. So is one that finishes while a move is in
+flight, or one that would drop a row selected while it ran (that row is read again, pinned).
+A jump to one message (search hit, notification, task link, Move from a popout) still
+reads inline (`reload_now`), because its next steps need that account's folders and rows.
+That costs one inline read per click (39–42 ms in release at 100k). Tests:
+`list_reads_run_off_the_ui_thread_and_never_go_back_in_time`,
+`a_row_selected_during_a_read_stays_listed` and
+`search_hit_in_a_folder_opens_while_a_read_is_in_flight`.
+
+Still counted per reload: unread per folder and the Inbox and Later totals each visit
+every row of their folder (about 10–13 ms each in release at 100k). A covering partial
+index needs a schema bump. Not measured: native frame times, a real account.
