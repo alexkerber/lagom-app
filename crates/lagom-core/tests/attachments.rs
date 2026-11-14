@@ -111,7 +111,8 @@ async fn attachment_roundtrip(cached: Option<bool>) {
     assert_eq!(imap.fetch_attachment(&mut store, message.id, "2.2").await.unwrap(), b"\0\xffhi!");
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1").await.is_err());
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1").await.is_err());
-    assert!(store.attachments(message.id).unwrap().is_empty());
+    // Only a folder sync resets a changed mailbox: mobile runs downloads beside one.
+    assert_eq!(store.attachments(message.id).unwrap().len(), 2);
     imap.logout().await.unwrap();
     server.await.unwrap();
 }

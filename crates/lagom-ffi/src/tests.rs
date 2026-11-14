@@ -613,10 +613,12 @@ async fn next_snooze_uses_earliest_future_deadline_across_accounts() {
 #[tokio::test]
 async fn a_panic_in_one_action_leaves_the_store_usable() {
     let (_dir, core) = fixture();
-    for network in [false, true] {
-        assert!(core.run_on(network, |_| -> lagom_core::Result<()> { panic!("action panicked") }).await.is_err());
-        assert!(core.run_on(network, |s| s.accounts()).await.unwrap().is_empty());
+    for lane in [Lane::Local, Lane::Network, Lane::Own] {
+        assert!(core.run_on(lane, |_| -> lagom_core::Result<()> { panic!("action panicked") }).await.is_err());
+        assert!(core.run_on(lane, |s| s.accounts()).await.unwrap().is_empty());
     }
+    assert!(core.run_sync(|_| -> lagom_core::Result<()> { panic!("action panicked") }).await.is_err());
+    assert!(core.run_sync(|s| s.network.blocking_lock().accounts()).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1249,6 +1251,352 @@ async fn unsubscribe_offer_and_a_web_page_is_never_fetched() {
     assert!(core.unsubscribe(id).await.is_err());
     core.stores.local.lock().unwrap().set_unsubscribe(id, parse("<https://list.example/one>", Some("List-Unsubscribe=One-Click")).as_ref()).unwrap();
     assert_eq!(core.message(id).await.unwrap().unsubscribe.unwrap().link, None);
+}
+
+/// Empty INBOX and Archive. The first `stall_on` command waits for `release`.
+#[derive(Default)]
+struct SlowFolder { stall_on: &'static str, stalls: std::sync::atomic::AtomicUsize, stalled: tokio::sync::Notify, release: tokio::sync::Notify,
+    searches: std::sync::atomic::AtomicUsize, open: std::sync::atomic::AtomicUsize, most_open: std::sync::atomic::AtomicUsize,
+    moved: std::sync::atomic::AtomicBool }
+fn slow_folder_server(listener: tokio::net::TcpListener, slow: Arc<SlowFolder>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    tokio::spawn(async move { loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let slow = slow.clone();
+        tokio::spawn(async move {
+            slow.most_open.fetch_max(slow.open.fetch_add(1, SeqCst) + 1, SeqCst);
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                if cmd == slow.stall_on && slow.stalls.fetch_add(1, SeqCst) == 0 { slow.stalled.notify_one(); slow.release.notified().await; }
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n* LIST () NIL \"Archive\"\r\n" }
+                else if cmd == "SELECT \"INBOX\"" { "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n" }
+                else if cmd == "SELECT \"Archive\"" {
+                    assert!(slow.moved.load(SeqCst), "the sync went on to the next folder before the waiting action");
+                    "* 0 EXISTS\r\n* OK [UIDVALIDITY 9] valid\r\n"
+                } else if cmd == "UID SEARCH ALL" { slow.searches.fetch_add(1, SeqCst); "* SEARCH\r\n" } else if cmd == "UID STORE 1 +FLAGS.SILENT (\\Seen)" { "" }
+                // Counted closed before the reply, so the next sync cannot connect first.
+                else if cmd == "LOGOUT" { slow.open.fetch_sub(1, SeqCst); "* BYE bye\r\n" }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+    } });
+}
+
+#[tokio::test]
+async fn user_actions_do_not_wait_for_a_slow_folder_sync() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (a, id) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "slow@example.test", listener.local_addr().unwrap().port());
+        let id = mail(&mut s, &a, 1, 1);
+        (a, id)
+    };
+    // Inside the INBOX folder sync.
+    let slow = Arc::new(SlowFolder { stall_on: "UID SEARCH ALL", ..Default::default() });
+    slow_folder_server(listener, slow.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let sync = tokio::spawn({ let core = core.clone(); async move { core.sync(a.id).await } });
+        slow.stalled.notified().await;
+        // The sync now holds the folder lock in the middle of INBOX.
+        tokio::time::timeout(std::time::Duration::from_secs(10), core.mark_read(id, true)).await
+            .expect("the read flag waited for the sync").unwrap();
+        assert!(!core.message(id).await.unwrap().row.unread);
+        // Stands in for a move: it waits for INBOX only and runs before Archive. The first poll queues it.
+        let mut step = std::pin::pin!(core.stores.network.lock());
+        assert!(tokio::time::timeout(std::time::Duration::ZERO, step.as_mut()).await.is_err(), "a folder-state step ran inside a folder sync");
+        slow.release.notify_one();
+        let guard = step.await;
+        slow.moved.store(true, SeqCst);
+        drop(guard);
+        sync.await.unwrap().unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn two_syncs_of_one_account_never_overlap() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let a = fixture_account(&core.stores.local.lock().unwrap(), "slow@example.test", listener.local_addr().unwrap().port());
+    // Logout holds no folder lock: only the sync lock keeps the second sync out.
+    let slow = Arc::new(SlowFolder { stall_on: "LOGOUT", moved: true.into(), ..Default::default() });
+    slow_folder_server(listener, slow.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let first = tokio::spawn({ let core = core.clone(); let id = a.id.clone(); async move { core.sync(id).await } });
+        slow.stalled.notified().await;
+        // Deterministic part: the sync lock is held outside the folder lock too.
+        assert!(core.stores.sync.try_lock().is_err());
+        let second = tokio::spawn({ let core = core.clone(); async move { core.sync_all().await } });
+        // A slow scheduler can only make this part pass without testing anything, never fail falsely.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(slow.open.load(SeqCst), 1, "the second sync connected during the first");
+        slow.release.notify_one();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        // Two searches per folder, two folders, two syncs.
+        assert_eq!(slow.searches.load(SeqCst), 8);
+        assert_eq!(slow.most_open.load(SeqCst), 1);
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_read_flag_leaves_a_changed_mailbox_to_the_sync() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+        mail(&mut s, &a, 1, 1)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                // The store knows UIDVALIDITY 7: the mailbox was recreated.
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 8] valid\r\n" }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+        assert!(core.mark_read(id, true).await.is_err());
+        server.await.unwrap();
+    }).await.unwrap();
+    // A running sync owns the folder checkpoint: the action reset nothing.
+    let s = core.stores.local.lock().unwrap();
+    let message = s.message(id).unwrap().summary;
+    assert_eq!(s.folder(message.folder).unwrap().uidvalidity, Some(7));
+}
+
+#[tokio::test]
+async fn a_sync_with_older_flags_does_not_undo_a_read_flag() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (a, id) = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+        let id = mail(&mut s, &a, 1, 1);
+        (a, id)
+    };
+    let stalled = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn({ let (stalled, release) = (stalled.clone(), release.clone()); async move { loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (stalled, release) = (stalled.clone(), release.clone());
+        tokio::spawn(async move {
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { String::new() }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n".into() }
+                else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n".into() }
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n".into() }
+                else if cmd == "UID SEARCH ALL" { "* SEARCH 1\r\n".into() }
+                else if cmd.contains("BODYSTRUCTURE") {
+                    let header = "From: Sender <sender@example.test>\r\nSubject: Fixture\r\nMessage-ID: <fixture@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                    format!("* 1 FETCH (UID 1 FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                else if cmd == "UID FETCH 1 (UID FLAGS)" {
+                    // The server read the flags before the read flag; the reply arrives after it.
+                    stalled.notify_one();
+                    release.notified().await;
+                    "* 1 FETCH (UID 1 FLAGS ())\r\n".into()
+                } else if cmd == "UID STORE 1 +FLAGS.SILENT (\\Seen)" { String::new() }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+    } } });
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let sync = tokio::spawn({ let core = core.clone(); async move { core.sync(a.id).await } });
+        stalled.notified().await;
+        core.mark_read(id, true).await.unwrap();
+        release.notify_one();
+        sync.await.unwrap().unwrap();
+    }).await.unwrap();
+    assert!(!core.message(id).await.unwrap().row.unread);
+}
+
+/// One message (UID 1) on a server with INBOX, Archive and Trash. The first command that starts with
+/// `stall_on` waits for `release` before it runs.
+#[derive(Default)]
+struct OneMessage { stall_on: &'static str, stalls: std::sync::atomic::AtomicUsize, stalled: tokio::sync::Notify,
+    release: tokio::sync::Notify, state: Mutex<(String, bool)>, refuse_store: bool }
+fn one_message_server(listener: tokio::net::TcpListener, server: Arc<OneMessage>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    *server.state.lock().unwrap() = ("INBOX".into(), false);
+    tokio::spawn(async move { loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let server = server.clone();
+        tokio::spawn(async move {
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            let mut selected = String::new();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                if !server.stall_on.is_empty() && cmd.starts_with(server.stall_on) && server.stalls.fetch_add(1, SeqCst) == 0 {
+                    server.stalled.notify_one();
+                    server.release.notified().await;
+                }
+                if server.refuse_store && cmd.starts_with("UID STORE") {
+                    socket.get_mut().write_all(format!("{tag} NO refused\r\n").as_bytes()).await.unwrap();
+                    continue;
+                }
+                let (location, seen) = server.state.lock().unwrap().clone();
+                let here = selected == location;
+                let flags = if seen { "(\\Seen)" } else { "()" };
+                let data = if cmd.starts_with("LOGIN ") { String::new() }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1 MOVE\r\n".into() }
+                else if cmd.starts_with("LIST ") { "* LIST () NIL \"INBOX\"\r\n* LIST (\\Archive) NIL \"Archive\"\r\n* LIST (\\Trash) NIL \"Trash\"\r\n".into() }
+                else if let Some(name) = cmd.strip_prefix("SELECT ") {
+                    selected = name.trim_matches('"').into();
+                    "* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 2] next\r\n".into()
+                } else if cmd == "UID SEARCH ALL" { if here { "* SEARCH 1\r\n".into() } else { "* SEARCH\r\n".into() } }
+                else if cmd.contains("BODYSTRUCTURE") {
+                    let header = "From: sender@example.test\r\nSubject: One\r\nMessage-ID: <m1@example.test>\r\nContent-Type: text/plain\r\n\r\n";
+                    format!("* 1 FETCH (UID 1 FLAGS {flags} RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())
+                } else if cmd == "UID FETCH 1 (UID BODY.PEEK[TEXT])" { "* 1 FETCH (UID 1 BODY[TEXT] {4}\r\nbody)\r\n".into() }
+                else if cmd == "UID FETCH 1 (UID FLAGS)" { if here { format!("* 1 FETCH (UID 1 FLAGS {flags})\r\n") } else { String::new() } }
+                else if let Some(change) = cmd.strip_prefix("UID STORE 1 ") {
+                    // A STORE on a UID that moved away changes nothing, as on a real server.
+                    if here { server.state.lock().unwrap().1 = change.starts_with('+'); }
+                    String::new()
+                } else if let Some(target) = cmd.strip_prefix("UID MOVE 1 ") {
+                    if here { server.state.lock().unwrap().0 = target.trim_matches('"').into(); }
+                    String::new()
+                } else if cmd == "LOGOUT" { "* BYE bye\r\n".into() }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+    } });
+}
+fn one_message_fixture(core: &LagomCore, port: u16) -> (Account, i64) {
+    let mut s = core.stores.local.lock().unwrap();
+    let a = fixture_account(&s, "one@example.test", port);
+    let id = mail(&mut s, &a, 1, 1);
+    (a, id)
+}
+
+#[tokio::test]
+async fn a_read_flag_from_before_a_sync_never_overrides_what_that_sync_fetched() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (_, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage::default());
+    one_message_server(listener, server.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        core.mark_read(id, true).await.unwrap();
+        // Later another device marks it unread; the next Inbox sync fetches that.
+        server.state.lock().unwrap().1 = false;
+        core.background_sync().await.unwrap();
+    }).await.unwrap();
+    assert!(core.message(id).await.unwrap().row.unread);
+}
+
+#[tokio::test]
+async fn done_and_move_to_folder_wait_for_a_read_flag_already_on_its_way() {
+    for to_folder in [false, true] {
+        let (_dir, core) = fixture();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+        let archive = core.stores.local.lock().unwrap().save_folder(&a.id, "Archive", None, FolderRole::Archive).unwrap();
+        let server = Arc::new(OneMessage { stall_on: "UID STORE", ..Default::default() });
+        one_message_server(listener, server.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            // Open an unread message, then tap Done (or Move to) at once.
+            let read = tokio::spawn({ let core = core.clone(); async move { core.mark_read(id, true).await } });
+            server.stalled.notified().await;
+            let moved = tokio::spawn({ let core = core.clone(); async move {
+                if to_folder { core.move_to_folder(vec![id], archive).await } else { core.done(vec![id]).await }
+            } });
+            // Without the wait, the move runs now. A slow scheduler can only make this pass without testing anything.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            server.release.notify_one();
+            read.await.unwrap().unwrap();
+            moved.await.unwrap().unwrap();
+        }).await.unwrap();
+        assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the moved copy must be read (to_folder {to_folder})");
+        let archived = core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap();
+        assert!(!archived[0].unread);
+    }
+}
+
+#[tokio::test]
+async fn done_carries_a_read_flag_asked_for_but_not_yet_run() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (a, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage::default());
+    one_message_server(listener, server.clone());
+    // mark_read was called and is still on its way to its lock.
+    core.stores.pending_reads.lock().unwrap().insert(id, (true, 0));
+    tokio::time::timeout(std::time::Duration::from_secs(20), core.done(vec![id])).await.unwrap().unwrap();
+    assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the move stores the read flag first");
+    assert!(core.stores.pending_reads.lock().unwrap().is_empty(), "the late mark_read then does nothing");
+    assert!(!core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap()[0].unread);
+}
+
+#[tokio::test]
+async fn a_refused_carried_read_flag_stays_for_its_own_call() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (_, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage { refuse_store: true, ..Default::default() });
+    one_message_server(listener, server.clone());
+    core.stores.pending_reads.lock().unwrap().insert(id, (true, 0));
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(20), core.done(vec![id])).await.unwrap().is_err());
+    // The waiting mark_read runs it and reports the refusal itself.
+    assert_eq!(core.stores.pending_reads.lock().unwrap().get(&id), Some(&(true, 0)));
+    assert_eq!(server.state.lock().unwrap().0, "INBOX");
+}
+
+#[tokio::test]
+async fn a_read_flag_keeps_a_star_set_meanwhile() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (_, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage { stall_on: "UID STORE", ..Default::default() });
+    one_message_server(listener, server.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let read = tokio::spawn({ let core = core.clone(); async move { core.mark_read(id, true).await } });
+        server.stalled.notified().await;
+        // A sync stores a star while the read flag is on its way.
+        let s = core.stores.local.lock().unwrap();
+        let m = s.message(id).unwrap().summary;
+        s.set_flags(m.folder, m.uid, false, true).unwrap();
+        drop(s);
+        server.release.notify_one();
+        read.await.unwrap().unwrap();
+    }).await.unwrap();
+    let m = core.stores.local.lock().unwrap().message(id).unwrap().summary;
+    assert_eq!((m.seen, m.flagged), (true, true));
 }
 
 #[tokio::test]
