@@ -72,8 +72,8 @@ impl MainWindow {
         match result {
             Ok(count) => {
                 self.today.unread = count;
-                #[cfg(all(target_os = "macos", not(test)))]
-                crate::icon::set_badge(count);
+                #[cfg(not(test))]
+                crate::badge::set(count);
             }
             Err(e) => self.notify(format!("Could not read unread count: {e}"), cx),
         }
