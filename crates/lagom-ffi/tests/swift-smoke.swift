@@ -39,6 +39,23 @@ struct Smoke {
         let undone = try await core.undoSend(id: "missing")
         precondition(!undone)
         precondition(mailDocument(html: "<LINK rel=preconnect href='https://example.test'>", dark: true, messageId: 1, remote: false).contains("<x-LINK"))
-        print("Swift FFI smoke: 14 checks passed")
+        // Browser sign-in: only the pending sign-in's own redirect ends it, and only once.
+        let stray = "msauth.com.example.app://auth?code=stray&state=guess"
+        do { _ = try await core.finishSignIn(callbackUrl: stray); preconditionFailure("redirect without a sign-in did not throw") } catch MailError.Failed { }
+        configureSignIn(appId: "com.example.app", googleClientId: "", microsoftClientId: "fixture-client")
+        precondition(!signInAvailable(provider: .google) && signInAvailable(provider: .microsoft))
+        let start = try core.beginSignIn(provider: .microsoft)
+        precondition(start.callbackScheme == "msauth.com.example.app")
+        let query = URLComponents(string: start.url)?.queryItems ?? []
+        let state = query.first { $0.name == "state" }?.value ?? ""
+        precondition(query.contains { $0.name == "redirect_uri" && $0.value == "msauth.com.example.app://auth" })
+        precondition(query.contains { $0.name == "code_challenge_method" && $0.value == "S256" } && state.count >= 32)
+        do { _ = try await core.finishSignIn(callbackUrl: stray); preconditionFailure("wrong state did not throw") } catch MailError.Failed { }
+        let denied = "msauth.com.example.app://auth?error=access_denied&state=\(state)"
+        do { _ = try await core.finishSignIn(callbackUrl: denied); preconditionFailure("denied sign-in did not throw") }
+        catch MailError.Failed(let reason) { precondition(reason == "sign-in cancelled", "a wrong state ended the sign-in") }
+        do { _ = try await core.finishSignIn(callbackUrl: denied); preconditionFailure("reused redirect did not throw") }
+        catch MailError.Failed(let reason) { precondition(reason != "sign-in cancelled") }
+        print("Swift FFI smoke: 19 checks passed")
     }
 }

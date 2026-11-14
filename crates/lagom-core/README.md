@@ -184,6 +184,19 @@ account types; organization policy may require admin consent or enabling IMAP
 and authenticated SMTP. See [Microsoft's mail OAuth guide](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth)
 and [loopback redirect rules](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url).
 
+The iOS and Android apps use the system browser and a redirect back to the app
+instead of the loopback listener: `oauth::begin` returns the authorization URL
+(PKCE S256 and state) and `oauth::finish` takes the redirect, checks its URI and
+state, and exchanges the code. Each platform has its own public client ID and no
+secret, set at start with `oauth::configure_mobile`: iOS from `Local.xcconfig`
+(see `apps/mobile/apple/Config.xcconfig`), Android from the Gradle properties
+`lagom.googleClientId` and `lagom.microsoftClientId` or the environment variables
+`LAGOM_GOOGLE_ANDROID_CLIENT_ID` and `LAGOM_MICROSOFT_ANDROID_CLIENT_ID`. Google
+redirects to the reversed client ID, `com.googleusercontent.apps.<id>:/oauth2redirect`
+(on Android the client needs **Enable custom URI scheme** under Advanced settings);
+Microsoft redirects to `msauth.<bundle or application ID>://auth`, registered under
+**Mobile and desktop applications**.
+
 For a release, put your own registrations in the git-ignored `.env.oauth` at the
 repository root (shell assignments; omit providers you do not configure):
 

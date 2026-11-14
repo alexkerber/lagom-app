@@ -447,3 +447,109 @@ async fn calendar_consent_requests_full_scopes_and_existing_identity_hint() {
     assert!(has_scope(&query["scope"], "https://mail.google.com/"));
     for scope in GOOGLE_CALENDAR_SCOPES.split_whitespace() { assert!(has_scope(&query["scope"], scope)); }
 }
+
+#[test]
+fn mobile_redirects_follow_each_provider() {
+    assert_eq!(
+        mobile_redirect(Provider::Google, "123-abc.apps.googleusercontent.com", "com.example.app").unwrap(),
+        "com.googleusercontent.apps.123-abc:/oauth2redirect"
+    );
+    assert_eq!(
+        mobile_redirect(Provider::Microsoft, "00000000-0000-0000-0000-000000000000", "com.example.app").unwrap(),
+        "msauth.com.example.app://auth"
+    );
+    for id in ["", "123-abc", "a b.apps.googleusercontent.com", "a/b.apps.googleusercontent.com"] {
+        assert!(mobile_redirect(Provider::Google, id, "com.example.app").is_err(), "{id}");
+    }
+    assert!(mobile_redirect(Provider::Microsoft, "id", "bad app").is_err());
+}
+
+fn mobile_config(endpoint: &str) -> Config {
+    Config {
+        id: "123-abc.apps.googleusercontent.com".into(),
+        secret: Zeroizing::new(String::new()),
+        auth: format!("{endpoint}/authorize"),
+        token: format!("{endpoint}/token"),
+        scope: "https://mail.google.com/ openid email profile".into(),
+    }
+}
+
+#[test]
+fn mobile_redirect_needs_our_uri_and_the_pending_state() {
+    for (provider, redirect) in [
+        (Provider::Google, "com.googleusercontent.apps.123-abc:/oauth2redirect"),
+        (Provider::Microsoft, "msauth.com.example.app://auth"),
+    ] {
+        let (url, pending) = begin_with(provider, mobile_config("https://provider.example"), redirect.into()).unwrap();
+        let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
+        assert_eq!(params["redirect_uri"], redirect);
+        assert_eq!(params["response_type"], "code");
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert_eq!(params["code_challenge"], challenge(&pending.verifier));
+        assert_eq!(params["state"], pending.state);
+        assert!(!url.contains(pending.verifier.as_str()));
+        let scheme = redirect.split(':').next().unwrap();
+        assert_eq!(pending.scheme(), scheme);
+        let state = &pending.state;
+        assert_eq!(&*pending.code(&format!("{redirect}?code=a%2Bb&state={state}")).unwrap(), "a+b");
+        assert!(matches!(pending.code(&format!("{redirect}?error=access_denied&state={state}")), Err(Error::Cancelled)));
+        // Ours, though it carries no code: it ends the sign-in with an error.
+        assert!(pending.accepts(&format!("{redirect}?state={state}")));
+        if provider == Provider::Microsoft {
+            assert!(pending.accepts(&format!("{redirect}/?code=c&state={state}")));
+        }
+        for stray in [
+            format!("{redirect}?code=c&state=wrong"),
+            format!("{redirect}?code=c"),
+            format!("{redirect}?code=c&state={state}&state={state}"),
+            format!("{redirect}?error=access_denied&state=wrong"),
+            format!("https://evil.example/oauth2redirect?code=c&state={state}"),
+            format!("other.scheme:/oauth2redirect?code=c&state={state}"),
+            format!("{redirect}/other?code=c&state={state}"),
+            format!("{scheme}://evil.example/oauth2redirect?code=c&state={state}"),
+            format!("{scheme}://user@auth?code=c&state={state}"),
+            format!("{scheme}://auth:123?code=c&state={state}"),
+            format!("{redirect}//?code=c&state={state}"),
+            "not a url".into(),
+            String::new(),
+        ] {
+            assert!(!pending.accepts(&stray), "{stray}");
+            assert!(pending.code(&stray).is_err(), "{stray}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
+    memory();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirect = "com.googleusercontent.apps.123-abc:/oauth2redirect";
+    let (url, pending) = begin_with(
+        Provider::Google,
+        mobile_config(&format!("http://{}", listener.local_addr().unwrap())),
+        redirect.into(),
+    )
+    .unwrap();
+    let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
+    let callback = format!("{redirect}?state={}&code=mobile-code", params["state"]);
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (mut socket, _, form) = request(socket).await;
+        let form: HashMap<_, _> = url::form_urlencoded::parse(form.as_bytes()).into_owned().collect();
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code"], "mobile-code");
+        assert_eq!(form["redirect_uri"], redirect);
+        assert_eq!(form["client_id"], "123-abc.apps.googleusercontent.com");
+        assert_eq!(challenge(&form["code_verifier"]), params["code_challenge"]);
+        assert!(!form.contains_key("client_secret"));
+        let body = serde_json::json!({"access_token":"mobile-access", "token_type":"Bearer", "expires_in":3600, "refresh_token":"mobile-refresh", "id_token":jwt(r#"{"email":"mobile@example.com","name":"Mobile"}"#)}).to_string();
+        respond(&mut socket, "200 OK", &body).await;
+    });
+    let signed = finish(pending, &callback).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(signed.email, "mobile@example.com");
+    assert_eq!(signed.account.auth, Auth::OAuth(Provider::Google));
+    assert_eq!(signed.scopes, "https://mail.google.com/ openid email profile");
+    assert_eq!(&*signed.account.password().unwrap(), "mobile-refresh");
+    signed.account.delete_password().unwrap();
+}

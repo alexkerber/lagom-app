@@ -1,8 +1,10 @@
+import AuthenticationServices
 import SwiftUI
 
 struct AddAccountView: View {
     let model: MailModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.webAuthenticationSession) private var browser
     @State private var email = ""
     @State private var password = ""
     @State private var passwordStep = false
@@ -22,6 +24,13 @@ struct AddAccountView: View {
         SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() }) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    // Hidden until this build has the provider's client ID.
+                    ForEach([(SignInProvider.google, "Google"), (.microsoft, "Microsoft")], id: \.1) { provider, name in
+                        if signInAvailable(provider: provider) {
+                            Button("Sign in with \(name)") { Task { await signIn(provider) } }
+                                .buttonStyle(HouseButtonStyle()).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                     FieldRow(label: "Email") {
                         TextField("you@example.com", text: $email).textContentType(.emailAddress).keyboardType(.emailAddress)
                             .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
@@ -30,9 +39,10 @@ struct AddAccountView: View {
                         FieldRow(label: "Password") {
                             SecureField("App password", text: $password).textContentType(.password).accessibilityLabel("Password")
                         }
-                        Text("Gmail and iCloud require an app-specific password. Microsoft accounts may require OAuth, which is not available in this version.")
+                        Text(signInAvailable(provider: .microsoft)
+                            ? "Gmail and iCloud require an app-specific password. For Microsoft accounts, use Sign in with Microsoft."
+                            : "Gmail and iCloud require an app-specific password. Microsoft accounts may require OAuth, which is not available in this version.")
                             .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.vertical, 12)
-                        // shortcut: Google/Microsoft OAuth on iOS needs per-platform client IDs; v1 uses passwords.
                         Toggle("Advanced", isOn: $advanced).lagomFont(.base).frame(minHeight: 44)
                         if advanced {
                             server("IMAP", host: $imapHost, port: $imapPort, username: $imapUser, tls: $imapTLS)
@@ -77,6 +87,26 @@ struct AddAccountView: View {
                 .pickerStyle(.segmented).fixedSize()
             }
         }
+    }
+
+    private func signIn(_ provider: SignInProvider) async {
+        guard let core = model.core else { return }
+        error = nil
+        do {
+            let start = try core.beginSignIn(provider: provider)
+            guard let url = URL(string: start.url) else { return }
+            // Ephemeral: no cookies shared with Safari and no system prompt. The core checks the redirect's state.
+            let redirect = try await browser.authenticate(using: url, callback: .customScheme(start.callbackScheme),
+                preferredBrowserSession: .ephemeral, additionalHeaderFields: [:])
+            connecting = true
+            defer { connecting = false }
+            _ = try await core.finishSignIn(callbackUrl: redirect.absoluteString)
+            await model.reload()
+            dismiss()
+            await model.sync()
+        } catch let stopped as ASWebAuthenticationSessionError where stopped.code == .canceledLogin {
+            // The user closed the browser sheet.
+        } catch { self.error = error.localizedDescription }
     }
 
     private func connect() async {

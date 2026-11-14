@@ -39,5 +39,15 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <!-- The browser returns a Google or Microsoft sign-in here. The core takes only the pending sign-in's redirect and state. -->
+        <activity android:name=".SignInRedirectActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="${googleScheme}" />
+                <data android:scheme="msauth.${applicationId}" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

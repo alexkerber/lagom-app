@@ -2,6 +2,9 @@ name: Lagom
 options:
   deploymentTarget:
     iOS: '18.0'
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
 settings:
   base:
     SWIFT_VERSION: '5.0'
@@ -43,6 +46,9 @@ targets:
         # The only encryption is TLS to the user's own mail and OAuth servers (rustls) and the system
         # Keychain. No own data encryption. See docs/release.md, "Export compliance", before changing.
         ITSAppUsesNonExemptEncryption: false
+        # Set in Local.xcconfig, which is not committed. Empty hides that provider's sign-in button.
+        LagomGoogleClientID: $(LAGOM_GOOGLE_IOS_CLIENT_ID)
+        LagomMicrosoftClientID: $(LAGOM_MICROSOFT_IOS_CLIENT_ID)
         BGTaskSchedulerPermittedIdentifiers: [app.lagommail.refresh]
         UIBackgroundModes: [fetch]
         # mailto links; the system sends them here only with the com.apple.developer.mail-client entitlement.

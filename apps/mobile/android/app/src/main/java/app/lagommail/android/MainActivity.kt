@@ -1,6 +1,9 @@
 package app.lagommail.android
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -28,6 +31,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.lagommail.core.LagomCore
+import app.lagommail.core.configureSignIn
 import app.lagommail.core.SendAttachment
 import app.lagommail.core.installSecretStore
 import app.lagommail.core.parseMailto
@@ -41,7 +45,12 @@ class LagomApplication : Application() {
         super.onCreate()
         MailRefreshWorker.schedule(this)
     }
-    private val credentials by lazy { installSecretStore(AndroidSecretStore(this)); true }
+    private val credentials by lazy {
+        installSecretStore(AndroidSecretStore(this))
+        // Token refresh in every sync needs the client IDs, also in a background worker.
+        configureSignIn(packageName, BuildConfig.GOOGLE_CLIENT_ID, BuildConfig.MICROSOFT_CLIENT_ID)
+        true
+    }
     val core: LagomCore by lazy {
         check(credentials)
         LagomCore.open(File(noBackupFilesDir, "mail").absolutePath)
@@ -50,6 +59,33 @@ class LagomApplication : Application() {
     fun backgroundCore(): LagomCore {
         check(credentials)
         return LagomCore.open(File(noBackupFilesDir, "mail").absolutePath)
+    }
+}
+
+/** The redirect of a browser sign-in, or null for any other link. The core then checks the exact URI and state. */
+internal fun signInRedirect(action: String?, data: String?, appId: String): String? = data?.takeIf {
+    action == Intent.ACTION_VIEW && (it.startsWith("com.googleusercontent.apps.") || it.startsWith("msauth.$appId:"))
+}
+
+/** Opens the sign-in page in a Custom Tab: the null session extra is what marks one. Other browsers open it in full. */
+internal fun openSignIn(context: Context, url: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .putExtras(Bundle().apply { putBinder("android.support.customtabs.extra.SESSION", null) }))
+    // The system's message would show the whole sign-in address.
+    } catch (_: ActivityNotFoundException) { error("No browser found to sign in with.") }
+}
+
+/** Hands the redirect to the open MainActivity and closes the browser tab above it. */
+class SignInRedirectActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // As an extra, not as data: the system logs an intent's data when it starts an activity.
+        signInRedirect(intent.action, intent.dataString, packageName)?.let {
+            startActivity(Intent(this, MainActivity::class.java).putExtra("signIn", it)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        }
+        finish()
     }
 }
 
@@ -65,6 +101,7 @@ private fun java.io.InputStream.readAtMost(limit: Int): ByteArray {
 
 class MainActivity : ComponentActivity() {
     private var notificationTarget by mutableStateOf<MailTarget?>(null)
+    private var signIn by mutableStateOf<String?>(null)
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     private fun readNotification(intent: Intent) {
@@ -81,6 +118,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         readNotification(intent)
+        signIn = intent.getStringExtra("signIn") ?: signIn
         if (intent.action in shareActions) shareIntent = intent
     }
 
@@ -117,6 +155,8 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         readNotification(intent)
+        // A recreated activity gets the same intent again; its redirect is already used.
+        if (savedInstanceState == null) signIn = intent.getStringExtra("signIn")
         // A recreated activity already opened this share.
         if (savedInstanceState == null && intent.action in shareActions) shareIntent = intent
         enableEdgeToEdge()
@@ -132,6 +172,10 @@ class MainActivity : ComponentActivity() {
             val state by lifecycle.currentStateAsState()
             LaunchedEffect(state, model.accounts.isEmpty()) {
                 if (state.isAtLeast(Lifecycle.State.RESUMED) && model.accounts.isNotEmpty()) requestNotificationPermission()
+            }
+            LaunchedEffect(signIn, model.core) {
+                val redirect = signIn
+                if (redirect != null && model.core != null) { signIn = null; model.finishSignIn(redirect) }
             }
             LaunchedEffect(notificationTarget, model.core) {
                 val target = notificationTarget

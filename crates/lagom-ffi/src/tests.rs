@@ -1107,6 +1107,30 @@ async fn conversations_count_visible_members_and_read_whole_thread_without_dupli
 }
 
 #[tokio::test]
+async fn browser_sign_in_takes_only_its_own_redirect_once() {
+    let (_dir, core) = fixture();
+    let stray = "msauth.com.example.app://auth?code=stray&state=guess";
+    // Nothing pending: a redirect from another app is refused before any network use.
+    assert!(core.finish_sign_in(stray.into()).await.is_err());
+    configure_sign_in("com.example.app".into(), String::new(), "fixture-client".into());
+    assert!(!sign_in_available(SignInProvider::Google) && sign_in_available(SignInProvider::Microsoft));
+    assert!(core.begin_sign_in(SignInProvider::Google).is_err());
+    let start = core.begin_sign_in(SignInProvider::Microsoft).unwrap();
+    assert_eq!(start.callback_scheme, "msauth.com.example.app");
+    let url = start.url;
+    let state = url.split("state=").nth(1).unwrap().split('&').next().unwrap();
+    assert!(url.contains("client_id=fixture-client") && url.contains("code_challenge_method=S256"));
+    assert!(url.contains("redirect_uri=msauth.com.example.app%3A%2F%2Fauth"));
+    // A wrong state leaves the real sign-in pending.
+    assert!(matches!(core.finish_sign_in(stray.into()).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
+    let denied = format!("msauth.com.example.app://auth?error=access_denied&state={state}");
+    assert!(matches!(core.finish_sign_in(denied.clone()).await, Err(MailError::Failed { reason }) if reason == "sign-in cancelled"));
+    // The redirect is single use.
+    assert!(matches!(core.finish_sign_in(denied).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
+    assert!(core.accounts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn unsubscribe_offer_and_a_web_page_is_never_fetched() {
     use lagom_core::unsubscribe::parse;
     let (_dir, core) = fixture();

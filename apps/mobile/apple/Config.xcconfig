@@ -1,0 +1,5 @@
+// Google and Microsoft sign-in need this build's own OAuth client IDs. Put them in Local.xcconfig
+// next to this file (git-ignored), then run xcodegen again:
+//   LAGOM_GOOGLE_IOS_CLIENT_ID = <id>.apps.googleusercontent.com
+//   LAGOM_MICROSOFT_IOS_CLIENT_ID = <Entra application (client) ID>
+#include? "Local.xcconfig"

@@ -215,11 +215,19 @@ internal class AccountForm {
             })
         }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                // Hidden until this build has the provider's client ID.
+                val context = LocalContext.current
+                val providers = remember { listOf(SignInProvider.GOOGLE to "Google", SignInProvider.MICROSOFT to "Microsoft").filter { signInAvailable(it.first) } }
+                for ((provider, name) in providers) {
+                    OutlinedButton(enabled = !connecting, modifier = Modifier.fillMaxWidth(), onClick = {
+                        model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) }
+                    }) { Text("Sign in with $name") }
+                }
                 Field("Email", email, !connecting, KeyboardType.Email) { email = it }
                 if (passwordStep) {
                     Field("Password", password, !connecting, KeyboardType.Password) { password = it }
-                    // shortcut: app passwords only, add OAuth when mobile client IDs are provisioned.
-                    Text("Gmail and iCloud need an app-specific password. Microsoft may require OAuth, which is not available in this version.", style = MaterialTheme.typography.bodySmall)
+                    Text(if (providers.any { it.first == SignInProvider.MICROSOFT }) "Gmail and iCloud need an app-specific password. For Microsoft accounts, use Sign in with Microsoft."
+                        else "Gmail and iCloud need an app-specific password. Microsoft may require OAuth, which is not available in this version.", style = MaterialTheme.typography.bodySmall)
                     Row { Checkbox(advanced, { advanced = it }, enabled = !connecting); Text("Advanced", Modifier.padding(top = 12.dp)) }
                     if (advanced) {
                         Text("IMAP", style = MaterialTheme.typography.titleMedium)

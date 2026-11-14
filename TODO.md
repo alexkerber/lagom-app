@@ -106,6 +106,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).
 - [x] recipient autocomplete on iOS and Android (2026-11-13).
 - [x] received attachments open/share on iOS and Android (2026-11-13).
+- [ ] Google and Microsoft sign-in on iOS and Android (2026-11-13): the code is in the `feat/mobile-oauth` PR. Open: Alex creates the iOS and Android OAuth clients and the Entra redirect (values in the PR), then a sign-in on a device with each provider.
 - [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
 - [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, HTML mail on Linux, a hand test of each.
 

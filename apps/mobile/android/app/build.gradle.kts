@@ -5,6 +5,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Sign-in client IDs come from a Gradle property (for example in ~/.gradle/gradle.properties) or the
+// environment, never from the repository. Empty hides that provider's sign-in button.
+fun clientId(property: String, variable: String) =
+    providers.gradleProperty(property).orElse(providers.environmentVariable(variable)).getOrElse("").trim()
+val googleClientId = clientId("lagom.googleClientId", "LAGOM_GOOGLE_ANDROID_CLIENT_ID")
+val microsoftClientId = clientId("lagom.microsoftClientId", "LAGOM_MICROSOFT_ANDROID_CLIENT_ID")
+
 /** Release inputs come from the environment (CI) or ~/.gradle/gradle.properties (local), never the repository. */
 fun setting(name: String): String? =
     (providers.environmentVariable(name).orNull ?: providers.gradleProperty(name).orNull)?.takeIf { it.isNotBlank() }
@@ -42,6 +49,12 @@ android {
         versionCode = lagomVersion?.let(::versionCodeOf) ?: 1
         versionName = lagomVersion ?: "0.0.0-dev"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        buildConfigField("String", "GOOGLE_CLIENT_ID", "\"$googleClientId\"")
+        buildConfigField("String", "MICROSOFT_CLIENT_ID", "\"$microsoftClientId\"")
+        // Google redirects to the reversed client ID. Without one the filter repeats the Microsoft scheme.
+        val suffix = ".apps.googleusercontent.com"
+        manifestPlaceholders["googleScheme"] =
+            if (googleClientId.endsWith(suffix)) "com.googleusercontent.apps.${googleClientId.removeSuffix(suffix)}" else "msauth.$applicationId"
     }
     signingConfigs {
         if (uploadKeystore != null) create("upload") {
@@ -60,7 +73,7 @@ android {
             signingConfig = signingConfigs.findByName("upload")
         }
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     sourceSets["main"].kotlin.srcDir("build/generated/uniffi")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

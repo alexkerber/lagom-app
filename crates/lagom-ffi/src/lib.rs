@@ -49,6 +49,21 @@ impl From<MailServer> for ServerConfig {
     }
 }
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum SignInProvider { Google, Microsoft }
+impl From<SignInProvider> for lagom_core::oauth::Provider {
+    fn from(p: SignInProvider) -> Self { match p { SignInProvider::Google => Self::Google, SignInProvider::Microsoft => Self::Microsoft } }
+}
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SignInStart { pub url: String, pub callback_scheme: String }
+/// Call once at app start, before a core syncs: token refresh needs the client IDs too.
+/// `app_id` is the bundle or application ID; an empty client ID turns that provider off.
+#[uniffi::export]
+pub fn configure_sign_in(app_id: String, google_client_id: String, microsoft_client_id: String) {
+    lagom_core::oauth::configure_mobile(app_id, google_client_id, microsoft_client_id);
+}
+#[uniffi::export]
+pub fn sign_in_available(provider: SignInProvider) -> bool { lagom_core::oauth::mobile_available(provider.into()) }
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum Mailbox { Inbox, Later, Done, Sent, Trash }
 impl Mailbox {
     fn role(self) -> Option<FolderRole> { match self {
@@ -131,7 +146,9 @@ pub struct ContactSuggestion { pub name: String, pub address: String, pub recipi
 
 #[derive(uniffi::Object)]
 pub struct LagomCore { stores: Arc<Stores>, background_cancel: Arc<std::sync::atomic::AtomicBool> }
-struct Stores { local: Mutex<Store>, network: Mutex<Store>, contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>> }
+struct Stores { local: Mutex<Store>, network: Mutex<Store>, contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>>,
+    // shortcut: one browser sign-in at a time, lost if the app is killed in the browser; the user starts again.
+    sign_in: Mutex<Option<lagom_core::oauth::Pending>> }
 
 impl LagomCore {
     async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
@@ -233,7 +250,7 @@ impl LagomCore {
         let store = Store::open(dir.join("lagom.sqlite3"))?;
         store.recover_outbox()?;
         let local = Store::open(dir.join("lagom.sqlite3"))?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { local: Mutex::new(local), network: Mutex::new(store), contacts: Mutex::new(HashMap::new()) }), background_cancel: Arc::default() });
+        let core = Arc::new(Self { stores: Arc::new(Stores { local: Mutex::new(local), network: Mutex::new(store), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
@@ -273,6 +290,40 @@ impl LagomCore {
     pub async fn add_account_manual(&self, email: String, password: String, imap: MailServer, smtp: MailServer) -> Result<MailAccount> {
         let password = Zeroizing::new(password);
         self.run_network(move |s| network(add(s, Account::new(email, imap.into(), smtp.into())?, password))).await
+    }
+    /// Starts a system-browser sign-in. A new start replaces an unfinished one.
+    pub fn begin_sign_in(&self, provider: SignInProvider) -> Result<SignInStart> {
+        let (url, pending) = lagom_core::oauth::begin(provider.into())?;
+        let start = SignInStart { url, callback_scheme: pending.scheme() };
+        *self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+        Ok(start)
+    }
+    /// `callback_url` is the redirect the browser handed back. Only the pending sign-in's own redirect
+    /// (its URI and state) is taken; anything else is refused and leaves the sign-in pending.
+    // shortcut: adds new accounts only. When a refresh token expires the user removes the account and
+    // signs in again; use core's `reauthenticate` checks here once that happens in practice.
+    pub async fn finish_sign_in(&self, callback_url: String) -> Result<MailAccount> {
+        let callback_url = Zeroizing::new(callback_url);
+        let pending = {
+            let mut slot = self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match slot.take() {
+                Some(pending) if pending.accepts(&callback_url) => pending,
+                other => { *slot = other; return Err(failure("Sign-in was interrupted. Try again.")); }
+            }
+        };
+        self.run_network(move |s| network(async {
+            let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
+            let account = signed.account;
+            let saved = s.accounts().and_then(|all| {
+                if all.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
+                    return Err(lagom_core::Error::Invalid("This account is already in lagom."));
+                }
+                s.save_authorized_account(&account, &signed.scopes)
+            });
+            // The sign-in stored its refresh token under the new account's id; an unsaved account must not keep it.
+            if let Err(error) = saved { let _ = account.delete_password(); return Err(error); }
+            Ok(account.into())
+        })).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
         let stores = self.stores.clone();
