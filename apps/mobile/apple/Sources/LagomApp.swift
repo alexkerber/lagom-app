@@ -272,6 +272,8 @@ struct MailView: View {
     }
 
     private var inbox: some View {
+        // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes.
+        let unreadOnly = unreadOnly && !(model.mailbox == .trash && model.folder == nil)
         let rows = (unreadOnly ? model.rows.filter(\.unread) : model.rows)
             .filter { !leaving.contains($0.id) && !$0.messageIds.contains(where: leaving.contains) }
         let ids = rows.map(\.id)

@@ -953,6 +953,9 @@ class MailModelTest {
         assertEquals(receipts, model.folder); assertEquals("fixture", model.accountId)
         assertEquals(listOf(7L), model.rows.map { it.id })
         assertTrue("the open folder is no target", model.moveTargets("fixture").isEmpty())
+        model.changeSearch("Mail")
+        assertEquals("search covers the account, so the open folder is a target", listOf(receipts), model.moveTargets("fixture"))
+        model.changeSearch("")
         model.changeScope("fixture", Mailbox.INBOX)
         assertNull(model.folder); assertEquals(listOf(1L, 2L), model.rows.map { it.id })
         // A folder the server dropped closes back to the mailbox under it.
@@ -969,6 +972,22 @@ class MailModelTest {
         assertEquals(listOf(3L to true, 1L to true), core.readCalls)
         model.setRead(model.rows.single())
         assertEquals("a read row marks unread", 3L to false, core.readCalls[2])
+        // Busy until the list shows the flag, so no list action can replace the row between members.
+        core.pageGate = CompletableDeferred()
+        val reading = async { model.setRead(3, true) }
+        runCurrent()
+        assertTrue(model.working)
+        core.pageGate!!.complete(Unit); reading.await()
+        assertFalse(model.working)
+    }
+
+    @Test fun trashListsReadMailEvenWithTheUnreadFilterOn() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2, unread = true)) }
+        val model = model(core); model.start()
+        model.unreadOnly = true
+        assertEquals(listOf(2L), model.visibleRows.map { it.id })
+        model.changeScope(null, Mailbox.TRASH)
+        assertEquals("Empty Trash deletes what Trash shows", listOf(1L, 2L), model.visibleRows.map { it.id })
     }
 
     @Test fun emptyTrashRunsOnlyInTrashAndDropsUndo() = runTest(dispatcher) {

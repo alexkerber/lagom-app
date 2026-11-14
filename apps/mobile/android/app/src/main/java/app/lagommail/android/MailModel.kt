@@ -130,7 +130,8 @@ internal class MailModel(
     var emptyingTrash by mutableStateOf(false); private set
     var searchText by mutableStateOf(""); private set
     var unreadOnly by mutableStateOf(false)
-    val visibleRows: List<MailRow> get() = if (unreadOnly) rows.filter { it.unread } else rows
+    // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes.
+    val visibleRows: List<MailRow> get() = if (unreadOnly && !(mailbox == Mailbox.TRASH && folder == null)) rows.filter { it.unread } else rows
     var selectedId by mutableStateOf<Long?>(null); private set
     var message by mutableStateOf<MailMessage?>(null); private set
     var messages by mutableStateOf<List<MailMessage>>(emptyList()); private set
@@ -356,7 +357,8 @@ internal class MailModel(
         reload()
     }
     /** The folders a message of `account` can move to: its account's, without the open one. */
-    fun moveTargets(account: String) = folders.filter { it.account == account && it.id != folder?.id }
+    /** Search covers the whole account, so there the open folder is a target too. */
+    fun moveTargets(account: String) = folders.filter { it.account == account && (it.id != folder?.id || searchText.isNotEmpty()) }
     suspend fun changeSearch(text: String) {
         if (searchText == text) return
         revision++
@@ -427,7 +429,8 @@ internal class MailModel(
                     if (message?.row?.id == id) message = updated
                 }
             }
-        } finally { readingIds -= id; reload() }
+        // Busy until the list shows the flag, so a list action cannot replace the row between members.
+        } finally { try { reload() } finally { readingIds -= id } }
     }
     suspend fun sync() {
         val core = core ?: return

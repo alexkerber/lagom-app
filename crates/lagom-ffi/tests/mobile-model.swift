@@ -434,6 +434,9 @@ struct ModelChecks {
         precondition(model.accountID == "fixture" && model.folder == receipts)
         await model.changeScope()
         precondition(model.rows.map(\.id) == [70] && model.moveTargets(account: "fixture").isEmpty, "the open folder is no target")
+        model.searchText = "receipt"
+        precondition(model.moveTargets(account: "fixture") == [receipts], "search covers the account, so the open folder is a target")
+        model.searchText = ""
         model.mailbox = .inbox
         precondition(model.folder == nil, "choosing a mailbox leaves the folder")
         model.open(receipts)

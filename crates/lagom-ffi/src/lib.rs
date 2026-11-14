@@ -704,7 +704,15 @@ impl LagomCore {
                         Some(FolderRole::Archive)
                     }
                     // move_message refuses a folder of another account.
-                    MoveTarget::Folder(folder) => { session.move_message(s, id, folder).await?; None }
+                    MoveTarget::Folder(folder) => {
+                        session.move_message(s, id, folder).await?;
+                        // Moved out of Later into its own folder: it shows there again. A real move replaced the row.
+                        match s.snooze(id, None) {
+                            Ok(()) | Err(lagom_core::Error::NotFound) => {},
+                            Err(error) => return Err(error),
+                        }
+                        None
+                    }
                 };
                 let _ = session.logout().await;
                 // The folder that now holds it: an account can have more than one folder with this role.

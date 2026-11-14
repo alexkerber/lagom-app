@@ -597,8 +597,9 @@ final class MailModel {
     }
 
     /// The folders a message of `account` can move to: its account's, without the open one.
+    /// Search covers the whole account, so there the open folder is a target too.
     func moveTargets(account: String) -> [MailFolder] {
-        folders.filter { $0.account == account && $0.id != folder?.id }
+        folders.filter { $0.account == account && ($0.id != folder?.id || !searchText.isEmpty) }
     }
 
     /// Only after the person confirmed: the scope's Trash is deleted for good on the server.

@@ -1404,3 +1404,40 @@ async fn empty_trash_deletes_only_the_chosen_accounts_trash() {
         assert_eq!(core.mailbox(Some(other.id), Mailbox::Trash, 20, 0).await.unwrap().len(), 1);
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn moving_later_mail_to_its_own_folder_ends_the_snooze_and_undo_restores_it() {
+    let (_dir, core) = fixture();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, id, inbox) = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "later@example.test", listener.local_addr().unwrap().port());
+            let id = mail(&mut s, &a, 1, 1);
+            let inbox = s.message_summary(id).unwrap().folder;
+            (a, id, inbox)
+        };
+        // The server folder is unchanged, so only a login and a logout reach it.
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            for (command, data) in [("LOGIN \"later@example.test\" \"fixture\"", ""), ("CAPABILITY", "* CAPABILITY IMAP4rev1 MOVE\r\n"), ("LOGOUT", "* BYE bye\r\n")] {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, actual) = line.trim_end().split_once(' ').unwrap();
+                assert_eq!(actual, command);
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        let until = now() + 3600;
+        core.later(vec![id], until).await.unwrap();
+        assert!(core.mailbox(Some(a.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().is_empty());
+        let changes = core.move_to_folder(vec![id], inbox).await.unwrap();
+        server.await.unwrap();
+        assert_eq!((changes[0].from_folder, changes[0].to_folder, changes[0].snoozed_until), (inbox, inbox, Some(until)));
+        assert_eq!(core.mailbox(Some(a.id.clone()), Mailbox::Inbox, 20, 0).await.unwrap().len(), 1, "back in its folder, out of Later");
+        core.undo(changes).await.unwrap();
+        assert_eq!(core.mailbox(Some(a.id), Mailbox::Later, 20, 0).await.unwrap().len(), 1, "Undo snoozes it again");
+    }).await.unwrap();
+}
