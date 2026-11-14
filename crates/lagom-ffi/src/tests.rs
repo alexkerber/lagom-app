@@ -1209,13 +1209,13 @@ async fn user_actions_do_not_wait_for_a_slow_folder_sync() {
         tokio::time::timeout(std::time::Duration::from_secs(10), core.mark_read(id, true)).await
             .expect("the read flag waited for the sync").unwrap();
         assert!(!core.message(id).await.unwrap().row.unread);
-        // Stands in for a move: it waits for INBOX only and runs before Archive.
-        let step = tokio::spawn({ let core = core.clone(); let slow = slow.clone();
-            async move { core.run_network(move |_| { slow.moved.store(true, SeqCst); Ok(()) }).await } });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(!step.is_finished(), "a folder-state step ran inside a folder sync");
+        // Stands in for a move: it waits for INBOX only and runs before Archive. The first poll queues it.
+        let mut step = std::pin::pin!(core.stores.network.lock());
+        assert!(tokio::time::timeout(std::time::Duration::ZERO, step.as_mut()).await.is_err(), "a folder-state step ran inside a folder sync");
         slow.release.notify_one();
-        step.await.unwrap().unwrap();
+        let guard = step.await;
+        slow.moved.store(true, SeqCst);
+        drop(guard);
         sync.await.unwrap().unwrap();
     }).await.unwrap();
 }
@@ -1233,6 +1233,7 @@ async fn two_syncs_of_one_account_never_overlap() {
         let first = tokio::spawn({ let core = core.clone(); let id = a.id.clone(); async move { core.sync(id).await } });
         slow.stalled.notified().await;
         let second = tokio::spawn({ let core = core.clone(); async move { core.sync_all().await } });
+        // A slow scheduler can only make this pass without testing anything, never fail falsely.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(slow.open.load(SeqCst), 1, "the second sync connected during the first");
         slow.release.notify_one();
@@ -1242,4 +1243,41 @@ async fn two_syncs_of_one_account_never_overlap() {
         assert_eq!(slow.searches.load(SeqCst), 8);
         assert_eq!(slow.most_open.load(SeqCst), 1);
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_read_flag_leaves_a_changed_mailbox_to_the_sync() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let id = {
+        let mut s = core.stores.local.lock().unwrap();
+        let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+        mail(&mut s, &a, 1, 1)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 { break; }
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                // The store knows UIDVALIDITY 7: the mailbox was recreated.
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 8] valid\r\n" }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+        assert!(core.mark_read(id, true).await.is_err());
+        server.await.unwrap();
+    }).await.unwrap();
+    // A running sync owns the folder checkpoint: the action reset nothing.
+    let s = core.stores.local.lock().unwrap();
+    let message = s.message(id).unwrap().summary;
+    assert_eq!(s.folder(message.folder).unwrap().uidvalidity, Some(7));
 }

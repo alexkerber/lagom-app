@@ -549,7 +549,23 @@ impl Store {
         Ok(id)
     }
     pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
+        self.save_synced(message, attachments, false)
+    }
+    /// A body fetched again for an existing row: keeps the row's flags; NotFound when the row is gone.
+    pub(crate) fn refetched_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
+        self.save_synced(message, attachments, true)
+    }
+    fn save_synced(&self, message: &Message, attachments: &[crate::attachment::Attachment], existing: bool) -> Result<i64> {
         let tx = self.db.unchecked_transaction()?;
+        let kept: Message;
+        let message = if existing {
+            // Read in the write's transaction: a delete or flag change committed meanwhile fails the write.
+            let m = &message.summary;
+            let (seen, flagged) = self.db.query_row("SELECT seen,flagged FROM messages WHERE folder=?1 AND uid=?2",
+                params![m.folder, m.uid], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(Error::NotFound)?;
+            kept = Message { summary: MessageSummary { seen, flagged, ..m.clone() }, ..message.clone() };
+            &kept
+        } else { message };
         let id = self.insert_message(message)?;
         // Unchanged parts keep their cached downloads when a body is fetched again.
         let old = self.attachments(id)?;
@@ -763,6 +779,22 @@ impl Store {
 #[cfg(test)]
 mod mail_tests {
     use super::*;
+    #[test]
+    fn a_refetched_body_keeps_newer_flags_and_never_brings_a_moved_row_back() {
+        let (_temp, store, account, folder) = setup();
+        let id = store.save_synced_message(&mail(&account, folder, 1), &[]).unwrap();
+        // A read flag confirmed while the body was on its way.
+        store.set_flags(folder, 1, true, true).unwrap();
+        let mut body = mail(&account, folder, 1);
+        body.body_text = "full body".into();
+        assert_eq!(store.refetched_message(&body, &[]).unwrap(), id);
+        let m = store.message(id).unwrap();
+        assert_eq!((m.summary.seen, m.summary.flagged, m.body_text.as_str()), (true, true, "full body"));
+        // A move deleted the row before the body arrived.
+        store.delete_message(id).unwrap();
+        assert!(matches!(store.refetched_message(&body, &[]), Err(Error::NotFound)));
+        assert!(store.known_uids(folder).unwrap().is_empty());
+    }
     #[test]
     fn cached_forward_attachments_survive_concurrent_deletion() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};

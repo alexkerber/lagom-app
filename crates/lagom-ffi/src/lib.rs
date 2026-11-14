@@ -151,8 +151,10 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     // One step that writes folder state (a folder sync, a move, a send). Two syncs of one folder race on its
     // checkpoint and can lose a message. Tokio's lock is FIFO: a waiting move runs between a sync's folders.
     network: tokio::sync::Mutex<Store>,
-    // A whole sync, so two syncs never overlap. Order: sync, then network, then local.
+    // A whole sync, so two syncs never overlap. Order: sync, removal, network, local.
     sync: Mutex<()>,
+    // One-message actions share it; removal takes it alone, so no token refresh writes a removed account's secret back.
+    removal: std::sync::RwLock<()>,
     contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>>,
     // shortcut: one browser sign-in at a time, lost if the app is killed in the browser; the user starts again.
     sign_in: Mutex<Option<lagom_core::oauth::Pending>> }
@@ -199,7 +201,10 @@ impl LagomCore {
             match lane {
                 Lane::Local => action(&mut stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner)),
                 Lane::Network => action(&mut stores.network.blocking_lock()),
-                Lane::Own => Store::open(&stores.path).and_then(|mut store| action(&mut store)),
+                Lane::Own => {
+                    let _removal = stores.removal.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    Store::open(&stores.path).and_then(|mut store| action(&mut store))
+                }
             }.map_err(MailError::from)
         }).await.map_err(|_| failure("something went wrong; try again"))?
     }
@@ -281,7 +286,7 @@ impl LagomCore {
         let store = Store::open(&path)?;
         store.recover_outbox()?;
         let local = Store::open(&path)?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
+        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
@@ -357,8 +362,9 @@ impl LagomCore {
         })).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
-        // Under the sync lock: a running sync finishes its account before the rows go.
+        // A running sync finishes its account, and running one-message actions their token refresh, before the rows go.
         self.run_sync(move |stores| {
+            let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = &mut *stores.network.blocking_lock();
             account(s, &id)?.delete_password()?;
             // Serialize with refresh, and evict even if the caller cancels this future.
@@ -394,8 +400,9 @@ impl LagomCore {
             let mut rows = Vec::new();
             let accounts = stores.network.blocking_lock().accounts()?;
             for a in accounts {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
                 let s = &mut *stores.network.blocking_lock();
+                // After the lock: a cancel may arrive while a move holds it.
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
                 // No Inbox yet means no first sync: new_mail would stay silent anyway.
                 let Some(before) = s.folders(&a.id, now())?.into_iter().find(|f| f.role == FolderRole::Inbox) else { continue };
                 let synced = network(async {
