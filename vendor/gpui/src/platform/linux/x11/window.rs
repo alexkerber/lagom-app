@@ -796,8 +796,12 @@ impl X11Window {
             x_window,
         };
 
+        // lagom: the first read is best-effort. Under Xvfb without a window manager it failed now
+        // and then and the window never opened. PropertyNotify reads it again on every change.
         let state = ptr.state.borrow_mut();
-        ptr.set_wm_properties(state)?;
+        if let Err(error) = ptr.set_wm_properties(state) {
+            log::warn!("{error:#}");
+        }
 
         Ok(Self(ptr))
     }
