@@ -1517,26 +1517,46 @@ async fn a_read_flag_from_before_a_sync_never_overrides_what_that_sync_fetched()
 }
 
 #[tokio::test]
-async fn done_waits_for_a_read_flag_already_on_its_way() {
+async fn done_and_move_to_folder_wait_for_a_read_flag_already_on_its_way() {
+    for to_folder in [false, true] {
+        let (_dir, core) = fixture();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+        let archive = core.stores.local.lock().unwrap().save_folder(&a.id, "Archive", None, FolderRole::Archive).unwrap();
+        let server = Arc::new(OneMessage { stall_on: "UID STORE", ..Default::default() });
+        one_message_server(listener, server.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            // Open an unread message, then tap Done (or Move to) at once.
+            let read = tokio::spawn({ let core = core.clone(); async move { core.mark_read(id, true).await } });
+            server.stalled.notified().await;
+            let moved = tokio::spawn({ let core = core.clone(); async move {
+                if to_folder { core.move_to_folder(vec![id], archive).await } else { core.done(vec![id]).await }
+            } });
+            // Without the wait, the move runs now. A slow scheduler can only make this pass without testing anything.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            server.release.notify_one();
+            read.await.unwrap().unwrap();
+            moved.await.unwrap().unwrap();
+        }).await.unwrap();
+        assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the moved copy must be read (to_folder {to_folder})");
+        let archived = core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap();
+        assert!(!archived[0].unread);
+    }
+}
+
+#[tokio::test]
+async fn done_carries_a_read_flag_asked_for_but_not_yet_run() {
     let (_dir, core) = fixture();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let (a, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
-    let server = Arc::new(OneMessage { stall_on: "UID STORE", ..Default::default() });
+    let server = Arc::new(OneMessage::default());
     one_message_server(listener, server.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        // Open an unread message, then tap Done at once.
-        let read = tokio::spawn({ let core = core.clone(); async move { core.mark_read(id, true).await } });
-        server.stalled.notified().await;
-        let done = tokio::spawn({ let core = core.clone(); async move { core.done(vec![id]).await } });
-        // Without the wait, the move runs now. A slow scheduler can only make this pass without testing anything.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        server.release.notify_one();
-        read.await.unwrap().unwrap();
-        done.await.unwrap().unwrap();
-    }).await.unwrap();
-    assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the archived copy must be read");
-    let archived = core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap();
-    assert!(!archived[0].unread);
+    // mark_read was called and is still on its way to its lock.
+    core.stores.pending_reads.lock().unwrap().insert(id, (true, 0));
+    tokio::time::timeout(std::time::Duration::from_secs(20), core.done(vec![id])).await.unwrap().unwrap();
+    assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the move stores the read flag first");
+    assert!(core.stores.pending_reads.lock().unwrap().is_empty(), "the late mark_read then does nothing");
+    assert!(!core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap()[0].unread);
 }
 
 #[tokio::test]
