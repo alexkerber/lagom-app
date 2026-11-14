@@ -107,6 +107,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).
+- [ ] Mobile network work without one global lock (found in #118; PR `ffi/no-global-lock`): read flags, inline loads and attachment fetches run on their own IMAP session and WAL connection; moves and sends wait for one folder of a sync, not the whole sync; two syncs never overlap. Rust fixture tests cover it; device timing not measured.
 - [x] recipient autocomplete on iOS and Android (2026-11-13).
 - [x] received attachments open/share on iOS and Android (2026-11-13).
 - [ ] Google and Microsoft sign-in on iOS and Android (2026-11-13): the code is in the `feat/mobile-oauth` PR. Open: Alex creates the iOS and Android OAuth clients and the Entra redirect (values in the PR), then a sign-in on a device with each provider.
