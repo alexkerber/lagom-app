@@ -44,9 +44,9 @@ Values: **yes**, **partial** (the note says what is missing) or **no**.
 
 | Feature    | Desktop                     | iOS                                                           | Android |
 | ---------- | --------------------------- | ------------------------------------------------------------- | ------- |
-| Today page | yes, `main_window/home.rs`  | yes, `PlannerViews.swift:10`                                  | no      |
-| Calendar   | yes, `main_window/week.rs`  | partial: needs a Google account, `PlannerViews.swift:368,404` | no      |
-| Todo lists | yes, `main_window/tasks.rs` | yes, `PlannerViews.swift:231,312`                             | no      |
+| Today page | yes, `main_window/home.rs`  | yes, `PlannerViews.swift:10`                                  | yes (android/planner), `PlannerScreen.kt:118`; page bar `MainActivity.kt:214` |
+| Calendar   | yes, `main_window/week.rs`  | partial: needs a Google account, `PlannerViews.swift:368,404` | partial (android/planner): the phone day list, `PlannerScreen.kt:378`; no tablet week grid; same Google empty state |
+| Todo lists | yes, `main_window/tasks.rs` | yes, `PlannerViews.swift:231,312`                             | yes (android/planner), `PlannerScreen.kt:236` |
 
 ## Gaps, ranked by daily impact
 
@@ -54,7 +54,8 @@ Values: **yes**, **partial** (the note says what is missing) or **no**.
 2. **Signatures.** Mobile had no editor, and new mail started empty. Closed in this PR.
 3. **Folders and Move to folder.** Mobile showed only the fixed mailboxes. Closed in round 2: FFI folder
    list, folder mail and a move with Undo, a picker on both platforms.
-4. **Android Today, Calendar and Todo.** iOS has them; Android has none. Large.
+4. **Android Today, Calendar and Todo.** Closed on branch `android/planner`: the page bar, Today, Todo and the phone
+   Calendar list. The tablet week grid (iPad has one) is the next step.
 5. **Calendar without Google on iOS.** Waits for the OAuth clients (Alex, see TODO).
 6. **Mark read or unread from the Android list.** Closed in round 2: a long press opens the same choices as the iOS context menu.
 7. **Empty Trash on mobile.** Closed in round 2, with desktop's confirm words.
@@ -80,3 +81,12 @@ Values: **yes**, **partial** (the note says what is missing) or **no**.
 - Empty Trash needs the server's UIDPLUS, as on desktop. Without it the app shows the core's error.
 - In "All accounts", Empty Trash empties every account's Trash. One account's failure does not stop the others.
 - Nothing here ran on a device or against a real server. The Rust tests use a loopback IMAP fixture.
+
+## Known limits of the Android planner (branch `android/planner`)
+
+- Calendar shows the phone day list on every screen size. The iPad week grid has no Android version yet.
+- The mobile core never fetches a calendar, on iOS or Android. Calendar stays empty outside demo data.
+  Android says "Google Calendar sync is coming to Android" where iOS says "Google sign-in is coming to iPhone and iPad".
+- Android shows no account colour on events, because the Android mail list has no account colours.
+- Todo deletes a task with a swipe to the start or the TalkBack "Delete" action, as iOS. There is no Undo, as on iOS.
+- Nothing here ran on a device or an emulator. JVM tests cover `PlannerModel`, `DateWords` and `openInbox`.

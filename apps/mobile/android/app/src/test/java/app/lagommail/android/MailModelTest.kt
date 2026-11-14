@@ -1015,7 +1015,7 @@ class MailModelTest {
     }
 }
 
-private class FakeCore : LagomCoreInterface {
+internal class FakeCore : LagomCoreInterface {
     override suspend fun refreshContacts(accountId: String) = Unit
     override fun suggestContacts(accountId: String, query: String) = emptyList<ContactSuggestion>()
     var attachmentGate: CompletableDeferred<Unit>? = null
@@ -1053,17 +1053,35 @@ private class FakeCore : LagomCoreInterface {
         check(!rejectSearch) { "Fixture search refused" }
         return snapshot
     }
-    // Planner screens are iOS-only so far; the mail model never calls these.
-    override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo = error("unused")
-    override suspend fun addTodoList(name: String): TodoList = error("unused")
-    override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> = emptyList()
-    override suspend fun calendarConnected(): Boolean = false
-    override suspend fun deleteTodo(id: Long) {}
+    // An in-memory planner for PlannerModelTest; core's own rules are tested in Rust.
+    val todoLists = mutableListOf(TodoList(1, "Tasks", true))
+    val tasks = mutableListOf<Todo>()
+    val addedTodos = mutableListOf<Triple<Long, String, String?>>()
+    val agendaCalls = mutableListOf<Pair<String, UInt>>()
+    var events = emptyList<AgendaItem>()
+    var connected = false
+    var rejectPlanner = false
+    override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo {
+        check(!rejectPlanner) { "Fixture task refused" }
+        addedTodos += Triple(list, title, dueDate)
+        return Todo((tasks.maxOfOrNull { it.id } ?: 0) + 1, list, title, dueDate, false, false).also { tasks += it }
+    }
+    override suspend fun addTodoList(name: String): TodoList =
+        TodoList((todoLists.maxOf { it.id }) + 1, name, false).also { todoLists += it }
+    override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> { agendaCalls += startDay to days; return events }
+    override suspend fun calendarConnected(): Boolean = connected
+    override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
     override suspend fun mailCounts(): List<MailCounts> = emptyList()
-    override suspend fun setTodoDone(id: Long, done: Boolean) {}
-    override suspend fun today(unreadLimit: UInt): TodaySummary = error("unused")
-    override suspend fun todoLists(): List<TodoList> = emptyList()
-    override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> = emptyList()
+    override suspend fun setTodoDone(id: Long, done: Boolean) {
+        check(!rejectPlanner) { "Fixture task refused" }
+        tasks.replaceAll { if (it.id == id) it.copy(done = done) else it }
+    }
+    override suspend fun today(unreadLimit: UInt): TodaySummary = TodaySummary("2026-11-14", events, tasks.filter { !it.done },
+        mail.count { it.unread }.toUInt(), mail.filter { it.unread }.take(unreadLimit.toInt()))
+    override suspend fun todoLists(): List<TodoList> = todoLists.toList()
+    // Open first, as core orders them.
+    override suspend fun todos(list: Long, includeDone: Boolean): List<Todo> =
+        tasks.filter { it.list == list && (includeDone || !it.done) }.sortedBy { it.done }
 
     override fun laterChoices() = listOf(LaterChoice("Later: this evening 18:00", 18_000),
         LaterChoice("Later: tomorrow 08:00", 86_400), LaterChoice("Later: next week, Monday 08:00", 604_800))

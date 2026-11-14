@@ -22,7 +22,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.material3.windowsizeclass.*
 import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
@@ -167,7 +172,8 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.IO) { (application as LagomApplication).core }
                 }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { SendWorker.schedule(applicationContext) }) as T
             })
-            LifecycleEventEffect(Lifecycle.Event.ON_START) { model.perform { model.setForeground(true) } }
+            val planner: PlannerModel = viewModel()
+            LifecycleEventEffect(Lifecycle.Event.ON_START) { model.perform { model.setForeground(true) }; planner.perform { planner.reload() } }
             LifecycleEventEffect(Lifecycle.Event.ON_STOP) { model.perform { model.setForeground(false) } }
             val state by lifecycle.currentStateAsState()
             LaunchedEffect(state, model.accounts.isEmpty()) {
@@ -198,9 +204,61 @@ class MainActivity : ComponentActivity() {
             }
             val size = calculateWindowSizeClass(this)
             LagomTheme {
-                MailScreen(model, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact)
+                LagomHome(model, planner, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact)
             }
         }
+    }
+}
+
+/** Today, Mail, Calendar and Todo with the page bar, as iOS on a phone. The last page comes back at the next start. */
+@Composable internal fun LagomHome(model: MailModel, planner: PlannerModel, twoPane: Boolean) {
+    val settings = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    var section by remember { mutableStateOf(settings.getString("section", null)?.let { name -> AppSection.entries.find { it.name == name } } ?: AppSection.MAIL) }
+    fun show(page: AppSection) { section = page; settings.edit().putString("section", page.name).apply() }
+    // Compose, Add account and an opened message (a notification, a share) live on the Mail page.
+    val mailOpen = model.draft != null || model.accountForm != null
+    LaunchedEffect(mailOpen, model.selectedId) { if (mailOpen || model.selectedId != null) show(AppSection.MAIL) }
+    // Local tasks and events load as soon as the store opens, not after the first sync.
+    LaunchedEffect(model.core) { model.core?.let { planner.core = it; planner.reload() } }
+    // Unread counts and Today's mail follow every mail reload and the end of a sync.
+    LaunchedEffect(model.rows, model.syncing) { if (!model.syncing) planner.reloadMail() }
+    LaunchedEffect(section) {
+        if (section == AppSection.CALENDAR) planner.reloadAgenda()
+        if (section == AppSection.TODAY) planner.reloadMail()
+    }
+    // A message reads full height on a phone; its back returns to the list and the bar.
+    val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
+    Scaffold(bottomBar = {
+        if (bar) NavigationBar {
+            AppSection.entries.forEach { page ->
+                val unread = if (page == AppSection.MAIL) planner.unreadCount else 0
+                NavigationBarItem(selected = page == section, onClick = { show(page) }, label = { Text(page.title) }, icon = {
+                    BadgedBox(badge = { if (unread > 0) Badge { Text("$unread", Modifier.semantics { contentDescription = "$unread unread" }) } }) {
+                        Icon(SectionIcons.getValue(page), contentDescription = null)
+                    }
+                })
+            }
+        }
+    }) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+            when (section) {
+                AppSection.TODAY -> TodayScreen(planner, model) { id ->
+                    show(AppSection.MAIL)
+                    model.perform { model.openInbox(id) }
+                }
+                AppSection.MAIL -> MailScreen(model, twoPane)
+                AppSection.CALENDAR -> CalendarScreen(planner)
+                AppSection.TODO -> TodoScreen(planner)
+            }
+        }
+    }
+    model.error?.let { error ->
+        AlertDialog(onDismissRequest = { model.error = null }, title = { Text("Mail") }, text = { Text(error) },
+            confirmButton = { TextButton(onClick = { model.error = null }) { Text("OK") } })
+    }
+    planner.error?.takeIf { model.error == null }?.let { error ->
+        AlertDialog(onDismissRequest = { planner.error = null }, title = { Text("lagom") }, text = { Text(error) },
+            confirmButton = { TextButton(onClick = { planner.error = null }) { Text("OK") } })
     }
 }
 
