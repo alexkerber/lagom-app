@@ -408,8 +408,13 @@ extension MailModelTests {
         for id in conversationIDs.isEmpty ? [messageId] : conversationIDs { result.append(try await message(id: id)) }
         return result
     }
+    /// Text and HTML per message; the default is HTML with an inline image. `fetched` is what loadInline stores.
+    var bodies: [Int64: (String, String?)] = [:]
+    var fetched: [Int64: (String, String?)] = [:]
+    var inlineCalls: [Int64] = []
     override func message(id: Int64) async throws -> MailMessage {
-        MailMessage(row: mail.first { $0.id == id }!, textBody: "body", htmlBody: "<img src='cid:logo'>", attachments: [])
+        let body = bodies[id] ?? ("body", "<img src='cid:logo'>")
+        return MailMessage(row: mail.first { $0.id == id }!, textBody: body.0, htmlBody: body.1, attachments: [])
     }
     override func markRead(id: Int64, read: Bool) async throws {
         flags.append((id, read))
@@ -423,8 +428,10 @@ extension MailModelTests {
         unsubscribed.append(messageId)
     }
     override func loadInline(id: Int64) async throws {
+        inlineCalls.append(id)
         if failInline { throw MailError.Failed(reason: "inline unavailable") }
         if suspendInline { try await withCheckedThrowingContinuation { inlineContinuations[id] = $0 } }
+        if let body = fetched.removeValue(forKey: id) { bodies[id] = body }
     }
 }
 
@@ -565,6 +572,27 @@ extension MailModelTests {
         XCTAssertEqual(model.inlineRevision, 0)
         XCTAssertTrue(model.remoteImagesIDs.isEmpty)
         XCTAssertTrue(model.error?.contains("inline unavailable") == true)
+    }
+
+    @MainActor func testOpeningABodySyncLeftOutDownloadsItAndShowsTheHTML() async {
+        let core = DailyFixtureCore(noHandle: .init())
+        core.bodies[1] = ("The text of this message is larger than 4 MiB and was not downloaded.", nil)
+        core.failInline = true
+        let model = MailModel()
+        model.core = core
+        model.selectedID = 1
+        await model.select(1)
+        XCTAssertTrue(model.error?.hasPrefix("Could not download this message: ") == true)
+        XCTAssertNil(model.message?.htmlBody)
+        core.failInline = false
+        core.fetched[1] = ("Full text", "<p>Full text</p>")
+        model.error = nil
+        await model.select(1)
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.message?.htmlBody, "<p>Full text</p>")
+        XCTAssertEqual(model.messages.first?.textBody, "Full text")
+        // One fetch per open: refreshing the reading view does not ask again.
+        XCTAssertEqual(core.inlineCalls, [1, 1])
     }
 
     @MainActor func testReadActionsUpdateListAndDetailAndPreserveSearch() async {

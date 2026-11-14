@@ -174,6 +174,24 @@ class MailModelTest {
         model.clearSelection()
         assertTrue(model.messages.isEmpty()); assertTrue(model.expandedIds.isEmpty()); assertTrue(model.remoteImagesIds.isEmpty())
     }
+    @Test fun openingABodySyncLeftOutDownloadsItOnceAndShowsTheHtml() = runTest(dispatcher) {
+        val core = FakeCore().apply {
+            mail = listOf(row(1))
+            bodies[1] = "The text of this message is larger than 4 MiB and was not downloaded." to null
+            rejectInline = true
+        }
+        val model = model(core); model.start(); model.select(1)
+        assertEquals("Could not download this message: Fixture fetch refused", model.error)
+        assertNull(model.message!!.htmlBody)
+        core.rejectInline = false
+        core.fetched[1] = "Full text" to "<p>Full text</p>"
+        model.select(1)
+        assertEquals("<p>Full text</p>", model.message!!.htmlBody)
+        assertEquals("Full text", model.messages.single().textBody)
+        // One fetch per open: refreshing the reading view does not ask again, and HTML mail never asks.
+        model.select(1)
+        assertEquals(listOf(1L, 1L), core.inlineCalls)
+    }
     @Test fun listActionsUseVisibleThreadMembers() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(3).copy(messageCount = 2u, messageIds = listOf(3, 1))) }
         val model = model(core); model.start()
@@ -863,7 +881,16 @@ private class FakeCore : LagomCoreInterface {
         return byteArrayOf(0, -1)
     }
     override suspend fun inlineResource(id: Long, request: String): InlineResource = error("unused")
-    override suspend fun loadInline(id: Long): Unit = error("unused")
+    /** Text and HTML per message; the default is HTML. `fetched` is what loadInline stores. */
+    var bodies = mutableMapOf<Long, Pair<String, String?>>()
+    var fetched = mutableMapOf<Long, Pair<String, String?>>()
+    val inlineCalls = mutableListOf<Long>()
+    var rejectInline = false
+    override suspend fun loadInline(id: Long) {
+        inlineCalls += id
+        check(!rejectInline) { "Fixture fetch refused" }
+        fetched.remove(id)?.let { bodies[id] = it }
+    }
     val searchCalls = mutableListOf<Triple<String?, String, UInt>>()
     var searchGate: CompletableDeferred<Unit>? = null
     var rejectSearch = false
@@ -978,7 +1005,8 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun conversation(messageId: Long) = (conversationIds.ifEmpty { listOf(messageId) }).map { message(it) }
     override suspend fun message(id: Long): MailMessage {
         messageThreads += Thread.currentThread()
-        val result = MailMessage(mail.first { it.id == id }, "body", null, emptyList())
+        val body = bodies[id] ?: ("body" to "<p>body</p>")
+        val result = MailMessage(mail.first { it.id == id }, body.first, body.second, emptyList())
         val gate = messageGate
         messageStarted?.complete(Unit)
         gate?.await()

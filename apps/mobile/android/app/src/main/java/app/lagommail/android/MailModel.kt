@@ -332,6 +332,10 @@ internal class MailModel(
                 if (request != selectionRevision) return
                 setRead(item.row.id, true)
             }
+            for (item in loaded.filter { it.row.id in expandedIds }) {
+                if (request != selectionRevision) return
+                loadBody(item.row.id, request)
+            }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (request == selectionRevision) throw e }
     }
@@ -339,7 +343,24 @@ internal class MailModel(
         val item = messages.firstOrNull { it.row.id == id } ?: return
         if (id in expandedIds) { expandedIds -= id; return }
         expandedIds += id
+        val request = selectionRevision
         if (item.row.unread) setRead(id, true)
+        loadBody(id, request)
+    }
+    /** Sync leaves some bodies out (over 4 MiB, or synced before HTML parts were kept): for mail
+     *  without HTML, load_inline fetches the body, at most once per message. */
+    private suspend fun loadBody(id: Long, request: Int) {
+        val core = core ?: return
+        val item = messages.firstOrNull { it.row.id == id }?.takeIf { it.htmlBody == null } ?: return
+        try {
+            val updated = withContext(Dispatchers.IO) { core.loadInline(id); core.message(id) }
+            if (request != selectionRevision || (updated.htmlBody == null && updated.textBody == item.textBody)) return
+            messages = messages.map { if (it.row.id == id) updated else it }
+            if (message?.row?.id == id) message = updated
+            // The list snippet changed with the body.
+            reload()
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (request == selectionRevision) error = "Could not download this message: ${e.mailMessage()}" }
     }
     suspend fun setRead(id: Long, read: Boolean) {
         val core = core ?: return

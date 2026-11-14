@@ -413,13 +413,26 @@ final class MailModel {
         } catch { if selectedID == id, request == selectionRevision { self.error = error.localizedDescription } }
     }
 
+    /// Loads inline images, and for mail without HTML the body sync left out (over 4 MiB, or synced
+    /// before HTML parts were kept). The core fetches either at most once per message.
     private func loadInline(id: Int64, request: Int) async {
-        guard let core, messages.contains(where: { $0.row.id == id && $0.htmlBody != nil }) else { return }
+        // Demo rows have no server: a body fetch would only raise a keychain error.
+        guard let core, let item = messages.first(where: { $0.row.id == id }), item.htmlBody != nil || !Storage.demo else { return }
         do {
             try await core.loadInline(id: id)
             guard request == selectionRevision else { return }
             inlineRevision += 1
-        } catch { if request == selectionRevision { self.error = error.localizedDescription } }
+            guard item.htmlBody == nil else { return }
+            let updated = try await core.message(id: id)
+            guard request == selectionRevision, updated.htmlBody != nil || updated.textBody != item.textBody else { return }
+            messages = messages.map { $0.row.id == id ? updated : $0 }
+            if message?.row.id == id { message = updated }
+            // The list snippet changed with the body.
+            await reload()
+        } catch {
+            guard request == selectionRevision else { return }
+            self.error = item.htmlBody == nil ? "Could not download this message: \(error.localizedDescription)" : error.localizedDescription
+        }
     }
 
     func loadRemoteImages(id: Int64) {
