@@ -74,10 +74,6 @@ import kotlin.math.abs
             }
         }
     }
-    model.error?.let { error ->
-        AlertDialog(onDismissRequest = { model.error = null }, title = { Text("Mail") }, text = { Text(error) },
-            confirmButton = { TextButton(onClick = { model.error = null }) { Text("OK") } })
-    }
     removing?.let { account ->
         AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove account?") }, text = { Text("Remove ${account.email} and its local mail?") },
             confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove") } },
@@ -302,7 +298,7 @@ private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
     if (animate) Modifier.animateItem(fadeInSpec = Fade, placementSpec = landing(IntOffset.VisibilityThreshold), fadeOutSpec = Fade) else Modifier
 
 // Material's check mark; the app has no icon library.
-private val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
+internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
     .addPath(addPathNodes("M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"), fill = SolidColor(Color.Black)).build()
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)

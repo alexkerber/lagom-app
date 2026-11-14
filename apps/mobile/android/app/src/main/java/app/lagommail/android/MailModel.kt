@@ -338,6 +338,17 @@ internal class MailModel(
         reload()
         if (selection == selectionRevision) select(target.message)
     }
+    /** Today's mail links: the unified Inbox, and the message in it when given, as iOS `openMail`. */
+    suspend fun openInbox(id: Long?) {
+        if (searchText.isNotEmpty() || accountId != null || mailbox != Mailbox.INBOX || folder != null || showingDrafts) {
+            searchText = ""
+            enterScope(null, Mailbox.INBOX)
+        }
+        // Never pull the user back after a navigation during the reload.
+        val selection = selectionRevision
+        reload()
+        if (id != null && selection == selectionRevision) select(id)
+    }
     suspend fun changeScope(account: String?, box: Mailbox) {
         enterScope(account, box)
         reload()
