@@ -22,7 +22,18 @@ import Foundation
         return Data([0, 255])
     }
     var snoozed: ([Int64], Int64)?
-    override func later(ids: [Int64], untilUnix: Int64) async throws { snoozed = (ids, untilUnix) }
+    override func later(ids: [Int64], untilUnix: Int64) async throws -> [MailChange] { snoozed = (ids, untilUnix); return ids.map(change) }
+    func change(_ id: Int64) -> MailChange {
+        MailChange(id: id, account: "fixture", headerId: "m\(id)@example.test", fromFolder: 1, toFolder: 2, snoozedUntil: nil)
+    }
+    var undone: [MailChange] = []
+    var removed: [MailRow] = []
+    override func undo(changes: [MailChange]) async throws {
+        undone += changes
+        mail += removed.filter { row in changes.contains { $0.id == row.id } }
+        mail.sort { $0.id < $1.id }
+    }
+    override func newMailBody(accountId: String) async throws -> String { "" }
     var deadline: Int64?
     var reads = 0
     var syncs = 0
@@ -65,9 +76,11 @@ import Foundation
         let index = mail.firstIndex { $0.id == id }!
         mail[index].unread = !read
     }
-    override func done(ids: [Int64]) async throws {
+    override func done(ids: [Int64]) async throws -> [MailChange] {
         if suspendDone { try await withCheckedThrowingContinuation { doneContinuation = $0 } }
+        removed += mail.filter { ids.contains($0.id) }
         mail.removeAll { ids.contains($0.id) }
+        return ids.map(change)
     }
     override func nextSnooze() async throws -> Int64? {
         guard let deadline, Double(deadline) > Date().timeIntervalSince1970 else { return nil }
@@ -121,13 +134,15 @@ import Foundation
         return draft
     }
     override func savedReply(id: Int64) async throws -> LocalDraft? { drafts.values.first }
-    override func saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
+    var signatures: [String: String] = [:]
+    override func newMailBody(accountId: String) async throws -> String { signatures[accountId].map { "\n\n-- \n\($0)" } ?? "" }
+    override func saveDraft(id: String, accountId: String, to: String, cc: String, bcc: String, subject: String, body: String,
                             replyTo: Int64?, attachments: [SendAttachment]) async throws -> DraftRow {
         saves += 1
         if suspendSave { await withCheckedContinuation { gate = $0 } }
         if fail { throw MailError.Failed(reason: "save refused") }
         let saved = LocalDraft(id: id, account: accountId, to: to, cc: cc, subject: subject, body: body,
-                              inReplyTo: nil, references: [], attachments: attachments)
+                              inReplyTo: nil, references: [], attachments: attachments, bcc: bcc)
         drafts[id] = saved
         return saved.row
     }
@@ -289,6 +304,7 @@ struct ModelChecks {
         precondition(draft.subject == "Hi  Bcc: x@example.test" && draft.body == "Line 1\nLine 2")
         precondition(!draft.isReply && draft.replyTo == nil && draft.messageID.hasSuffix("@example.test>"))
         precondition(![draft.to, draft.cc, draft.subject, draft.body].contains { $0.contains("hidden@example.test") })
+        precondition(draft.bcc == "hidden@example.test" && draft.showBcc, "a link's Bcc shows in its own field")
         let core = FixtureCore(noHandle: .init())
         core.accountList = [MailAccount(id: "fixture", email: "me@example.test", displayName: "Me")]
         let model = MailModel()
@@ -297,7 +313,7 @@ struct ModelChecks {
         model.core = core
         await model.reload()
         precondition(model.composeDraft?.to == "a@example.test" && model.pendingMailto == nil)
-        precondition(model.notice == "The link's Bcc was left out.")
+        precondition(model.composeDraft?.bcc == "hidden@example.test" && model.notice == nil)
         let opened = model.composeDraft?.id
         await model.reload()
         precondition(model.composeDraft?.id == opened, "a later reload must not open the link again")
@@ -312,12 +328,50 @@ struct ModelChecks {
         await busy.openMailto(link)
         precondition(busy.composeDraft?.messageID == open.messageID && busy.error != nil, "a failed save keeps the open message")
         drafts.fail = false; busy.error = nil
+        drafts.signatures["fixture"] = "Team"
         await busy.openMailto(link)
         precondition(busy.composeDraft?.to == "a@example.test" && drafts.drafts[open.messageID]?.body == "unsaved")
+        precondition(busy.composeDraft?.body == "Line 1\nLine 2\n\n-- \nTeam", "the link's body sits above the signature")
         print("MailModel: mailto link to draft passed")
     }
 
+    /// Done offers Undo for 5 s; Undo hands the core back exactly what Done changed.
+    @MainActor static func undoDoneAndNewMailSignature() async throws {
+        let core = FixtureCore(noHandle: .init())
+        core.mail = Array(core.mail.prefix(3))
+        let gate = SendGate()
+        let model = MailModel(sendDelay: { await gate.wait() }); model.core = core
+        await model.reload()
+        await model.act(.done, id: 2)
+        precondition(model.notice == "Moved to Done" && model.undoChanges == [core.change(2)] && model.rows.map(\.id) == [1, 3])
+        await model.undoAction()
+        precondition(core.undone == [core.change(2)] && model.undoChanges.isEmpty && model.notice == nil)
+        precondition(model.rows.map(\.id) == [1, 2, 3], "Undo brings the row back")
+        await model.act(.later, id: 1)
+        precondition(model.notice == "Moved to Later" && !model.undoChanges.isEmpty)
+        await gate.release()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while model.notice != nil && ContinuousClock.now < deadline { await Task.yield() }
+        precondition(model.notice == nil && model.undoChanges.isEmpty, "the Undo window ends")
+        await model.undoAction()
+        precondition(core.undone.count == 1, "nothing to undo after the window")
+
+        let drafts = DraftFixtureCore(noHandle: .init())
+        drafts.signatures = ["work": "Work team"]
+        let compose = MailModel(); compose.core = drafts
+        await compose.newMessage(account: "work")
+        let opened = compose.composeDraft!
+        precondition(opened.body == "\n\n-- \nWork team" && !opened.hasContent, "an untouched signature is no draft")
+        try await compose.changeComposeAccount("home")
+        precondition(compose.composeDraft?.body == "" && compose.composeDraft?.account == "home", "the new account brings its own signature")
+        var edited = compose.composeDraft!; edited.body = "Hello"; compose.composeDraft = edited
+        try await compose.changeComposeAccount("work")
+        precondition(compose.composeDraft?.body == "Hello", "an edited body stays")
+        print("MailModel: Undo for Done and Later, and new mail signature passed")
+    }
+
     @MainActor static func main() async throws {
+        try await undoDoneAndNewMailSignature()
         await mailtoOpensANewDraft()
         await listReadActionIncludesOlderUnreadMembers()
         await selectedThreadActionSurvivesRepresentativeChange()

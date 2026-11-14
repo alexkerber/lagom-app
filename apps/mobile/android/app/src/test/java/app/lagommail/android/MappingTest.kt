@@ -74,5 +74,10 @@ class MappingTest {
         assertEquals(listOf(file), draft.attachments)
         assertTrue(draft.id.endsWith("@example.test>")); assertNull(draft.replyTo); assertEquals("New message", draft.title)
         assertFalse(listOf(draft.to, draft.cc, draft.subject, draft.body).any { "hidden@example.test" in it })
+        // A link's Bcc shows in its own field; the signature goes under the link's body.
+        assertEquals("hidden@example.test", draft.bcc); assertTrue(draft.showBcc)
+        assertEquals("Line 1\nLine 2\n\n-- \nTeam", sharedDraft("account", "me@example.test", SharedMail(link), "\n\n-- \nTeam").body)
+        assertFalse(ComposeDraft("account").showBcc)
+        assertTrue(ComposeDraft(LocalDraft("id", "account", "", "", "", "", null, emptyList(), emptyList(), "b@example.test")).showBcc)
     }
 }

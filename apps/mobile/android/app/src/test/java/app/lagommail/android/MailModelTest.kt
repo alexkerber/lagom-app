@@ -88,8 +88,8 @@ class MailModelTest {
         model.setForeground(true)
         assertEquals("fixture", model.draft?.account)
         assertEquals("a@example.test", model.draft?.to); assertEquals("c@example.test", model.draft?.cc)
-        assertEquals("Hi", model.draft?.subject); assertEquals("Body", model.draft?.body)
-        assertEquals("The link's Bcc was left out.", model.notice)
+        assertEquals("Hi", model.draft?.subject); assertEquals("Body\n\n-- \nFixture team", model.draft?.body)
+        assertEquals("hidden@example.test", model.draft?.bcc); assertEquals(true, model.draft?.showBcc); assertNull(model.notice)
         val opened = model.draft?.id
         model.reload()
         assertEquals("a later reload must not open the link again", opened, model.draft?.id)
@@ -127,6 +127,42 @@ class MailModelTest {
         assertEquals(newer, model.draft)
         assertEquals(original.body, core.saved[original.id]?.body)
         core.onRestore = null
+    }
+
+    @Test fun doneOffersUndoForFiveSecondsAndUndoHandsBackTheChanges() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }; val model = model(core); model.start()
+        model.act(MailAction.Done, 2)
+        assertEquals("Moved to Done", model.notice); assertEquals(listOf(core.change(2)), model.undoChanges)
+        assertEquals(listOf(1L), model.rows.map { it.id })
+        model.undoAction()
+        assertEquals(listOf(core.change(2)), core.undone); assertTrue(model.undoChanges.isEmpty()); assertNull(model.notice)
+        assertEquals(listOf(1L, 2L), model.rows.map { it.id })
+        model.act(MailAction.Delete, 1); runCurrent()
+        assertEquals("Deleted", model.notice)
+        advanceTimeBy(5000); runCurrent()
+        assertNull(model.notice); assertTrue(model.undoChanges.isEmpty())
+        model.undoAction()
+        assertEquals(1, core.undone.size)
+        // The newest action owns the notice: Done after Send replaces Undo send.
+        model.draft = ComposeDraft("fixture", to = "to@example.test", body = "b"); model.send(); runCurrent()
+        assertNotNull(model.undoSendId)
+        model.act(MailAction.Later, 2)
+        assertNull(model.undoSendId); assertEquals("Moved to Later", model.notice)
+    }
+
+    @Test fun newMessageStartsWithTheSignatureAndAnUntouchedOneIsNoDraft() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        model.newMessage("fixture")
+        val draft = model.draft!!
+        assertEquals("\n\n-- \nFixture team", draft.body); assertFalse(draft.hasContent)
+        model.draft = null; runCurrent()
+        assertEquals(0, core.saveCalls)
+        model.newMessage("other")
+        assertEquals("", model.draft?.body)
+        model.changeComposeAccount("fixture")
+        assertEquals("\n\n-- \nFixture team", model.draft?.body)
+        model.draft = model.draft!!.copy(body = "Hello"); model.changeComposeAccount("other")
+        assertEquals("Hello", model.draft?.body)
     }
 
     @Test fun laterUsesEveryCoreChoiceAndTomorrowForSwipe() = runTest(dispatcher) {
@@ -976,13 +1012,13 @@ private class FakeCore : LagomCoreInterface {
     override suspend fun savedReply(id: Long): LocalDraft? = saved.values.firstOrNull {
         it.account == mail.first { row -> row.id == id }.account && it.inReplyTo == "<${id}>"
     }
-    override suspend fun saveDraft(id: String, accountId: String, to: String, cc: String, subject: String, body: String,
+    override suspend fun saveDraft(id: String, accountId: String, to: String, cc: String, bcc: String, subject: String, body: String,
         replyTo: Long?, attachments: List<SendAttachment>): DraftRow {
         saveCalls++
         saveGate?.await()
         check(!rejectSave) { "Fixture save refused" }
         replyIds[id] = replyTo ?: replyIds[id]
-        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments)
+        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments, bcc)
         saved[id] = value
         return value.row()
     }
@@ -1057,16 +1093,32 @@ private class FakeCore : LagomCoreInterface {
         sent += ComposeDraft(accountId, to.joinToString(","), cc.joinToString(","), subject, bodyMarkdown, replyTo, attachments = attachments)
         return "queued"
     }
-    override suspend fun later(ids: List<Long>, untilUnix: Long) {
+    fun change(id: Long) = MailChange(id, "fixture", "m$id@example.test", 1, 2, null)
+    val undone = mutableListOf<MailChange>()
+    private val removed = mutableListOf<MailRow>()
+    override suspend fun undo(changes: List<MailChange>) {
+        undone += changes
+        mail = (mail + removed.filter { row -> changes.any { it.id == row.id } }).sortedBy { it.id }
+    }
+    override suspend fun newMailBody(accountId: String) = if (accountId == "fixture") "\n\n-- \nFixture team" else ""
+    override suspend fun signature(accountId: String) = ""
+    override suspend fun setSignature(accountId: String, text: String) = Unit
+    override suspend fun later(ids: List<Long>, untilUnix: Long): List<MailChange> {
         laterThread = Thread.currentThread()
         check(!rejectAction); snoozed = ids to untilUnix
+        return ids.map(::change)
     }
-    override suspend fun done(ids: List<Long>) { check(!rejectAction); mail = mail.filterNot { it.id in ids } }
-    override suspend fun delete(ids: List<Long>) {
+    override suspend fun done(ids: List<Long>): List<MailChange> {
+        check(!rejectAction); removed += mail.filter { it.id in ids }; mail = mail.filterNot { it.id in ids }
+        return ids.map(::change)
+    }
+    override suspend fun delete(ids: List<Long>): List<MailChange> {
         actionGate?.await()
         check(!rejectAction)
         deleted += ids
+        removed += mail.filter { it.id in ids }
         mail = mail.filterNot { it.id in ids }
+        return ids.map(::change)
     }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
     override suspend fun retrySend(id: String) = Unit

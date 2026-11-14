@@ -142,6 +142,14 @@ pub enum ComposeKind { Reply, ReplyAll, Forward }
 pub struct SendAttachment { pub filename: String, pub mime_type: String, pub data: Vec<u8> }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SendFailure { pub id: String, pub subject: String, pub message: String }
+/// One message Done, Later or Delete changed. The app keeps it for Undo and passes it back unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MailChange {
+    pub id: i64, pub account: String,
+    /// The Message-ID header: a move gives the message a new store id, and this finds it.
+    pub header_id: String,
+    pub from_folder: i64, pub to_folder: i64, pub snoozed_until: Option<i64>,
+}
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ContactSuggestion { pub name: String, pub address: String, pub recipient: String }
 
@@ -440,16 +448,42 @@ impl LagomCore {
             Ok(conversation_rows(s.search_conversations(account_id.as_deref(), &query, now(), limit, offset)?))
         }).await
     }
-    pub async fn later(&self, ids: Vec<i64>, until_unix: i64) -> Result<()> {
+    /// Returns what Undo needs; Later only changes the snooze, so Undo stays local.
+    pub async fn later(&self, ids: Vec<i64>, until_unix: i64) -> Result<Vec<MailChange>> {
         self.run(move |s| {
             if until_unix <= now() { return Err(lagom_core::Error::Invalid("Later must be in the future")); }
-            for id in &ids { s.message_summary(*id)?; }
+            let before = ids.iter().map(|id| s.message_summary(*id)).collect::<lagom_core::Result<Vec<_>>>()?;
             for id in ids { s.snooze(id, Some(until_unix))?; }
-            Ok(())
+            Ok(before.into_iter().map(|m| MailChange { id: m.id, account: m.account, header_id: m.message_id,
+                from_folder: m.folder, to_folder: m.folder, snoozed_until: m.snoozed_until }).collect())
         }).await
     }
-    pub async fn done(&self, ids: Vec<i64>) -> Result<()> { self.move_messages(ids, false).await }
-    pub async fn delete(&self, ids: Vec<i64>) -> Result<()> { self.move_messages(ids, true).await }
+    pub async fn done(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, false).await }
+    pub async fn delete(&self, ids: Vec<i64>) -> Result<Vec<MailChange>> { self.move_messages(ids, true).await }
+    /// Puts Done, Later or Delete back: each message returns to the folder it left, with its old snooze.
+    pub async fn undo(&self, changes: Vec<MailChange>) -> Result<()> {
+        self.run_network(move |s| network(async {
+            for c in changes {
+                let id = if c.from_folder == c.to_folder { c.id } else {
+                    let a = account(s, &c.account)?;
+                    let mut session = ImapSync::login(&a, &a.password()?).await?;
+                    // The move dropped the old row; the target folder's sync made a new one.
+                    let current = match s.find_message(c.to_folder, &c.header_id)? {
+                        Some(id) => id,
+                        None => {
+                            session.sync_folder(s, c.to_folder, DEFAULT_LIMIT).await?;
+                            s.find_message(c.to_folder, &c.header_id)?.ok_or(lagom_core::Error::NotFound)?
+                        }
+                    };
+                    session.move_message(s, current, c.from_folder).await?;
+                    let _ = session.logout().await;
+                    match s.find_message(c.from_folder, &c.header_id)? { Some(id) => id, None => continue }
+                };
+                s.snooze(id, c.snoozed_until)?;
+            }
+            Ok(())
+        })).await
+    }
     pub async fn mark_read(&self, id: i64, read: bool) -> Result<()> {
         self.run_network(move |s| network(async {
             let a = account(s, &s.message_summary(id)?.account)?;
@@ -550,6 +584,17 @@ impl LagomCore {
             Unsubscribe::Link(_) => Err(failure("open the unsubscribe page in the browser")),
         }
     }
+    /// The account's signature, as Settings shows it.
+    pub async fn signature(&self, account_id: String) -> Result<String> {
+        self.run(move |s| { account(s, &account_id)?; s.signature(&account_id) }).await
+    }
+    pub async fn set_signature(&self, account_id: String, text: String) -> Result<()> {
+        self.run(move |s| { account(s, &account_id)?; s.set_signature(&account_id, &text) }).await
+    }
+    /// A new message's body: the signature under two empty lines, as on desktop, or nothing.
+    pub async fn new_mail_body(&self, account_id: String) -> Result<String> {
+        self.run(move |s| Ok(lagom_core::compose::compose_body(&s.signature(&account_id)?, None, lagom_core::compose::ComposeKind::Reply))).await
+    }
     pub async fn send_failures(&self) -> Result<Vec<SendFailure>> {
         self.run(|s| Ok(s.failed_outbox()?.into_iter().map(|p| SendFailure { id: p.id, subject: p.mail.subject, message: p.error.unwrap_or(p.state) }).collect())).await
     }
@@ -560,10 +605,12 @@ impl LagomCore {
     }
 }
 impl LagomCore {
-    async fn move_messages(&self, ids: Vec<i64>, trash: bool) -> Result<()> {
+    async fn move_messages(&self, ids: Vec<i64>, trash: bool) -> Result<Vec<MailChange>> {
         self.run_network(move |s| network(async {
+            let mut changes = Vec::new();
             for id in ids {
-                let a = account(s, &s.message_summary(id)?.account)?;
+                let m = s.message_summary(id)?;
+                let a = account(s, &m.account)?;
                 let mut session = ImapSync::login(&a, &a.password()?).await?;
                 if trash { session.trash(s, id).await?; } else {
                     session.archive(s, id).await?;
@@ -574,8 +621,14 @@ impl LagomCore {
                     }
                 }
                 let _ = session.logout().await;
+                let role = if trash { FolderRole::Trash } else { FolderRole::Archive };
+                // shortcut: a message without Message-ID cannot be found after a move, so Undo leaves it there, as on desktop.
+                if let Some(to) = s.folder_metadata(&a.id)?.into_iter().find(|f| f.role == role).map(|f| f.id)
+                    .filter(|to| *to == m.folder || !m.message_id.is_empty()) {
+                    changes.push(MailChange { id, account: m.account, header_id: m.message_id, from_folder: m.folder, to_folder: to, snoozed_until: m.snoozed_until });
+                }
             }
-            Ok(())
+            Ok(changes)
         })).await
     }
 }

@@ -75,14 +75,19 @@ struct ComposeDraft: Identifiable, Equatable {
     var account: String
     var to = ""
     var cc = ""
+    /// Only a mailto link or a saved draft fills Bcc, and then the field shows, as on desktop.
+    var bcc = ""
+    var showBcc = false
     var subject = ""
     var body = ""
+    /// The body a new message starts with, the signature: unchanged, it is not worth a draft.
+    var startBody = ""
     var replyTo: Int64?
     var attachments: [SendAttachment] = []
     var title = "New message"
     var restored = false
     var isReply = false
-    var hasContent: Bool { !to.isEmpty || !cc.isEmpty || !subject.isEmpty || !body.isEmpty || !attachments.isEmpty }
+    var hasContent: Bool { !to.isEmpty || !cc.isEmpty || !bcc.isEmpty || !subject.isEmpty || body != startBody || !attachments.isEmpty }
     var attachmentsTooLarge: Bool { attachments.reduce(0) { $0 + $1.data.count } > attachmentWarningBytes }
 
     init(account: String, email: String = "") { self.account = account; messageID = draftMessageID(email: email) }
@@ -106,24 +111,27 @@ struct ComposeDraft: Identifiable, Equatable {
     init(saved: LocalDraft) {
         messageID = saved.id
         account = saved.account
-        to = saved.to; cc = saved.cc; subject = saved.subject; body = saved.body
+        to = saved.to; cc = saved.cc; bcc = saved.bcc; subject = saved.subject; body = saved.body
+        showBcc = !bcc.isEmpty
         attachments = saved.attachments
         restored = true
         isReply = saved.inReplyTo != nil || !saved.references.isEmpty
         title = isReply ? "Reply" : "Draft"
     }
 
-    /// A mailto link's message. Bcc is left out: mobile Compose has no Bcc field, and a hidden recipient must never be sent unseen.
-    init(mailto: Mailto, account: String, email: String = "") {
+    /// A mailto link's message, above the signature. Its Bcc shows in its own field, so a link never adds a hidden recipient unseen.
+    init(mailto: Mailto, account: String, email: String = "", signature: String = "") {
         self.init(account: account, email: email)
         to = mailto.to.joined(separator: ", ")
         cc = mailto.cc.joined(separator: ", ")
+        bcc = mailto.bcc.joined(separator: ", ")
+        showBcc = !bcc.isEmpty
         subject = mailto.subject
-        body = mailto.body
+        body = mailto.body + signature
     }
 
     func save(using core: LagomCore) async throws -> DraftRow {
-        try await core.saveDraft(id: messageID, accountId: account, to: to, cc: cc, subject: subject,
+        try await core.saveDraft(id: messageID, accountId: account, to: to, cc: cc, bcc: bcc, subject: subject,
                                  body: body, replyTo: replyTo, attachments: attachments)
     }
 
@@ -213,6 +221,8 @@ final class MailModel {
     private(set) var unsubscribedIDs: Set<Int64> = []
     private(set) var undoSendID: String?
     private var sendRevision = 0
+    /// What the last Done, Later or Delete changed, while its notice offers Undo.
+    private(set) var undoChanges: [MailChange] = []
     var composeDraft: ComposeDraft? {
         didSet {
             guard !endingCompose, !composeBusy, oldValue != composeDraft else { return }
@@ -359,9 +369,26 @@ final class MailModel {
         guard let account = accountID ?? accounts.first?.id else { error = "Add an account, then open the link again."; return }
         // An open message goes to Drafts first; a failed save keeps it open, never replaced.
         do { try await closeCompose(discard: false) } catch { self.error = error.localizedDescription; return }
-        guard composeDraft == nil else { return }
-        composeDraft = ComposeDraft(mailto: mail, account: account, email: accounts.first { $0.id == account }?.email ?? "")
-        if !mail.bcc.isEmpty { notice = "The link's Bcc was left out." }
+        guard composeDraft == nil, let core else { return }
+        do {
+            let signature = try await core.newMailBody(accountId: account)
+            guard composeDraft == nil else { return }
+            composeDraft = ComposeDraft(mailto: mail, account: account, email: accounts.first { $0.id == account }?.email ?? "", signature: signature)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// A new message from the account, starting with its signature.
+    func newMessage(account: String) async {
+        guard let core, composeDraft == nil, !preparingCompose else { return }
+        preparingCompose = true
+        defer { preparingCompose = false }
+        do {
+            var draft = ComposeDraft(account: account, email: accounts.first { $0.id == account }?.email ?? "")
+            draft.body = try await core.newMailBody(accountId: account)
+            draft.startBody = draft.body
+            guard composeDraft == nil else { return }
+            composeDraft = draft
+        } catch { self.error = error.localizedDescription }
     }
 
     func openNotification(_ target: MailTarget) {
@@ -506,13 +533,44 @@ final class MailModel {
         actingID = id
         defer { actingID = nil }
         do {
+            let changes: [MailChange]
             switch action {
-            case .done: try await core.done(ids: ids)
-            case .later: try await core.later(ids: ids, untilUnix: until ?? core.laterChoices()[1].untilUnix)
-            case .delete: try await core.delete(ids: ids)
+            case .done: changes = try await core.done(ids: ids)
+            case .later: changes = try await core.later(ids: ids, untilUnix: until ?? core.laterChoices()[1].untilUnix)
+            case .delete: changes = try await core.delete(ids: ids)
             }
             if selectedID == id { selectedID = nil; message = nil; messages = []; expandedIDs = []; remoteImagesIDs = [] }
+            offerUndo(changes, notice: action.notice)
         } catch { self.error = error.localizedDescription }
+        await reload()
+    }
+
+    /// The newest action owns the notice, so its Undo replaces an older one, also Undo send.
+    private func offerUndo(_ changes: [MailChange], notice: String) {
+        guard !changes.isEmpty else { return }
+        sendRevision += 1
+        undoSendID = nil
+        undoChanges = changes
+        self.notice = notice
+        // The same 5 s window as Undo send.
+        let delay = sendDelay
+        Task { [weak self] in
+            do { try await delay() } catch { return }
+            guard let self, self.undoChanges == changes else { return }
+            self.undoChanges = []
+            self.notice = nil
+        }
+    }
+
+    /// Undo for the last Done, Later or Delete: each message goes back where it was.
+    func undoAction() async {
+        guard let core, !undoChanges.isEmpty, !working else { return }
+        let changes = undoChanges
+        undoChanges = []
+        notice = nil
+        actingID = changes[0].id
+        defer { actingID = nil }
+        do { try await core.undo(changes: changes) } catch { self.error = error.localizedDescription }
         await reload()
     }
 
@@ -613,6 +671,11 @@ final class MailModel {
         var replacement = old
         replacement.messageID = draftMessageID(email: accounts.first { $0.id == account }?.email ?? "")
         replacement.account = account
+        // An untouched body is the old account's signature; the new account brings its own.
+        if old.body == old.startBody {
+            replacement.body = try await core.newMailBody(accountId: account)
+            replacement.startBody = replacement.body
+        }
         if old.hasContent || savedDraftIDs.contains(old.messageID) {
             // Save the replacement first so a failed account change cannot lose the original.
             let saved = try await replacement.save(using: core)
@@ -658,6 +721,7 @@ final class MailModel {
         endCompose()
         sendRevision += 1
         let sending = sendRevision
+        undoChanges = []
         undoSendID = draft.messageID
         notice = "Sending…"
         let delay = sendDelay
@@ -705,7 +769,16 @@ final class MailModel {
     }
 }
 
-enum MailAction { case done, later, delete }
+enum MailAction {
+    case done, later, delete
+    var notice: String {
+        switch self {
+        case .done: "Moved to Done"
+        case .later: "Moved to Later"
+        case .delete: "Deleted"
+        }
+    }
+}
 
 /// The core's plain text. uniffi.toml drops the generated conformance, which shows the enum's debug form.
 extension MailError: LocalizedError {
