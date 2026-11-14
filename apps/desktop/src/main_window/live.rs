@@ -15,6 +15,18 @@ enum Op {
     CreateFolder { account: String, name: String },
 }
 
+/// A jump's next step once its message is selected: the move palette, or a popout's move.
+/// It needs the window, which a read's completion does not have, so it runs deferred.
+pub(super) struct Then(gpui::WindowHandle<MainWindow>, Box<Step>);
+
+type Step = dyn FnOnce(&mut MainWindow, &mut Window, &mut Context<MainWindow>);
+
+impl Then {
+    pub(super) fn new(window: &Window, f: impl FnOnce(&mut MainWindow, &mut Window, &mut Context<MainWindow>) + 'static) -> Option<Self> {
+        Some(Self(window.window_handle().downcast()?, Box::new(f)))
+    }
+}
+
 pub struct Live {
     pub(super) bridge: Bridge,
     pub(super) store: Rc<Store>,
@@ -34,7 +46,10 @@ pub struct Live {
     /// The ⌘K hit on screen: loaded even past `limit`, until another list opens.
     pub(super) pin: Option<i64>,
     /// The ⌘K hit to select once the next store read runs (it waits while moves are in flight).
-    want: Option<i64>,
+    want: Option<(i64, Option<Then>)>,
+    /// A jump that waits for a read of its account from generation `.0` on: the folder lookup
+    /// needs that account's folders, read after the message was found.
+    jump: Option<(u64, i64, Option<Then>)>,
     notification_target: Option<crate::notifications::Target>,
     task_target: Option<i64>,
     move_target: Option<i64>,
@@ -184,6 +199,7 @@ impl Live {
             more: false,
             pin: None,
             want: None,
+            jump: None,
             notification_target: None,
             task_target: None,
             move_target: None,
@@ -222,6 +238,11 @@ impl Live {
         }
     }
 
+    /// Drops a pending jump to one message and its follow-up.
+    pub(super) fn cancel_jump(&mut self) {
+        (self.want, self.jump) = (None, None);
+    }
+
     pub(super) fn event_op(&self) -> u64 {
         let id = self.next_op.get() + 1;
         self.next_op.set(id);
@@ -243,7 +264,9 @@ impl Live {
 }
 
 impl MainWindow {
-    pub(super) fn prepare_move(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Whether the move palette can open now. A selection in another account first opens that
+    /// account's list; the palette (`query`) opens once its read lands.
+    pub(super) fn prepare_move(&mut self, query: &str, window: &Window, cx: &mut Context<Self>) -> bool {
         let members = self.inbox.selected_members();
         let accounts: HashSet<_> = members.iter().map(|&id| self.inbox.mail[id].account.clone()).collect();
         // shortcut: custom-folder moves use one account at a time, add per-account destinations for mixed selections.
@@ -261,17 +284,20 @@ impl MainWindow {
             Ok(summaries) => summaries,
             Err(e) => { self.notify(format!("Could not read selection: {e}"), cx); return false; }
         };
-        self.open_found(first, cx);
-        let Some(live) = &mut self.live else { return false };
-        // Selected rows can straddle a page after switching accounts.
-        for summary in summaries {
-            let id = self.inbox.intern(&summary, &live.seen, chrono::Local::now());
-            if !self.inbox.raw_list().contains(&id) { self.inbox.list_mut().push(id); }
-        }
-        self.inbox.regroup();
-        self.inbox.chosen = Some(self.inbox.list().iter().copied().filter(|&id|
-            self.inbox.members(id).iter().any(|&member| self.inbox.mail[member].store.is_some_and(|id| selected.contains(&id)))).collect());
-        true
+        let query = query.to_owned();
+        self.open_found(first, Then::new(window, move |this, window, cx| {
+            let Some(live) = &this.live else { return };
+            // Selected rows can straddle a page after switching accounts.
+            for summary in summaries {
+                let id = this.inbox.intern(&summary, &live.seen, chrono::Local::now());
+                if !this.inbox.raw_list().contains(&id) { this.inbox.list_mut().push(id); }
+            }
+            this.inbox.regroup();
+            this.inbox.chosen = Some(this.inbox.list().iter().copied().filter(|&id|
+                this.inbox.members(id).iter().any(|&member| this.inbox.mail[member].store.is_some_and(|id| selected.contains(&id)))).collect());
+            this.open_palette(&query, window, cx);
+        }), cx);
+        false
     }
 
     pub(super) fn validate_folder_name(&self, name: &str) -> Result<(), String> {
@@ -316,16 +342,6 @@ impl MainWindow {
     /// list stays on screen until the read lands. Waits while moves are in flight, so a read
     /// never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
-        self.reload_with(false, cx);
-    }
-
-    /// A reload whose list is on screen when it returns: for jumps to one message, whose next
-    /// steps need that account's folders and rows.
-    fn reload_now(&mut self, cx: &mut Context<Self>) {
-        self.reload_with(true, cx);
-    }
-
-    fn reload_with(&mut self, inline: bool, cx: &mut Context<Self>) {
         self.reload_draft_rows(cx);
         self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
@@ -364,8 +380,8 @@ impl MainWindow {
         }
         live.reads += 1;
         // One background read at a time: its completion starts the next, so results land in
-        // request order. An inline read is newer than one in flight, which then is dropped.
-        if inline || live.read.is_none() { self.start_read(inline, cx); }
+        // request order.
+        if live.read.is_none() { self.start_read(cx); }
     }
 
     /// What a list read for the screen as it is now asks for.
@@ -389,7 +405,7 @@ impl MainWindow {
         self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).collect()
     }
 
-    fn start_read(&mut self, inline: bool, cx: &mut Context<Self>) {
+    fn start_read(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.read_key() else { return };
         let mut pins = self.selected_stores();
         pins.extend(key.pin);
@@ -399,8 +415,7 @@ impl MainWindow {
         let at = now();
         let read = move || mail::load_accounts(&Store::open(path)?, &accounts, &request.account, request.filter.as_deref(), request.view, request.limit, at, pins, request.group);
         #[cfg(test)]
-        let inline = inline || INLINE_READS.get();
-        if inline { return self.read_done(generation, key, asked, read(), cx); }
+        if INLINE_READS.get() { return self.read_done(generation, key, asked, read(), cx); }
         let read = cx.background_executor().spawn(async move { read() });
         live.read = Some(cx.spawn(async move |this, cx| {
             let result = read.await;
@@ -427,7 +442,7 @@ impl MainWindow {
         // Read again with that row pinned.
         if lost { live.reads += 1; }
         if lost || generation <= live.shown || current.as_ref() != Some(&key) {
-            if live.reads > live.shown && live.read.is_none() { self.start_read(false, cx); }
+            if live.reads > live.shown && live.read.is_none() { self.start_read(cx); }
             return;
         }
         live.shown = generation;
@@ -440,19 +455,24 @@ impl MainWindow {
                 self.inbox.group = key.group;
                 let due = snap.next_due;
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
-                let want = live.want.take();
+                let (want, jump) = (live.want.take(), live.jump.take_if(|(from, ..)| generation >= *from));
                 self.wake_at(due, cx);
                 self.settle_list(before);
-                if let Some(want) = want {
-                    self.select_found(want, cx);
+                if let Some((store, then)) = want {
+                    if let (true, Some(Then(window, then))) = (self.select_found(store, cx), then) {
+                        cx.defer(move |cx| { window.update(cx, |this, window, cx| then(this, window, cx)).ok(); });
+                    }
                 }
+                if let Some((_, store, then)) = jump { self.open_found(store, then, cx); }
             }
             Err(e) => {
+                // A pending jump and its follow-up end here, so later jumps are not refused.
+                live.cancel_jump();
                 self.confirm_empty_trash = false;
                 self.notify(format!("Could not read mail: {e}"), cx);
             }
         }
-        if again && self.live.as_ref().is_some_and(|l| l.read.is_none()) { self.start_read(false, cx); }
+        if again && self.live.as_ref().is_some_and(|l| l.read.is_none()) { self.start_read(cx); }
         cx.notify();
     }
 
@@ -757,7 +777,7 @@ impl MainWindow {
                     return;
                 };
                 self.switch_account(account, cx);
-                self.open_found(mail.id, cx);
+                self.open_found(mail.id, None, cx);
             }
             Ok(None) => self.notify("The linked mail is no longer available locally", cx),
             Err(e) => self.notify(format!("Could not open linked mail: {e}"), cx),
@@ -786,7 +806,7 @@ impl MainWindow {
         live.current = account;
         live.limit = PAGE;
         live.pin = None;
-        live.want = None;
+        live.cancel_jump();
         self.set_page(Page::Mail, cx);
         self.palette = None;
         // Preserve an unfinished compose sheet as a draft while revealing the clicked mail.
@@ -799,7 +819,7 @@ impl MainWindow {
         self.release(false, cx);
         self.clear_motion();
         self.reload(cx);
-        if let Some(id) = target.message { self.open_found(id, cx); }
+        if let Some(id) = target.message { self.open_found(id, None, cx); }
         window.focus(&self.focus);
         cx.notify();
     }
@@ -1144,6 +1164,8 @@ impl MainWindow {
         self.folder_name = None;
         live.limit = PAGE;
         live.pin = None;
+        // Another account replaces a pending jump; `open_found` sets its own after this.
+        live.cancel_jump();
         // Folder indices belong to one account; history does too.
         self.inbox = Inbox::live();
         self.inbox.account_filter = Some(account);
@@ -1229,16 +1251,28 @@ impl MainWindow {
         if !live.bridge.send(cmd) { self.worker_gone(cx); }
     }
 
-    /// ⌘K search hit: open its list (Later when snoozed) and select it. The hit is pinned into
-    /// that list, so the selection never lands on another row that Delete or Reply would hit.
-    pub(super) fn open_found(&mut self, store: i64, cx: &mut Context<Self>) {
+    /// ⌘K search hit: open its list (Later when snoozed) and select it once the read lands, then
+    /// run `then`. The old list stays on screen meanwhile. The hit is pinned into that list, so
+    /// the selection never lands on another row that Delete or Reply would hit.
+    pub(super) fn open_found(&mut self, store: i64, then: Option<Then>, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
+        // A newer jump would drop the pending one's Move or popout action without a word.
+        if live.want.as_ref().is_some_and(|(_, then)| then.is_some()) || live.jump.as_ref().is_some_and(|(_, _, then)| then.is_some()) {
+            return self.notify("Wait for the message to open", cx);
+        }
         let Ok(m) = live.store.message(store) else { return self.notify("That message is gone", cx) };
+        let from = live.reads;
         if live.account().is_none_or(|a| a.id != m.summary.account) {
             if let Some(ix) = live.accounts.iter().position(|a| a.id == m.summary.account) { self.switch_account(ix, cx); }
         }
-        // The folder lookup below needs this account's folders on screen.
-        if self.live.as_ref().is_some_and(|l| l.stale) { self.reload_now(cx); }
+        // The folder lookup below needs this account's folders on screen, from a read requested
+        // after the message was found: that read's completion comes back here.
+        if let Some(live) = self.live.as_mut().filter(|l| l.stale) {
+            (live.jump, live.want) = (Some((from + 1, store, then)), None);
+            // An account switch above already requested that read.
+            if live.reads == from { self.reload(cx); }
+            return;
+        }
         self.inbox.account_filter = Some(m.summary.account.clone());
         let list = if m.summary.snoozed_until.is_some_and(|t| t > now()) {
             self.inbox.find_kind(Kind::Later)
@@ -1248,11 +1282,12 @@ impl MainWindow {
         };
         self.inbox.unread_only = false;
         self.open_box(list, cx);
+        // Nothing is selected until the hit is: no key or render acts on (or reads) row 0.
+        self.inbox.chosen = Some(HashSet::new());
         if let Some(live) = &mut self.live {
-            (live.pin, live.want) = (Some(store), Some(store));
+            (live.pin, live.want) = (Some(store), Some((store, then)));
         }
-        // Callers act on the selected hit right away (Move opens its palette).
-        self.reload_now(cx);
+        self.reload(cx);
     }
 
     pub(super) fn move_message(&mut self, store: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -1265,18 +1300,17 @@ impl MainWindow {
             self.notify("That message is no longer available locally", cx);
             return;
         }
-        self.open_found(store, cx);
-        // `want` is taken only when the inline read landed; selecting may start a page read.
-        if self.live.as_ref().is_some_and(|l| l.want.is_none())
-            && self.inbox.single().is_some_and(|id| self.inbox.members(id).iter().any(|&id| self.inbox.mail[id].store == Some(store))) {
-            self.open_palette("move ", window, cx);
-        }
+        self.open_found(store, Then::new(window, move |this, window, cx| {
+            if this.inbox.single().is_some_and(|id| this.inbox.members(id).iter().any(|&id| this.inbox.mail[id].store == Some(store))) {
+                this.open_palette("move ", window, cx);
+            }
+        }), cx);
     }
 
-    fn select_found(&mut self, store: i64, cx: &mut Context<Self>) {
+    fn select_found(&mut self, store: i64, cx: &mut Context<Self>) -> bool {
         match self.inbox.list().iter().position(|&id| self.inbox.members(id).iter().any(|&member| self.inbox.mail[member].store == Some(store))) {
-            Some(ix) => self.select(|inbox| inbox.select(ix), cx),
-            None => self.notify("That message is not in this list any more", cx),
+            Some(ix) => { self.select(|inbox| inbox.select(ix), cx); true }
+            None => { self.notify("That message is not in this list any more", cx); false }
         }
     }
 
@@ -1694,12 +1728,44 @@ mod tests {
             (folder, hit)
         });
         view.update_in(cx, |v, window, cx| v.move_message(hit, window, cx));
+        // The jump does not read on the UI thread: the old list stays until the reads land.
+        view.read_with(cx, |v, _| {
+            assert!(v.inbox.open.is_none() && v.inbox.list().is_empty());
+            assert!(v.palette.is_none());
+        });
+        cx.run_until_parked();
+        // The completion opens the folder, selects the hit and then opens the move palette.
         view.read_with(cx, |v, _| {
             assert_eq!(v.inbox.open.map(|f| v.inbox.folders[f].store), Some(Some(folder)));
             assert_eq!(v.inbox.single().and_then(|id| v.inbox.mail[id].store), Some(hit));
-            assert!(v.palette.is_some(), "Move opens its palette at once");
+            assert!(v.palette.is_some(), "Move opens its palette once the hit is selected");
+        });
+        INLINE_READS.set(true);
+    }
+
+    #[gpui::test]
+    fn a_jump_selects_nothing_until_its_read_lands_and_navigation_cancels_it(cx: &mut TestAppContext) {
+        INLINE_READS.set(false);
+        let (view, cx, _rx) = window(cx);
+        let (hit, newest) = view.update(cx, |v, cx| {
+            v.inbox = Inbox::live();
+            v.panes.group_conversations = false;
+            let hit = incoming(v, 1).id;
+            let newest = incoming(v, 2).id;
+            v.reload(cx);
+            (hit, newest)
         });
         cx.run_until_parked();
+        let selected = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.inbox.single().and_then(|id| v.inbox.mail[id].store));
+        view.update(cx, |v, cx| v.open_found(hit, None, cx));
+        // Row 0 is not the hit: until the read lands, no key or render may act on it.
+        assert_eq!(selected(cx), None);
+        cx.run_until_parked();
+        assert_eq!(selected(cx), Some(hit));
+        // Opening another list before the read lands drops the jump.
+        view.update(cx, |v, cx| { v.open_found(hit, None, cx); v.open_box(None, cx); });
+        cx.run_until_parked();
+        assert_eq!(selected(cx), Some(newest));
         INLINE_READS.set(true);
     }
 
@@ -1715,7 +1781,8 @@ mod tests {
             v.live.as_ref().unwrap().store.path().to_owned()
         });
         // 100k messages in one thread pair each, every third read.
-        rusqlite::Connection::open(path).unwrap().execute("WITH RECURSIVE seq(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM seq WHERE n<100000)
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute("WITH RECURSIVE seq(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM seq WHERE n<100000)
             INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,thread_id)
             SELECT account,folder,n,'','','x','x@test','','','Subject',n,'',n%3=0,0,0,0,'',printf('thread-%d',n/2) FROM messages,seq WHERE uid=1", []).unwrap();
         for inline in [true, false] {
@@ -1731,6 +1798,18 @@ mod tests {
             // scripts/perf.py reads this line; the key is in docs/performance-budgets.toml.
             println!("perf reload.ui_thread_{} {:.3}", if inline { "inline" } else { "background" }, best.as_secs_f64() * 1000.);
         }
+        // A jump to one old message (⌘K hit, notification): the call, not the read it starts.
+        INLINE_READS.set(false);
+        let hit: i64 = db.query_row("SELECT id FROM messages WHERE uid = 50", [], |r| r.get(0)).unwrap();
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            view.update(cx, |v, cx| v.open_found(hit, None, cx));
+            best = best.min(start.elapsed());
+            cx.run_until_parked();
+            assert!(view.read_with(cx, |v, _| v.inbox.single().is_some_and(|id| v.inbox.members(id).iter().any(|&m| v.inbox.mail[m].store == Some(hit)))));
+        }
+        println!("perf reload.ui_thread_jump {:.3}", best.as_secs_f64() * 1000.);
         INLINE_READS.set(true);
     }
 
@@ -3088,7 +3167,7 @@ mod tests {
             v.inbox = Inbox::live();
             v.reload(cx);
             v.filter_unread(true, cx);
-            v.open_found(target.id, cx);
+            v.open_found(target.id, None, cx);
             assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(target.id));
             v.act(Move::Delete, cx);
             assert!(matches!(rx.try_recv(), Ok(Cmd::Op { id, act: Act::Trash, .. }) if id == target.id));
@@ -3942,6 +4021,7 @@ mod tests {
             more: false,
             pin: None,
             want: None,
+            jump: None,
             notification_target: None,
             task_target: None,
             move_target: None,
@@ -4837,7 +4917,7 @@ mod tests {
             assert_ne!(replacement, id);
             v.on_events(vec![Event::Op { op, error: None }], window, cx);
             v.undo(cx);
-            assert!(v.prepare_move(cx));
+            assert!(v.prepare_move("move ", window, cx));
             let folder = v.inbox.folders.iter().position(|f| f.store == Some(next)).unwrap();
             v.act(Move::Folder(folder), cx);
             assert!(matches!(rx.try_recv().unwrap(), Cmd::Op { id, act: Act::Move(folder), .. } if id == original.id && folder == original.folder));
@@ -5005,7 +5085,7 @@ mod tests {
             }
             v.inbox = Inbox::live();
             v.reload(cx);
-            v.open_found(hit, cx);
+            v.open_found(hit, None, cx);
             assert_eq!(v.inbox.folders[v.inbox.open.unwrap()].store, Some(trash));
             assert_eq!(v.inbox.list().iter().map(|&id| v.inbox.mail[id].store).collect::<Vec<_>>(), [Some(hit)]);
             v.confirm_empty_trash = true;
@@ -5038,7 +5118,7 @@ mod tests {
             v.inbox = Inbox::live();
             v.open_kind(Kind::Trash, cx);
             v.act(Move::Inbox, cx);
-            v.open_found(hit, cx);
+            v.open_found(hit, None, cx);
             assert_eq!(v.inbox.folders[v.inbox.open.unwrap()].store, Some(trash));
             assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].folder, mail::Place::Folder(first));
             v.confirm_empty_trash = true;
@@ -5084,7 +5164,7 @@ mod tests {
             }
             v.inbox = Inbox::live();
             v.reload(cx);
-            v.open_found(oldest, cx);
+            v.open_found(oldest, None, cx);
             v.live.as_mut().unwrap().limit = 2;
             oldest
         });
@@ -5416,7 +5496,7 @@ mod tests {
         // The oldest is a ⌘K hit, opened in its own window from the pinned folder.
         view.update(cx, |v, cx| {
             v.reload(cx);
-            v.open_found(store, cx);
+            v.open_found(store, None, cx);
             // Selecting the last row grew the page; a hit further back stays past it.
             v.live.as_mut().unwrap().limit = 2;
         });
@@ -5833,7 +5913,7 @@ mod tests {
             let (view, cx, mut rx) = window(cx);
             let other = view.update(cx, |v, cx| {
                 let (first, other) = review_accounts(v, cx);
-                v.open_found(first, cx);
+                v.open_found(first, None, cx);
                 v.act(Move::Done, cx);
                 v.switch_account(1, cx);
                 other
@@ -5867,6 +5947,9 @@ mod tests {
             let Cmd::Op { op, .. } = rx.try_recv().unwrap() else { panic!("missing move") };
             view.update_in(cx, |v, window, cx| {
                 v.on_events(vec![Event::Op { op, error: Some("fixture refusal".into()) }], window, cx);
+            });
+            // The palette opens in the jump's completion, after the selection.
+            view.read_with(cx, |v, _| {
                 assert!(v.palette.is_some());
                 assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(target));
             });
@@ -6009,7 +6092,7 @@ mod tests {
     fn unified_move_palette_uses_selected_account_and_rejects_mixed_selection(cx: &mut TestAppContext) {
         use lagom_core::store::{FolderRole, Message, MessageSummary};
         let (view, cx, _rx) = window(cx);
-        view.update(cx, |v, cx| {
+        let (other, message) = view.update_in(cx, |v, window, cx| {
             incoming(v, 1);
             let live = v.live.as_ref().unwrap();
             let mut other = live.accounts[0].clone();
@@ -6024,14 +6107,20 @@ mod tests {
             v.inbox = Inbox::live();
             v.reload(cx);
             v.inbox.select_all();
-            assert!(!v.prepare_move(cx));
+            assert!(!v.prepare_move("move ", window, cx));
             assert!(v.palette.is_none());
             let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(message)).unwrap();
             v.inbox.select(row);
-            assert!(v.prepare_move(cx));
-            assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, other.id);
+            // The other account's list opens first; the palette opens once its read lands.
+            assert!(!v.prepare_move("move ", window, cx));
+            (other.id, message)
+        });
+        view.update_in(cx, |v, window, cx| {
+            assert!(v.palette.is_some());
+            assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, other);
             assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].store, Some(message));
             assert!(v.inbox.folders.iter().any(|f| f.full == "Work files" && !f.gone));
+            assert!(v.prepare_move("move ", window, cx));
         });
     }
 
@@ -6039,7 +6128,7 @@ mod tests {
     fn unified_popout_action_rebinds_store_id_after_account_switch(cx: &mut TestAppContext) {
         use lagom_core::store::{FolderRole, Message, MessageSummary};
         let (view, cx, mut rx) = window(cx);
-        view.update_in(cx, |v, window, cx| {
+        let message = view.update_in(cx, |v, window, cx| {
             incoming(v, 1);
             let live = v.live.as_ref().unwrap();
             let personal = live.accounts[0].id.clone();
@@ -6060,10 +6149,12 @@ mod tests {
             assert!(!v.inbox.raw_list().contains(&id));
             v.act_on(id, Move::Done, window, cx);
             assert_eq!(v.live.as_ref().unwrap().account().unwrap().id, other.id);
-            let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-            assert!(commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, act: Act::Archive, .. } if *id == message)));
-            assert!(!commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, .. } if *id != message)));
+            message
         });
+        // The move runs in the jump's completion, once the other account's list is on screen.
+        let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, act: Act::Archive, .. } if *id == message)));
+        assert!(!commands.iter().any(|cmd| matches!(cmd, Cmd::Op { id, .. } if *id != message)));
     }
 
 }

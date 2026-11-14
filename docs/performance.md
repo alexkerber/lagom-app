@@ -122,12 +122,25 @@ meanwhile merge into one follow-up read. A generation counter drops results olde
 list on screen. Starting a move or another operation also invalidates reads already
 running. A read for another list is dropped. So is one that finishes while a move is in
 flight, or one that would drop a row selected while it ran (that row is read again, pinned).
-A jump to one message (search hit, notification, task link, Move from a popout) still
-reads inline (`reload_now`), because its next steps need that account's folders and rows.
-That costs one inline read per click (39–42 ms in release at 100k). Tests:
+A jump to one message (search hit, notification, task link, Move from a popout, Move for a
+selection in another account) reads on the background executor too. Its next steps need
+that account's folders and rows, so they run in the read's completion: when the account's
+folders are not on screen yet, the jump waits for that read; then it opens the message's
+list, and the next read selects the message and runs the follow-up (the Move palette, or
+the popout's Done or Later). The old list stays on screen until then. Rules: the account's
+folders come from a read requested after the message was found; nothing is selected between
+opening the list and selecting the message, so no key or render acts on row 0; another
+account or list cancels the pending jump; a read error ends it; a new jump is refused with
+"Wait for the message to open" while one with a follow-up is pending.
+
+`reload_ui_thread_100k` also times the jump (`reload.ui_thread_jump`): `open_found` for an
+old Inbox message at 100k, release, M4 Max, best of 5, three runs each. Before
+(`reload_now` inline): 25.7–26.6 ms. After: 0.88–1.08 ms. Tests:
 `list_reads_run_off_the_ui_thread_and_never_go_back_in_time`,
-`a_row_selected_during_a_read_stays_listed` and
-`search_hit_in_a_folder_opens_while_a_read_is_in_flight`.
+`a_row_selected_during_a_read_stays_listed`,
+`search_hit_in_a_folder_opens_while_a_read_is_in_flight` (the jump keeps the old list,
+then its completion selects the hit and opens the Move palette) and
+`a_jump_selects_nothing_until_its_read_lands_and_navigation_cancels_it`.
 
 Still counted per reload: unread per folder and the Inbox and Later totals each visit
 every row of their folder (about 10–13 ms each in release at 100k). A covering partial
@@ -147,26 +160,28 @@ GitHub's shared runners, which are slower and noisier than the reference Mac. Me
 without a budget are listed as "no budget".
 
 What the gate cannot measure: first presented frame, frame times, resident memory and idle CPU.
-These need a window and a GPU. `reload.ui_thread_background` times the `reload()` call only;
+These need a window and a GPU. `reload.ui_thread_background` and `reload.ui_thread_jump`
+time the `reload()` and `open_found()` calls only;
 applying the finished read to the list also runs on the UI thread and is not timed. "Cold start" here is store open plus the first list read on a
 warm OS file cache, in an already running process.
 
 Measured 2026-11-14 on macOS 27.2.1, Apple M4 Max, release, other builds running meanwhile:
 
-| Key                            |   Value | Budget |
-| ------------------------------ | ------: | -----: |
-| `search.*` (four queries)      | ≤ 0.1 ms |  50 ms |
-| `open.message`                 | 0.02 ms |  16 ms |
-| `reload.ui_thread_background`  | 0.17 ms |   8 ms |
-| `reload.cold_start_first_list` |   44 ms | 200 ms |
-| `reload.load_accounts`         |   42 ms | 100 ms |
-| `reload.folders`               |   18 ms |  30 ms |
-| `reload.counts`                |   15 ms |  30 ms |
-| `mime.typical` (25 KB)         | 0.53 ms |   2 ms |
-| `mime.large` (3 MB)            | 0.56 ms |  50 ms |
-| `html.to_text_100kb`           |  2.0 ms |  10 ms |
-| `sync.parse_save_1000`         |  0.8–1.5 s |  2 s |
-| `binary.size`                  | 27.5 MB |  30 MB |
+| Key                            |     Value | Budget |
+| ------------------------------ | --------: | -----: |
+| `search.*` (four queries)      |  ≤ 0.1 ms |  50 ms |
+| `open.message`                 |   0.02 ms |  16 ms |
+| `reload.ui_thread_background`  |   0.17 ms |   8 ms |
+| `reload.ui_thread_jump`        |   0.92 ms |   8 ms |
+| `reload.cold_start_first_list` |     44 ms | 200 ms |
+| `reload.load_accounts`         |     42 ms | 100 ms |
+| `reload.folders`               |     18 ms |  30 ms |
+| `reload.counts`                |     15 ms |  30 ms |
+| `mime.typical` (25 KB)         |   0.53 ms |   2 ms |
+| `mime.large` (3 MB)            |   0.56 ms |  50 ms |
+| `html.to_text_100kb`           |    2.0 ms |  10 ms |
+| `sync.parse_save_1000`         | 0.8–1.5 s |    2 s |
+| `binary.size`                  |   27.5 MB |  30 MB |
 
 First CI run (PR #131, 2026-11-14): every time was within 1.3× of the reference Mac, most
 faster. ubuntu-latest: cold start 36 ms, `load_accounts` 35 ms, `sync.parse_save_1000` 1.41 s.
@@ -183,6 +198,8 @@ Findings:
   rustybuzz and oo7 2 % each. zbus, naga, oo7 and dbus are Linux only.
 - macOS is 27.4 MB (`__text` 14.3 MB), not the 6.0 MB of the 2026-11-06 baseline. `strip` of
   the symbols takes it to 21.6 MB.
-- A jump to one message (`reload_now`, inline) holds the UI thread for 69 ms at 100k
-  (`reload.ui_thread_inline`). That breaks the 16 ms "open a message" budget. It has no CI
-  budget, because the gate would fail on main today.
+- A jump to one message read inline and held the UI thread for 69 ms at 100k
+  (`reload.ui_thread_inline`, an earlier run). It now reads on the background executor:
+  `reload.ui_thread_jump` is 0.9–1.1 ms (was 25.7–26.6 ms for the same jump), budget 8 ms.
+  `reload.ui_thread_inline` stays in the table as the "before" reference for `reload()`
+  (38–42 ms) and has no budget.

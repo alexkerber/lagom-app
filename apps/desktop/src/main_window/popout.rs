@@ -242,7 +242,10 @@ impl MainWindow {
             match (self.inbox.mail[id].store.filter(|_| self.live.is_some()), self.inbox.items.contains(&id)) {
                 // Real mail: find and pin it by store id, as ⌘K does. A folder's cached rows may
                 // hold it while its next read, a page from the top, would not (an older ⌘K hit).
-                (Some(store), _) => self.open_found(store, cx),
+                // The move runs once that read lands.
+                (Some(store), _) => {
+                    return self.open_found(store, Then::new(window, move |this, _, cx| this.act_listed(id, Some(store), what, cx)), cx);
+                }
                 (None, true) => self.open_box(None, cx),
                 (None, false) if self.inbox.trash.contains(&id) => self.open_kind(Kind::Trash, cx),
                 (None, false) => {
@@ -252,6 +255,12 @@ impl MainWindow {
                 }
             }
         }
+        self.act_listed(id, store, what, cx);
+    }
+
+    /// The move of `act_on` once its list is on screen. `store` names the message when set:
+    /// an account switch renumbers `id`.
+    fn act_listed(&mut self, id: usize, store: Option<i64>, what: Move, cx: &mut Context<Self>) {
         let id = match store {
             Some(store) => match self.inbox.by_store.get(&store) {
                 Some(&id) => id,

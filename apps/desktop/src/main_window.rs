@@ -210,6 +210,7 @@ pub(crate) use tasks::TaskChange;
 mod popout;
 pub use live::Live;
 pub(crate) use live::notify_without_window;
+use live::Then;
 use popout::MessageWindow;
 
 const SECTIONS: [(&str, &str); 4] = [
@@ -635,7 +636,7 @@ impl MainWindow {
     }
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::command_palette::move_query(query).is_some() && !self.prepare_move(cx) { return; }
+        if crate::command_palette::move_query(query).is_some() && !self.prepare_move(query, window, cx) { return; }
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
         // The overlay takes ⌘Z, so the toast's Undo would not work while it is open.
@@ -657,11 +658,11 @@ impl MainWindow {
             this.close_palette(window, cx);
             this.open_palette(&query.0, window, cx);
         }).detach();
-        cx.subscribe(&palette, |this, _, target: &MoveTo, cx| {
+        cx.subscribe_in(&palette, window, |this, _, target: &MoveTo, window, cx| {
             let f = match target {
                 MoveTo::Folder(f) => *f,
                 MoveTo::New(name) => {
-                    if !this.prepare_move(cx) { return; }
+                    if !this.prepare_move(&format!("move {name}"), window, cx) { return; }
                     let name = name.trim();
                     if let Err(e) = this.validate_folder_name(name) {
                         this.notify(e, cx);
@@ -719,7 +720,7 @@ impl MainWindow {
             Run::Settings => self.open_settings(window, cx),
             Run::AddAccount => self.add_account(window, cx),
             Run::Shortcuts => self.show_shortcuts(window, cx),
-            Run::Open(id) => self.open_found(id, cx),
+            Run::Open(id) => self.open_found(id, None, cx),
         }
     }
 
@@ -1026,6 +1027,8 @@ impl MainWindow {
         self.reading_thread = None;
         if let Some(live) = &mut self.live {
             live.pin = None;
+            // Another list replaces a pending jump; `open_found` sets its own after this.
+            live.cancel_jump();
         }
         // Selection is row 0 of the new list; the old list's offset would hide it.
         self.scroll.set_offset(Point::default());
