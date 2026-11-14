@@ -278,15 +278,23 @@ impl Stores {
 }
 impl Stores {
     /// Stores a read flag that was asked for but has not run yet, before `id` moves.
+    /// The caller holds `marking`.
     async fn carry_read_flag(&self, session: &mut ImapSync, s: &mut Store, id: i64) -> lagom_core::Result<()> {
-        let pending = self.pending_reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
-        match pending { Some((seen, _)) => session.mark_seen(s, id, seen).await, None => Ok(()) }
+        let Some((seen, call)) = self.pending_reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&id).copied() else { return Ok(()) };
+        // On failure the entry stays, so the waiting mark_read runs it and reports its own result.
+        session.mark_seen(s, id, seen).await?;
+        self.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, seen);
+        let mut pending = self.pending_reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.get(&id).map(|p| p.1) == Some(call) { pending.remove(&id); }
+        Ok(())
     }
 }
 impl std::ops::Deref for FolderLock<'_> { type Target = Store; fn deref(&self) -> &Store { &self.store } }
 impl std::ops::DerefMut for FolderLock<'_> { fn deref_mut(&mut self) -> &mut Store { &mut self.store } }
-impl Drop for FolderLock<'_> {
-    fn drop(&mut self) {
+impl Drop for FolderLock<'_> { fn drop(&mut self) { self.replay(); } }
+impl FolderLock<'_> {
+    /// Writes again the read flags confirmed during this step. Drop calls it; call it sooner to read flags now.
+    fn replay(&mut self) {
         // Under `marking`: a read flag that finished after the drain must not be overwritten by an older one.
         let _marking = self.stores.marking.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let flags = std::mem::take(&mut *self.stores.read_flags.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
@@ -493,7 +501,8 @@ impl LagomCore {
             let mut rows = Vec::new();
             let accounts = stores.folder_lock().accounts()?;
             for a in accounts {
-                let s = &mut *stores.folder_lock();
+                let mut lock = stores.folder_lock();
+                let s = &mut *lock;
                 // After the lock: a cancel may arrive while a move holds it.
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
                 // No Inbox yet means no first sync: new_mail would stay silent anyway.
@@ -506,7 +515,9 @@ impl LagomCore {
                 });
                 // One account's failure (locked secret, network) must not stop the others.
                 if synced.is_err() { continue; }
-                let (after, messages) = (s.folder(before.id)?, s.messages_since(before.id, before.last_uid)?);
+                // A read flag confirmed during the sync must not come back as new mail.
+                lock.replay();
+                let (after, messages) = (lock.folder(before.id)?, lock.messages_since(before.id, before.last_uid)?);
                 rows.extend(lagom_core::new_mail::new_mail(&before, &after, messages).into_iter().map(MailRow::from));
             }
             Ok(rows)
@@ -657,9 +668,14 @@ impl LagomCore {
     }
     pub async fn mark_read(&self, id: i64, read: bool) -> Result<()> {
         let stores = self.stores.clone();
-        // At the call, before any wait: a move that starts later still sees it.
-        let call = stores.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        stores.pending_reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, (read, call));
+        // At the call, before any wait: a move that starts later still sees it. Numbered under the
+        // same lock, so a later call always holds the higher number.
+        let call = {
+            let mut pending = stores.pending_reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let call = stores.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            pending.insert(id, (read, call));
+            call
+        };
         self.run_own(move |s| {
             let _marking = stores.marking.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mine = |p: &HashMap<i64, (bool, u64)>| p.get(&id).map(|p| p.1) == Some(call);

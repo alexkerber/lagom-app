@@ -1444,7 +1444,7 @@ async fn a_sync_with_older_flags_does_not_undo_a_read_flag() {
 /// `stall_on` waits for `release` before it runs.
 #[derive(Default)]
 struct OneMessage { stall_on: &'static str, stalls: std::sync::atomic::AtomicUsize, stalled: tokio::sync::Notify,
-    release: tokio::sync::Notify, state: Mutex<(String, bool)> }
+    release: tokio::sync::Notify, state: Mutex<(String, bool)>, refuse_store: bool }
 fn one_message_server(listener: tokio::net::TcpListener, server: Arc<OneMessage>) {
     use std::sync::atomic::Ordering::SeqCst;
     *server.state.lock().unwrap() = ("INBOX".into(), false);
@@ -1462,6 +1462,10 @@ fn one_message_server(listener: tokio::net::TcpListener, server: Arc<OneMessage>
                 if !server.stall_on.is_empty() && cmd.starts_with(server.stall_on) && server.stalls.fetch_add(1, SeqCst) == 0 {
                     server.stalled.notify_one();
                     server.release.notified().await;
+                }
+                if server.refuse_store && cmd.starts_with("UID STORE") {
+                    socket.get_mut().write_all(format!("{tag} NO refused\r\n").as_bytes()).await.unwrap();
+                    continue;
                 }
                 let (location, seen) = server.state.lock().unwrap().clone();
                 let here = selected == location;
@@ -1557,6 +1561,20 @@ async fn done_carries_a_read_flag_asked_for_but_not_yet_run() {
     assert_eq!(*server.state.lock().unwrap(), ("Archive".to_string(), true), "the move stores the read flag first");
     assert!(core.stores.pending_reads.lock().unwrap().is_empty(), "the late mark_read then does nothing");
     assert!(!core.mailbox(Some(a.id), Mailbox::Done, 20, 0).await.unwrap()[0].unread);
+}
+
+#[tokio::test]
+async fn a_refused_carried_read_flag_stays_for_its_own_call() {
+    let (_dir, core) = fixture();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (_, id) = one_message_fixture(&core, listener.local_addr().unwrap().port());
+    let server = Arc::new(OneMessage { refuse_store: true, ..Default::default() });
+    one_message_server(listener, server.clone());
+    core.stores.pending_reads.lock().unwrap().insert(id, (true, 0));
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(20), core.done(vec![id])).await.unwrap().is_err());
+    // The waiting mark_read runs it and reports the refusal itself.
+    assert_eq!(core.stores.pending_reads.lock().unwrap().get(&id), Some(&(true, 0)));
+    assert_eq!(server.state.lock().unwrap().0, "INBOX");
 }
 
 #[tokio::test]
