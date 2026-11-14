@@ -8,7 +8,9 @@ import androidx.core.content.FileProvider
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.rememberScrollState
@@ -46,13 +48,14 @@ import kotlin.math.abs
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
     var removing by remember { mutableStateOf<MailAccount?>(null) }
     var signing by remember { mutableStateOf<MailAccount?>(null) }
+    var naming by remember { mutableStateOf<MailAccount?>(null) }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
     val rise = with(LocalDensity.current) { 12.dp.roundToPx() }
     Box(Modifier.fillMaxSize()) {
         Box(if (overlay != null) Modifier.clearAndSetSemantics {} else Modifier) {
-            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onRetry = { retrying = it })
+            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onName = { naming = it }, onRetry = { retrying = it })
         }
         AnimatedContent(overlay, Modifier.fillMaxSize(), contentKey = { it?.let { screen -> screen::class } }, label = "screen", transitionSpec = {
             when {
@@ -81,6 +84,7 @@ import kotlin.math.abs
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } })
     }
     signing?.let { account -> SignatureDialog(model, account) { signing = null } }
+    naming?.let { account -> NameDialog(model, account) { naming = null } }
     retrying?.let { failure ->
         AlertDialog(onDismissRequest = { retrying = null }, title = { Text("Send again?") },
             text = { Text("Check Sent first if delivery was uncertain. This can send a duplicate.") },
@@ -94,11 +98,12 @@ internal fun Mailbox.label(): String = when (this) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit) {
+@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit,
+    onName: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Scaffold(topBar = {
         TopAppBar(title = {
-            Text(if (model.showingDrafts) "Drafts" else if (model.accounts.isEmpty()) "lagom" else model.mailbox.label(),
+            Text(if (model.showingDrafts) "Drafts" else if (model.accounts.isEmpty()) "lagom" else model.folder?.name ?: model.mailbox.label(),
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }, navigationIcon = {
             Box {
@@ -112,6 +117,15 @@ internal fun Mailbox.label(): String = when (this) {
                     DropdownMenuItem(text = { Text("Drafts") }, onClick = {
                         menu = false; model.perform { model.showDrafts() }
                     })
+                    // Desktop's folder group: the server's own folders, with the account when there are several.
+                    val folders = model.folders.filter { model.accountId == null || it.account == model.accountId }
+                    if (folders.isNotEmpty()) HorizontalDivider()
+                    folders.forEach { folder ->
+                        val account = model.accounts.find { it.id == folder.account }?.takeIf { model.accounts.size > 1 }
+                        DropdownMenuItem(text = { Text(account?.let { "${folder.path} · ${it.displayName}" } ?: folder.path) }, onClick = {
+                            menu = false; model.perform { model.openFolder(folder) }
+                        })
+                    }
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("All accounts") }, onClick = {
                         menu = false; model.perform { model.changeScope(null, model.mailbox) }
@@ -123,6 +137,7 @@ internal fun Mailbox.label(): String = when (this) {
                     }
                     DropdownMenuItem(text = { Text("Add account") }, enabled = model.core != null, onClick = { menu = false; model.accountForm = AccountForm() })
                     model.accounts.forEach { account ->
+                        DropdownMenuItem(text = { Text("Your name for ${account.email}") }, onClick = { menu = false; onName(account) })
                         DropdownMenuItem(text = { Text("Signature for ${account.email}") }, onClick = { menu = false; onSign(account) })
                         DropdownMenuItem(text = { Text("Remove ${account.email}") }, onClick = { menu = false; onRemove(account) })
                     }
@@ -210,10 +225,21 @@ internal fun Mailbox.label(): String = when (this) {
                     modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Clear search" }) { Text("Clear") }
             }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).semantics { contentDescription = "Search" })
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(!model.unreadOnly, { model.unreadOnly = false }, label = { Text("All") },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "All" })
-            FilterChip(model.unreadOnly, { model.unreadOnly = true }, label = { Text("Unread") },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Unread" })
+            if (model.mailbox == Mailbox.TRASH && model.folder == null) {
+                // In Trash the filter makes way for Empty Trash, as on desktop.
+                var confirm by remember { mutableStateOf(false) }
+                TextButton(enabled = model.rows.isNotEmpty() && !model.working, onClick = { confirm = true },
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text(if (model.emptyingTrash) "Emptying…" else "Empty Trash") }
+                if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete all permanently?") },
+                    confirmButton = { TextButton(onClick = { confirm = false; model.perform { model.emptyTrash() } },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
+                    dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
+            } else {
+                FilterChip(!model.unreadOnly, { model.unreadOnly = false }, label = { Text("All") },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "All" })
+                FilterChip(model.unreadOnly, { model.unreadOnly = true }, label = { Text("Unread") },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Unread" })
+            }
         }
         // A pull shows the indicator at once; a sync the app starts shows it only past 150 ms.
         var pulled by remember { mutableStateOf(false) }
@@ -239,8 +265,11 @@ internal fun Mailbox.label(): String = when (this) {
                 }
                 items(rows, key = { it.id }) { row ->
                     Column(rowMotion(animate)) {
-                        MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, onSelect = { model.perform { model.select(row.id) } },
-                            onAction = { model.perform { model.act(it, row.id) } })
+                        MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, model.moveTargets(row.account),
+                            onSelect = { model.perform { model.select(row.id) } },
+                            onAction = { model.perform { model.act(it, row.id) } },
+                            onRead = { model.perform { model.setRead(row) } },
+                            onMove = { folder -> model.perform { model.move(row.id, folder) } })
                         HorizontalDivider()
                     }
                 }
@@ -258,7 +287,7 @@ internal fun Mailbox.label(): String = when (this) {
     val title = when {
         model.unreadOnly && model.rows.isNotEmpty() -> "No unread mail"
         model.searchText.isNotBlank() -> "No results"
-        model.mailbox == Mailbox.INBOX -> "Nothing left."
+        model.mailbox == Mailbox.INBOX && model.folder == null -> "Nothing left."
         else -> "No mail here"
     }
     Column(modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
@@ -276,8 +305,13 @@ private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
 private val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
     .addPath(addPathNodes("M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"), fill = SolidColor(Color.Black)).build()
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, onSelect: () -> Unit, onAction: (MailAction) -> Unit) {
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, onSelect: () -> Unit,
+    onAction: (MailAction) -> Unit, onRead: () -> Unit, onMove: (MailFolder) -> Unit) {
+    // A long press opens what iOS's context menu has: Mark read or unread, and Move to.
+    var menu by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf(false) }
+    val readLabel = if (row.unread) "Mark read" else "Mark unread"
     val currentAction by rememberUpdatedState(onAction)
     val currentBusy by rememberUpdatedState(busy)
     // motion.md: a release past 120 dp acts; short of it the row springs back.
@@ -316,11 +350,15 @@ private val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
                 modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Cancel" }) { Text("Cancel") }
         }
     }) {
-        ListItem(modifier = Modifier.clickable(onClick = onSelect).then(if (revealed) Modifier.clearAndSetSemantics {} else Modifier.semantics {
+        Box {
+        ListItem(modifier = Modifier.combinedClickable(onLongClickLabel = "More actions", onLongClick = { if (!busy) menu = true }, onClick = onSelect)
+            .then(if (revealed) Modifier.clearAndSetSemantics {} else Modifier.semantics {
             stateDescription = if (row.unread) "Unread" else "Read"
             customActions = listOf(CustomAccessibilityAction("Done") { if (!busy) onAction(MailAction.Done); !busy },
                 CustomAccessibilityAction("Later") { if (!busy) onAction(MailAction.Later); !busy }) +
-                if (canDelete) listOf(CustomAccessibilityAction("Delete") { if (!busy) onAction(MailAction.Delete); !busy }) else emptyList()
+                (if (canDelete) listOf(CustomAccessibilityAction("Delete") { if (!busy) onAction(MailAction.Delete); !busy }) else emptyList()) +
+                CustomAccessibilityAction(readLabel) { if (!busy) onRead(); !busy } +
+                targets.map { folder -> CustomAccessibilityAction("Move to ${folder.path}") { if (!busy) onMove(folder); !busy } }
         }), headlineContent = { Text(view.sender, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             supportingContent = { Column {
                 Text(view.subject, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -333,6 +371,15 @@ private val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
                 }
                 if (row.hasAttachments) Text("Attachment", style = MaterialTheme.typography.labelSmall)
             } })
+        DropdownMenu(menu || moving, { menu = false; moving = false }) {
+            if (moving) targets.forEach { folder ->
+                DropdownMenuItem(text = { Text(folder.path) }, onClick = { moving = false; onMove(folder) })
+            } else {
+                DropdownMenuItem(text = { Text(readLabel) }, onClick = { menu = false; onRead() })
+                if (targets.isNotEmpty()) DropdownMenuItem(text = { Text("Move to…") }, onClick = { menu = false; moving = true })
+            }
+        }
+        }
     }
 }
 
@@ -514,6 +561,20 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                         DropdownMenuItem(text = { Text(choice.label) }, onClick = {
                             choices = emptyList()
                             model.perform { model.act(MailAction.Later, message.row.id, conversation = false, until = choice.untilUnix) }
+                        })
+                    }
+                }
+            }
+            val targets = model.moveTargets(message.row.account)
+            if (targets.isNotEmpty()) Box {
+                var open by remember { mutableStateOf(false) }
+                TextButton(enabled = !model.working, onClick = { open = true },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text("Move to") }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    targets.forEach { folder ->
+                        DropdownMenuItem(text = { Text(folder.path) }, onClick = {
+                            open = false
+                            model.perform { model.move(message.row.id, folder, conversation = false) }
                         })
                     }
                 }

@@ -206,7 +206,13 @@ final class MailModel {
     private(set) var notificationRevision = 0
     var notificationTarget: MailTarget?
     var accountID: String?
-    var mailbox: MailboxChoice = .inbox
+    /// Choosing a mailbox, even the one under an open folder, leaves the folder.
+    var mailbox: MailboxChoice = .inbox { didSet { if folder != nil { folder = nil } } }
+    /// A server folder from `folders`; while set, the list shows it instead of `mailbox`.
+    var folder: MailFolder?
+    /// Every account's own folders: desktop's folder group and its "Move to" targets.
+    var folders: [MailFolder] = []
+    private(set) var emptyingTrash = false
     var searchText = ""
     var remoteImagesIDs: Set<Int64> = []
     var messages: [MailMessage] = []
@@ -252,7 +258,7 @@ final class MailModel {
     var syncing = false
     private var actingID: Int64?
     private var readingIDs: Set<Int64> = []
-    var working: Bool { actingID != nil || !readingIDs.isEmpty }
+    var working: Bool { actingID != nil || !readingIDs.isEmpty || emptyingTrash }
     var hasMore = false
     private var revision = 0
     private var syncAgain = false
@@ -299,26 +305,40 @@ final class MailModel {
         let request = revision
         let offset = more ? UInt32(rows.count) : 0
         let account = accountID
-        let draftsOnly = mailbox == .drafts
+        let draftsOnly = mailbox == .drafts && folder == nil
         let mailbox = mailbox.mailbox
+        let folder = folder?.id
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let due = try await core.nextSnooze()
             let accounts = try await core.accounts()
+            // Every account's: the sidebar lists them all, and opening one narrows the account.
+            let folders = try await core.folders(accountId: nil)
+            // The folder went from the server, or belongs to another account: the scope change reloads.
+            if let folder, !folders.contains(where: { $0.id == folder && (account == nil || $0.account == account) }) {
+                guard request == revision else { return }
+                self.folders = folders
+                self.folder = nil
+                return
+            }
             var page: [MailRow] = []
             let count = more ? 100 : max(100, rows.count)
             var hasMore = false
             repeat {
                 try Task.checkCancellation()
-                let batch = try await draftsOnly ? [] : query.isEmpty
-                    ? core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: offset + UInt32(page.count))
-                    : core.search(accountId: account, query: query, limit: 100, offset: offset + UInt32(page.count))
+                let at = offset + UInt32(page.count)
+                let batch: [MailRow]
+                if draftsOnly { batch = [] }
+                else if !query.isEmpty { batch = try await core.search(accountId: account, query: query, limit: 100, offset: at) }
+                else if let folder { batch = try await core.folderMail(folderId: folder, limit: 100, offset: at) }
+                else { batch = try await core.mailbox(accountId: account, mailbox: mailbox, limit: 100, offset: at) }
                 page += batch
                 hasMore = batch.count == 100
             } while hasMore && page.count < count
             let failures = try await core.sendFailures()
             guard request == revision, !Task.isCancelled else { return }
             self.accounts = accounts
+            self.folders = folders
             self.failures = failures
             rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
             self.hasMore = hasMore
@@ -413,7 +433,7 @@ final class MailModel {
         rows = []
         await reload()
         guard !Task.isCancelled, core != nil, let target = notificationTarget,
-              target.account == accountID, mailbox == .inbox, searchText.isEmpty else { return }
+              target.account == accountID, mailbox == .inbox, folder == nil, searchText.isEmpty else { return }
         notificationTarget = nil
         selectedID = target.message
     }
@@ -540,6 +560,7 @@ final class MailModel {
             case .done: changes = try await core.done(ids: ids)
             case .later: changes = try await core.later(ids: ids, untilUnix: until ?? core.laterChoices()[1].untilUnix)
             case .delete: changes = try await core.delete(ids: ids)
+            case .move(let folder): changes = try await core.moveToFolder(ids: ids, folderId: folder.id)
             }
             if selectedID == id { selectedID = nil; message = nil; messages = []; expandedIDs = []; remoteImagesIDs = [] }
             offerUndo(changes, notice: action.notice)
@@ -566,7 +587,43 @@ final class MailModel {
         }
     }
 
-    /// Undo for the last Done, Later or Delete: each message goes back where it was.
+    /// Opens a folder of its account, as desktop's folder group does.
+    func open(_ folder: MailFolder) {
+        // Under a folder the mailbox is Inbox, so Drafts and Trash rules never apply to it.
+        mailbox = .inbox
+        accountID = folder.account
+        searchText = ""
+        self.folder = folder
+    }
+
+    /// The folders a message of `account` can move to: its account's, without the open one.
+    /// Search covers the whole account, so there the open folder is a target too.
+    func moveTargets(account: String) -> [MailFolder] {
+        folders.filter { $0.account == account && ($0.id != folder?.id || !searchText.isEmpty) }
+    }
+
+    /// Only after the person confirmed: the scope's Trash is deleted for good on the server.
+    func emptyTrash() async {
+        guard let core, mailbox == .trash, folder == nil, !working else { return }
+        emptyingTrash = true
+        defer { emptyingTrash = false }
+        // Undo could only point at mail that is gone now.
+        if !undoChanges.isEmpty { undoChanges = []; notice = nil }
+        selectedID = nil; message = nil; messages = []; expandedIDs = []; remoteImagesIDs = []
+        do { try await core.emptyTrash(accountId: accountID) } catch { self.error = error.localizedDescription }
+        await reload()
+    }
+
+    /// "Your name" on desktop. An empty name falls back to the address.
+    func setName(_ name: String, account: MailAccount) async {
+        guard let core else { return }
+        do {
+            let saved = try await core.setAccountName(accountId: account.id, name: name)
+            accounts = accounts.map { $0.id == saved.id ? saved : $0 }
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// Undo for the last Done, Later, Delete or Move: each message goes back where it was.
     func undoAction() async {
         guard let core, !undoChanges.isEmpty, !working else { return }
         let changes = undoChanges
@@ -774,12 +831,13 @@ final class MailModel {
 }
 
 enum MailAction {
-    case done, later, delete
+    case done, later, delete, move(MailFolder)
     var notice: String {
         switch self {
         case .done: "Moved to Done"
         case .later: "Moved to Later"
         case .delete: "Deleted"
+        case .move(let folder): "Moved to \(folder.path)"
         }
     }
 }

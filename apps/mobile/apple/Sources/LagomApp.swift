@@ -46,6 +46,11 @@ struct MailView: View {
     @State private var laterID: Int64?
     @State private var retrying: SendFailure?
     @State private var signing: MailAccount?
+    @State private var naming: MailAccount?
+    @State private var newName = ""
+    /// The message "Move to" asks a folder for, with its account.
+    @State private var moving: (account: String, id: Int64)?
+    @State private var confirmEmptyTrash = false
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
@@ -123,6 +128,23 @@ struct MailView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
         .sheet(item: $signing) { account in SignatureView(model: model, account: account) }
+        .alert("Your name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+            TextField("Your name", text: $newName).textContentType(.name)
+            Button("Save") {
+                guard let account = naming else { return }
+                Task { await model.setName(newName, account: account) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("Shown to the people you write to, and in the sidebar.") }
+        .confirmationDialog("Move to", isPresented: Binding(get: { moving != nil }, set: { if !$0 { moving = nil } }), presenting: moving) { row in
+            ForEach(model.moveTargets(account: row.account), id: \.id) { folder in
+                Button(folder.path) { act(.move(folder), id: row.id) }
+            }
+        }
+        // Desktop's words: the subtitle asks, the button deletes.
+        .confirmationDialog("Delete all permanently?", isPresented: $confirmEmptyTrash, titleVisibility: .visible) {
+            Button("Delete all", role: .destructive) { Task { await model.emptyTrash() } }
+        }
         .confirmationDialog("Send again? Check Sent first if delivery was uncertain. This can send a duplicate.", isPresented: Binding(get: { retrying != nil }, set: { if !$0 { retrying = nil } })) {
             if let failure = retrying {
                 Button("Send again") {
@@ -143,7 +165,11 @@ struct MailView: View {
             HStack(alignment: .center, spacing: 8) {
                 mailboxMenu
                 Spacer(minLength: 4)
-                if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
+                if model.mailbox == .trash && model.folder == nil && !model.accounts.isEmpty {
+                    // In Trash the filter makes way for Empty Trash, as on desktop.
+                    HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
+                        .disabled(model.rows.isEmpty || model.working)
+                } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
                 IconButton(title: "New message", icon: "compose") {
                     let account = model.accountID ?? model.accounts.first?.id ?? ""
                     Task { await model.newMessage(account: account) }
@@ -161,18 +187,32 @@ struct MailView: View {
     /// also narrows Later, Sent, Done and Trash.
     private var mailboxMenu: some View {
         let name = model.mailbox == .drafts || model.searchText.isEmpty ? title : "Search"
-        let left = model.mailbox == .inbox && !model.accounts.isEmpty ? "\(planner.inboxLeft(account: model.accountID)) left" : nil
+        let left = model.mailbox == .inbox && model.folder == nil && !model.accounts.isEmpty ? "\(planner.inboxLeft(account: model.accountID)) left" : nil
         return Menu {
-            Picker("Mailbox", selection: $model.mailbox) {
-                ForEach(MailboxChoice.allCases) { Text($0.rawValue).tag($0) }
+            // No mailbox shows as chosen while a folder is open.
+            Picker("Mailbox", selection: Binding(get: { model.folder == nil ? Optional(model.mailbox) : nil }, set: { if let box = $0 { model.mailbox = box } })) {
+                ForEach(MailboxChoice.allCases) { Text($0.rawValue).tag(Optional($0)) }
             }
-            Picker("Account", selection: $model.accountID) {
+            ForEach(model.accounts.filter { model.accountID == nil || $0.id == model.accountID }, id: \.id) { account in
+                let own = model.folders.filter { $0.account == account.id }
+                if !own.isEmpty {
+                    Section(model.accounts.count > 1 ? account.displayName : "Folders") {
+                        ForEach(own, id: \.id) { folder in
+                            Button { model.open(folder) } label: {
+                                if model.folder?.id == folder.id { Label(folder.path, systemImage: "checkmark") } else { Text(folder.path) }
+                            }
+                        }
+                    }
+                }
+            }
+            Picker("Account", selection: Binding(get: { model.accountID }, set: { model.folder = nil; model.accountID = $0 })) {
                 Text("All accounts").tag(String?.none)
                 ForEach(model.accounts, id: \.id) { Text($0.email).tag(Optional($0.id)) }
             }
             Button("Add account") { addAccount = true }
             ForEach(model.accounts, id: \.id) { account in
                 Menu(account.email) {
+                    Button("Your name") { newName = account.displayName == account.email ? "" : account.displayName; naming = account }
                     Button("Signature") { signing = account }
                     Button("Remove account", role: .destructive) { removing = account }
                 }
@@ -232,6 +272,8 @@ struct MailView: View {
     }
 
     private var inbox: some View {
+        // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes.
+        let unreadOnly = unreadOnly && !(model.mailbox == .trash && model.folder == nil)
         let rows = (unreadOnly ? model.rows.filter(\.unread) : model.rows)
             .filter { !leaving.contains($0.id) && !$0.messageIds.contains(where: leaving.contains) }
         let ids = rows.map(\.id)
@@ -285,7 +327,7 @@ struct MailView: View {
                             EmptyState(icon: "inbox", title: "Welcome to lagom", detail: "Add an account to get started.") {
                                 HouseButton(title: "Add account", icon: "account-add", primary: true) { addAccount = true }
                             }
-                        } else if model.mailbox == .inbox && model.searchText.isEmpty {
+                        } else if model.mailbox == .inbox && model.folder == nil && model.searchText.isEmpty {
                             // Inbox zero, as on desktop: one calm illustration, no confetti.
                             EmptyState(icon: "inbox", title: "Nothing left.", illustration: "EmptyTray")
                         } else {
@@ -310,6 +352,9 @@ struct MailView: View {
             Button(row.unread ? "Mark read" : "Mark unread") {
                 Task { await model.setRead(row: row) }
             }.disabled(model.working)
+            if !model.moveTargets(account: row.account).isEmpty {
+                Button("Move to…") { moving = (row.account, row.id) }.disabled(model.working)
+            }
         }
         .swipeActions(edge: .leading) {
             Button { act(.done, id: row.id) } label: { Label("Done", image: "done") }.tint(Theme.done)
@@ -338,6 +383,7 @@ struct MailView: View {
     }
 
     private var title: String {
+        if let folder = model.folder { return folder.name }
         guard model.mailbox == .inbox, let id = model.accountID, let account = model.accounts.first(where: { $0.id == id }) else { return model.mailbox.rawValue }
         return account.displayName
     }
@@ -403,6 +449,11 @@ extension MailView {
             }
             if model.mailbox != .trash {
                 HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { act(.delete, id: id) }
+            }
+            if !model.moveTargets(account: message.row.account).isEmpty {
+                HouseButton(title: "Move to", icon: "move", iconOnly: iconOnly) {
+                    moving = (message.row.account, id)
+                }
             }
             if regular {
                 HouseButton(title: message.row.unread ? "Mark read" : "Mark unread", icon: message.row.unread ? "read" : "unread",
