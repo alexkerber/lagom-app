@@ -86,6 +86,9 @@ pub enum TouchPhase {
     Moved,
     /// The touch phase has ended
     Ended,
+    /// The system cancelled the touch; the gesture ends without the user lifting their fingers.
+    // lagom: macOS sends NSEventPhaseCancelled; mapping it to Moved left a swiped row offset.
+    Cancelled,
 }
 
 /// A mouse down event from the platform
