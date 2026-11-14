@@ -266,6 +266,14 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn folder_unread_counts_seek_each_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("plan.sqlite3")).unwrap();
+        let plan: Vec<String> = store.db.prepare(&format!("EXPLAIN QUERY PLAN {FOLDERS_SQL}")).unwrap()
+            .query_map(params!["account", 0], |r| r.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(plan.iter().any(|p| p.contains("SEARCH m USING INDEX messages_visible_folder_date")), "{plan:?}");
+    }
+    #[test]
     fn bounded_task_write_restores_timeout_and_leaves_worker_timeout_unchanged() {
         use std::time::{Duration, Instant};
         let temp = tempfile::tempdir().unwrap();
@@ -479,6 +487,9 @@ fn folder_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
         unread: r.get(9)?,
     })
 }
+/// Folders with unread counts. `+f.id` drops the column's affinity: with it, SQLite cannot seek
+/// the expression index and scans every message once per folder.
+const FOLDERS_SQL: &str = "SELECT f.id,f.account,f.name,f.delimiter,f.role,f.uidvalidity,f.uidnext,f.last_uid,f.highest_modseq,(SELECT count(*) FROM messages m WHERE coalesce(m.move_target,m.folder)=+f.id AND NOT m.seen AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2)) FROM folders f WHERE f.account=?1 ORDER BY f.name";
 impl Store {
     pub fn save_folder(
         &self,
@@ -509,7 +520,7 @@ impl Store {
         Ok(())
     }
     pub fn folders(&self, account: &str, now: i64) -> Result<Vec<Folder>> {
-        let mut stmt = self.db.prepare("SELECT f.id,f.account,f.name,f.delimiter,f.role,f.uidvalidity,f.uidnext,f.last_uid,f.highest_modseq,(SELECT count(*) FROM messages m WHERE coalesce(m.move_target,m.folder)=f.id AND NOT m.seen AND (m.snoozed_until IS NULL OR m.snoozed_until<=?2)) FROM folders f WHERE f.account=?1 ORDER BY f.name")?;
+        let mut stmt = self.db.prepare(FOLDERS_SQL)?;
         let rows = stmt.query_map(params![account, now], folder_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }

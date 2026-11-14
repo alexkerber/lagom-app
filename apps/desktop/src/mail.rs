@@ -184,7 +184,7 @@ pub fn recipients(field: &str) -> Vec<String> {
 }
 
 /// The list the UI shows, as the store has it now.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum View {
     Inbox,
     Trash,
@@ -208,8 +208,8 @@ pub struct Snapshot {
     pub more: bool,
 }
 
-/// Bounded queries on indexed columns: a few ms for a 100 000-message store. Runs when the
-/// worker reports a change, never per key press.
+/// Bounded queries on indexed columns. The unread and total counts still visit every row of the
+/// folder, so the window runs this on the background executor, never per key press.
 /// `pins`: selected messages and a ⌘K hit stay in their list even past `limit`.
 pub fn load(store: &lagom_core::store::Store, account: &str, view: View, limit: u32, now: i64, pins: impl IntoIterator<Item = i64>, group: bool) -> lagom_core::Result<Snapshot> {
     let folders = store.folders(account, now)?;
@@ -270,7 +270,9 @@ pub fn load_accounts(store: &lagom_core::store::Store, accounts: &[lagom_core::a
         _ => None,
     };
     for account in accounts {
-        let folders = store.folders(&account.id, now)?;
+        // The current account's folders and counts are already in `result`.
+        let other;
+        let folders = if account.id == current { &result.folders } else { other = store.folders(&account.id, now)?; &other };
         let unread = [FolderRole::Inbox, FolderRole::Archive, FolderRole::Sent].map(|role|
             folders.iter().filter(|f| f.role == role).map(|f| f.unread as usize).sum());
         result.account_unread.insert(account.id.clone(), unread);
@@ -659,6 +661,58 @@ mod tests {
         store.snooze(oldest, Some(1_000)).unwrap();
         assert!(!list(rows(Some(oldest), View::Inbox)).contains(&oldest));
         assert!(list(rows(Some(oldest), View::Later)).contains(&oldest));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Times one window reload's store reads at 100k messages. Run with
+    /// `cargo test -p lagom [--release] reload_reads_100k -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn reload_reads_100k() {
+        use lagom_core::store::{FolderRole, Message, Store};
+        let dir = std::env::temp_dir().join(format!("lagom-100k-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mail.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let accounts = demo_accounts();
+        for account in &accounts {
+            store.save_account(account).unwrap();
+            let mut first = None;
+            for (name, role) in [("INBOX", FolderRole::Inbox), ("Archive", FolderRole::Archive), ("Sent", FolderRole::Sent)] {
+                let folder = store.save_folder(&account.id, name, Some("/"), role).unwrap();
+                let summary = MessageSummary { account: account.id.clone(), folder, uid: 1, ..Default::default() };
+                let id = store.save_message(&Message { summary, ..Default::default() }).unwrap();
+                first.get_or_insert(id);
+            }
+            // Personal: 100k messages, 50k Inbox, 40k Archive, 10k Sent, every third read.
+            if account.id != "personal" { continue; }
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute("WITH RECURSIVE seq(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM seq WHERE n<100000)
+                INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,thread_id)
+                SELECT account,folder+(CASE WHEN n<=50000 THEN 0 WHEN n<=90000 THEN 1 ELSE 2 END),n,'','','x','x@test','','','Subject',n,'',n%3=0,0,0,0,'',printf('thread-%d',n/2)
+                FROM messages,seq WHERE id=?1", [first.unwrap()]).unwrap();
+        }
+        let time = |name: &str, run: &dyn Fn()| {
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                run();
+                best = best.min(start.elapsed());
+            }
+            eprintln!("100k messages, {name}: best of 5 {best:?}");
+        };
+        time("folders", &|| { store.folders("personal", 0).unwrap(); });
+        time("counts", &|| { store.counts("personal", 0).unwrap(); });
+        time("next_snooze", &|| { store.next_snooze("personal", 0).unwrap(); });
+        let inbox = store.folders("personal", 0).unwrap()[1].id;
+        time("list_conversations", &|| { store.list_conversations("personal", Some(inbox), 0, 201).unwrap(); });
+        time("load personal", &|| { load(&store, "personal", View::Inbox, 201, 0, [], true).unwrap(); });
+        time("load work", &|| { load(&store, "work", View::Inbox, 201, 0, [], true).unwrap(); });
+        time("folders work", &|| { store.folders("work", 0).unwrap(); });
+        time("counts work", &|| { store.counts("work", 0).unwrap(); });
+        time("unread_inbox_count", &|| { store.unread_inbox_count(0, &[]).unwrap(); });
+        time("load_accounts", &|| { load_accounts(&store, &accounts, "personal", None, View::Inbox, 200, 0, vec![], true).unwrap(); });
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

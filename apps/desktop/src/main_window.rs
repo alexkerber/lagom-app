@@ -194,6 +194,12 @@ mod html;
 mod conversation;
 mod selection;
 mod live;
+#[cfg(test)]
+thread_local! {
+    /// Fixture tests that assert right after a reload read the store inline, through the same
+    /// completion code. Off, reads run on the background executor as in the app.
+    static INLINE_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
 mod tasks;
 mod agenda;
 mod week;
@@ -317,6 +323,8 @@ pub struct MainWindow {
     drafts: Vec<gpui::Entity<Compose>>,
     draft_rows: Vec<lagom_core::outbox::DraftSummary>,
     draft_read: Option<Task<()>>,
+    /// The Home unread count read in flight; a newer one replaces (cancels) it.
+    unread_read: Option<Task<()>>,
     draft_open: Option<Task<()>>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
@@ -453,6 +461,7 @@ impl MainWindow {
             drafts: Vec::new(),
             draft_rows: Vec::new(),
             draft_read: None,
+            unread_read: None,
             draft_open: None,
             sending: Vec::new(),
             live,

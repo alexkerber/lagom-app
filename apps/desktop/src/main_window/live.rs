@@ -43,6 +43,22 @@ pub struct Live {
     pub(super) failed: Vec<lagom_core::outbox::Pending>,
     /// Wakes the window when the next message on Later is due.
     due: Option<(i64, Task<()>)>,
+    /// Generation of the newest list read request, and of the snapshot on screen.
+    reads: u64,
+    shown: u64,
+    /// The list read in flight, at most one.
+    read: Option<Task<()>>,
+}
+
+/// What a list read asks for. A result for another key belongs to a list no longer on screen.
+#[derive(Clone, PartialEq)]
+struct ReadKey {
+    account: String,
+    filter: Option<String>,
+    view: mail::View,
+    limit: u32,
+    group: bool,
+    pin: Option<i64>,
 }
 
 /// The body of a message whose text is still being read.
@@ -173,6 +189,9 @@ impl Live {
             move_target: None,
             seen: HashSet::new(),
             due: None,
+            reads: 0,
+            shown: 0,
+            read: None,
         })
     }
 
@@ -289,10 +308,10 @@ impl MainWindow {
         }
     }
 
-    /// Reads the store for the account and list on screen. Waits while moves are in flight, so
-    /// a read never shows a moved row back before the server has it.
+    /// Reads the store for the account and list on screen, on the background executor; the old
+    /// list stays on screen until the read lands. Waits while moves are in flight, so a read
+    /// never shows a moved row back before the server has it.
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
-        let before = self.list_before();
         self.reload_draft_rows(cx);
         self.reload_tasks(cx);
         let Some(live) = &mut self.live else { return };
@@ -321,13 +340,22 @@ impl MainWindow {
             return;
         }
         live.current = live.current.min(live.accounts.len().saturating_sub(1));
-        let Some(account) = live.account().map(|a| a.id.clone()) else {
+        if live.account().is_none() {
             live.more = false;
+            live.read = None;
             self.inbox = Inbox::live();
             self.reading_thread = None;
             self.close_popouts(None, cx);
             return;
-        };
+        }
+        live.reads += 1;
+        // One read at a time: its completion starts the next, so results land in request order.
+        if live.read.is_none() { self.start_read(cx); }
+    }
+
+    /// What a list read for the screen as it is now asks for.
+    fn read_key(&self) -> Option<ReadKey> {
+        let live = self.live.as_ref()?;
         let view = match self.inbox.open.map(|f| (&self.inbox.folders[f].kind, self.inbox.folders[f].store)) {
             None => mail::View::Inbox,
             Some((Kind::Later, _)) => mail::View::Later,
@@ -338,14 +366,48 @@ impl MainWindow {
             // A folder ⌘K just created: nothing on the server yet.
             Some((_, None)) => mail::View::Inbox,
         };
-        self.inbox.group = self.panes.group_conversations;
-        let pins = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(live.pin).collect();
-        let result = mail::load_accounts(&live.store, &live.accounts, &account, self.inbox.account_filter.as_deref(), view, live.limit, now(), pins, self.inbox.group);
+        Some(ReadKey { account: live.account()?.id.clone(), filter: self.inbox.account_filter.clone(), view,
+            limit: live.limit, group: self.panes.group_conversations, pin: live.pin })
+    }
+
+    fn start_read(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.read_key() else { return };
+        let pins: Vec<i64> = self.inbox.selected_members().into_iter().filter_map(|id| self.inbox.mail[id].store).chain(key.pin).collect();
+        let Some(live) = &mut self.live else { return };
+        live.stale = true;
+        let (generation, path, accounts, request) = (live.reads, live.store.path().to_owned(), live.accounts.clone(), key.clone());
+        let at = now();
+        let read = move || mail::load_accounts(&Store::open(path)?, &accounts, &request.account, request.filter.as_deref(), request.view, request.limit, at, pins, request.group);
+        #[cfg(test)]
+        if INLINE_READS.get() { return self.read_done(generation, key, read(), cx); }
+        let read = cx.background_executor().spawn(async move { read() });
+        live.read = Some(cx.spawn(async move |this, cx| {
+            let result = read.await;
+            this.update(cx, |this, cx| this.read_done(generation, key, result, cx)).ok();
+        }));
+    }
+
+    /// Applies a finished read unless it is stale: another list is on screen now, or a move is
+    /// in flight (the read may predate its optimistic removal). Reads again when newer requests
+    /// arrived meanwhile; an unchanged list still takes this result, so steady sync never starves it.
+    fn read_done(&mut self, generation: u64, key: ReadKey, result: lagom_core::Result<mail::Snapshot>, cx: &mut Context<Self>) {
+        let current = self.read_key();
+        let before = self.list_before();
+        let Some(live) = &mut self.live else { return };
+        live.read = None;
+        // Older than the list on screen: never shown. Single flight makes this a backstop.
+        if generation <= live.shown { return; }
+        // The move's completion reloads: `stale` stays set.
+        if !live.ops.is_empty() { return; }
+        if current.as_ref() != Some(&key) { return self.start_read(cx); }
+        let again = generation != live.reads;
         match result {
             Ok(snap) => {
+                live.shown = generation;
                 live.stale = false;
                 live.more = snap.more;
                 self.reading_dirty = true;
+                self.inbox.group = key.group;
                 let due = snap.next_due;
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
                 let want = live.want.take();
@@ -360,6 +422,7 @@ impl MainWindow {
                 self.notify(format!("Could not read mail: {e}"), cx);
             }
         }
+        if again { self.start_read(cx); }
         cx.notify();
     }
 
@@ -974,7 +1037,8 @@ impl MainWindow {
 
     pub(super) fn load_more(&mut self, cx: &mut Context<Self>) {
         if !self.has_more() { return; }
-        if let Some(live) = &mut self.live { live.limit += PAGE; }
+        // Cleared until the bigger read lands, so key repeats do not grow the page again.
+        if let Some(live) = &mut self.live { live.limit += PAGE; live.more = false; }
         self.reload(cx);
     }
 
@@ -1494,6 +1558,63 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use lagom_core::account::{Security, ServerConfig};
+
+    #[gpui::test]
+    fn list_reads_run_off_the_ui_thread_and_never_go_back_in_time(cx: &mut TestAppContext) {
+        INLINE_READS.set(false);
+        let (view, cx, _rx) = window(cx);
+        let rows = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.inbox.list().len());
+        // A request during a read keeps the old list on screen and coalesces into one follow-up.
+        view.update(cx, |v, cx| { v.inbox = Inbox::live(); incoming(v, 1); v.reload(cx); incoming(v, 2); v.reload(cx); });
+        assert_eq!(rows(cx), 0);
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 2);
+        let (key, old) = view.read_with(cx, |v, _| {
+            let live = v.live.as_ref().unwrap();
+            assert!(live.read.is_none() && live.shown == live.reads);
+            let key = v.read_key().unwrap();
+            let old = mail::load_accounts(&live.store, &live.accounts, &key.account, None, key.view, key.limit, now(), vec![], key.group);
+            (key, old)
+        });
+        view.update(cx, |v, cx| { incoming(v, 3); v.reload(cx); });
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 3);
+        assert_eq!(view.read_with(cx, |v, _| v.today.unread), 3);
+        // A result from an older generation, for the same list, must not overwrite the newer one.
+        view.update(cx, |v, cx| v.read_done(1, key, old, cx));
+        assert_eq!(rows(cx), 3);
+        INLINE_READS.set(true);
+    }
+
+    /// UI-thread time of one reload at 100k messages, with the read inline (as before) and on the
+    /// background executor. `cargo test -p lagom [--release] reload_ui_thread_100k -- --ignored --nocapture`
+    #[gpui::test]
+    #[ignore]
+    fn reload_ui_thread_100k(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        let path = view.update(cx, |v, _| {
+            v.inbox = Inbox::live();
+            incoming(v, 1);
+            v.live.as_ref().unwrap().store.path().to_owned()
+        });
+        // 100k messages in one thread pair each, every third read.
+        rusqlite::Connection::open(path).unwrap().execute("WITH RECURSIVE seq(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM seq WHERE n<100000)
+            INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,thread_id)
+            SELECT account,folder,n,'','','x','x@test','','','Subject',n,'',n%3=0,0,0,0,'',printf('thread-%d',n/2) FROM messages,seq WHERE uid=1", []).unwrap();
+        for inline in [true, false] {
+            INLINE_READS.set(inline);
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                view.update(cx, |v, cx| v.reload(cx));
+                best = best.min(start.elapsed());
+                cx.run_until_parked();
+            }
+            assert!(view.read_with(cx, |v, _| v.inbox.list().len()) >= 200);
+            eprintln!("100k messages, reload on the UI thread, inline read {inline}: best of 5 {best:?}");
+        }
+        INLINE_READS.set(true);
+    }
 
     #[gpui::test]
     fn review_normal_startup_restores_saved_pages(cx: &mut TestAppContext) {
@@ -3667,6 +3788,9 @@ mod tests {
             seen: HashSet::new(),
             failed: Vec::new(),
             due: None,
+            reads: 0,
+            shown: 0,
+            read: None,
         }
     }
 
