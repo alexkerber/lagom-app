@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy · lagom</title>
+  <meta name="description" content="What lagom stores, where it stores it and what it sends. In short: your mail stays on your device and your mail server.">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon-180.png">
+  <style>
+    /* The tokens and type of index.html; only what a text page needs. */
+    @font-face { font-family: "Hauora Sans"; font-weight: 400; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-400.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 500; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-500.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 600; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-600.woff2") format("woff2"); }
+    @font-face { font-family: "Hauora Sans"; font-weight: 700; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-700.woff2") format("woff2"); }
+    @font-face { font-family: "Geist Mono"; font-weight: 400; font-style: normal; font-display: swap; src: url("fonts/geist-mono-400.woff2") format("woff2"); }
+    :root { --bg: #FFFFFF; --card: #F6F6F4; --ink: #111110; --ink2: #6B6B66; --line: #EBEBE7; --accent: #111110; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+    a { color: inherit; }
+    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+    .mono { font-family: "Geist Mono", ui-monospace, monospace; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 56px); }
+    nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 88px; }
+    .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 700; letter-spacing: -0.05em; line-height: 1; }
+    .brand img { border-radius: 22%; }
+    .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
+    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
+    .links a:hover, .links a[aria-current] { background: var(--card); }
+    .text { max-width: 40rem; padding: clamp(32px, 6vw, 72px) 0 0; overflow-wrap: anywhere; }
+    h1 { margin: 0 0 8px; font-size: clamp(40px, 6vw, 64px); font-weight: 700; line-height: 1.05; letter-spacing: -0.04em; }
+    h2 { margin: 48px 0 12px; font-size: 22px; font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; }
+    h3 { margin: 28px 0 6px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+    p, ul, ol { margin: 0 0 14px; }
+    ul, ol { padding-left: 1.2em; }
+    li { margin-bottom: 6px; }
+    .lede { font-size: 19px; color: var(--ink2); }
+    .updated { font-size: 13px; color: var(--ink2); }
+    /* Text Alex must fill in or approve before release. */
+    mark { background: #FFF1A8; padding: 0 3px; border-radius: 3px; }
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: clamp(96px, 12vw, 160px); padding: 24px 0 48px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink2); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav aria-label="Site">
+      <a class="brand" href="./">
+        <img src="apple-touch-icon-180.png" width="30" height="30" alt="">
+        lagom
+      </a>
+      <div class="links">
+        <a href="privacy.html" aria-current="page">Privacy</a>
+        <a href="support.html">Support</a>
+      </div>
+    </nav>
+
+    <main class="text">
+      <h1>Privacy</h1>
+      <p class="updated mono">Last updated 13 November 2026</p>
+      <p class="lede">lagom is an email app for macOS, Windows, Linux, iPhone, iPad and Android. Your mail stays on your device and on your mail server. We have no servers, no accounts and no analytics. We never see your mail.</p>
+
+      <h2>Who we are</h2>
+      <p>lagom is made by <mark>[LEGAL NAME: Alex fills in]</mark>, Sweden. Contact: <mark>[privacy@ADDRESS: Alex fills in]</mark>.</p>
+      <p>The source code is public at <a href="https://github.com/alexkerber/lagom-app">github.com/alexkerber/lagom-app</a>. You can check every claim on this page there.</p>
+
+      <h2>What lagom stores, and where</h2>
+      <ul>
+        <li><strong>Mail, calendar events and tasks</strong> that you sync, plus drafts, settings and the addresses you write to. lagom keeps them in a database on your device. They are not encrypted by lagom; your device's own disk encryption protects them.</li>
+        <li><strong>Passwords and sign-in tokens</strong> go in the system's secure storage: the Keychain on macOS, iPhone and iPad, Credential Manager on Windows, Secret Service on Linux and a key in the Android Keystore on Android. On Apple devices they stay on that device and do not sync to iCloud.</li>
+        <li><strong>Android backups</strong> are off. lagom data does not go into Google backups or device transfers.</li>
+      </ul>
+
+      <h2>What lagom sends, and to whom</h2>
+      <p>lagom connects only to the services below. Each connection goes directly from your device. Nothing goes through a server of ours.</p>
+      <ul>
+        <li><strong>Your mail provider</strong>, over IMAP and SMTP, to fetch, send, move and delete your mail. Your password or sign-in token goes only to that provider.</li>
+        <li><strong>Google</strong>, if you add a Google account: Gmail over IMAP and SMTP. If you sign in with Google, also Google sign-in, and the Google Calendar and Google Tasks APIs if you allow calendar and tasks.</li>
+        <li><strong>Microsoft</strong>, if you add a Microsoft account: Outlook mail over IMAP and SMTP. If you sign in with Microsoft, also Microsoft sign-in.</li>
+        <li><strong>Setup lookups.</strong> When you add an account, lagom looks up your mail server. It asks your normal DNS resolver for the domain's mail servers (not on iPhone and iPad). If it still has no answer, it asks Mozilla's Thunderbird autoconfig service (<span class="mono">autoconfig.thunderbird.net</span>). These lookups send only the domain, for example <span class="mono">example.com</span>. They never send your full address or password.</li>
+        <li><strong>Remote images</strong> in an email are blocked. lagom loads them only when you tap "Load remote images" for that email. Then the sender's image servers can see that you opened it, and your IP address.</li>
+      </ul>
+      <p>Links in an email open in your browser, and only when you click them.</p>
+
+      <h2>What lagom does not do</h2>
+      <ul>
+        <li>No analytics, tracking or advertising.</li>
+        <li>No crash reports. If lagom crashes, nothing is sent.</li>
+        <li>No AI features. lagom does not send your mail to any AI service.</li>
+        <li>No lagom account and no servers of our own. We do not sell or share data, because we do not have it.</li>
+      </ul>
+
+      <h2 id="google">Google user data</h2>
+      <p>If you sign in with Google, lagom asks for these permissions:</p>
+      <ul>
+        <li><span class="mono">https://mail.google.com/</span>: read, send, move and delete your Gmail over IMAP and SMTP.</li>
+        <li><span class="mono">calendar.events</span> and <span class="mono">calendar.calendarlist.readonly</span>: show your calendars, and create and change events. Only if you allow calendar.</li>
+        <li><span class="mono">tasks</span>: show and change your Google Tasks. Only if you allow calendar and tasks.</li>
+        <li><span class="mono">openid</span>, <span class="mono">email</span> and <span class="mono">profile</span>: know which Google account you signed in with.</li>
+      </ul>
+      <p>lagom uses this data only to show it to you and to do what you ask in the app. The data goes only between your device and Google. It is stored only on your device.</p>
+      <p>lagom's use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. We do not transfer Google user data to anyone. We do not use it for ads, and we do not use it to train AI or machine learning models. No person reads it. We cannot read it, because it never reaches us.</p>
+      <p>You can remove lagom's access at any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+
+      <h2>Deleting your data</h2>
+      <ul>
+        <li><strong>Remove an account</strong> (see <a href="support.html#remove">how</a>). lagom deletes that account's mail, events and drafts from the device, and its password or token from secure storage. Your mail on the server stays as it is.</li>
+        <li><strong>Tasks stay.</strong> When you remove an account, its tasks stay on the device as local tasks, so you do not lose them. Delete them in Todo if you want them gone.</li>
+        <li><strong>On phones</strong>, attachments you opened stay in a cache until lagom starts again.</li>
+        <li><strong>On Android</strong>, uninstall lagom to remove everything else.</li>
+        <li><strong>On iPhone and iPad</strong>, uninstall lagom to remove the database. iOS can keep Keychain items after an uninstall, so remove your accounts first.</li>
+        <li><strong>On macOS, Windows and Linux</strong>, uninstalling leaves the database in place. Remove your accounts first, then delete the folder: <span class="mono">~/Library/Application Support/lagom</span> on macOS, <span class="mono">%APPDATA%\lagom</span> on Windows, <span class="mono">~/.local/share/lagom</span> on Linux.</li>
+        <li>To stop access from the provider's side, remove lagom from the apps list in your Google or Microsoft account settings.</li>
+      </ul>
+
+      <h2>This website</h2>
+      <p>This site has no cookies, no scripts and no analytics. GitHub Pages hosts it, and GitHub may log your IP address like any web host. See <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>.</p>
+
+      <h2>Children</h2>
+      <p>lagom is not made for children under 13. It collects no data from anyone, children included.</p>
+
+      <h2>If you write to us</h2>
+      <p>If you email us for support, we use your email only to answer you. We delete it when the question is closed, unless you ask us to keep it.</p>
+
+      <h2>Changes</h2>
+      <p>If this policy changes, we update this page and the date at the top. The full history is in the <a href="https://github.com/alexkerber/lagom-app/commits/main/site/privacy.html">public repository</a>.</p>
+
+      <h2>Contact</h2>
+      <p>Questions about privacy: <mark>[privacy@ADDRESS: Alex fills in]</mark>.</p>
+    </main>
+
+    <footer class="mono">
+      <span><a href="./">lagom</a> · <a href="privacy.html">Privacy</a> · <a href="support.html">Support</a></span>
+      <span>Made in Sweden</span>
+    </footer>
+  </div>
+</body>
+</html>
