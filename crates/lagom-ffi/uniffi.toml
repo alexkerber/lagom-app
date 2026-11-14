@@ -2,6 +2,8 @@
 module_name = "LagomCore"
 ffi_module_name = "LagomFFI"
 generate_module_map = true
+# MailModel.swift gives MailError its plain text; the generated one is the debug form.
+omit_localized_error_conformance = true
 
 [bindings.kotlin]
 package_name = "app.lagommail.core"

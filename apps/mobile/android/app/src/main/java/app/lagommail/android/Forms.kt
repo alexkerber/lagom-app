@@ -211,7 +211,7 @@ internal class AccountForm {
                             } finally { connecting = false }
                         }
                     }
-                }) { Text(if (passwordStep) "Connect" else "Continue") }
+                }) { Text(if (passwordStep) "Sign in" else "Continue") }
             })
         }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -226,19 +226,19 @@ internal class AccountForm {
                 Field("Email", email, !connecting, KeyboardType.Email) { email = it }
                 if (passwordStep) {
                     Field("Password", password, !connecting, KeyboardType.Password) { password = it }
-                    Text(if (providers.any { it.first == SignInProvider.MICROSOFT }) "Gmail and iCloud need an app-specific password. For Microsoft accounts, use Sign in with Microsoft."
-                        else "Gmail and iCloud need an app-specific password. Microsoft may require OAuth, which is not available in this version.", style = MaterialTheme.typography.bodySmall)
+                    Text(if (providers.any { it.first == SignInProvider.MICROSOFT }) "Gmail and iCloud need an app password, not your normal password. For Microsoft, use Sign in with Microsoft."
+                        else "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.", style = MaterialTheme.typography.bodySmall)
                     Row { Checkbox(advanced, { advanced = it }, enabled = !connecting); Text("Advanced", Modifier.padding(top = 12.dp)) }
                     if (advanced) {
-                        Text("IMAP", style = MaterialTheme.typography.titleMedium)
-                        Field("IMAP host", imapHost, !connecting) { imapHost = it }
-                        Field("IMAP port", imapPort, !connecting, KeyboardType.Number) { imapPort = it }
-                        Field("IMAP username", imapUser, !connecting) { imapUser = it }
+                        Text("Incoming mail", style = MaterialTheme.typography.titleMedium)
+                        Field("Incoming mail server", imapHost, !connecting, hint = "imap.example.com") { imapHost = it }
+                        Field("Incoming mail port", imapPort, !connecting, KeyboardType.Number) { imapPort = it }
+                        Field("Incoming mail username", imapUser, !connecting) { imapUser = it }
                         SecurityChoice(imapTls, !connecting) { imapTls = it }
-                        Text("SMTP", style = MaterialTheme.typography.titleMedium)
-                        Field("SMTP host", smtpHost, !connecting) { smtpHost = it }
-                        Field("SMTP port", smtpPort, !connecting, KeyboardType.Number) { smtpPort = it }
-                        Field("SMTP username", smtpUser, !connecting) { smtpUser = it }
+                        Text("Outgoing mail", style = MaterialTheme.typography.titleMedium)
+                        Field("Outgoing mail server", smtpHost, !connecting, hint = "smtp.example.com") { smtpHost = it }
+                        Field("Outgoing mail port", smtpPort, !connecting, KeyboardType.Number) { smtpPort = it }
+                        Field("Outgoing mail username", smtpUser, !connecting) { smtpUser = it }
                         SecurityChoice(smtpTls, !connecting) { smtpTls = it }
                     }
                 }
@@ -248,8 +248,8 @@ internal class AccountForm {
     }
 }
 
-@Composable private fun Field(label: String, value: String, enabled: Boolean = true, keyboard: KeyboardType = KeyboardType.Text, change: (String) -> Unit) {
-    OutlinedTextField(value, change, enabled = enabled, label = { Text(label) }, singleLine = true,
+@Composable private fun Field(label: String, value: String, enabled: Boolean = true, keyboard: KeyboardType = KeyboardType.Text, hint: String? = null, change: (String) -> Unit) {
+    OutlinedTextField(value, change, enabled = enabled, label = { Text(label) }, placeholder = hint?.let { { Text(it) } }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = false),
         visualTransformation = if (keyboard == KeyboardType.Password) PasswordVisualTransformation() else VisualTransformation.None,
         modifier = Modifier.fillMaxWidth())

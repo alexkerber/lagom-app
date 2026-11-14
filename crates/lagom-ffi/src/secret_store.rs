@@ -14,7 +14,7 @@ static INSTALLED: Mutex<bool> = Mutex::new(false);
 
 #[uniffi::export]
 pub fn install_secret_store(store: Box<dyn SecretStore>) -> Result<()> {
-    let mut installed = INSTALLED.lock().map_err(|_| failure("secret store unavailable"))?;
+    let mut installed = INSTALLED.lock().map_err(|_| failure("lagom could not open the password saved on this device"))?;
     if *installed { return Err(failure("secret store already installed")); }
     // Installation is completed before any core is opened by the Android Application.
     keyring::set_default_credential_builder(Box::new(Builder(Arc::from(store))));
@@ -24,7 +24,7 @@ pub fn install_secret_store(store: Box<dyn SecretStore>) -> Result<()> {
 
 #[cfg(target_os = "android")]
 pub fn require_installed() -> Result<()> {
-    if *INSTALLED.lock().map_err(|_| failure("secret store unavailable"))? { Ok(()) }
+    if *INSTALLED.lock().map_err(|_| failure("lagom could not open the password saved on this device"))? { Ok(()) }
     else { Err(failure("Android secret store must be installed before opening mail")) }
 }
 

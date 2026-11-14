@@ -413,7 +413,7 @@ impl MainWindow {
             true => (None, None),
             false => match Live::start(cx) {
                 Ok(live) => (Some(live), None),
-                Err(e) => (None, Some(format!("Could not open the mail store: {e}"))),
+                Err(e) => (None, Some(format!("Could not open your saved mail: {e}"))),
             },
         };
         let inbox = match &live {
@@ -430,14 +430,15 @@ impl MainWindow {
         let preferences_path = match preferences {
             Ok(path) => path,
             Err(e) => {
-                preference_problem = Some(format!("Could not locate window preferences: {e}"));
+                preference_problem = Some(format!("Could not find the window layout: {e}"));
                 None
             }
         };
         let panes = match preferences_path.as_ref().map(|p| panes::Writes::load(p, viewport, cx)).transpose() {
             Ok(panes) => panes.unwrap_or_else(|| Panes::new(viewport)),
             Err(e) => {
-                preference_problem = Some(format!("Could not read window preferences: {e}"));
+                eprintln!("lagom: window layout: {e:#}");
+                preference_problem = Some("Could not read the window layout.".into());
                 Panes::new(viewport)
             }
         };

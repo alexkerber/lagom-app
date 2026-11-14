@@ -14,7 +14,7 @@ type Result<T> = std::result::Result<T, MailError>;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MailError {
-    #[error("not found")]
+    #[error("it is no longer here")]
     NotFound,
     // Kotlin exceptions already own message; the payload needs a distinct name.
     #[error("{reason}")]
@@ -22,7 +22,8 @@ pub enum MailError {
 }
 impl From<lagom_core::Error> for MailError {
     fn from(error: lagom_core::Error) -> Self {
-        match error { lagom_core::Error::NotFound => Self::NotFound, error => failure(error.to_string()) }
+        // The person reads Display; the log keeps the technical detail.
+        match error { lagom_core::Error::NotFound => Self::NotFound, error => { eprintln!("lagom: {error:?}"); failure(error.to_string()) } }
     }
 }
 fn failure(message: impl Into<String>) -> MailError { MailError::Failed { reason: message.into() } }
@@ -186,7 +187,7 @@ impl LagomCore {
             // A panic in one action must not disable the app: SQLite transactions keep the store consistent.
             let mut store = (if network { &stores.network } else { &stores.local }).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             action(&mut store).map_err(MailError::from)
-        }).await.map_err(|_| failure("mail worker stopped unexpectedly"))?
+        }).await.map_err(|_| failure("something went wrong; try again"))?
     }
 }
 fn account(store: &Store, id: &str) -> lagom_core::Result<Account> {
@@ -245,7 +246,7 @@ impl LagomCore {
         static OPEN: std::sync::OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Stores>>>> = std::sync::OnceLock::new();
         std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
         let dir = std::fs::canonicalize(data_dir).map_err(lagom_core::Error::from)?;
-        let mut open = OPEN.get_or_init(Default::default).lock().map_err(|_| failure("mail registry unavailable"))?;
+        let mut open = OPEN.get_or_init(Default::default).lock().map_err(|_| failure("something went wrong; try again"))?;
         if let Some(stores) = open.get(&dir).and_then(std::sync::Weak::upgrade) { return Ok(Arc::new(Self { stores, background_cancel: Arc::default() })); }
         let store = Store::open(dir.join("lagom.sqlite3"))?;
         store.recover_outbox()?;

@@ -485,7 +485,7 @@ impl Compose {
         if let Some((store, account)) = &self.store {
             let ready = chrono::Local::now().timestamp_millis() + UNDO_WINDOW.as_millis() as i64;
             if store.enqueue(account, &mail, ready).is_err() {
-                self.problem = Some("Could not queue message. Check recipients and local storage.");
+                self.problem = Some("Could not save the message for sending. Check the recipients.");
                 cx.notify();
                 return;
             }
@@ -838,7 +838,7 @@ fn read_file(path: &Path) -> Result<String, &'static str> {
     let mut bytes = Vec::new();
     file.take(LIMIT + 1).read_to_end(&mut bytes).map_err(|_| "Could not read the file")?;
     if bytes.len() as u64 > LIMIT { return Err("The file is larger than 1 MB"); }
-    String::from_utf8(bytes).map_err(|_| "The file must be UTF-8 text")
+    String::from_utf8(bytes).map_err(|_| "Choose a text file")
 }
 
 #[cfg(test)]
@@ -1026,7 +1026,7 @@ mod tests {
         assert!(read_file(&dir.join("missing.txt")).is_err());
         assert!(read_file(&dir.join("image.png")).is_err());
         std::fs::write(&path, [0xff]).unwrap();
-        assert!(read_file(&path).unwrap_err().contains("UTF-8"));
+        assert_eq!(read_file(&path).unwrap_err(), "Choose a text file");
         std::fs::write(&path, vec![b'a'; 1024 * 1024]).unwrap();
         assert_eq!(read_file(&path).unwrap().len(), 1024 * 1024);
         std::fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();

@@ -40,13 +40,13 @@ struct AddAccountView: View {
                             SecureField("App password", text: $password).textContentType(.password).accessibilityLabel("Password")
                         }
                         Text(signInAvailable(provider: .microsoft)
-                            ? "Gmail and iCloud require an app-specific password. For Microsoft accounts, use Sign in with Microsoft."
-                            : "Gmail and iCloud require an app-specific password. Microsoft accounts may require OAuth, which is not available in this version.")
+                            ? "Gmail and iCloud need an app password, not your normal password. For Microsoft, use Sign in with Microsoft."
+                            : "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.")
                             .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.vertical, 12)
                         Toggle("Advanced", isOn: $advanced).lagomFont(.base).frame(minHeight: 44)
                         if advanced {
-                            server("IMAP", host: $imapHost, port: $imapPort, username: $imapUser, tls: $imapTLS)
-                            server("SMTP", host: $smtpHost, port: $smtpPort, username: $smtpUser, tls: $smtpTLS)
+                            server("Incoming mail", example: "imap.example.com", host: $imapHost, port: $imapPort, username: $imapUser, tls: $imapTLS)
+                            server("Outgoing mail", example: "smtp.example.com", host: $smtpHost, port: $smtpPort, username: $smtpUser, tls: $smtpTLS)
                         }
                     }
                     if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(.vertical, 12) }
@@ -54,14 +54,14 @@ struct AddAccountView: View {
                 .padding(.horizontal, 16)
             }
         } footer: {
-            HouseButton(title: passwordStep ? "Connect" : "Continue", icon: "account-add", primary: true) {
+            HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
                 if passwordStep { Task { await connect() } }
                 else { passwordStep = true; imapUser = email; smtpUser = email }
             }
             .disabled(email.isEmpty || connecting || (passwordStep && password.isEmpty))
             if connecting {
                 ProgressView()
-                Text("Connecting…").lagomFont(.small).foregroundStyle(Theme.secondary)
+                Text("Signing in…").lagomFont(.small).foregroundStyle(Theme.secondary)
             }
             Spacer(minLength: 0)
         }
@@ -69,11 +69,11 @@ struct AddAccountView: View {
         .interactiveDismissDisabled(connecting)
     }
 
-    private func server(_ title: String, host: Binding<String>, port: Binding<String>, username: Binding<String>, tls: Binding<Bool>) -> some View {
+    private func server(_ title: String, example: String, host: Binding<String>, port: Binding<String>, username: Binding<String>, tls: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             GroupHeader(title: title).padding(.horizontal, -10)
-            FieldRow(label: "Host") {
-                TextField("", text: host).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("\(title) host")
+            FieldRow(label: "Server") {
+                TextField(example, text: host).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("\(title) server")
             }
             FieldRow(label: "Port") { TextField("", text: port).keyboardType(.numberPad).accessibilityLabel("\(title) port") }
             FieldRow(label: "Username") {

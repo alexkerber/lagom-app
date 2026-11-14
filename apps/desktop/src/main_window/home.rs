@@ -210,7 +210,7 @@ mod tests {
             v.set_page(Page::Todo, cx);
         });
         cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.toast.as_ref().unwrap().0.starts_with("Could not save window preferences:")));
+        assert!(view.read_with(cx, |v, _| v.toast.as_ref().unwrap().0 == "Could not save the window layout."));
         assert_eq!(Panes::load(&path, 1440.).unwrap().start_page, StartPage::Todo);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();

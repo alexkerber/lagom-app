@@ -109,7 +109,7 @@ async fn unified_pages_snooze_details_and_account_removal() {
     assert_eq!(message.text_body, "line one\nline two");
     assert_eq!(message.html_body.as_deref(), Some("<p>Hello</p>"));
     assert!(message.row.unread);
-    assert!(core.message(-1).await.unwrap_err().to_string().contains("not found"));
+    assert!(core.message(-1).await.unwrap_err().to_string().contains("no longer here"));
     core.remove_account(a.id.clone()).await.unwrap();
     assert_eq!(core.accounts().await.unwrap()[0].id, b.id);
     assert_eq!(core.inbox(20, 0).await.unwrap().len(), 1);
@@ -728,7 +728,7 @@ async fn inline_resource_reads_only_the_requested_blob() {
     }
     for request in [url(id + 1, "0", false), url(id, "missing", false),
         format!("{}?query=1", url(id, "0", false)), "https://example.test/pixel".into()] {
-        assert_eq!(core.inline_resource(id, request).await.unwrap_err().to_string(), "not found");
+        assert_eq!(core.inline_resource(id, request).await.unwrap_err().to_string(), "it is no longer here");
     }
 }
 
