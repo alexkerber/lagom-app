@@ -17,6 +17,10 @@ Local source changes:
   same visibility input and record platform quit requests.
 - `src/app/test_context.rs`: expose those test operations; register reopen
   through `Application::on_reopen`, as production does.
+- `Cargo.toml`: `image` keeps only the formats in GPUI's `ImageFormat` (PNG,
+  JPEG, WebP, GIF, BMP, TIFF, ICO). The defaults add an AVIF encoder (rav1e),
+  EXR, HDR and more, which GPUI never decodes. This keeps the release binary
+  in its size budget.
 
 The desktop regressions dispatch Close Window, assert no quit request, and
 reopen through the platform callback with a surviving popout. A positive
