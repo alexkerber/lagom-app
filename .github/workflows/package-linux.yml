@@ -67,6 +67,8 @@ jobs:
         run: scripts/package-linux.sh "$VERSION"
       # Installs the .deb, starts lagom through D-Bus activation as a notification click would,
       # and checks it is still running. 124 is timeout's exit code: still alive.
+      # Every argument carries its type: gdbus gives up introspecting after 3 s, and a cold start
+      # can take longer; untyped, "{}" would go out as a string and fail the call.
       - name: Smoke start under Xvfb
         env:
           TARGET: >-
@@ -75,7 +77,7 @@ jobs:
           sudo apt-get install -y ./target/linux/lagom-*.deb
           xvfb-run -a dbus-run-session -- sh -euc '
             gdbus call --session --dest app.lagommail.desktop --object-path /app/lagommail/desktop \
-              --method org.freedesktop.Application.ActivateAction open-message "$TARGET" "{}"
+              --method org.freedesktop.Application.ActivateAction open-message "$TARGET" "@a{sv} {}"
             sleep 5
             pgrep -x lagom
             pkill -x lagom'
