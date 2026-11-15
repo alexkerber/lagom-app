@@ -49,8 +49,10 @@ struct LagomApp: App {
             .tint(Theme.accent)
             .task(id: phase) {
                 guard phase == .active else { return }
-                await readNotifications()
+                // The store opens first: a slow notification-settings answer must never hold back the mail.
+                async let settings: Void = readNotifications()
                 await model.start()
+                await settings
             }
             // Local tasks and events load as soon as the store opens, not after the first sync.
             .task(id: model.core == nil) {
@@ -69,7 +71,12 @@ struct LagomApp: App {
     }
 
     private func readNotifications() async {
-        notificationsUndecided = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus == .notDetermined
+        // An answer that never comes must not keep the window blank: after 2 s the app opens, and the
+        // notifications step waits for a later launch. Seen on an iOS 27.2 simulator, 2026-11-15.
+        let wait = Task { try? await Task.sleep(for: .seconds(2)); if notificationsUndecided == nil { notificationsUndecided = false } }
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        wait.cancel()
+        notificationsUndecided = status == .notDetermined
     }
 }
 

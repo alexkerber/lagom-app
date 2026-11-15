@@ -320,7 +320,8 @@ internal fun Mailbox.label(): String = when (this) {
 /** The desktop sidebar's Search field: an icon, the text, and Clear once there is some. */
 @Composable private fun SearchField(text: String, modifier: Modifier = Modifier, change: (String) -> Unit) {
     val c = lagom
-    Row(modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control))
+    // Raised, as the desktop search field (Alex 2026-11-15: one look on every platform).
+    Row(modifier.height(40.dp).background(c.raised, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control))
         .padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         LagomIcon(R.drawable.ic_search, size = 16.dp)
         Box(Modifier.weight(1f)) {
@@ -335,7 +336,7 @@ internal fun Mailbox.label(): String = when (this) {
     }
 }
 
-/** All / Unread, the desktop list header's filter: icons in a small segmented well; the chosen one raised. */
+/** All / Unread, the desktop list header's filter: icon and label in a small segmented well; the chosen one raised. */
 @Composable private fun FilterControl(unreadOnly: Boolean, choose: (Boolean) -> Unit) {
     val c = lagom
     Row(Modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control)).padding(3.dp)) {
@@ -343,9 +344,11 @@ internal fun Mailbox.label(): String = when (this) {
             val on = unreadOnly == unread
             // The highlight moves in 140 ms ease-out, as the desktop selection.
             val fill by animateColorAsState(if (on) c.raised else c.subtle, tween(140, easing = EaseOut), label = "filter")
-            Box(Modifier.fillMaxHeight().width(44.dp).clip(RoundedCornerShape(6.dp)).background(fill)
-                .selectable(on, role = Role.Tab) { choose(unread) }.semantics { contentDescription = choice.first }, contentAlignment = Alignment.Center) {
+            Row(Modifier.fillMaxHeight().clip(RoundedCornerShape(6.dp)).background(fill)
+                .selectable(on, role = Role.Tab) { choose(unread) }.padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 LagomIcon(choice.second, tint = if (on) c.ink else c.ink2, size = 16.dp)
+                Text(choice.first, color = if (on) c.ink else c.ink2, style = MaterialTheme.typography.labelLarge, maxLines = 1)
             }
         }
     }
