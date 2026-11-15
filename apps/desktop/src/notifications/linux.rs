@@ -6,7 +6,7 @@
 use super::{Event, Notice, Target, UnboundedSender};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use zbus::wire::{OwnedVariant, Variant};
+use zbus::zvariant::{OwnedValue as OwnedVariant, Value as Variant};
 
 /// Desktop file, icon, D-Bus name and window app_id; main.rs repeats it for the window.
 pub const APP_ID: &str = "app.lagommail.desktop";
@@ -45,9 +45,10 @@ impl Service {
     pub fn new(events: UnboundedSender<Event>) -> Self {
         // zbus lets a later process take the name by default; then the first one's clicks would
         // reach the second. Keep the name with the first lagom.
-        let bus = zbus::block_on(zbus::connection::Builder::session()
-            .name(APP_ID).allow_name_replacements(false).replace_existing_names(false)
-            .serve_at(PATH, Application(events.clone())).build()).ok();
+        let builder = zbus::connection::Builder::session()
+            .and_then(|b| b.name(APP_ID))
+            .and_then(|b| b.allow_name_replacements(false).replace_existing_names(false).serve_at(PATH, Application(events.clone())));
+        let bus = builder.ok().and_then(|b| zbus::block_on(b.build()).ok());
         Self { events, bus, next: AtomicU64::new(0) }
     }
 

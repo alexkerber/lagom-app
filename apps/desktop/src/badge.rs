@@ -155,7 +155,7 @@ mod taskbar {
 mod launcher {
     use std::collections::HashMap;
     use std::sync::{mpsc, OnceLock};
-    use zbus::wire::Variant;
+    use zbus::zvariant::Value as Variant;
 
     /// The installed desktop file, packaging/linux/app.lagommail.desktop.desktop.
     const APP_URI: &str = "application://app.lagommail.desktop.desktop";
