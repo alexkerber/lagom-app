@@ -17,6 +17,17 @@ Local source changes:
   same visibility input and record platform quit requests.
 - `src/app/test_context.rs`: expose those test operations; register reopen
   through `Application::on_reopen`, as production does.
+- `Cargo.toml`: `image` keeps only the formats Lagom shows (PNG, JPEG, WebP,
+  GIF, BMP). `img()` and image clipboard reads no longer decode TIFF, ICO,
+  AVIF, EXR, HDR, PNM, QOI, TGA, DDS or Farbfeld; Lagom reads only text from
+  the clipboard. The defaults also add an AVIF encoder (rav1e).
+- `src/platform/linux/platform.rs` and `Cargo.toml`: no `oo7`. The Linux
+  `write_credentials`, `read_credentials` and `delete_credentials` return an
+  error. Lagom stores passwords with lagom-core's `keyring` and never calls
+  GPUI's credentials API.
+
+Both keep the Linux release binary in its 30 MB budget
+(`docs/performance.md`).
 
 The desktop regressions dispatch Close Window, assert no quit request, and
 reopen through the platform callback with a surviving popout. A positive

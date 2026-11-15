@@ -5,8 +5,25 @@ exclude = ["vendor/gpui", "vendor/html5ever"]
 members = ["crates/lagom-core", "crates/lagom-ffi", "crates/lagom-cli", "apps/desktop", "vendor/imap-proto"]
 
 [profile.release]
-# Drop debug info, keep symbol names for panic backtraces. No packaging step uploads symbols.
+# Drop debug info. Fat LTO in one codegen unit cuts the Linux binary from 53 to 36 MB; release
+# builds take about a quarter longer.
 strip = "debuginfo"
+lto = "fat"
+codegen-units = 1
+
+# The desktop binary also drops its symbol table (13 MB on Linux), so panic backtraces show
+# addresses, not function names. No crash reporter or symbol upload reads them. Not for lagom-ffi:
+# uniffi-bindgen reads its metadata from the library's symbols.
+[profile.release.package.lagom]
+strip = "symbols"
+
+# Linux D-Bus (badge, notifications, portals): a few calls per session, so size over speed.
+[profile.release.package.zbus]
+opt-level = "s"
+[profile.release.package.zvariant]
+opt-level = "s"
+[profile.release.package.ashpd]
+opt-level = "s"
 
 [workspace.package]
 edition = "2021"
