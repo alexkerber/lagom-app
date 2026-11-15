@@ -330,8 +330,8 @@ struct MailView: View {
                                 HouseButton(title: "Add account", icon: "account-add", primary: true) { addAccount = true }
                             }
                         } else if model.mailbox == .inbox && model.folder == nil && model.searchText.isEmpty {
-                            // Inbox zero, as on desktop: one calm illustration, no confetti.
-                            EmptyState(icon: "inbox", title: "Nothing left.", illustration: "EmptyTray")
+                            // Inbox zero, as on desktop: the inbox icon, no confetti.
+                            EmptyState(icon: "inbox", title: "Nothing left.")
                         } else {
                             EmptyState(icon: "inbox", title: "No mail here", detail: "Pull to refresh your mail.")
                         }
