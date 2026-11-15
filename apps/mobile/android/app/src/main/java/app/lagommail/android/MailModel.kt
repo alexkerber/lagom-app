@@ -144,6 +144,8 @@ internal class MailModel(
     fun loadRemoteImages(id: Long) { if (messages.any { it.row.id == id }) remoteImagesIds += id }
     var hasMore by mutableStateOf(false); private set
     var syncing by mutableStateOf(false); private set
+    var syncState by mutableStateOf<SyncState>(SyncState.NotSynced); private set
+    var counts by mutableStateOf<List<MailCounts>>(emptyList()); private set
     /** True once a sync has ended, well or not; until then an empty list is not yet known to be empty. */
     var synced by mutableStateOf(demo); private set
     private var actingId by mutableStateOf<Long?>(null)
@@ -265,6 +267,7 @@ internal class MailModel(
             val query = searchText.trim()
             val due = core.nextSnooze()
             val accounts = core.accounts()
+            val counts = core.mailCounts()
             // Every account's: the menu lists them all, and opening one narrows the account.
             val folders = core.folders(null)
             // The folder went from the server: back to the mailbox under it.
@@ -290,6 +293,7 @@ internal class MailModel(
             val failures = core.sendFailures()
             if (request != revision) return
             this.accounts = accounts
+            this.counts = counts
             this.folders = folders
             this.failures = failures
             rows = (if (append) old + page else page).distinctBy { it.id }
@@ -459,8 +463,11 @@ internal class MailModel(
         try {
             do {
                 syncAgain = false
-                try { core.syncAll() } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { error = e.mailMessage() }
+                try {
+                    core.syncAll()
+                    syncState = SyncState.Synced(now() / 1000)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { syncState = SyncState.Failed; error = e.mailMessage() }
                 reload()
             } while (syncAgain)
         } finally { syncing = false; synced = true }

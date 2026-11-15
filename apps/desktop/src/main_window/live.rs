@@ -1222,20 +1222,13 @@ impl MainWindow {
 
     /// "synced 10:12": the list footer has no room for the account name, the sidebar shows it.
     pub(super) fn sync_state(&self) -> Option<SharedString> {
+        self.sync_text(None)
+    }
+
+    pub(super) fn sync_text(&self, remaining: Option<u64>) -> Option<SharedString> {
         let live = self.live.as_ref()?;
         let account = live.account()?;
-        let state = match live.shown_sync(&account.id).as_ref() {
-            None | Some(SyncState::Syncing) => "syncing…".to_string(),
-            Some(SyncState::Synced(at)) => {
-                let at = chrono::DateTime::from_timestamp(*at, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
-                format!("synced {}", at.unwrap_or_default())
-            }
-            // The reason is in the status tooltip; a raw server error does not fit the header.
-            Some(SyncState::Failed(_)) => "not synced".into(),
-            Some(SyncState::ReauthRequired) => "Sign in again".into(),
-            Some(SyncState::SigningIn) => "Signing in…".into(),
-        };
-        Some(state.into())
+        Some(live.shown_sync(&account.id).unwrap_or(SyncState::Syncing).status(remaining).text.into())
     }
 
     /// Why the current account did not sync, if it did not.

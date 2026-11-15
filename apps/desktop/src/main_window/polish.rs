@@ -178,10 +178,9 @@ pub(super) fn reading_menu(t: &Theme, id: usize, open: bool,
 }
 
 pub(super) fn sync_icon(state: &crate::sync::SyncState) -> &'static str {
-    use crate::sync::SyncState;
-    match state {
-        SyncState::Synced(_) => "icons/cloud-synced.svg",
-        SyncState::Failed(_) | SyncState::ReauthRequired => "icons/cloud-failed.svg",
+    match state.status(None).icon {
+        "cloud-synced" => "icons/cloud-synced.svg",
+        "cloud-failed" => "icons/cloud-failed.svg",
         _ => "icons/cloud-syncing.svg",
     }
 }

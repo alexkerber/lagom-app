@@ -25,6 +25,26 @@ class MailModelTest {
     private fun model(core: FakeCore, now: () -> Long = { 0 }) = MailModel(
         open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = now, sendLater = { sendLaters++ })
 
+    @Test fun syncStatusTracksFailureAndSuccessfulCompletionTime() = runTest(dispatcher) {
+        val core = FakeCore()
+        val model = model(core, now = { 1_700_000_000_000 })
+        assertEquals(SyncState.NotSynced, model.syncState)
+        model.start()
+        assertEquals(core.mailCounts(), model.counts)
+        assertEquals(SyncState.NotSynced, model.syncState)
+        model.sync()
+        assertEquals(SyncState.Synced(1_700_000_000), model.syncState)
+        core.rejectSync = true
+        model.sync()
+        assertEquals(SyncState.Failed, model.syncState)
+        model.error = null
+        assertEquals(SyncState.Failed, model.syncState)
+        core.rejectSync = false
+        model.sync()
+        assertEquals(SyncState.Synced(1_700_000_000), model.syncState)
+        assertFalse(model.syncing)
+    }
+
     @Test fun signInRedirectIsOnlyOurSchemesOnAViewIntent() {
         val (view, app) = "android.intent.action.VIEW" to "com.example.app"
         val google = "com.googleusercontent.apps.123-abc:/oauth2redirect?code=c&state=s"
@@ -1090,7 +1110,7 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> { agendaCalls += startDay to days; return events }
     override suspend fun calendarConnected(): Boolean = connected
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
-    override suspend fun mailCounts(): List<MailCounts> = emptyList()
+    override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
     override suspend fun setTodoDone(id: Long, done: Boolean) {
         check(!rejectPlanner) { "Fixture task refused" }
         tasks.replaceAll { if (it.id == id) it.copy(done = done) else it }

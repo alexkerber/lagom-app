@@ -1,6 +1,25 @@
 import XCTest
 
 final class MailModelTests: XCTestCase {
+    @MainActor func testSyncStatusRetainsFailureUntilSuccessfulSync() async {
+        let model = MailModel()
+        let core = ComposeFixtureCore(noHandle: .init())
+        model.core = core
+        XCTAssertEqual(model.syncState, .notSynced)
+        core.rejectSync = true
+        await model.sync()
+        XCTAssertEqual(model.syncState, .failed)
+        model.error = nil
+        XCTAssertEqual(model.syncState, .failed)
+        core.rejectSync = false
+        let before = Int64(Date().timeIntervalSince1970)
+        await model.sync()
+        guard case .synced(let at) = model.syncState else { return XCTFail("Expected a successful sync time") }
+        XCTAssertGreaterThanOrEqual(at, before)
+        XCTAssertLessThanOrEqual(at, Int64(Date().timeIntervalSince1970))
+        XCTAssertFalse(model.syncing)
+    }
+
     func testNotificationContentGroupsAccountsAndTargetsNewestMail() {
         let row = MailRow(id: 1, account: "a", senderName: "", senderAddress: "sender@example.test", subject: "First", preview: "", dateUnix: 1, unread: true, hasAttachments: false, threadId: "thread-\(1)", messageCount: 1, messageIds: [1])
         XCTAssertTrue(mailNotices([]).isEmpty)
@@ -158,7 +177,10 @@ final class MailModelTests: XCTestCase {
                            subject: "Re: Fixture", body: "\n\n> Original", replyTo: 42, attachments: [])
 
     var queued: LocalDraft?
-    override func syncAll() async throws {}
+    var rejectSync = false
+    override func syncAll() async throws {
+        if rejectSync { throw MailError.Failed(reason: "Fixture sync refused") }
+    }
     override func undoSend(id: String) async throws -> Bool {
         guard let queued, queued.id == id else { return false }
         saved.append(queued); self.queued = nil

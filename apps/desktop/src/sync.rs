@@ -91,6 +91,19 @@ pub enum SyncState {
     Failed(String),
 }
 
+impl SyncState {
+    pub fn status(&self, remaining: Option<u64>) -> lagom_core::sync_status::SyncStatus {
+        use lagom_core::sync_status::{sync_status, SyncState as State};
+        sync_status(match self {
+            Self::Syncing => State::Syncing,
+            Self::Synced(at) => State::synced_at(*at),
+            Self::Failed(_) => State::Failed,
+            Self::ReauthRequired => State::ReauthRequired,
+            Self::SigningIn => State::SigningIn,
+        }, remaining)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Delivery {
     Sent,

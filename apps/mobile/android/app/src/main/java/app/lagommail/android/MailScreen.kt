@@ -111,8 +111,10 @@ internal fun Mailbox.label(): String = when (this) {
         TopBar(Modifier.statusBarsPadding(), start = 8.dp) {
             Box(Modifier.weight(1f)) {
                 val title = if (model.showingDrafts) "Drafts" else model.folder?.name ?: model.mailbox.label()
-                val scope = model.accountId?.let { id -> model.accounts.find { it.id == id }?.displayName } ?: "All accounts"
                 val syncing = afterWait(model.syncing)
+                val left = if (!model.showingDrafts && model.mailbox == Mailbox.INBOX && model.folder == null && model.accounts.isNotEmpty())
+                    model.counts.filter { model.accountId == null || it.account == model.accountId }.sumOf { it.inbox } else null
+                val status = syncStatus(if (syncing && model.syncing) SyncState.Syncing else model.syncState, left)
                 Column(Modifier.clip(RoundedCornerShape(Radius.control)).clickable(onClickLabel = "Mailboxes and accounts") { menu = true }
                     .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -120,8 +122,12 @@ internal fun Mailbox.label(): String = when (this) {
                         LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        LagomIcon(if (syncing) R.drawable.ic_cloud_syncing else R.drawable.ic_cloud_synced, size = 14.dp)
-                        Text(if (syncing) "Syncing…" else scope, color = lagom.ink2, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                        LagomIcon(when (status.icon) {
+                            "cloud-synced" -> R.drawable.ic_cloud_synced
+                            "cloud-failed" -> R.drawable.ic_cloud_failed
+                            else -> R.drawable.ic_cloud_syncing
+                        }, size = 14.dp)
+                        Text(status.text, color = lagom.ink2, style = MaterialTheme.typography.bodySmall, maxLines = 1,
                             overflow = TextOverflow.Ellipsis)
                     }
                 }

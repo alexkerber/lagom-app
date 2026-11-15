@@ -2159,8 +2159,8 @@ impl MainWindow {
             // "0 left" would be a guess until the read lands.
             self.sync_state().map_or_else(|| "Loading…".into(), String::from)
         } else {
-            match self.sync_state() {
-                Some(sync) => format!("{left} left · {sync}"),
+            match self.sync_text(Some(left as u64)) {
+                Some(sync) => sync.to_string(),
                 None => format!("{left} left"),
             }
         };

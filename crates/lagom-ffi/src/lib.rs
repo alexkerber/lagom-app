@@ -8,6 +8,8 @@ uniffi::setup_scaffolding!();
 
 mod secret_store;
 mod drafts;
+mod sync_status;
+pub use sync_status::{sync_status, SyncState, SyncStatus};
 pub use drafts::{DraftRow, LocalDraft};
 
 type Result<T> = std::result::Result<T, MailError>;
