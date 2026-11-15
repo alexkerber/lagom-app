@@ -8,6 +8,12 @@ import androidx.core.content.FileProvider
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -98,13 +104,27 @@ internal fun Mailbox.label(): String = when (this) {
 @Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit,
     onName: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit) {
     var menu by remember { mutableStateOf(false) }
-    Scaffold(topBar = {
-        TopAppBar(title = {
-            Text(if (model.showingDrafts) "Drafts" else if (model.accounts.isEmpty()) "lagom" else model.folder?.name ?: model.mailbox.label(),
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }, navigationIcon = {
-            Box {
-                TextButton(onClick = { menu = true }) { Text("Mailboxes") }
+    Box(Modifier.fillMaxSize()) {
+    Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) {
+    Scaffold(containerColor = lagom.bg, topBar = {
+        // The desktop list header: the title and a quiet line open the mailboxes and accounts; New message on the right.
+        TopBar(Modifier.statusBarsPadding(), start = 8.dp) {
+            Box(Modifier.weight(1f)) {
+                val title = if (model.showingDrafts) "Drafts" else model.folder?.name ?: model.mailbox.label()
+                val scope = model.accountId?.let { id -> model.accounts.find { it.id == id }?.displayName } ?: "All accounts"
+                val syncing = afterWait(model.syncing)
+                Column(Modifier.clip(RoundedCornerShape(Radius.control)).clickable(onClickLabel = "Mailboxes and accounts") { menu = true }
+                    .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        LagomIcon(if (syncing) R.drawable.ic_cloud_syncing else R.drawable.ic_cloud_synced, size = 14.dp)
+                        Text(if (syncing) "Syncing…" else scope, color = lagom.ink2, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 DropdownMenu(menu, { menu = false }) {
                     Mailbox.entries.forEach { box ->
                         DropdownMenuItem(text = { Text(box.label()) }, onClick = {
@@ -145,51 +165,43 @@ internal fun Mailbox.label(): String = when (this) {
                     }
                 }
             }
-        }, actions = {
-            TextButton(enabled = model.accounts.isNotEmpty(), onClick = {
+            LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
                 val account = model.accountId ?: model.accounts.first().id
                 model.perform { model.newMessage(account) }
-            }) { Text("Compose") }
-        })
-    }, snackbarHost = { Notice(model) }) { padding ->
+            }
+        }
+    }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            if (afterWait(model.loading)) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (model.accounts.isEmpty() && !model.loading) {
-                Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Welcome to lagom", style = MaterialTheme.typography.headlineMedium)
-                    Text("Add an account to get started.")
-                    Button(enabled = model.core != null, onClick = { model.accountForm = AccountForm() }) { Text("Add account") }
-                    if (model.core == null) TextButton(onClick = { model.perform { model.setForeground(true) } }) { Text("Try again") }
-                }
-            } else if (model.showingDrafts) {
+            if (model.showingDrafts) {
                 LazyColumn(Modifier.weight(1f)) {
                     val drafts = model.drafts.filter { model.accountId == null || it.account == model.accountId }
-                    if (drafts.isEmpty()) item(key = "empty") { Text("No drafts", rowMotion(true).padding(24.dp)) }
+                    if (drafts.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_edit_draft, "No drafts", rowMotion(true).fillParentMaxSize()) }
                     items(drafts, key = { it.id }) { draft ->
-                        Column(rowMotion(true)) {
-                            ListItem(headlineContent = { Text(draft.subject.ifEmpty { "(No subject)" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                supportingContent = { Column {
-                                    Text(draft.to)
-                                    Text(model.accounts.find { it.id == draft.account }?.email.orEmpty())
-                                    if (draft.updatedUnix > 0) Text(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
-                                        .withZone(ZoneId.systemDefault()).format(java.time.Instant.ofEpochSecond(draft.updatedUnix)))
-                                } }, modifier = Modifier.heightIn(min = 48.dp).clickable(onClickLabel = "Edit draft") { model.perform { model.openDraft(draft) } })
-                            HorizontalDivider()
+                        Column(rowMotion(true).fillMaxWidth().heightIn(min = 48.dp).clickable(onClickLabel = "Edit draft") { model.perform { model.openDraft(draft) } }
+                            .drawHairline(lagom.line).padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(draft.subject.ifEmpty { "(No subject)" }, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(draft.to, color = lagom.ink2, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(listOfNotNull(model.accounts.find { it.id == draft.account }?.email, draft.updatedUnix.takeIf { it > 0 }?.let {
+                                DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(java.time.Instant.ofEpochSecond(it))
+                            }).joinToString(" · "), color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
             } else Row(Modifier.weight(1f)) {
-                Box(if (twoPane) Modifier.weight(0.42f) else Modifier.weight(1f)) {
-                    // One pane: the list stays under the open message, so it keeps its place and predictive back shows it.
-                    Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) { Inbox(model, onRetry) }
-                    if (!twoPane) ReadingPane(model, single = true)
-                }
+                Box(if (twoPane) Modifier.weight(0.42f) else Modifier.weight(1f)) { Inbox(model, onRetry) }
                 if (twoPane) {
                     VerticalDivider()
                     Box(Modifier.weight(0.58f)) { ReadingPane(model, single = false) }
                 }
             }
         }
+    }
+    }
+    // One pane: the message covers the list and its bar, which stay underneath, so the list keeps its place and
+    // predictive back shows it.
+    if (!twoPane && !model.showingDrafts) ReadingPane(model, single = true)
+    // Above the open message too: Undo after a reply or Done must stay reachable.
+    Box(Modifier.align(Alignment.BottomCenter)) { Notice(model) }
     }
 }
 
@@ -219,29 +231,20 @@ internal fun Mailbox.label(): String = when (this) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun Inbox(model: MailModel, onRetry: (SendFailure) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(model.searchText, { model.perform { model.changeSearch(it) } },
-            label = { Text("Search") }, singleLine = true,
-            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Search),
-            trailingIcon = {
-                if (model.searchText.isNotEmpty()) TextButton(onClick = { model.perform { model.changeSearch("") } },
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Clear search" }) { Text("Clear") }
-            }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).semantics { contentDescription = "Search" })
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Search and the filter sit in one fixed band under the bar, so nothing above the list moves as it loads.
+        Row(Modifier.fillMaxWidth().drawHairline(lagom.line).padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SearchField(model.searchText, Modifier.weight(1f)) { model.perform { model.changeSearch(it) } }
             if (model.mailbox == Mailbox.TRASH && model.folder == null) {
                 // In Trash the filter makes way for Empty Trash, as on desktop.
                 var confirm by remember { mutableStateOf(false) }
-                TextButton(enabled = model.rows.isNotEmpty() && !model.working, onClick = { confirm = true },
-                    modifier = Modifier.heightIn(min = 48.dp)) { Text(if (model.emptyingTrash) "Emptying…" else "Empty Trash") }
+                HouseButton(if (model.emptyingTrash) "Emptying…" else "Empty Trash", R.drawable.ic_empty_trash, iconOnly = true,
+                    enabled = model.rows.isNotEmpty() && !model.working) { confirm = true }
                 if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete all permanently?") },
                     confirmButton = { TextButton(onClick = { confirm = false; model.perform { model.emptyTrash() } },
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
                     dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
-            } else {
-                FilterChip(!model.unreadOnly, { model.unreadOnly = false }, label = { Text("All") },
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "All" })
-                FilterChip(model.unreadOnly, { model.unreadOnly = true }, label = { Text("Unread") },
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Unread" })
-            }
+            } else FilterControl(model.unreadOnly) { model.unreadOnly = it }
         }
         // A pull shows the indicator at once; a sync the app starts shows it only past 150 ms.
         var pulled by remember { mutableStateOf(false) }
@@ -258,58 +261,112 @@ internal fun Mailbox.label(): String = when (this) {
             LazyColumn(Modifier.fillMaxSize(), state = list) {
                 // motion.md: at the top, new mail grows in where it can be seen; scrolled down, the first row on screen stays put.
                 if (atTop) list.requestScrollToItem(0)
-                if (rows.isEmpty() && model.failures.isEmpty() && !model.loading) item(key = "empty") {
-                    EmptyInbox(model, rowMotion(true).fillParentMaxSize())
+                // Until the first read or the first sync lands, quiet placeholder rows stand in, not inbox zero (desktop #141).
+                if (rows.isEmpty() && model.failures.isEmpty()) item(key = "empty") {
+                    if (model.rows.isEmpty() && (model.loading || !model.synced)) LoadingRows(rowMotion(true))
+                    else EmptyInbox(model, rowMotion(true).fillParentMaxSize())
                 }
+                if (model.failures.isNotEmpty()) item(key = "failures") { GroupHeader("Outbox needs attention", rowMotion(animate)) }
                 items(model.failures, key = { "failure-${it.id}" }) { failure ->
-                    ListItem(headlineContent = { Text("Outbox: ${failure.subject}") }, supportingContent = { Text(failure.message) },
-                        modifier = rowMotion(animate).clickable { onRetry(failure) })
+                    Column(rowMotion(animate).fillMaxWidth().clickable(onClickLabel = "Send again") { onRetry(failure) }
+                        .padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(failure.subject.ifEmpty { "(No subject)" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(failure.message, color = lagom.danger, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
                 items(rows, key = { it.id }) { row ->
-                    Column(rowMotion(animate)) {
-                        MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, model.moveTargets(row.account),
+                    Box(rowMotion(animate)) {
+                        MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, model.moveTargets(row.account), accountMark(model, row.account),
                             onSelect = { model.perform { model.select(row.id) } },
                             onAction = { model.perform { model.act(it, row.id) } },
                             onRead = { model.perform { model.setRead(row) } },
                             onMove = { folder -> model.perform { model.move(row.id, folder) } },
                             onNewFolder = { model.newFolder = NewFolder(row.account, row.id) })
-                        HorizontalDivider()
                     }
                 }
                 if (model.hasMore) item(key = "more") {
-                    TextButton(onClick = { model.perform { model.reload(more = true) } },
-                        modifier = rowMotion(animate).fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = "Load more" }) { Text("Load more") }
+                    Box(rowMotion(animate).fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        HouseButton("Load more", R.drawable.ic_load_more) { model.perform { model.reload(more = true) } }
+                    }
                 }
             }
         }
     }
 }
 
-/** motion.md "Inbox reaches zero": a calm state that fades in. No confetti. */
+/** An account's mark, only when several accounts share the list: the three accents in turn, as desktop `account_accent`. */
+@Composable private fun accountMark(model: MailModel, account: String): Color? {
+    if (model.accounts.size < 2) return null
+    val index = model.accounts.indexOfFirst { it.id == account }.coerceAtLeast(0)
+    return listOf(lagom.accent, lagom.done, lagom.later)[index % 3]
+}
+
+/** A list's group, "Outbox needs attention". */
+@Composable private fun GroupHeader(title: String, modifier: Modifier = Modifier) =
+    Text(title, modifier.fillMaxWidth().padding(start = 16.dp, top = 14.dp, bottom = 4.dp).semantics { heading() },
+        color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
+
+/** motion.md "Inbox reaches zero": the inbox icon, one line and one quiet line, fading in. No confetti. */
 @Composable private fun EmptyInbox(model: MailModel, modifier: Modifier) {
-    val title = when {
-        model.unreadOnly && model.rows.isNotEmpty() -> "No unread mail"
-        model.searchText.isNotBlank() -> "No results"
-        model.mailbox == Mailbox.INBOX && model.folder == null -> "Nothing left."
-        else -> "No mail here"
+    when {
+        model.unreadOnly && model.rows.isNotEmpty() -> EmptyState(R.drawable.ic_read, "No unread mail", modifier)
+        model.searchText.isNotBlank() -> EmptyState(R.drawable.ic_search, "No results", modifier, "Nothing in your mail matches.")
+        model.mailbox == Mailbox.INBOX && model.folder == null ->
+            EmptyState(R.drawable.ic_inbox, "Nothing left.", modifier, "Not too much. Not too little. Just right.")
+        else -> EmptyState(R.drawable.ic_inbox, "No mail here", modifier, "Pull to refresh your mail.")
     }
-    Column(modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(title, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
-        Text(if (afterWait(model.syncing)) "Checking for mail…" else "Pull to refresh your mail.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+}
+
+/** The desktop sidebar's Search field: an icon, the text, and Clear once there is some. */
+@Composable private fun SearchField(text: String, modifier: Modifier = Modifier, change: (String) -> Unit) {
+    val c = lagom
+    Row(modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control))
+        .padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        LagomIcon(R.drawable.ic_search, size = 16.dp)
+        Box(Modifier.weight(1f)) {
+            val style = MaterialTheme.typography.bodyLarge
+            if (text.isEmpty()) Text("Search", Modifier.clearAndSetSemantics {}, color = c.ink2, style = style)
+            BasicTextField(text, change, Modifier.fillMaxWidth().semantics { contentDescription = "Search" }, singleLine = true,
+                textStyle = style.copy(color = c.ink), cursorBrush = SolidColor(c.accent),
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Search))
+        }
+        if (text.isNotEmpty()) LagomIconButton("Clear search", R.drawable.ic_close, Modifier.size(40.dp)) { change("") }
+        else Spacer(Modifier.width(4.dp))
+    }
+}
+
+/** All / Unread, the desktop list header's filter: icons in a small segmented well; the chosen one raised. */
+@Composable private fun FilterControl(unreadOnly: Boolean, choose: (Boolean) -> Unit) {
+    val c = lagom
+    Row(Modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control)).padding(3.dp)) {
+        listOf(false to ("All" to R.drawable.ic_filter_all), true to ("Unread" to R.drawable.ic_unread)).forEach { (unread, choice) ->
+            val on = unreadOnly == unread
+            // The highlight moves in 140 ms ease-out, as the desktop selection.
+            val fill by animateColorAsState(if (on) c.raised else c.subtle, tween(140, easing = EaseOut), label = "filter")
+            Box(Modifier.fillMaxHeight().width(44.dp).clip(RoundedCornerShape(6.dp)).background(fill)
+                .selectable(on, role = Role.Tab) { choose(unread) }.semantics { contentDescription = choice.first }, contentAlignment = Alignment.Center) {
+                LagomIcon(choice.second, tint = if (on) c.ink else c.ink2, size = 16.dp)
+            }
+        }
     }
 }
 
 private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
     if (animate) Modifier.animateItem(fadeInSpec = Fade, placementSpec = landing(IntOffset.VisibilityThreshold), fadeOutSpec = Fade) else Modifier
 
-// Material's check mark; the app has no icon library.
-internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
-    .addPath(addPathNodes("M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"), fill = SolidColor(Color.Black)).build()
+/** The list's time, desktop `mail::when`: the clock today, the weekday this week, then the date. */
+@Composable private fun listTime(date: java.time.Instant): String {
+    val day = date.atZone(ZoneId.systemDefault()).toLocalDate()
+    val days = java.time.temporal.ChronoUnit.DAYS.between(day, java.time.LocalDate.now())
+    return when {
+        days == 0L -> android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date.from(date))
+        days in 1..6 -> localDate(day, "EEE")
+        else -> localDate(day, if (day.year == java.time.LocalDate.now().year) "dMMM" else "dMMMyy")
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, onSelect: () -> Unit,
+@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, mark: Color?, onSelect: () -> Unit,
     onAction: (MailAction) -> Unit, onRead: () -> Unit, onMove: (MailFolder) -> Unit, onNewFolder: () -> Unit) {
     // A long press opens what iOS's context menu has: Mark read or unread, and Move to.
     var menu by remember { mutableStateOf(false) }
@@ -334,27 +391,26 @@ internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
     val revealed = state.currentValue == SwipeToDismissBoxValue.EndToStart
     val view = RowPresentation(row)
     SwipeToDismissBox(state = state, gesturesEnabled = !busy, backgroundContent = {
-        val colors = MaterialTheme.colorScheme
-        val fill by animateColorAsState(if (past) colors.tertiary else colors.surfaceVariant, tween(100, easing = EaseOut), label = "swipe fill")
-        val ink by animateColorAsState(if (past) colors.onTertiary else colors.onSurfaceVariant, tween(100, easing = EaseOut), label = "swipe ink")
+        val c = lagom
+        // `swipe_done` once the release would act; the subtle fill short of it.
+        val fill by animateColorAsState(if (past) c.done else c.subtle, tween(100, easing = EaseOut), label = "swipe fill")
+        val ink by animateColorAsState(if (past) c.accentInk else c.ink2, tween(100, easing = EaseOut), label = "swipe ink")
         if (state.dismissDirection == SwipeToDismissBoxValue.StartToEnd) Row(Modifier.fillMaxSize().background(fill).padding(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(CheckIcon, contentDescription = null, tint = ink)
-            Text("Done", color = ink)
-        } else Row(Modifier.fillMaxSize().background(colors.surfaceVariant)
+            LagomIcon(R.drawable.ic_done, tint = ink, size = 20.dp)
+            Text("Done", color = ink, style = MaterialTheme.typography.labelLarge)
+        } else Row(Modifier.fillMaxSize().background(c.subtle).padding(end = 8.dp)
             .then(if (revealed) Modifier else Modifier.clearAndSetSemantics {}),
             horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            TextButton(enabled = !busy, onClick = { scope.launch { state.reset(); currentAction(MailAction.Later) } },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Later" }) { Text("Later") }
-            if (canDelete) TextButton(enabled = !busy, onClick = { scope.launch { state.reset(); currentAction(MailAction.Delete) } },
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Delete" }) { Text("Delete") }
-            TextButton(onClick = { scope.launch { state.reset() } },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Cancel" }) { Text("Cancel") }
+            LagomIconButton("Later", R.drawable.ic_later, enabled = !busy, tint = c.later) { scope.launch { state.reset(); currentAction(MailAction.Later) } }
+            if (canDelete) LagomIconButton("Delete", R.drawable.ic_trash, enabled = !busy, tint = c.danger) {
+                scope.launch { state.reset(); currentAction(MailAction.Delete) }
+            }
+            LagomIconButton("Cancel", R.drawable.ic_close) { scope.launch { state.reset() } }
         }
     }) {
         Box {
-        ListItem(modifier = Modifier.combinedClickable(onLongClickLabel = "More actions", onLongClick = { if (!busy) menu = true }, onClick = onSelect)
+        Column(Modifier.combinedClickable(onLongClickLabel = "More actions", onLongClick = { if (!busy) menu = true }, onClick = onSelect)
             .then(if (revealed) Modifier.clearAndSetSemantics {} else Modifier.semantics {
             stateDescription = if (row.unread) "Unread" else "Read"
             customActions = listOf(CustomAccessibilityAction("Done") { if (!busy) onAction(MailAction.Done); !busy },
@@ -363,18 +419,24 @@ internal val CheckIcon = ImageVector.Builder("Done", 24.dp, 24.dp, 24f, 24f)
                 CustomAccessibilityAction(readLabel) { if (!busy) onRead(); !busy } +
                 targets.map { folder -> CustomAccessibilityAction("Move to ${folder.path}") { if (!busy) onMove(folder); !busy } } +
                 CustomAccessibilityAction("Move to a new folder") { if (!busy) onNewFolder(); !busy }
-        }), headlineContent = { Text(view.sender, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            supportingContent = { Column {
+        }).fillMaxWidth().heightIn(min = RowHeight).background(lagom.bg).padding(start = 10.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)) {
+            // The desktop list row: unread dot, account bar, sender and time; subject and a two-line snippet under them.
+            val c = lagom
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(Modifier.size(7.dp).background(if (row.unread) c.accent else Color.Transparent, CircleShape))
+                mark?.let { Box(Modifier.size(3.dp, 16.dp).background(it, RoundedCornerShape(1.5.dp))) }
+                Text(view.sender, Modifier.weight(1f), fontWeight = if (row.unread) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (row.messageCount > 1u) Text(row.messageCount.toString(), Modifier.background(c.subtle, RoundedCornerShape(50)).padding(horizontal = 6.dp)
+                    .semantics { contentDescription = "${row.messageCount} messages" }, style = MaterialTheme.typography.bodySmall)
+                if (row.hasAttachments) LagomIcon(R.drawable.ic_attachment, size = 15.dp, label = "Attachment")
+                Text(listTime(view.date), color = c.ink2, style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"))
+            }
+            Column(Modifier.padding(start = 13.dp, top = 2.dp)) {
                 Text(view.subject, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(row.preview, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            } },
-            trailingContent = { Column(horizontalAlignment = Alignment.End) {
-                Text(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(view.date), style = MaterialTheme.typography.labelSmall)
-                if (row.messageCount > 1u) Badge {
-                    Text(row.messageCount.toString(), Modifier.semantics { contentDescription = "${row.messageCount} messages" })
-                }
-                if (row.hasAttachments) Text("Attachment", style = MaterialTheme.typography.labelSmall)
-            } })
+                Text(row.preview, color = c.ink2, style = MaterialTheme.typography.bodyMedium, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
         DropdownMenu(menu || moving, { menu = false; moving = false }) {
             if (moving) {
                 targets.forEach { folder -> DropdownMenuItem(text = { Text(folder.path) }, onClick = { moving = false; onMove(folder) }) }
@@ -402,19 +464,25 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
         } using null
     }) { shown ->
         if (shown == null) {
-            if (!single) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Select a message") }
+            if (!single) EmptyState(R.drawable.ic_mail, "No message selected")
             return@AnimatedContent
         }
         val back = rememberBackPreview(enabled = shown.id == model.selectedId && model.draft == null && model.accountForm == null) {
             model.clearSelection(); false
         }
+        val close = if (single) model::clearSelection else null
         // Surface also keeps touches from reaching the list underneath.
-        Surface(Modifier.fillMaxSize().backPreview(back)) {
+        Surface(Modifier.fillMaxSize().backPreview(back), color = lagom.bg) {
             Column(Modifier.fillMaxSize()) {
-                if (single) TextButton(onClick = model::clearSelection) { Text("Back") }
+                val one = shown.messages.singleOrNull()
+                // A single message's bar carries its actions; a conversation's carries only the way back.
+                if (one == null) TopBar(Modifier.statusBarsPadding(), start = 4.dp) { close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) } }
                 Box(Modifier.weight(1f)) {
-                    if (shown.messages.isEmpty()) MessagePlaceholder(model.rows.firstOrNull { it.id == shown.id })
-                    else ConversationScreen(model, shown.messages)
+                    when {
+                        one != null -> MessageScreen(model, one, close)
+                        shown.messages.isEmpty() -> MessagePlaceholder(model.rows.firstOrNull { it.id == shown.id })
+                        else -> ConversationScreen(model, shown.messages)
+                    }
                 }
             }
         }
@@ -428,11 +496,10 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     val context = LocalContext.current
     val quiet = MaterialTheme.typography.bodySmall
     when {
-        id in model.unsubscribedIds -> Text("Unsubscribed", style = quiet)
-        model.unsubscribingId == id -> Text("Unsubscribing…", style = quiet)
-        else -> TextButton(onClick = { confirm = true }, modifier = Modifier.heightIn(min = 48.dp)) {
-            Text("Unsubscribe from ${offer.list}", style = quiet, maxLines = 2)
-        }
+        id in model.unsubscribedIds -> Text("Unsubscribed", color = lagom.ink2, style = quiet)
+        model.unsubscribingId == id -> Text("Unsubscribing…", color = lagom.ink2, style = quiet)
+        else -> Text("Unsubscribe from ${offer.list}", Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { confirm = true }
+            .wrapContentHeight(), color = lagom.ink2, style = quiet, maxLines = 2)
     }
     if (confirm) AlertDialog(
         onDismissRequest = { confirm = false },
@@ -451,22 +518,21 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     )
 }
 
-/** motion.md "Loading": nothing for the first 150 ms, then the row's preview stands in for the body. */
+/** motion.md "Loading": nothing for the first 150 ms, then the row's preview stands in for the body, under a bar as tall
+ *  as the message's own, so nothing moves when the body lands. */
 @Composable private fun MessagePlaceholder(row: MailRow?) {
+    TopBar(Modifier.statusBarsPadding()) {}
     if (!afterWait(true)) return
-    val quiet = MaterialTheme.colorScheme.onSurfaceVariant
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (row == null) { Text("Loading message…", color = quiet); return@Column }
+    Column(Modifier.fillMaxSize().padding(top = BarHeight).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (row == null) { Text("Loading message…", color = lagom.ink2); return@Column }
         val view = RowPresentation(row)
-        Text(view.subject, style = MaterialTheme.typography.titleLarge)
-        Text(view.sender)
-        Text(row.preview, color = quiet)
+        Text(view.subject, style = MaterialTheme.typography.headlineSmall)
+        Text(view.sender, fontWeight = FontWeight.SemiBold)
+        Text(row.preview, color = lagom.ink2)
     }
 }
 
 @Composable private fun ConversationScreen(model: MailModel, messages: List<MailMessage>) {
-    // Most mail is a single message: keep the full-height reading view for it.
-    messages.singleOrNull()?.let { MessageScreen(model, it); return }
     LazyColumn(Modifier.fillMaxSize()) {
         items(messages, key = { it.row.id }) { message ->
             val row = message.row
@@ -475,23 +541,26 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
                 .clickable(role = Role.Button, onClickLabel = "${if (expanded) "Collapse" else "Expand"} message from ${view.sender}") {
                     model.perform { model.toggleMessage(row.id) }
-                }.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
+                }.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (expanded) "⌄" else "›")
-                Text(view.sender, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Normal)
-                Text(row.preview, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
-                Text(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(view.date), style = MaterialTheme.typography.labelSmall)
+                LagomIcon(if (expanded) R.drawable.ic_chevron else R.drawable.ic_chevron_right, size = 16.dp)
+                Text(view.sender, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (row.unread) FontWeight.SemiBold else FontWeight.Normal)
+                Text(row.preview, Modifier.weight(1f), color = lagom.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                Text(listTime(view.date), color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
             }
             // shortcut: like desktop, expanded bodies scroll independently; measure HTML for continuous scrolling later.
-            if (expanded) Box(Modifier.height(560.dp)) { MessageScreen(model, message) }
+            if (expanded) Box(Modifier.height(560.dp)) { MessageScreen(model, message, close = null) }
             HorizontalDivider()
         }
     }
 }
 
-@Composable private fun MessageScreen(model: MailModel, message: MailMessage) {
+/** The desktop reading pane: a bar with Back, Later, Delete, Move and Done filled; then the subject, the sender with the
+ *  message menu, the body, attachments, and Reply. */
+@Composable private fun MessageScreen(model: MailModel, message: MailMessage, close: (() -> Unit)?) {
     var plain by remember(message.row.id) { mutableStateOf(false) }
     val context = LocalContext.current
+    val c = lagom
     fun openAttachment(part: MailAttachment, share: Boolean = false) {
         model.perform {
             val file = model.openAttachment(message.row.id, part) ?: return@perform
@@ -510,87 +579,132 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
             } catch (_: ActivityNotFoundException) { model.error = "No app can open this file" }
         }
     }
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SelectionContainer {
-            Column {
-                Text(message.row.subject.ifEmpty { "(No subject)" }, style = MaterialTheme.typography.titleLarge)
-                Text(message.row.senderName)
-                Text(message.row.senderAddress, style = MaterialTheme.typography.bodySmall)
-                Text(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM).withZone(ZoneId.systemDefault()).format(RowPresentation(message.row).date), style = MaterialTheme.typography.labelSmall)
-            }
-        }
-        message.unsubscribe?.let { UnsubscribeLine(model, message.row.id, it) }
-        if (message.htmlBody != null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(plain, { plain = it }); Text("Plain text")
-                if (message.row.id !in model.remoteImagesIds) TextButton(onClick = { model.loadRemoteImages(message.row.id) }) { Text("Load remote images") }
-            }
-        }
-        Box(Modifier.weight(1f)) {
-            if (!plain && message.htmlBody != null) MailHtml(message.row.id, message.htmlBody!!, message.row.id in model.remoteImagesIds)
-            else SelectionContainer { Text(message.textBody, Modifier.fillMaxSize().verticalScroll(rememberScrollState())) }
-        }
-        if (message.attachments.isNotEmpty()) {
-            LazyColumn(Modifier.heightIn(max = 144.dp)) {
-                items(message.attachments, key = { it.section }) { part ->
-                    val downloading = (message.row.id to part.section) in model.downloadingAttachments
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Row(Modifier.weight(1f).heightIn(min = 48.dp)
-                            .clickable(enabled = !downloading, onClickLabel = "Open", role = Role.Button) { openAttachment(part) }
-                            .padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (afterWait(downloading)) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Text("${safeAttachmentName(part.filename)} · ${part.size} bytes", style = MaterialTheme.typography.bodySmall)
-                        }
-                        TextButton(enabled = !downloading, onClick = { openAttachment(part, share = true) },
-                            modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)
-                                .semantics { contentDescription = "Share ${safeAttachmentName(part.filename)}" }) { Text("Share") }
-                    }
-                }
-            }
-        }
-        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id) } }) { Text("Reply") }
-            TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id, ComposeKind.REPLY_ALL) } },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Reply all" }) { Text("Reply all") }
-            TextButton(enabled = !model.working, onClick = { model.perform { model.reply(message.row.id, ComposeKind.FORWARD) } },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Forward" }) { Text("Forward") }
-            val readLabel = if (message.row.unread) "Mark read" else "Mark unread"
-            TextButton(enabled = !model.working, onClick = { model.perform { model.setRead(message.row.id, message.row.unread) } },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = readLabel }) { Text(readLabel) }
+    val id = message.row.id
+    Column(Modifier.fillMaxSize()) {
+        TopBar(Modifier.statusBarsPadding(), start = if (close != null) 4.dp else 12.dp, end = 12.dp) {
+            close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) }
             Box {
                 var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
-                TextButton(enabled = !model.working, onClick = { choices = model.core?.laterChoices().orEmpty() },
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text("Later") }
+                HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working) { choices = model.core?.laterChoices().orEmpty() }
                 DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {
                     choices.forEach { choice ->
                         DropdownMenuItem(text = { Text(choice.label) }, onClick = {
                             choices = emptyList()
-                            model.perform { model.act(MailAction.Later, message.row.id, conversation = false, until = choice.untilUnix) }
+                            model.perform { model.act(MailAction.Later, id, conversation = false, until = choice.untilUnix) }
                         })
                     }
                 }
+            }
+            HouseButton("Delete", R.drawable.ic_trash, iconOnly = true, enabled = !model.working) {
+                model.perform { model.act(MailAction.Delete, id, conversation = false) }
             }
             val targets = model.moveTargets(message.row.account)
             Box {
                 var open by remember { mutableStateOf(false) }
-                TextButton(enabled = !model.working, onClick = { open = true },
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text("Move to") }
+                HouseButton("Move to", R.drawable.ic_move, iconOnly = true, enabled = !model.working) { open = true }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                     targets.forEach { folder ->
                         DropdownMenuItem(text = { Text(folder.path) }, onClick = {
                             open = false
-                            model.perform { model.move(message.row.id, folder, conversation = false) }
+                            model.perform { model.move(id, folder, conversation = false) }
                         })
                     }
                     DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
                         open = false
-                        model.newFolder = NewFolder(message.row.account, message.row.id, conversation = false)
+                        model.newFolder = NewFolder(message.row.account, id, conversation = false)
                     })
                 }
             }
-            TextButton(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Delete, message.row.id, conversation = false) } }) { Text("Delete") }
-            Button(enabled = !model.working, onClick = { model.perform { model.act(MailAction.Done, message.row.id, conversation = false) } }) { Text("Done") }
+            Spacer(Modifier.weight(1f))
+            HouseButton("Done", R.drawable.ic_done, primary = true, enabled = !model.working) {
+                model.perform { model.act(MailAction.Done, id, conversation = false) }
+            }
+        }
+        Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            SelectionContainer {
+                Text(message.row.subject.ifEmpty { "(No subject)" }, Modifier.padding(top = 16.dp).semantics { heading() },
+                    style = MaterialTheme.typography.headlineSmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+            Header(model, message, plain) { plain = !plain }
+            message.unsubscribe?.let { UnsubscribeLine(model, id, it) }
+            if (message.htmlBody != null && !plain && id !in model.remoteImagesIds) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HouseButton("Load remote images", R.drawable.ic_image) { model.loadRemoteImages(id) }
+                    Text("Remote images are blocked", color = c.ink2, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Box(Modifier.weight(1f)) {
+                if (!plain && message.htmlBody != null) MailHtml(id, message.htmlBody!!, id in model.remoteImagesIds)
+                else SelectionContainer {
+                    Text(message.textBody, Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * 1.45f))
+                }
+            }
+            if (message.attachments.isNotEmpty()) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(message.attachments, key = { it.section }) { part ->
+                        val downloading = (id to part.section) in model.downloadingAttachments
+                        val name = safeAttachmentName(part.filename)
+                        Row(Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(Radius.attachment)).background(c.subtle)
+                            .border(1.dp, c.line, RoundedCornerShape(Radius.attachment))
+                            .clickable(enabled = !downloading, onClickLabel = "Open", role = Role.Button) { openAttachment(part) }
+                            .padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (afterWait(downloading)) CircularProgressIndicator(Modifier.size(16.dp), color = c.ink2, strokeWidth = 2.dp)
+                            else LagomIcon(R.drawable.ic_attachment, size = 16.dp)
+                            Text(name, Modifier.widthIn(max = 180.dp), style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
+                            Text(android.text.format.Formatter.formatShortFileSize(context, part.size.toLong()), color = c.ink2,
+                                style = MaterialTheme.typography.bodySmall)
+                            LagomIconButton("Share $name", R.drawable.ic_external, enabled = !downloading) { openAttachment(part, share = true) }
+                        }
+                    }
+                }
+            }
+            // The desktop reply box: one quiet line that opens Reply.
+            Row(Modifier.fillMaxWidth().padding(bottom = 12.dp).heightIn(min = 48.dp).clip(RoundedCornerShape(Radius.control))
+                .background(c.raised).border(1.dp, c.line, RoundedCornerShape(Radius.control))
+                .clickable(enabled = !model.working, role = Role.Button) { model.perform { model.reply(id) } }.padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LagomIcon(R.drawable.ic_reply)
+                Text("Reply to ${RowPresentation(message.row).sender}", color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+/** Initials, sender, address and date, with the desktop's message menu: Reply all, Forward, Mark read, plain text. */
+@Composable private fun Header(model: MailModel, message: MailMessage, plain: Boolean, togglePlain: () -> Unit) {
+    val row = message.row
+    val c = lagom
+    val sender = RowPresentation(row).sender
+    val initials = sender.split(" ").filter { it.isNotEmpty() }.take(2).map { it.first().uppercaseChar() }.joinToString("")
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.size(36.dp).background(c.subtle, CircleShape).border(1.dp, c.line, CircleShape).clearAndSetSemantics {},
+            contentAlignment = Alignment.Center) {
+            Text(initials, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold), maxLines = 1)
+        }
+        // The address wraps, so a look-alike sender's domain stays visible.
+        SelectionContainer(Modifier.weight(1f)) {
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(sender, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                Text(row.senderAddress, color = c.ink2, style = MaterialTheme.typography.bodySmall)
+                val date = RowPresentation(row).date
+                Text("${localDate(date.atZone(ZoneId.systemDefault()).toLocalDate(), "EEEEdMMMMyyyy")}, " +
+                    android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date.from(date)),
+                    color = c.ink2, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Box {
+            var open by remember { mutableStateOf(false) }
+            LagomIconButton("Message actions", R.drawable.ic_more) { open = true }
+            DropdownMenu(open, { open = false }) {
+                val readLabel = if (row.unread) "Mark read" else "Mark unread"
+                DropdownMenuItem(text = { Text("Reply all") }, enabled = !model.working, onClick = { open = false; model.perform { model.reply(row.id, ComposeKind.REPLY_ALL) } })
+                DropdownMenuItem(text = { Text("Forward") }, enabled = !model.working, onClick = { open = false; model.perform { model.reply(row.id, ComposeKind.FORWARD) } })
+                DropdownMenuItem(text = { Text(readLabel) }, enabled = !model.working, onClick = { open = false; model.perform { model.setRead(row.id, row.unread) } })
+                if (message.htmlBody != null) DropdownMenuItem(text = { Text(if (plain) "Show formatted" else "Show plain text") },
+                    onClick = { open = false; togglePlain() })
+            }
         }
     }
 }

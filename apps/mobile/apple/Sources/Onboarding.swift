@@ -68,7 +68,8 @@ struct OnboardingView: View {
             HouseButton(title: "Add account", icon: "account-add", primary: true) { choosing = true }
                 .padding(.top, 8)
         case .choose:
-            Text("Choose account").lagomFont(.subject, .bold).accessibilityAddTraits(.isHeader)
+            Text("Choose your mail").lagomFont(.subject, .bold).accessibilityAddTraits(.isHeader)
+            Text("Google and Microsoft sign in in the browser. Anything else uses its mail server.").lagomFont(.body).foregroundStyle(Theme.secondary)
             VStack(spacing: 8) {
                 // Hidden until this build has the provider's client ID, as in Add account.
                 ForEach([(SignInProvider.google, "Google"), (.microsoft, "Microsoft")], id: \.1) { provider, name in
@@ -88,8 +89,8 @@ struct OnboardingView: View {
             }
             if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger) }
         case .notifications:
-            Text("Notifications").lagomFont(.subject, .bold).accessibilityAddTraits(.isHeader)
-            Text("Know when new mail arrives.").lagomFont(.body).foregroundStyle(Theme.secondary)
+            Text("New mail, when it arrives").lagomFont(.subject, .bold).accessibilityAddTraits(.isHeader)
+            Text("lagom tells you about new mail in your Inbox. Nothing else.").lagomFont(.body).foregroundStyle(Theme.secondary)
             VStack(spacing: 8) {
                 HouseButton(title: "Allow", icon: "done", primary: true, action: allow)
                 HouseButton(title: "Not now", icon: "close", action: notNow)
