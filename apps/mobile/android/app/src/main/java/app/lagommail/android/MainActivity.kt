@@ -214,7 +214,7 @@ class MainActivity : ComponentActivity() {
                 override fun <T : ViewModel> create(modelClass: Class<T>): T = MailModel(open = {
                     val app = application as LagomApplication
                     withContext(Dispatchers.IO) { launch.demo?.let(app::demoCore) ?: app.core }
-                }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { SendWorker.schedule(applicationContext) },
+                }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { if (launch.demo == null) SendWorker.schedule(applicationContext) },
                     demo = launch.demo != null) as T
             })
             val planner: PlannerModel = viewModel()
@@ -273,7 +273,9 @@ class MainActivity : ComponentActivity() {
 /** Today, Mail, Calendar and Todo with the page bar, as iOS on a phone. The last page comes back at the next start. */
 @Composable internal fun LagomHome(model: MailModel, planner: PlannerModel, twoPane: Boolean) {
     val settings = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
-    var section by remember { mutableStateOf(settings.getString("section", null)?.let { name -> AppSection.entries.find { it.name == name } } ?: AppSection.MAIL) }
+    // A share or notification that landed during loading or onboarding opens on Mail, where it lives.
+    var section by remember { mutableStateOf(if (model.draft != null || model.accountForm != null || model.selectedId != null) AppSection.MAIL
+        else settings.getString("section", null)?.let { name -> AppSection.entries.find { it.name == name } } ?: AppSection.MAIL) }
     fun show(page: AppSection) { section = page; settings.edit().putString("section", page.name).apply() }
     /** A message Today asked to open; a tap on another page cancels it, and a half-open message with it. */
     var opening by remember { mutableStateOf<Job?>(null) }

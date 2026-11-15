@@ -142,13 +142,14 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
     iconOnly: Boolean = false, enabled: Boolean = true, danger: Boolean = false, onClick: () -> Unit) {
     val c = lagom
     val ink = when { primary -> c.accentInk; danger -> c.danger; else -> c.ink }
-    Box(modifier.semantics { if (iconOnly) contentDescription = text }, contentAlignment = Alignment.Center,
+    Box(modifier, contentAlignment = Alignment.Center,
         // A full-width button passes its width on to the drawn shape.
         propagateMinConstraints = true) {
         Row(Modifier.minimumInteractiveComponentSize().heightIn(min = 36.dp).clip(RoundedCornerShape(Radius.control))
             .background(if (primary) c.accent else c.bg)
             .then(if (primary) Modifier else Modifier.border(1.dp, c.line, RoundedCornerShape(Radius.control)))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { if (iconOnly) contentDescription = text }
             .alpha(if (enabled) 1f else 0.5f)
             .padding(horizontal = if (iconOnly) 9.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
@@ -161,9 +162,9 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
 /** A borderless glyph, desktop `icon_button`: 36 dp drawn, 48 dp to touch. */
 @Composable internal fun LagomIconButton(label: String, @DrawableRes icon: Int, modifier: Modifier = Modifier, enabled: Boolean = true,
     tint: Color = lagom.ink2, onClick: () -> Unit) {
-    Box(modifier.size(48.dp).semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+    Box(modifier.size(48.dp), contentAlignment = Alignment.Center) {
         Box(Modifier.size(40.dp).clip(RoundedCornerShape(Radius.control)).clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .alpha(if (enabled) 1f else 0.4f), contentAlignment = Alignment.Center) {
+            .semantics { contentDescription = label }.alpha(if (enabled) 1f else 0.4f), contentAlignment = Alignment.Center) {
             LagomIcon(icon, tint = tint, size = 20.dp)
         }
     }

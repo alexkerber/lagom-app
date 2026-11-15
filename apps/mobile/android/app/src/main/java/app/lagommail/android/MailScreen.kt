@@ -170,7 +170,7 @@ internal fun Mailbox.label(): String = when (this) {
                 model.perform { model.newMessage(account) }
             }
         }
-    }, snackbarHost = { Notice(model) }) { padding ->
+    }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (model.showingDrafts) {
                 LazyColumn(Modifier.weight(1f)) {
@@ -200,6 +200,8 @@ internal fun Mailbox.label(): String = when (this) {
     // One pane: the message covers the list and its bar, which stay underneath, so the list keeps its place and
     // predictive back shows it.
     if (!twoPane && !model.showingDrafts) ReadingPane(model, single = true)
+    // Above the open message too: Undo after a reply or Done must stay reachable.
+    Box(Modifier.align(Alignment.BottomCenter)) { Notice(model) }
     }
 }
 
