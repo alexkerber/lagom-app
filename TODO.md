@@ -112,7 +112,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [ ] folders and Move to folder with Undo, Android list mark read/unread, Empty Trash and account name on iOS and Android — PR `mobile/parity-round-2` (2026-11-14). Closes on merge.
   - [ ] Android Today, Todo and the phone Calendar list with the page bar — PR `android/planner` (2026-11-14). Closes on merge.
   - [ ] next gaps from the table: Android tablet Calendar week grid; create a folder on mobile — PR `mobile/parity-round-3` (2026-11-14). Closes on merge.
-  - [ ] Android in lagom's look: desktop colour tokens and line icons, one accent, a fixed top bar, onboarding (Welcome, account, notifications), skeleton rows and inbox zero, debug-only demo mode — PR `android/lagom-theme` (2026-11-15). Closes on merge.
+  - [x] Android in lagom's look: desktop colour tokens and line icons, one accent, a fixed top bar, onboarding (Welcome, account, notifications), skeleton rows and inbox zero, debug-only demo mode (#143, 2026-11-15). Screenshots on the Pixel 9a; a hand test with a real account not done.
 - [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).
@@ -122,7 +122,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] Google and Microsoft sign-in on iOS and Android (2026-11-13): the code is in the `feat/mobile-oauth` PR. Open: Alex creates the iOS and Android OAuth clients and the Entra redirect (values in the PR), then a sign-in on a device with each provider.
 - [x] iOS intro before the app (Alex 2026-11-15): no account shows Welcome, Choose account (Google, Microsoft, Other (IMAP) through the existing sign-in and form) and then Notifications once; removing the last account returns to it. Gate tests in `LaunchStageTests`; not run on a device or with VoiceOver. Android builds the same copy in parallel.
 - [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
-- [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, HTML mail on Linux, a hand test of each.
+- [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, a hand test of each. HTML mail on Linux draws a safe subset (#138); a hand check on Linux is not done.
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
