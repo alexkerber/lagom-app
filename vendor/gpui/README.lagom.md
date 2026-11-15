@@ -17,10 +17,11 @@ Local source changes:
   same visibility input and record platform quit requests.
 - `src/app/test_context.rs`: expose those test operations; register reopen
   through `Application::on_reopen`, as production does.
-- `Cargo.toml`: `image` keeps only the formats in GPUI's `ImageFormat` (PNG,
-  JPEG, WebP, GIF, BMP, TIFF, ICO). `img()` no longer decodes AVIF, EXR, HDR,
-  PNM, QOI, TGA, DDS or Farbfeld; Lagom shows none of them, and the defaults
-  also add an AVIF encoder (rav1e). `ashpd` is 0.12, the version
+- `Cargo.toml`: `image` keeps only the formats Lagom shows (PNG, JPEG, WebP,
+  GIF, BMP). `img()` and image clipboard reads no longer decode TIFF, ICO,
+  AVIF, EXR, HDR, PNM, QOI, TGA, DDS or Farbfeld; Lagom reads only text from
+  the clipboard. The defaults also add an AVIF encoder (rav1e). `ashpd` is
+  0.12, the version
   `oo7` uses, so Linux carries one copy. Both keep the release binary in its
   size budget.
 
