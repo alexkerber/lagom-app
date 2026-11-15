@@ -333,8 +333,7 @@ version = "1"
 optional = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.ashpd]
-# Lagom: 0.12, the version oo7 uses, so the binary carries one ashpd. The API GPUI calls is unchanged.
-version = "0.12"
+version = "0.11"
 features = ["async-std"]
 optional = true
 default-features = false
@@ -378,14 +377,6 @@ version = "0.14.1-zed"
 features = ["source-fontconfig-dlopen"]
 optional = true
 package = "zed-font-kit"
-
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.oo7]
-version = "0.5.0"
-features = [
-    "async-std",
-    "native_crypto",
-]
-default-features = false
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.open]
 version = "5.2.0"

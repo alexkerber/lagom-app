@@ -17,12 +17,10 @@ codegen-units = 1
 [profile.release.package.lagom]
 strip = "symbols"
 
-# Linux D-Bus (badge, notifications, keyring, portals): a few calls per session, so size over speed.
+# Linux D-Bus (badge, notifications, portals): a few calls per session, so size over speed.
 [profile.release.package.zbus]
 opt-level = "s"
 [profile.release.package.zvariant]
-opt-level = "s"
-[profile.release.package.oo7]
 opt-level = "s"
 [profile.release.package.ashpd]
 opt-level = "s"

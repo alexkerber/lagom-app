@@ -26,7 +26,6 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
- "zeroize",
 ]
 
 [[package]]
@@ -165,9 +164,9 @@ dependencies = [
 
 [[package]]
 name = "ashpd"
-version = "0.12.3"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33a3c86f3fd70c0ffa500ed189abfa90b5a52398a45d5dc372fcc38ebeb7a645"
+checksum = "d2f3f79755c74fd155000314eb349864caa787c6592eace6c6882dad873d9c39"
 dependencies = [
  "async-fs",
  "async-net",
@@ -946,7 +945,6 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.7",
  "inout",
- "zeroize",
 ]
 
 [[package]]
@@ -1425,7 +1423,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
- "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -2508,7 +2505,6 @@ dependencies = [
  "naga",
  "num_cpus",
  "objc",
- "oo7",
  "open",
  "parking",
  "parking_lot",
@@ -3589,9 +3585,6 @@ name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
-dependencies = [
- "spin",
-]
 
 [[package]]
 name = "leak"
@@ -3856,16 +3849,6 @@ dependencies = [
  "log",
  "tendril 0.5.1",
  "web_atoms",
-]
-
-[[package]]
-name = "md-5"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
-dependencies = [
- "cfg-if",
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -4161,23 +4144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-bigint-dig"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
-dependencies = [
- "lazy_static",
- "libm",
- "num-integer",
- "num-iter",
- "num-traits",
- "rand 0.8.8",
- "serde",
- "smallvec",
- "zeroize",
-]
-
-[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4464,41 +4430,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "oo7"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3299dd401feaf1d45afd8fd1c0586f10fcfb22f244bb9afa942cec73503b89d"
-dependencies = [
- "aes",
- "ashpd",
- "async-fs",
- "async-io",
- "async-lock",
- "blocking",
- "cbc",
- "cipher",
- "digest 0.10.7",
- "endi",
- "futures-lite 2.6.1",
- "futures-util",
- "getrandom 0.3.4",
- "hkdf",
- "hmac",
- "md-5",
- "num",
- "num-bigint-dig",
- "pbkdf2",
- "rand 0.9.5",
- "serde",
- "sha2 0.10.9",
- "subtle",
- "zbus 5.19.0",
- "zbus_macros 5.19.0",
- "zeroize",
- "zvariant 5.15.1",
-]
-
-[[package]]
 name = "open"
 version = "5.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4582,16 +4513,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4500030c302e4af1d423f36f3b958d1aecb6c04184356ed5a833bf6b60435777"
 dependencies = [
  "rustc_version",
-]
-
-[[package]]
-name = "pbkdf2"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
-dependencies = [
- "digest 0.10.7",
- "hmac",
 ]
 
 [[package]]
