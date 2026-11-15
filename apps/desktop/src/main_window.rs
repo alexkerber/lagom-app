@@ -1838,11 +1838,8 @@ impl MainWindow {
             let new = new.debug_selector(|| "new-folder".into());
             return group.when(self.folder_name.is_none(), |group| group.child(new));
         }
-        // Once any folder has subfolders, every row keeps a chevron slot, so the icons line up.
-        let nested = all.iter().any(|f| f.parent.is_some() && f.listed());
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
-        let slot = || div().size(px(16.)).flex_shrink_0();
         let sel = t.sel;
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
@@ -1852,7 +1849,9 @@ impl MainWindow {
             let color = if active { t.accent } else if unread > 0 { t.ink } else { t.ink2 };
             let chevron = folders::has_children(all, f).then(|| {
                 let path = if all[f].open { "icons/chevron.svg" } else { "icons/chevron-right.svg" };
-                icon_button(t, "folder-disclosure", path, if all[f].open { "Collapse folder" } else { "Expand folder" }).id(("chevron", f)).size(px(16.)).on_click(cx.listener(move |this, _, _, cx| {
+                icon_button(t, "folder-disclosure", path, if all[f].open { "Collapse folder" } else { "Expand folder" }).id(("chevron", f)).size(px(16.))
+                    .debug_selector(move || format!("folder-{f}-chevron"))
+.on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.inbox.folders[f].open ^= true;
                     cx.notify();
@@ -1861,29 +1860,29 @@ impl MainWindow {
             list = list.child(
                 row(("folder", f).into(), active)
                     .debug_selector(move || format!("folder-{f}"))
-                    .pl(px(10. + 22. * depth as f32))
+                    // Alex 2026-11-15: less indent. Top-level icons line up with Inbox; each level adds one icon width.
+                    .pl(px(10. + 16. * depth as f32))
                     .text_color(color)
                     .on_click(cx.listener(move |this, _, _, cx| this.open_box(Some(f), cx)))
                     // The open folder is no target: a move there changes nothing.
                     .when(!active, |d| d.drag_over::<DragMail>(move |s, _, _, _| s.bg(sel))
                         .on_drop(cx.listener(move |this, drag: &DragMail, _, cx| this.drop_on_folder(f, &drag.rows, cx))))
-                    .when(nested, |d| match chevron {
-                        Some(c) => d.child(c),
-                        None => d.child(slot()),
-                    })
                     .child(icon("icons/folder.svg", color, 16.))
                     .child(div().flex_1().min_w(px(0.)).one_line()
                         .debug_selector(move || format!("folder-{f}-{}", if active { "accent" } else { "idle" }))
                         .child(all[f].name.clone()))
                     // A zero count is calm: no number at all.
-                    .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}")))),
+                    .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}"))))
+                    // Trailing, as on Sent and Done: 6 px right padding puts the centre on a one-digit count's
+                    // (Alex 2026-11-15). A negative margin here collapsed the label to a few letters.
+                    .when(chevron.is_some(), |d| d.pr(px(6.)))
+                    .children(chevron.map(|c| div().flex_shrink_0().child(c))),
             );
         }
         if shown < rows.len() {
             list = list.child(
                 row("folders-more".into(), false)
                     .text_color(t.ink2)
-                    .when(nested, |d| d.child(slot()))
                     .child(icon("icons/chevron.svg", t.ink2, 16.))
                     .child(format!("{} more", rows.len() - shown))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -4075,9 +4074,11 @@ mod dispatch {
 
     #[gpui::test]
     fn sidebar_counts_chevrons_and_add_folder_share_one_edge(cx: &mut TestAppContext) {
-        let (_view, cx) = open(cx);
+        let (view, cx) = open(cx);
         frame(cx);
         let count = cx.debug_bounds("Inbox-count").unwrap().right();
+        let parent = view.read_with(cx, |v, _| (0..v.inbox.folders.len()).find(|&f| folders::has_children(&v.inbox.folders, f) && v.inbox.folders[f].listed())).unwrap();
+        assert_eq!(cx.debug_bounds(format!("folder-{parent}-chevron").leak()).unwrap().right() - px(4.), count);
         // Glyph ends: the add button keeps 6 px around its 16 px glyph; the chevron box overhangs by 4.
         assert_eq!(cx.debug_bounds("add-folder").unwrap().right() - px(6.), count);
         assert_eq!(cx.debug_bounds("disclosure-Sent").unwrap().right() - px(4.), count);
