@@ -81,7 +81,11 @@ jobs:
             sleep 5
             pgrep -x lagom
             pkill -x lagom'
-          LAGOM_DEMO=1 APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 10 target/linux/lagom-*.AppImage || test $? = 124
+          # Unpack first so the 10 s measure only lagom. Only 124 (still alive at timeout) passes.
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/target/linux/lagom-*.AppImage --appimage-extract > /dev/null)
+          status=0
+          LAGOM_DEMO=1 xvfb-run -a timeout 10 "$RUNNER_TEMP"/squashfs-root/AppRun || status=$?
+          test "$status" = 124
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-packages
