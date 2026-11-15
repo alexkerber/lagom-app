@@ -47,3 +47,21 @@ jobs:
         run: python3 scripts/test-perf.py
       - name: Measure budgets (release)
         run: python3 scripts/perf.py
+      # shortcut: temporary size diagnostic for perf/linux-binary-size, remove before merge.
+      - name: Binary size per release profile (Linux, temporary)
+        if: always() && runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          size -A target/release/lagom | sort -k2 -n | tail -8
+          measure() {
+            name=$1; shift
+            start=$SECONDS
+            env "$@" cargo build --release --locked -p lagom --bin lagom -q
+            echo "VARIANT $name: $(stat -c %s target/release/lagom) bytes, build $((SECONDS - start)) s"
+            size -A target/release/lagom | grep -E '^\.(text|rodata|symtab|strtab|eh_frame) '
+          }
+          measure strip-symbols CARGO_PROFILE_RELEASE_STRIP=symbols
+          measure lto-thin CARGO_PROFILE_RELEASE_LTO=thin
+          measure lto-thin-strip CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_STRIP=symbols
+          measure lto-fat-cgu1 CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+          measure lto-fat-cgu1-strip CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_STRIP=symbols
