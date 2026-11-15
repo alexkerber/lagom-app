@@ -2,6 +2,7 @@
 """Converts the desktop line icons (apps/desktop/assets/icons/*.svg) to Android vector drawables
 (res/drawable/ic_<name>.xml). Handles what the icons use: path, rect (with rx) and circle, with
 fill and stroke attributes on the root or the element. Run from the repository root."""
+import argparse
 import pathlib
 import xml.etree.ElementTree as ET
 
@@ -59,5 +60,23 @@ def convert(svg: pathlib.Path) -> str:
             + "\n".join(paths) + "\n</vector>\n")
 
 
-for svg in sorted(SRC.glob("*.svg")):
-    (OUT / f"ic_{svg.stem.replace('-', '_')}.xml").write_text(convert(svg))
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="report stale assets without writing")
+    args = parser.parse_args()
+    stale = False
+    for svg in sorted(SRC.glob("*.svg")):
+        path = OUT / f"ic_{svg.stem.replace('-', '_')}.xml"
+        expected = convert(svg).encode("utf-8")
+        if not path.is_file() or path.read_bytes() != expected:
+            stale = True
+            print(f"{'Out of date' if args.check else 'Writing'}: {path}")
+            if not args.check:
+                OUT.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(expected)
+    if args.check and stale:
+        raise SystemExit("Run python3 scripts/android-icons.py to update Android icons.")
+
+
+if __name__ == "__main__":
+    main()

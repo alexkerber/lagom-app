@@ -16,7 +16,16 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
         }
     }
     /// The desktop icon, `apps/desktop/assets/icons`.
-    var icon: String { self == .drafts ? "compose" : rawValue.lowercased() }
+    var icon: String {
+        switch self {
+        case .inbox: "inbox"
+        case .later: "later"
+        case .sent: "sent"
+        case .done: "done"
+        case .trash: "trash"
+        case .drafts: "compose"
+        }
+    }
 }
 
 func draftMessageID(email: String) -> String {
