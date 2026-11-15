@@ -385,6 +385,9 @@ pub struct MainWindow {
     expanded: HashMap<usize, Entity<conversation::MessageBody>>,
     // Messages open in their own windows: (message id, window).
     popouts: Vec<(usize, gpui::WindowHandle<MessageWindow>)>,
+    /// The mail on screen last frame: the selected one, expanded bodies and pop-outs. Others
+    /// drop their decoded HTML images.
+    rich_shown: Vec<usize>,
     _appearance: gpui::Subscription,
     _activation: gpui::Subscription,
     _bounds: gpui::Subscription,
@@ -508,6 +511,7 @@ impl MainWindow {
             reading_members: Vec::new(),
             expanded: HashMap::new(),
             popouts: Vec::new(),
+            rich_shown: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             _bounds: cx.observe_window_bounds(window, |this, window, cx| {
@@ -2239,6 +2243,21 @@ impl MainWindow {
             .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
     }
 
+    /// Mail that left the screen drops its decoded images (up to 128 MiB each): checked only
+    /// when what is on screen changes.
+    fn forget_hidden_images(&mut self, cx: &App) {
+        // A closed pop-out shows nothing.
+        self.popouts.retain(|(_, h)| h.read(cx).is_ok());
+        let mut shown: Vec<usize> = self.inbox.single().into_iter().chain(self.expanded.keys().copied()).chain(self.popouts.iter().map(|(id, _)| *id)).collect();
+        shown.sort_unstable();
+        shown.dedup();
+        if shown == self.rich_shown { return; }
+        for (id, mail) in self.inbox.mail.iter().enumerate() {
+            if let Some(rich) = mail.rich.as_ref().filter(|_| shown.binary_search(&id).is_err()) { rich.forget(); }
+        }
+        self.rich_shown = shown;
+    }
+
     /// One quiet line above the message body: "Unsubscribe from …", a confirm step, then the outcome.
     // shortcut: single messages in the main reading pane only; add it to conversations and pop-outs if newsletters thread.
     fn unsubscribe_line(&self, m: &Mail, cx: &mut Context<Self>) -> Option<Div> {
@@ -2445,6 +2464,7 @@ impl Render for MainWindow {
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
         self.web_frame(window, cx);
+        self.forget_hidden_images(cx);
         crate::rich::release(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = matches!(self.page, Page::AddAccount(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty());

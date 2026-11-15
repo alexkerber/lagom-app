@@ -28,7 +28,6 @@ pub struct Rich {
     /// The mail has images from the web, which "Load remote images" fetches.
     pub has_remote: bool,
     images: Images,
-    budget: Arc<Budget>,
 }
 
 /// An image of this mail, by what it is: a part by its content ID (however `src` spells it),
@@ -39,9 +38,14 @@ enum Key { Part(String), Data(usize), Web(String) }
 #[derive(Clone)]
 enum Source { Part(Arc<Vec<InlinePart>>, String), Data(Arc<str>), Web(String) }
 
-enum Slot { Loading, Done(Option<Arc<RenderImage>>) }
+/// A decoded image, with the windows that drew it: each frees its own texture.
+enum Slot { Loading, Done(Option<Arc<RenderImage>>, Vec<gpui::WindowId>) }
 
-type Images = Arc<Mutex<HashMap<Key, Slot>>>;
+/// The images of a mail while it is on screen. `forget` starts a new generation: a load that
+/// finishes for an older one is dropped, never drawn.
+struct Store { slots: HashMap<Key, Slot>, budget: Arc<Budget>, generation: u64 }
+
+type Images = Arc<Mutex<Store>>;
 
 /// What is left of this mail's budgets. Remote fetches hold `remote` while they run: one at a
 /// time per mail, so the budget is exact and no image fails for bytes another one reserved.
@@ -50,19 +54,46 @@ struct Budget { decoded: Mutex<usize>, remote: tokio::sync::Mutex<usize> }
 /// Decodes at a time, across all mail: each may hold up to `DECODE_BYTES`.
 static DECODES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// Textures of mail that is gone, for the next frame to free: `Drop` has no window.
-static RELEASED: Mutex<Vec<Arc<RenderImage>>> = Mutex::new(Vec::new());
-
-impl Drop for Rich {
-    fn drop(&mut self) {
-        let images = std::mem::take(&mut *self.images.lock().unwrap());
-        RELEASED.lock().unwrap().extend(images.into_values().filter_map(|slot| match slot { Slot::Done(image) => image, Slot::Loading => None }));
+impl Budget {
+    fn new() -> Arc<Self> {
+        Arc::new(Budget { decoded: DECODED_BUDGET.into(), remote: tokio::sync::Mutex::const_new(REMOTE_BUDGET) })
     }
 }
 
-/// Frees the GPU textures of dropped mail, in every window. Once per frame.
-pub fn release(window: &mut Window, cx: &mut App) {
-    for image in std::mem::take(&mut *RELEASED.lock().unwrap()) { cx.drop_image(image, Some(window)); }
+thread_local! {
+    /// Textures of mail no window shows any more, with the windows that still hold them.
+    /// `Drop` and `forget` have no window, so each window frees its own in its next frame.
+    static RELEASED: std::cell::RefCell<Vec<(Arc<RenderImage>, Vec<gpui::WindowId>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Empties the store into `RELEASED`, with fresh budgets.
+fn retire(store: &mut Store) {
+    let slots = std::mem::take(&mut store.slots);
+    (store.budget, store.generation) = (Budget::new(), store.generation + 1);
+    RELEASED.with_borrow_mut(|released| released.extend(slots.into_values().filter_map(|slot| match slot {
+        Slot::Done(Some(image), windows) if !windows.is_empty() => Some((image, windows)),
+        _ => None,
+    })));
+}
+
+impl Drop for Rich {
+    fn drop(&mut self) { retire(&mut self.images.lock().unwrap()); }
+}
+
+/// Frees this window's textures of mail it no longer shows. Each window calls it while it
+/// builds a new frame, so no window loses a texture its last frame still draws; another
+/// window's atlas is never touched. Windows that closed are dropped from the list.
+pub fn release(window: &mut Window, cx: &App) {
+    let id = window.window_handle().window_id();
+    let open: Vec<_> = cx.windows().iter().map(|w| w.window_id()).collect();
+    RELEASED.with_borrow_mut(|released| released.retain_mut(|(image, windows)| {
+        windows.retain(|w| open.contains(w));
+        if let Some(at) = windows.iter().position(|w| *w == id) {
+            windows.swap_remove(at);
+            window.drop_image(image.clone()).ok();
+        }
+        !windows.is_empty()
+    }));
 }
 
 impl Rich {
@@ -70,9 +101,15 @@ impl Rich {
     pub fn new(html: &str) -> Self {
         let blocks = lagom_core::mime::html_to_blocks(html);
         let has_remote = blocks.iter().any(|b| matches!(b, Block::Images(row) if row.iter().any(|i| remote_image(&i.src).is_some())));
-        let budget = Arc::new(Budget { decoded: DECODED_BUDGET.into(), remote: tokio::sync::Mutex::const_new(REMOTE_BUDGET) });
-        Self { blocks, has_remote, images: Default::default(), budget }
+        Self { blocks, has_remote, images: Arc::new(Mutex::new(Store { slots: HashMap::new(), budget: Budget::new(), generation: 0 })) }
     }
+
+    /// Drops the decoded images of a mail that is no longer on screen; they load again when it
+    /// is. Their textures go when each window that drew them draws its next frame.
+    pub fn forget(&self) { retire(&mut self.images.lock().unwrap()); }
+
+    #[cfg(test)]
+    pub fn decoded(&self) -> usize { self.images.lock().unwrap().slots.len() }
 
     /// The body: one element per paragraph or image row.
     pub fn view(&self, m: &Mail, t: &Theme) -> Vec<AnyElement> {
@@ -99,12 +136,12 @@ impl Rich {
 
     fn image(&self, ix: usize, image: &Image, m: &Mail, t: &Theme) -> Option<AnyElement> {
         let (key, source) = Self::source(ix, &image.src, m)?;
-        let picture = match self.images.lock().unwrap().get(&key) {
-            Some(Slot::Done(None)) => div().px(px(8.)).py(px(4.)).border_1().border_color(t.line).rounded(px(4.))
+        let picture = match self.images.lock().unwrap().slots.get(&key) {
+            Some(Slot::Done(None, _)) => div().px(px(8.)).py(px(4.)).border_1().border_color(t.line).rounded(px(4.))
                 .text_color(t.ink2).child("Image not shown").into_any_element(),
             _ => {
-                let (images, budget) = (self.images.clone(), self.budget.clone());
-                img(move |window: &mut Window, cx: &mut App| load(&images, &budget, &key, &source, window, cx).map(Ok))
+                let images = self.images.clone();
+                img(move |window: &mut Window, cx: &mut App| load(&images, &key, &source, window, cx).map(Ok))
                     .max_w_full().when_some(image.width, |i, w| i.w(px(w))).into_any_element()
             }
         };
@@ -122,20 +159,28 @@ impl Rich {
 
 /// The decoded image, or `None` while it loads. The first call starts the load off the UI
 /// thread and redraws the view when it is done.
-fn load(images: &Images, budget: &Arc<Budget>, key: &Key, source: &Source, window: &mut Window, cx: &mut App) -> Option<Arc<RenderImage>> {
-    {
-        let mut slots = images.lock().unwrap();
-        match slots.get(key) {
-            Some(Slot::Done(image)) => return image.clone(),
+fn load(images: &Images, key: &Key, source: &Source, window: &mut Window, cx: &mut App) -> Option<Arc<RenderImage>> {
+    let (budget, generation) = {
+        let mut store = images.lock().unwrap();
+        let id = window.window_handle().window_id();
+        match store.slots.get_mut(key) {
+            Some(Slot::Done(image, windows)) => {
+                if image.is_some() && !windows.contains(&id) { windows.push(id); }
+                return image.clone();
+            }
             Some(Slot::Loading) => return None,
-            None => { slots.insert(key.clone(), Slot::Loading); }
+            None => { store.slots.insert(key.clone(), Slot::Loading); }
         }
-    }
-    let task = cx.background_executor().spawn(fetch_and_decode(source.clone(), budget.clone()));
+        (store.budget.clone(), store.generation)
+    };
+    let task = cx.background_executor().spawn(fetch_and_decode(source.clone(), budget));
     let (images, key, view) = (images.clone(), key.clone(), window.current_view());
     window.spawn(cx, async move |cx| {
         let image = task.await;
-        images.lock().unwrap().insert(key, Slot::Done(image));
+        let mut store = images.lock().unwrap();
+        if store.generation != generation { return; }
+        store.slots.insert(key, Slot::Done(image, Vec::new()));
+        drop(store);
         cx.update(|_, cx| cx.notify(view)).ok();
     }).detach();
     None
@@ -329,12 +374,12 @@ mod tests {
         assert_eq!(*budget.lock().unwrap(), 1600 * 50 * 4, "a refusal costs nothing");
         assert!(decode(&GIF, &budget).is_some());
         // Images past the decoded budget show the placeholder, and are never decoded.
-        let rich = Rich::new("");
-        *rich.budget.decoded.lock().unwrap() = 3;
+        let budget = Budget::new();
+        *budget.decoded.lock().unwrap() = 3;
         let source = Source::Data(format!("data:image/png;base64,{PNG}").into());
-        assert!(block_on(fetch_and_decode(source.clone(), rich.budget.clone())).is_none(), "4 bytes, 3 left: refused");
-        *rich.budget.decoded.lock().unwrap() = 4;
-        assert!(block_on(fetch_and_decode(source, rich.budget.clone())).is_some());
+        assert!(block_on(fetch_and_decode(source.clone(), budget.clone())).is_none(), "4 bytes, 3 left: refused");
+        *budget.decoded.lock().unwrap() = 4;
+        assert!(block_on(fetch_and_decode(source, budget)).is_some());
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -351,17 +396,31 @@ mod tests {
         cx.run_until_parked();
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
         cx.run_until_parked();
-        let images = rich.images.lock().unwrap();
-        assert_eq!(images.len(), 2, "two spellings of one part decode once");
-        assert!(matches!(images.get(&Key::Part("x".into())), Some(Slot::Done(Some(_)))));
-        assert!(matches!(images.get(&Key::Data(3)), Some(Slot::Done(None))), "data that is no image is refused once");
+        let id = window.window_id();
+        {
+            let images = &rich.images.lock().unwrap().slots;
+            assert_eq!(images.len(), 2, "two spellings of one part decode once");
+            assert!(matches!(images.get(&Key::Part("x".into())), Some(Slot::Done(Some(_), windows)) if *windows == [id]), "the window that drew it is known");
+            assert!(matches!(images.get(&Key::Data(3)), Some(Slot::Done(None, _))), "data that is no image is refused once");
+        }
+        // Off screen: the images go, and the window that drew them frees its texture.
+        *rich.images.lock().unwrap().budget.decoded.lock().unwrap() = 0;
+        rich.forget();
+        assert!(rich.images.lock().unwrap().slots.is_empty());
+        assert_eq!(*rich.images.lock().unwrap().budget.decoded.lock().unwrap(), DECODED_BUDGET, "a fresh budget");
+        assert_eq!(RELEASED.with_borrow(|r| r.iter().filter(|(_, w)| w.contains(&id)).count()), 1);
+        let other = cx.add_window(|_, _| Probe(Mail::default(), theme));
+        cx.update_window(other.into(), |_, window, cx| release(window, cx)).unwrap();
+        assert_eq!(RELEASED.with_borrow(|r| r.iter().filter(|(_, w)| w.contains(&id)).count()), 1, "another window frees nothing of this one");
+        cx.update_window(window.into(), |_, window, cx| release(window, cx)).unwrap();
+        assert_eq!(RELEASED.with_borrow(|r| r.iter().filter(|(_, w)| w.contains(&id)).count()), 0);
     }
 
     struct Probe(Mail, Theme);
 
     impl Render for Probe {
         fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            div().size_full().children(self.0.rich.clone().unwrap().view(&self.0, &self.1))
+            div().size_full().children(self.0.rich.clone().map(|rich| rich.view(&self.0, &self.1)).unwrap_or_default())
         }
     }
 }

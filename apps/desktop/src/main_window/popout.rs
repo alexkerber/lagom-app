@@ -96,6 +96,7 @@ impl Render for MessageWindow {
         };
         let menu_open = main.message_menu == Some(id);
         self.web.frame(Some((id, &m)), &t, menu_open, window, cx);
+        crate::rich::release(window, cx);
         let web = html::supported() && m.html.is_some();
         let this = cx.entity().downgrade();
         let on_reply = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {

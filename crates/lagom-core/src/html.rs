@@ -52,13 +52,19 @@ fn public_ip(ip: std::net::IpAddr) -> bool {
             !(v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
                 || v4.is_documentation() || v4.is_multicast() || a == 0 || a >= 240 || (a == 100 && (64..128).contains(&b)) || (a == 198 && (b == 18 || b == 19)))
         }
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => public_ip(v4.into()),
-            None => {
-                let first = v6.segments()[0];
-                !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80)
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let v4 = |hi: u16, lo: u16| std::net::Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+            match s {
+                // IPv4-mapped, and NAT64 (64:ff9b::/96) and 6to4 (2002::/16), which reach the IPv4 address they hold.
+                [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => public_ip(v4(hi, lo).into()),
+                [0x2002, hi, lo, ..] => public_ip(v4(hi, lo).into()),
+                // IPv4-compatible (::/96, loopback and unspecified too) and local-use NAT64 64:ff9b:1::/48.
+                [0, 0, 0, 0, 0, 0, ..] | [0x64, 0xff9b, 1, ..] => false,
+                // Multicast, unique local fc00::/7, link-local fe80::/10, site-local fec0::/10.
+                [first, ..] => !((first & 0xff00) == 0xff00 || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 || (first & 0xffc0) == 0xfec0),
             }
-        },
+        }
     }
 }
 
@@ -76,9 +82,10 @@ fn image_url_allowed(url: &reqwest::Url) -> bool {
     }
 }
 
-/// A redirect for a remote image: at most five, never from https down to http.
+/// A redirect for a remote image: at most five, never from https down to http. `previous`
+/// holds the first URL too, as reqwest gives it: five redirects leave five there.
 fn redirect_allowed(previous: &[reqwest::Url], next: &reqwest::Url) -> bool {
-    previous.len() < 5 && image_url_allowed(next) && !(next.scheme() == "http" && previous.iter().any(|u| u.scheme() == "https"))
+    previous.len() <= 5 && image_url_allowed(next) && !(next.scheme() == "http" && previous.iter().any(|u| u.scheme() == "https"))
 }
 
 /// DNS for remote images that drops private addresses at every lookup, redirects included, so
@@ -175,10 +182,11 @@ mod tests {
 
     #[test]
     fn remote_images_reach_only_public_hosts() {
-        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "255.255.255.255", "::1", "fe80::1", "fd00::1", "::ffff:192.168.1.1", "::"] {
+        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "255.255.255.255", "::1", "fe80::1", "fd00::1", "::ffff:192.168.1.1", "::",
+            "64:ff9b::7f00:1", "64:ff9b::a00:1", "2002:c0a8:101::1", "2002:7f00:1::", "::7f00:1", "::808:808", "fec0::1", "64:ff9b:1::808:808", "ff02::1"] {
             assert!(!public_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["93.184.216.34", "8.8.8.8", "2606:4700::1111"] { assert!(public_ip(ip.parse().unwrap()), "{ip}"); }
+        for ip in ["93.184.216.34", "8.8.8.8", "2606:4700::1111", "64:ff9b::808:808", "2002:808:808::1"] { assert!(public_ip(ip.parse().unwrap()), "{ip}"); }
         let url = |s: &str| reqwest::Url::parse(s).unwrap();
         for bad in ["http://127.0.0.1/x.png", "https://[::1]/x", "http://localhost:8080/x", "http://LOCALHOST./x", "http://a.localhost/x", "https://192.168.0.1/x", "http://0x7f000001/x", "file:///etc/passwd", "ftp://example.com/x"] {
             assert!(!image_url_allowed(&url(bad)), "{bad}");
@@ -190,7 +198,8 @@ mod tests {
         assert!(!redirect_allowed(&[https.clone()], &http), "no downgrade from https");
         assert!(!redirect_allowed(&[http.clone(), https.clone()], &url("http://c.example/z")));
         assert!(!redirect_allowed(&[https.clone()], &url("https://10.0.0.1/x")));
-        assert!(!redirect_allowed(&vec![https.clone(); 5], &url("https://b.example/y")), "five redirects at most");
+        assert!(redirect_allowed(&vec![https.clone(); 5], &url("https://b.example/y")), "the fifth redirect: the first URL and four redirects before it");
+        assert!(!redirect_allowed(&vec![https.clone(); 6], &url("https://b.example/y")), "no sixth");
     }
 
     #[test]

@@ -594,9 +594,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mail_off_screen_drops_its_decoded_images(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let (first, rich) = view.update(cx, |v, cx| {
+            v.open_box(None, cx);
+            v.inbox.group = false;
+            v.inbox.select(0);
+            let first = v.inbox.current().unwrap();
+            let rich = Arc::new(crate::rich::Rich::new(&format!("<img src='data:image/png;base64,{png}'>")));
+            // No HTML part: the reading pane draws `rich` on every platform.
+            v.inbox.mail[first].html = None;
+            v.inbox.mail[first].rich = Some(rich.clone());
+            cx.notify();
+            (first, rich)
+        });
+        cx.run_until_parked();
+        assert_eq!(rich.decoded(), 1, "the shown mail decodes its image");
+        view.update_in(cx, |v, window, cx| v.open_popout(window, cx));
+        cx.run_until_parked();
+        let popout = view.read_with(cx, |v, _| v.popouts[0].1);
+        view.update(cx, |v, cx| { v.inbox.select(1); cx.notify(); });
+        cx.run_until_parked();
+        assert_ne!(view.read_with(cx, |v, _| v.inbox.current()), Some(first));
+        assert_eq!(rich.decoded(), 1, "still shown in its pop-out");
+        cx.update_window(popout.into(), |_, window, _| window.remove_window()).unwrap();
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(rich.decoded(), 0, "off screen everywhere: its images go");
+    }
+
+    #[gpui::test]
     fn close_window_from_html_uses_the_window_action(cx: &mut gpui::TestAppContext) {
         let (view, cx) = super::super::dispatch::open(cx);
-        cx.simulate_keystrokes("secondary-o");
+        view.update_in(cx, |v, window, cx| v.open_popout(window, cx));
+        cx.run_until_parked();
         let popout = view.read_with(cx, |v, _| v.popouts[0].1);
         cx.update_window(popout.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
         popout.update(cx, |v, window, cx| {
