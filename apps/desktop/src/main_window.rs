@@ -117,6 +117,8 @@ const GLIDE_REPEAT: Duration = Duration::from_millis(70);
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
 const SIDEBAR_ROW: f32 = 28.;
+/// The Folders group fits its heading (28 px button + 6 px) and six rows, so "N more" is never cut; more rows scroll.
+const FOLDERS_MAX: f32 = 34. + 6. * (SIDEBAR_ROW + 2.);
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
 /// Compact windows scroll the sidebar groups beneath Search.
@@ -1769,7 +1771,7 @@ impl MainWindow {
                         .debug_selector(|| "nav-Drafts".into())
                         .on_click(cx.listener(|this, _, window, cx| this.show_drafts(window, cx))))
                     .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Trash, cx); })))
-                .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(200.)))
+                .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(FOLDERS_MAX)))
                 .child(account_rows.mt(px(18.))))))
             .child(
                 pressable(div().id("settings").group("settings"), t, in_settings)
