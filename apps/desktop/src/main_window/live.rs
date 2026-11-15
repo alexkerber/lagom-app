@@ -6116,6 +6116,11 @@ mod tests {
             v.inbox.select_all();
             assert!(!v.prepare_move("move ", window, cx));
             assert!(v.palette.is_none());
+            // A drop onto a folder keeps the same rule.
+            v.folder_drag = v.inbox.list().first().copied();
+            v.drop_on_folder(0, &v.inbox.selected_rows(), cx);
+            assert!(v.toast.as_ref().is_some_and(|t| t.0.contains("one account")));
+            assert!(v.inbox.batches.is_empty());
             let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(message)).unwrap();
             v.inbox.select(row);
             // The other account's list opens first; the palette opens once its read lands.

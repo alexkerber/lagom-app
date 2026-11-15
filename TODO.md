@@ -99,7 +99,8 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] Gmail labels and IMAP folders: shown the same way for now. A Gmail message can have several labels.
 - [ ] Folders per account (default) or merged across accounts.
 - [ ] Shortcuts: only ⌘K for now, no G + letter per folder.
-- [ ] Drag a message onto a folder, and a swipe to "Move to": not yet.
+- [x] Drag a message (or the selection) onto a sidebar folder to move it. A mouse drag that starts vertical picks it up; a sideways mouse swipe carried onto the sidebar does too, and the row springs back. Same move, undo and account rules as the Move palette. A small card shows the subject and a count; the folder under the pointer highlights (`feat/drag-to-folder`). GPUI tests cover drop, undo, swipe-to-drag and a plain click; not tried by hand.
+- [ ] Swipe to "Move to" (a swipe stage that opens the folder list): not yet.
 
 ## Product line
 
