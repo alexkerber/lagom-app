@@ -3692,6 +3692,7 @@ dependencies = [
  "embed-resource",
  "gpui",
  "iana-time-zone",
+ "image",
  "lagom-core",
  "notify-rust",
  "objc2",

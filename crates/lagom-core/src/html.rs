@@ -42,18 +42,86 @@ pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
     })
 }
 
-/// A remote image for a native view, after "Load remote images": no cookies or referrer, at
-/// most five redirects, 20 seconds and 10 MiB, raster formats only. Needs a Tokio runtime.
-pub async fn fetch_image(url: &str) -> Option<(&'static str, Vec<u8>)> {
+/// Whether a remote image may come from this address: not this machine, the local network,
+/// link-local, multicast or reserved space. Mail must not reach a router or a local service.
+fn public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+                || v4.is_documentation() || v4.is_multicast() || a == 0 || a >= 240 || (a == 100 && (64..128).contains(&b)) || (a == 198 && (b == 18 || b == 19)))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => public_ip(v4.into()),
+            None => {
+                let first = v6.segments()[0];
+                !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80)
+            }
+        },
+    }
+}
+
+/// A URL a remote image may load from, first or after a redirect: http or https, a public IP
+/// when the host is one, never `localhost`. Names resolve through `PublicDns`.
+fn image_url_allowed(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https") && match url.host() {
+        Some(url::Host::Ipv4(ip)) => public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => public_ip(ip.into()),
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name != "localhost" && !name.ends_with(".localhost")
+        }
+        None => false,
+    }
+}
+
+/// A redirect for a remote image: at most five, never from https down to http.
+fn redirect_allowed(previous: &[reqwest::Url], next: &reqwest::Url) -> bool {
+    previous.len() < 5 && image_url_allowed(next) && !(next.scheme() == "http" && previous.iter().any(|u| u.scheme() == "https"))
+}
+
+/// DNS for remote images that drops private addresses at every lookup, redirects included, so
+/// a name cannot rebind to the local network between checks.
+struct PublicDns;
+
+impl reqwest::dns::Resolve for PublicDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<_> = tokio::net::lookup_host((host.as_str(), 0)).await?.filter(|a| public_ip(a.ip())).collect();
+            if addrs.is_empty() { return Err("no public address".into()); }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// A remote image for a native view, after "Load remote images": no cookies, referrer or
+/// proxy, at most five redirects, 20 seconds and `limit` bytes (at most 10 MiB), public
+/// addresses only, raster formats only. `used` counts the bytes received, also when the fetch
+/// fails. Needs a Tokio runtime.
+pub async fn fetch_image(url: &str, limit: usize, used: &mut usize) -> Option<(&'static str, Vec<u8>)> {
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
     let client = CLIENT.get_or_init(|| reqwest::Client::builder().use_rustls_tls()
         .timeout(std::time::Duration::from_secs(20))
         .referer(false)
-        .redirect_policy(reqwest::redirect::Policy::limited(5))
+        // A proxy would resolve the name itself, past `PublicDns`.
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(PublicDns))
+        .redirect_policy(reqwest::redirect::Policy::custom(|attempt| {
+            if redirect_allowed(attempt.previous(), attempt.url()) { attempt.follow() } else { attempt.error("redirect refused") }
+        }))
         .build().ok()).as_ref()?;
-    let response = client.get(url).send().await.ok()?.error_for_status().ok()?;
-    let bytes = crate::oauth::body_limit(response, crate::inline::MAX_INLINE_BYTES).await.ok()?;
-    Some((image_type(&bytes)?, bytes.to_vec()))
+    let url = reqwest::Url::parse(url).ok().filter(image_url_allowed)?;
+    let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    let limit = limit.min(crate::inline::MAX_INLINE_BYTES);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        *used += chunk.len();
+        if bytes.len() + chunk.len() > limit { return None; }
+        bytes.extend_from_slice(&chunk);
+    }
+    Some((image_type(&bytes)?, bytes))
 }
 
 /// Whether the mail sets its own colours or backgrounds. Such mail assumes white paper; other
@@ -102,8 +170,28 @@ pub fn inert_tags(html: &str) -> std::borrow::Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{data_image, image_type, inert_tags, remote_image};
+    use super::{data_image, image_type, image_url_allowed, inert_tags, public_ip, redirect_allowed, remote_image};
     use std::borrow::Cow;
+
+    #[test]
+    fn remote_images_reach_only_public_hosts() {
+        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "255.255.255.255", "::1", "fe80::1", "fd00::1", "::ffff:192.168.1.1", "::"] {
+            assert!(!public_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["93.184.216.34", "8.8.8.8", "2606:4700::1111"] { assert!(public_ip(ip.parse().unwrap()), "{ip}"); }
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        for bad in ["http://127.0.0.1/x.png", "https://[::1]/x", "http://localhost:8080/x", "http://LOCALHOST./x", "http://a.localhost/x", "https://192.168.0.1/x", "http://0x7f000001/x", "file:///etc/passwd", "ftp://example.com/x"] {
+            assert!(!image_url_allowed(&url(bad)), "{bad}");
+        }
+        assert!(image_url_allowed(&url("https://cdn.example.com/x.png")) && image_url_allowed(&url("http://8.8.8.8/x")));
+        let (https, http) = (url("https://a.example/x"), url("http://b.example/y"));
+        assert!(redirect_allowed(&[https.clone()], &url("https://b.example/y")));
+        assert!(redirect_allowed(&[http.clone()], &url("http://c.example/z")), "http mail images may stay on http");
+        assert!(!redirect_allowed(&[https.clone()], &http), "no downgrade from https");
+        assert!(!redirect_allowed(&[http.clone(), https.clone()], &url("http://c.example/z")));
+        assert!(!redirect_allowed(&[https.clone()], &url("https://10.0.0.1/x")));
+        assert!(!redirect_allowed(&vec![https.clone(); 5], &url("https://b.example/y")), "five redirects at most");
+    }
 
     #[test]
     fn native_images_follow_the_csp() {

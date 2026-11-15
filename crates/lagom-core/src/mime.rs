@@ -65,7 +65,7 @@ pub struct Run {
 /// An `<img>`: its `src` as written, its `width` attribute in CSS pixels, and the link around it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image {
-    pub src: String,
+    pub src: Arc<str>,
     pub width: Option<f32>,
     pub link: Option<Arc<str>>,
 }
@@ -85,7 +85,7 @@ enum Mark {
     /// Headings do not nest, and a heading's end tag closes any heading: on or off, no count.
     Heading(bool),
     Italic(bool),
-    Image(String, Option<f32>),
+    Image(Arc<str>, Option<f32>),
 }
 
 /// Marks are U+F0000 and up, in Supplementary Private Use Area-A, which mail text never needs.
@@ -597,7 +597,7 @@ impl TextState {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Mark::Heading(start),
             "i" | "em" => Mark::Italic(start),
             "img" | "image" if start => match attr("src").filter(|s| !s.is_empty()) {
-                Some(src) => Mark::Image(src, attr("width").and_then(|w| w.trim_end_matches("px").parse().ok()).filter(|w: &f32| w.is_finite() && *w >= 0.)),
+                Some(src) => Mark::Image(src.into(), attr("width").and_then(|w| w.trim_end_matches("px").parse().ok()).filter(|w: &f32| w.is_finite() && *w >= 0.)),
                 None => return,
             },
             _ => return,

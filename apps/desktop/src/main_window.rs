@@ -2445,6 +2445,7 @@ impl Render for MainWindow {
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
         self.web_frame(window, cx);
+        crate::rich::release(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = matches!(self.page, Page::AddAccount(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
