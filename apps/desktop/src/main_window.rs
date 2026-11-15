@@ -2973,11 +2973,15 @@ struct Inbox {
     group: bool,
     rows: Vec<usize>,
     members: HashMap<usize, Vec<usize>>,
+    /// The list (account, filter, view) whose store read landed last, or failed. Until the list
+    /// on screen has one, its rows are unknown: loading rows, never "Nothing left.". A new
+    /// `Inbox` starts without one.
+    landed: Option<(String, Option<String>, mail::View)>,
 }
 
 impl Inbox {
     fn new(len: usize, later: usize) -> Self {
-        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, chosen: None, anchor: None, unread_only: false, account_filter: None, account_unread: HashMap::new(), date_headers: Vec::new(), keep_unread: HashSet::new(), later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new() }
+        Self { mail: mail::demo(), by_store: HashMap::new(), items: (0..len).collect(), extra: 0, folders: Vec::new(), open: None, selected: 0, chosen: None, anchor: None, unread_only: false, account_filter: None, account_unread: HashMap::new(), date_headers: Vec::new(), keep_unread: HashSet::new(), later, trash: Vec::new(), history: Vec::new(), batches: Vec::new(), group: false, rows: Vec::new(), members: HashMap::new(), landed: None }
     }
 
     /// The sample inbox and folders, with their unread counts.
