@@ -1751,10 +1751,9 @@ impl MainWindow {
                         let theme = *t;
                         // Alex 2026-11-14: no ⌘ keys on the rows; the tooltip still names them.
                         sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
-                            .when(ix == 1 && unread > 0, |d| d.child(
-                                div().debug_selector(|| "mail-unread-badge".into()).h(px(16.)).min_w(px(16.)).px(px(5.)).rounded_full()
-                                    .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
-                                    .text_size(px(size::SMALL)).font_weight(FontWeight::SEMIBOLD).child(unread.to_string())))
+                            // Alex 2026-11-15: a quiet number, as on every other row; no filled pill.
+                            .when(ix == 1 && unread > 0, |d| d.child(roll(
+                                mono(unread.to_string(), t.ink2).debug_selector(|| "mail-unread-badge".into()), format!("mail-{unread}"))))
                             .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix].into())).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     })))

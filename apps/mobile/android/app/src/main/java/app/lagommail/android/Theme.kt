@@ -187,11 +187,10 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
 @Composable internal fun BarTitle(title: String, modifier: Modifier = Modifier) =
     Text(title, modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
 
-/** The filled count on Mail in the bar. */
+/** The unread count on Mail in the bar: a quiet number, as on desktop and iOS (Alex 2026-11-15). */
 @Composable internal fun CountBadge(count: Int, modifier: Modifier = Modifier) {
-    Text("$count", modifier.background(lagom.accent, CircleShape).padding(horizontal = 5.dp).widthIn(min = 8.dp),
-        color = lagom.accentInk, style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold),
-        textAlign = TextAlign.Center, maxLines = 1)
+    Text("$count", modifier, color = lagom.ink2,
+        style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.sp, lineHeight = 16.sp, fontFeatureSettings = "tnum"), maxLines = 1)
 }
 
 /** The desktop's empty pages: a large line icon over a title and one quiet line, and an optional action. Fades in after
