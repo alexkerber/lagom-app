@@ -200,7 +200,7 @@ Findings:
   | One zbus: notify-rust held at 4.18, the app on zbus 5 like GPUI | 53.0 MB (43705119901)  |
   | `lto = "fat"`, `codegen-units = 1`                              | 35.7 MB (43705119901)  |
   | Desktop binary without its symbol table (`strip = "symbols"`)   | 30.7 MB (43705119901)  |
-  | GPUI's `image` with only the formats GPUI decodes               | 30.0 MB (43710105708)  |
+  | GPUI's `image` with only the formats in GPUI's `ImageFormat`    | 30.0 MB (43710105708)  |
   | GPUI on ashpd 0.12, the version oo7 uses                        | 29.98 MB (43711959948) |
   | zbus, zvariant, oo7 and ashpd at `opt-level = "s"`              | 29.89 MB (43715180813) |
 

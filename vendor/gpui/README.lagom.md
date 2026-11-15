@@ -18,8 +18,9 @@ Local source changes:
 - `src/app/test_context.rs`: expose those test operations; register reopen
   through `Application::on_reopen`, as production does.
 - `Cargo.toml`: `image` keeps only the formats in GPUI's `ImageFormat` (PNG,
-  JPEG, WebP, GIF, BMP, TIFF, ICO). The defaults add an AVIF encoder (rav1e),
-  EXR, HDR and more, which GPUI never decodes. `ashpd` is 0.12, the version
+  JPEG, WebP, GIF, BMP, TIFF, ICO). `img()` no longer decodes AVIF, EXR, HDR,
+  PNM, QOI, TGA, DDS or Farbfeld; Lagom shows none of them, and the defaults
+  also add an AVIF encoder (rav1e). `ashpd` is 0.12, the version
   `oo7` uses, so Linux carries one copy. Both keep the release binary in its
   size budget.
 

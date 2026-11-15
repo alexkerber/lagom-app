@@ -155,7 +155,7 @@ package = "gpui_http_client"
 
 [dependencies.image]
 version = "0.25.1"
-# Lagom: the formats GPUI's ImageFormat names, not image's AVIF encoder, EXR, HDR and the rest.
+# Lagom: the formats GPUI's ImageFormat names and Lagom shows; drops AVIF (and its rav1e encoder), EXR, HDR and the rest.
 default-features = false
 features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"]
 
