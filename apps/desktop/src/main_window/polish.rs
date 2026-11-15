@@ -49,7 +49,9 @@ impl MainWindow {
             .when(count > 0, |d| d.child(roll(mono(count.to_string(), t.ink2).debug_selector(move || format!("{label}-count")), format!("{label}-{count}"))))
             .when(multiple && slot != 0, |d| d.child(pressable(div().id(("disclosure", slot)), t, false)
                 .debug_selector(move || format!("disclosure-{label}"))
-                .group("mailbox-disclosure").w(px(20.)).h(px(24.)).flex().items_center().justify_center()
+                .group("mailbox-disclosure").w(px(16.)).h(px(24.))
+                // The chevron glyph is centred in 16 px; -4 puts its centre on a one-digit count's (Alex 2026-11-15).
+                .mr(px(-4.)).flex().items_center().justify_center()
                 .child(icon(if expanded { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 16.)
                     .group_hover("mailbox-disclosure", { let ink = t.ink; move |s| s.text_color(ink) }))
                 .tooltip({ let theme = *t; move |_, cx| cx.new(|_| Tip(theme, format!("{} {label} accounts", if expanded { "Hide" } else { "Show" }).into())).into() })

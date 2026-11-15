@@ -1822,7 +1822,8 @@ impl MainWindow {
         let row = |id: ElementId, active: bool| {
             polish::mailbox_style(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
-        let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder")
+        // The 28 px button's glyph ends where the row counts and chevrons end (Alex 2026-11-15).
+        let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder").mr(px(-6.))
             .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
         #[cfg(test)]
         let add = add.debug_selector(|| "add-folder".into());
@@ -4068,6 +4069,16 @@ mod dispatch {
             cx.simulate_keystrokes("escape");
             assert!(view.read_with(cx, |v, _| v.folder_name.is_none()));
         }
+    }
+
+    #[gpui::test]
+    fn sidebar_counts_chevrons_and_add_folder_share_one_edge(cx: &mut TestAppContext) {
+        let (_view, cx) = open(cx);
+        frame(cx);
+        let count = cx.debug_bounds("Inbox-count").unwrap().right();
+        // Glyph ends: the add button keeps 6 px around its 16 px glyph; the chevron box overhangs by 4.
+        assert_eq!(cx.debug_bounds("add-folder").unwrap().right() - px(6.), count);
+        assert_eq!(cx.debug_bounds("disclosure-Sent").unwrap().right() - px(4.), count);
     }
 
     fn large_list(cx: &mut TestAppContext) -> (Entity<MainWindow>, &mut VisualTestContext) {
