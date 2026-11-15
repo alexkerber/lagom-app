@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct LagomApp: App {
@@ -6,31 +7,69 @@ struct LagomApp: App {
     private var model: MailModel { delegate.model }
     @State private var planner = PlannerModel()
     @Environment(\.scenePhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// "Not now" was chosen once; the intro never asks again. "Allow" ends with the system's answer.
+    @AppStorage("lagom.notificationsAsked") private var notificationsAsked = false
+    @AppStorage(AppSection.storageKey) private var section: AppSection = .mail
+    /// Whether the system still waits for the user's choice; nil until it has said.
+    @State private var notificationsUndecided: Bool?
+
+    private var stage: LaunchStage {
+        LaunchStage(storeOpen: model.core != nil, hasAccount: !model.accounts.isEmpty,
+                    notificationsAsked: notificationsAsked, notificationsUndecided: notificationsUndecided)
+    }
 
     var body: some Scene {
         WindowGroup {
-            RootView(model: model, planner: planner)
-                .tint(Theme.accent)
-                .task(id: phase) {
-                    guard phase == .active else { return }
-                    await model.start()
-                    await delegate.requestPermission()
+            ZStack {
+                switch stage {
+                case .loading: Theme.background.ignoresSafeArea()
+                case .intro, .notifications:
+                    OnboardingView(model: model, notifications: stage == .notifications, allow: {
+                        // The system asks over this step; the inbox follows its answer. No prompt shown, the step stays.
+                        Task { await delegate.requestPermission(); await readNotifications() }
+                    }, notNow: { notificationsAsked = true })
+                    .transition(.opacity)
+                case .app: RootView(model: model, planner: planner).transition(.opacity)
                 }
-                .task(id: model.accounts.isEmpty) { await delegate.requestPermission() }
-                // Local tasks and events load as soon as the store opens, not after the first sync.
-                .task(id: model.core == nil) {
-                    guard let core = model.core else { return }
-                    planner.core = core
-                    await planner.reload()
+            }
+            .animation(Motion.move(reduceMotion), value: stage)
+            // After the intro the app opens on Mail's unified Inbox, whatever the last account left behind.
+            .onChange(of: stage) { _, stage in
+                guard stage == .intro else { return }
+                section = .mail
+                model.accountID = nil
+                model.mailbox = .inbox
+                model.searchText = ""
+            }
+            .alert("lagom", isPresented: Binding(get: { model.error != nil || planner.error != nil },
+                                                set: { if !$0 { model.error = nil; planner.error = nil } })) {
+                Button("OK") { model.error = nil; planner.error = nil }
+            } message: { Text(model.error ?? planner.error ?? "") }
+            .tint(Theme.accent)
+            .task(id: phase) {
+                guard phase == .active else { return }
+                await readNotifications()
+                await model.start()
+            }
+            // Local tasks and events load as soon as the store opens, not after the first sync.
+            .task(id: model.core == nil) {
+                guard let core = model.core else { return }
+                planner.core = core
+                await planner.reload()
+            }
+            .onChange(of: phase) { _, phase in
+                if phase == .background { MailAppDelegate.schedule() }
+                Task {
+                    await model.setForeground(phase == .active)
+                    if phase == .active { await planner.reload() }
                 }
-                .onChange(of: phase) { _, phase in
-                    if phase == .background { MailAppDelegate.schedule() }
-                    Task {
-                        await model.setForeground(phase == .active)
-                        if phase == .active { await planner.reload() }
-                    }
-                }
+            }
         }
+    }
+
+    private func readNotifications() async {
+        notificationsUndecided = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus == .notDetermined
     }
 }
 
@@ -325,11 +364,7 @@ struct MailView: View {
                     if unreadOnly && rows.isEmpty && !model.rows.isEmpty {
                         EmptyState(icon: "read", title: "No unread mail")
                     } else if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
-                        if model.accounts.isEmpty {
-                            EmptyState(icon: "inbox", title: "Welcome to lagom", detail: "Add an account to get started.") {
-                                HouseButton(title: "Add account", icon: "account-add", primary: true) { addAccount = true }
-                            }
-                        } else if model.mailbox == .inbox && model.folder == nil && model.searchText.isEmpty {
+                        if model.mailbox == .inbox && model.folder == nil && model.searchText.isEmpty {
                             // Inbox zero, as on desktop: the inbox icon, no confetti.
                             EmptyState(icon: "inbox", title: "Nothing left.")
                         } else {

@@ -24,6 +24,24 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the window shows: nothing until the store has its accounts, the intro without an account,
+/// the notifications step once after one, then the app.
+enum LaunchStage: Equatable {
+    case loading, intro, notifications, app
+
+    /// `notificationsUndecided` is nil until the system says whether the user has chosen.
+    init(storeOpen: Bool, hasAccount: Bool, notificationsAsked: Bool, notificationsUndecided: Bool?) {
+        guard storeOpen else { self = .loading; return }
+        guard hasAccount else { self = .intro; return }
+        guard !notificationsAsked else { self = .app; return }
+        switch notificationsUndecided {
+        case nil: self = .loading
+        case true?: self = .notifications
+        case false?: self = .app
+        }
+    }
+}
+
 /// Mail list and agenda wording, after the desktop's `mail::when`, `mail::date_group` and task due chips.
 struct DateWords {
     var now = Date()

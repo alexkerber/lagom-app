@@ -40,10 +40,6 @@ struct RootView: View {
         }
         .foregroundStyle(Theme.ink)
         .sheet(isPresented: $addAccount) { AddAccountView(model: model) }
-        .alert("lagom", isPresented: Binding(get: { model.error != nil || planner.error != nil },
-                                            set: { if !$0 { model.error = nil; planner.error = nil } })) {
-            Button("OK") { model.error = nil; planner.error = nil }
-        } message: { Text(model.error ?? planner.error ?? "") }
         .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             if let account = removing {
                 Button("Remove \(account.email)", role: .destructive) { Task { await model.remove(account) }; removing = nil }

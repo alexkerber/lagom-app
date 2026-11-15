@@ -45,6 +45,7 @@ import Foundation
     }
     var accountList: [MailAccount] = []
     override func accounts() async throws -> [MailAccount] { accountList }
+    override func removeAccount(id: String) async throws { accountList.removeAll { $0.id == id } }
     override func setAccountName(accountId: String, name: String) async throws -> MailAccount {
         let index = accountList.firstIndex { $0.id == accountId }!
         let trimmed = name.trimmingCharacters(in: .whitespaces)
@@ -575,6 +576,7 @@ struct ModelChecks {
         try await draftLifecycle()
         try await pickedAttachments()
         await openingDuringArchive()
+        await launchGate()
         let core = FixtureCore(noHandle: .init())
         let model = MailModel()
         model.core = core
@@ -749,6 +751,30 @@ struct ModelChecks {
             precondition((model.error != nil) == rejected)
         }
         print("MailModel: opening during archive regression passed (success and failure)")
+    }
+
+    /// The gate as `LagomApp` feeds it: the intro without an account, the notifications step once, back to the intro.
+    @MainActor static func launchGate() async {
+        let core = FixtureCore(noHandle: .init())
+        let model = MailModel()
+        var asked = false
+        let stage = { LaunchStage(storeOpen: model.core != nil, hasAccount: !model.accounts.isEmpty,
+                                  notificationsAsked: asked, notificationsUndecided: true) }
+        precondition(stage() == .loading)
+        model.core = core
+        await model.reload()
+        precondition(stage() == .intro)
+        let account = MailAccount(id: "fixture", email: "me@example.test", displayName: "Me")
+        core.accountList = [account]
+        await model.reload()
+        precondition(stage() == .notifications)
+        asked = true
+        precondition(stage() == .app)
+        await model.remove(account)
+        precondition(stage() == .intro, "removing the last account returns to the intro")
+        precondition(LaunchStage(storeOpen: true, hasAccount: true, notificationsAsked: false, notificationsUndecided: nil) == .loading)
+        precondition(LaunchStage(storeOpen: true, hasAccount: true, notificationsAsked: false, notificationsUndecided: false) == .app)
+        print("Launch gate checks passed")
     }
 
     @MainActor static func wake() async {

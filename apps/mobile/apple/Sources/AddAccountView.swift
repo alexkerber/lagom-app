@@ -3,6 +3,8 @@ import SwiftUI
 
 struct AddAccountView: View {
     let model: MailModel
+    /// The intro asks Google, Microsoft or Other first; Other opens only the mail server form.
+    var providers = true
     @Environment(\.dismiss) private var dismiss
     @Environment(\.webAuthenticationSession) private var browser
     @State private var email = ""
@@ -26,7 +28,7 @@ struct AddAccountView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     // Hidden until this build has the provider's client ID.
                     ForEach([(SignInProvider.google, "Google"), (.microsoft, "Microsoft")], id: \.1) { provider, name in
-                        if signInAvailable(provider: provider) {
+                        if providers && signInAvailable(provider: provider) {
                             Button("Sign in with \(name)") { Task { await signIn(provider) } }
                                 .buttonStyle(HouseButtonStyle()).frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -90,22 +92,12 @@ struct AddAccountView: View {
     }
 
     private func signIn(_ provider: SignInProvider) async {
-        guard let core = model.core else { return }
         error = nil
+        defer { connecting = false }
         do {
-            let start = try core.beginSignIn(provider: provider)
-            guard let url = URL(string: start.url) else { return }
-            // Ephemeral: no cookies shared with Safari and no system prompt. The core checks the redirect's state.
-            let redirect = try await browser.authenticate(using: url, callback: .customScheme(start.callbackScheme),
-                preferredBrowserSession: .ephemeral, additionalHeaderFields: [:])
-            connecting = true
-            defer { connecting = false }
-            _ = try await core.finishSignIn(callbackUrl: redirect.absoluteString)
-            await model.reload()
+            guard try await model.signIn(provider, browser: browser, exchanging: { connecting = true }) else { return }
             dismiss()
             await model.sync()
-        } catch let stopped as ASWebAuthenticationSessionError where stopped.code == .canceledLogin {
-            // The user closed the browser sheet.
         } catch { self.error = error.localizedDescription }
     }
 
@@ -134,6 +126,26 @@ struct AddAccountView: View {
 }
 
 extension MailAccount: Identifiable {}
+
+extension MailModel {
+    /// Signs in on the provider's own page and adds the account; false when the user closed the page.
+    /// `exchanging` runs once the page has returned, while the core trades its code for tokens.
+    func signIn(_ provider: SignInProvider, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
+        guard let core else { return false }
+        let start = try core.beginSignIn(provider: provider)
+        guard let url = URL(string: start.url) else { return false }
+        let redirect: URL
+        do {
+            // Ephemeral: no cookies shared with Safari and no system prompt. The core checks the redirect's state.
+            redirect = try await browser.authenticate(using: url, callback: .customScheme(start.callbackScheme),
+                preferredBrowserSession: .ephemeral, additionalHeaderFields: [:])
+        } catch let stopped as ASWebAuthenticationSessionError where stopped.code == .canceledLogin { return false }
+        exchanging()
+        _ = try await core.finishSignIn(callbackUrl: redirect.absoluteString)
+        await reload()
+        return true
+    }
+}
 
 /// The desktop's per-account signature: added to new mail, replies and forwards.
 struct SignatureView: View {
