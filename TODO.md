@@ -118,6 +118,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [x] recipient autocomplete on iOS and Android (2026-11-13).
 - [x] received attachments open/share on iOS and Android (2026-11-13).
 - [ ] Google and Microsoft sign-in on iOS and Android (2026-11-13): the code is in the `feat/mobile-oauth` PR. Open: Alex creates the iOS and Android OAuth clients and the Entra redirect (values in the PR), then a sign-in on a device with each provider.
+- [x] iOS intro before the app (Alex 2026-11-15): no account shows Welcome, Choose account (Google, Microsoft, Other (IMAP) through the existing sign-in and form) and then Notifications once; removing the last account returns to it. Gate tests in `LaunchStageTests`; not run on a device or with VoiceOver. Android builds the same copy in parallel.
 - [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
 - [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, HTML mail on Linux, a hand test of each.
 

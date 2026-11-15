@@ -294,7 +294,10 @@ final class MailModel {
         do {
             // Best effort: a stale cache must never block opening mail.
             try? FileManager.default.removeItem(at: attachmentDirectory)
-            core = try await Self.openCore()
+            let core = try await Self.openCore()
+            // The accounts come first, so an open store never shows the intro to someone with mail.
+            accounts = try await core.accounts()
+            self.core = core
             await reload()
             await sync()
         } catch { self.error = error.localizedDescription }
