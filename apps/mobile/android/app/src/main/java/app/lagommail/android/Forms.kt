@@ -7,10 +7,13 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -23,9 +26,13 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
@@ -74,28 +81,34 @@ import kotlinx.coroutines.CancellationException
                 cancelling = false; model.perform { model.closeCompose(discard = true) }
             }) { Text("Discard") } })
     }
-    Scaffold(Modifier.backPreview(back), topBar = {
-        TopAppBar(title = { Text(draft.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            navigationIcon = { TextButton(enabled = !model.sending, modifier = Modifier.heightIn(min = 48.dp), onClick = { cancelling = true }) { Text("Cancel") } },
-            actions = {
-                Box {
-                    TextButton(enabled = !model.sending && !model.attaching, modifier = Modifier.heightIn(min = 48.dp), onClick = { attachMenu = true }) { Text("Attach") }
-                    DropdownMenu(attachMenu, { attachMenu = false }) {
-                        DropdownMenuItem(text = { Text("Files") }, onClick = { attachMenu = false; files.launch(arrayOf("*/*")) })
-                        DropdownMenuItem(text = { Text("Photos") }, onClick = {
-                            attachMenu = false; media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                        })
-                    }
+    // The desktop compose sheet: a bar with Cancel, the title, Attach and Send; then From, To, Cc, Subject lines and the body.
+    Scaffold(Modifier.backPreview(back), containerColor = lagom.bg, topBar = {
+        TopBar(Modifier.statusBarsPadding(), start = 4.dp, end = 12.dp) {
+            LagomIconButton("Cancel", R.drawable.ic_close, enabled = !model.sending) { cancelling = true }
+            BarTitle(draft.title, Modifier.weight(1f))
+            Box {
+                LagomIconButton("Attach", R.drawable.ic_attachment, enabled = !model.sending && !model.attaching) { attachMenu = true }
+                DropdownMenu(attachMenu, { attachMenu = false }) {
+                    DropdownMenuItem(text = { Text("Files") }, onClick = { attachMenu = false; files.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("Photos") }, onClick = {
+                        attachMenu = false; media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    })
                 }
-                TextButton(enabled = !model.sending && !model.attaching && (draft.to.isNotBlank() || draft.cc.isNotBlank() || draft.bcc.isNotBlank()) && draft.account.isNotBlank(),
-                modifier = Modifier.heightIn(min = 48.dp), onClick = { model.perform { model.send() } }) { Text(if (model.sending) "Queuing…" else "Send") } })
+            }
+            HouseButton(if (model.sending) "Queuing…" else "Send", R.drawable.ic_send, primary = true,
+                enabled = !model.sending && !model.attaching && (draft.to.isNotBlank() || draft.cc.isNotBlank() || draft.bcc.isNotBlank()) && draft.account.isNotBlank(),
+                onClick = { model.perform { model.send() } })
+        }
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
             var fromMenu by remember { mutableStateOf(false) }
             Box {
                 // Changing sender mid-read would give the draft a new id and drop the pending files.
-                OutlinedButton(enabled = !model.sending && !model.attaching && !draft.isReply && !draft.restored, onClick = { fromMenu = true }) {
-                    Text("From: ${model.accounts.find { it.id == draft.account }?.email.orEmpty()}")
+                val fixed = draft.isReply || draft.restored
+                FieldRow("From", Modifier.clickable(enabled = !model.sending && !model.attaching && !fixed, role = Role.Button) { fromMenu = true }
+                    .semantics(mergeDescendants = true) {}) {
+                    Text(model.accounts.find { it.id == draft.account }?.email.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (!fixed) LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
                 }
                 DropdownMenu(fromMenu, { fromMenu = false }) {
                     model.accounts.forEach { account ->
@@ -106,23 +119,33 @@ import kotlinx.coroutines.CancellationException
             RecipientField("To", draft.to, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(to = it)) }
             RecipientField("Cc", draft.cc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(cc = it)) }
             if (draft.showBcc) RecipientField("Bcc", draft.bcc, !model.sending, model.core, draft.account, contactsAccount == draft.account) { edit(draft.copy(bcc = it)) }
-            contactsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            Field("Subject", draft.subject, !model.sending) { edit(draft.copy(subject = it)) }
-            if (draft.attachments.isNotEmpty() || model.attaching) {
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    draft.attachments.forEachIndexed { index, file ->
-                        InputChip(selected = false, enabled = !model.sending, onClick = { model.removeAttachment(index) },
-                            label = { Text(file.filename, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, modifier = Modifier.widthIn(max = 180.dp)) },
-                            trailingIcon = { Text("✕") },
-                            modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "Remove ${file.filename}" })
-                    }
-                    if (model.attaching) CircularProgressIndicator(Modifier.size(24.dp))
-                }
-                if (draft.attachmentsTooLarge) Text("Over 20 MB. Some mail servers refuse mail this large.", maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+            contactsError?.let { Text(it, Modifier.padding(vertical = 6.dp), color = lagom.danger, style = MaterialTheme.typography.bodySmall) }
+            FieldRow("Subject") {
+                LineInput(draft.subject, { edit(draft.copy(subject = it)) }, !model.sending, "Subject",
+                    MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
             }
-            OutlinedTextField(draft.body, { edit(draft.copy(body = it)) }, enabled = !model.sending,
-                label = { Text("Message · Markdown supported") }, minLines = 12, modifier = Modifier.fillMaxWidth())
+            if (draft.attachments.isNotEmpty() || model.attaching) {
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    draft.attachments.forEachIndexed { index, file ->
+                        Row(Modifier.background(lagom.subtle, RoundedCornerShape(50)).padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            LagomIcon(R.drawable.ic_attachment, size = 16.dp)
+                            Text(file.filename, Modifier.padding(start = 4.dp).widthIn(max = 180.dp), maxLines = 1, overflow = TextOverflow.MiddleEllipsis,
+                                style = MaterialTheme.typography.bodySmall)
+                            LagomIconButton("Remove ${file.filename}", R.drawable.ic_close, enabled = !model.sending) { model.removeAttachment(index) }
+                        }
+                    }
+                    if (model.attaching) CircularProgressIndicator(Modifier.size(20.dp), color = lagom.ink2, strokeWidth = 2.dp)
+                }
+                if (draft.attachmentsTooLarge) Text("Over 20 MB. Some mail servers refuse mail this large.", Modifier.padding(bottom = 6.dp), maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
+            }
+            Box(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                val body = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * 1.45f)
+                if (draft.body.isEmpty()) Text("Message · Markdown supported", Modifier.clearAndSetSemantics {}, color = lagom.ink2, style = body)
+                BasicTextField(draft.body, { edit(draft.copy(body = it)) }, Modifier.fillMaxWidth().heightIn(min = 240.dp).semantics { contentDescription = "Message body" },
+                    enabled = !model.sending, textStyle = body.copy(color = lagom.ink), cursorBrush = SolidColor(lagom.accent))
+            }
         }
     }
 }
@@ -145,9 +168,12 @@ private fun ContentResolver.attachment(uri: Uri): SendAttachment {
     val atEnd = field.selection.collapsed && field.selection.end == field.text.length
     val query = if (atEnd) recipientToken(value) else ""
     Column {
-        OutlinedTextField(field, { field = it; if (it.text != value) change(it.text) }, enabled = enabled, label = { Text(label) }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, autoCorrectEnabled = false),
-            modifier = Modifier.focusRequester(focus).onFocusChanged { focused = it.isFocused }.fillMaxWidth())
+        FieldRow(label) {
+            BasicTextField(field, { field = it; if (it.text != value) change(it.text) }, enabled = enabled, singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = lagom.ink), cursorBrush = SolidColor(lagom.accent),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, autoCorrectEnabled = false),
+                modifier = Modifier.focusRequester(focus).onFocusChanged { focused = it.isFocused }.fillMaxWidth().semantics { contentDescription = label })
+        }
         if (focused && enabled && contactsReady && query.isNotEmpty()) {
             core?.suggestContacts(account, query)?.forEach { contact ->
                 Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
@@ -157,14 +183,26 @@ private fun ContentResolver.attachment(uri: Uri): SendAttachment {
                         field = TextFieldValue(next, TextRange(next.length))
                         change(next)
                         focus.requestFocus()
-                    }.padding(vertical = 6.dp), verticalArrangement = Arrangement.Center) {
+                    }.padding(start = 80.dp, top = 6.dp, bottom = 6.dp), verticalArrangement = Arrangement.Center) {
                     if (contact.name.isNotEmpty()) Text(contact.name)
-                    Text(contact.address, style = MaterialTheme.typography.bodySmall)
+                    Text(contact.address, color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
     }
 }
+
+/** One labelled line, desktop compose `field`: a quiet label, the control, a hairline under. */
+@Composable private fun FieldRow(label: String, modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+    Row(modifier.fillMaxWidth().heightIn(min = 52.dp).drawHairline(lagom.line), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(80.dp).clearAndSetSemantics {}, color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
+        content()
+    }
+}
+
+@Composable private fun RowScope.LineInput(value: String, change: (String) -> Unit, enabled: Boolean, label: String, style: TextStyle) =
+    BasicTextField(value, change, Modifier.weight(1f).semantics { contentDescription = label }, enabled = enabled, singleLine = true,
+        textStyle = style.copy(color = lagom.ink), cursorBrush = SolidColor(lagom.accent))
 
 internal fun server(host: String, port: String, username: String, tls: Boolean): MailServer {
     val number = port.toIntOrNull()
@@ -189,14 +227,15 @@ internal class AccountForm {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable internal fun AddAccountScreen(model: MailModel, form: AccountForm, close: () -> Unit) {
+@Composable internal fun AddAccountScreen(model: MailModel, form: AccountForm, showProviders: Boolean = true, close: () -> Unit) {
     with(form) {
         BackHandler(model.accountForm === form) { if (!connecting) { password = ""; close() } }
-        Scaffold(topBar = {
-            TopAppBar(title = { Text("Add account") }, navigationIcon = {
-                TextButton(enabled = !connecting, onClick = { password = ""; close() }) { Text("Cancel") }
-            }, actions = {
-                TextButton(enabled = !connecting && email.isNotBlank() && (!passwordStep || password.isNotEmpty()), onClick = {
+        Scaffold(containerColor = lagom.bg, topBar = {
+            TopBar(Modifier.statusBarsPadding(), start = 4.dp, end = 12.dp) {
+                LagomIconButton("Cancel", R.drawable.ic_close, enabled = !connecting) { password = ""; close() }
+                BarTitle("Add account", Modifier.weight(1f))
+                HouseButton(if (passwordStep) "Sign in" else "Continue", primary = true,
+                    enabled = !connecting && email.isNotBlank() && (!passwordStep || password.isNotEmpty()), onClick = {
                     if (!passwordStep) { passwordStep = true; imapUser = email; smtpUser = email }
                     else {
                         connecting = true
@@ -213,23 +252,23 @@ internal class AccountForm {
                             } finally { connecting = false }
                         }
                     }
-                }) { Text(if (passwordStep) "Sign in" else "Continue") }
-            })
+                })
+            }
         }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Hidden until this build has the provider's client ID.
                 val context = LocalContext.current
                 val providers = remember { listOf(SignInProvider.GOOGLE to "Google", SignInProvider.MICROSOFT to "Microsoft").filter { signInAvailable(it.first) } }
-                for ((provider, name) in providers) {
-                    OutlinedButton(enabled = !connecting, modifier = Modifier.fillMaxWidth(), onClick = {
+                if (showProviders) for ((provider, name) in providers) {
+                    HouseButton("Sign in with $name", R.drawable.ic_connect, Modifier.fillMaxWidth(), enabled = !connecting) {
                         model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) }
-                    }) { Text("Sign in with $name") }
+                    }
                 }
                 Field("Email", email, !connecting, KeyboardType.Email) { email = it }
                 if (passwordStep) {
                     Field("Password", password, !connecting, KeyboardType.Password) { password = it }
                     Text(if (providers.any { it.first == SignInProvider.MICROSOFT }) "Gmail and iCloud need an app password, not your normal password. For Microsoft, use Sign in with Microsoft."
-                        else "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.", style = MaterialTheme.typography.bodySmall)
+                        else "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
                     Row { Checkbox(advanced, { advanced = it }, enabled = !connecting); Text("Advanced", Modifier.padding(top = 12.dp)) }
                     if (advanced) {
                         Text("Incoming mail", style = MaterialTheme.typography.titleMedium)

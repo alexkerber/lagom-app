@@ -16,18 +16,29 @@ import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.*
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.material3.windowsizeclass.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
@@ -40,6 +51,7 @@ import app.lagommail.core.configureSignIn
 import app.lagommail.core.SendAttachment
 import app.lagommail.core.installSecretStore
 import app.lagommail.core.parseMailto
+import app.lagommail.core.seedDemo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -69,7 +81,25 @@ class LagomApplication : Application() {
         check(credentials)
         return LagomCore.open(File(noBackupFilesDir, "mail").absolutePath)
     }
+    /** A store of fixture mail in the cache, never the real one, for a debug [DebugLaunch.demo]. "welcome" starts empty each time. */
+    fun demoCore(demo: String): LagomCore {
+        check(credentials)
+        val directory = File(cacheDir, if (demo == "welcome") "demo-welcome" else "demo")
+        // Every demo launch starts from the same fixtures, whatever the last one marked done.
+        directory.deleteRecursively()
+        if (demo != "welcome") seedDemo(directory.absolutePath)
+        return LagomCore.open(directory.absolutePath)
+    }
 }
+
+/**
+ * Debug-only launch extras for screenshots without real accounts, as desktop's `LAGOM_DEMO` and `LAGOM_THEME`:
+ * `--es lagomDemo mail|welcome|notifications` and `--es lagomTheme light|dark`. A release build ignores both.
+ */
+internal data class DebugLaunch(val demo: String? = null, val dark: Boolean? = null)
+internal fun debugLaunch(debug: Boolean, demo: String?, theme: String?): DebugLaunch =
+    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications") },
+        when (theme) { "light" -> false; "dark" -> true; else -> null })
 
 /** The redirect of a browser sign-in, or null for any other link. The core then checks the exact URI and state. */
 internal fun signInRedirect(action: String?, data: String?, appId: String): String? = data?.takeIf {
@@ -151,12 +181,15 @@ class MainActivity : ComponentActivity() {
         return SharedMail(mail, files)
     }
 
-    private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
-        val settings = getSharedPreferences("notifications", MODE_PRIVATE)
-        if (settings.getBoolean("requested", false)) return
-        settings.edit().putBoolean("requested", true).apply()
-        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    /** Android 13+ asks before an app may notify; lagom asks once, from the onboarding step. */
+    private fun needsNotificationPermission() = Build.VERSION.SDK_INT >= 33 &&
+        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+        !getSharedPreferences("notifications", MODE_PRIVATE).getBoolean("requested", false)
+
+    private fun answerNotifications(allow: Boolean) {
+        if (!needsNotificationPermission()) return
+        getSharedPreferences("notifications", MODE_PRIVATE).edit().putBoolean("requested", true).apply()
+        if (allow) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
@@ -168,21 +201,27 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) signIn = intent.getStringExtra("signIn")
         // A recreated activity already opened this share.
         if (savedInstanceState == null && intent.action in shareActions) shareIntent = intent
-        enableEdgeToEdge()
+        val launch = debugLaunch(BuildConfig.DEBUG, intent.getStringExtra("lagomDemo"), intent.getStringExtra("lagomTheme"))
+        // A forced debug theme sets the bar icons to match it; otherwise they follow the system.
+        launch.dark?.let { dark ->
+            val none = android.graphics.Color.TRANSPARENT
+            val bars = if (dark) SystemBarStyle.dark(none) else SystemBarStyle.light(none, none)
+            enableEdgeToEdge(bars, bars)
+        } ?: enableEdgeToEdge()
         setContent {
             val model: MailModel = viewModel(factory = object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T = MailModel(open = {
-                    withContext(Dispatchers.IO) { (application as LagomApplication).core }
-                }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { SendWorker.schedule(applicationContext) }) as T
+                    val app = application as LagomApplication
+                    withContext(Dispatchers.IO) { launch.demo?.let(app::demoCore) ?: app.core }
+                }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { SendWorker.schedule(applicationContext) },
+                    demo = launch.demo != null) as T
             })
             val planner: PlannerModel = viewModel()
             LifecycleEventEffect(Lifecycle.Event.ON_START) { model.perform { model.setForeground(true) }; planner.perform { planner.reload() } }
             LifecycleEventEffect(Lifecycle.Event.ON_STOP) { model.perform { model.setForeground(false) } }
-            val state by lifecycle.currentStateAsState()
-            LaunchedEffect(state, model.accounts.isEmpty()) {
-                if (state.isAtLeast(Lifecycle.State.RESUMED) && model.accounts.isNotEmpty()) requestNotificationPermission()
-            }
+            // Demo shows the step without touching the real permission or its setting.
+            var notificationsAnswered by rememberSaveable { mutableStateOf(if (launch.demo != null) launch.demo != "notifications" else !needsNotificationPermission()) }
             LaunchedEffect(signIn, model.core) {
                 val redirect = signIn
                 if (redirect != null && model.core != null) { signIn = null; model.finishSignIn(redirect) }
@@ -207,8 +246,25 @@ class MainActivity : ComponentActivity() {
                 finally { if (shareIntent == intent) shareIntent = null }
             }
             val size = calculateWindowSizeClass(this)
-            LagomTheme {
-                LagomHome(model, planner, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact)
+            LagomTheme(launch.dark ?: isSystemInDarkTheme()) {
+                // Without an account there is no app shell yet: the welcome steps lead to adding one, then to notifications.
+                val stage = when {
+                    model.loading && model.accounts.isEmpty() -> Stage.LOADING
+                    model.accounts.isEmpty() || !notificationsAnswered -> Stage.ONBOARDING
+                    else -> Stage.HOME
+                }
+                AnimatedContent(stage, Modifier.fillMaxSize().background(lagom.bg), label = "stage",
+                    transitionSpec = { fadeIn(tween(250, easing = EaseOut)) togetherWith fadeOut(tween(200, easing = EaseOut)) }) { shown ->
+                    when (shown) {
+                        Stage.LOADING -> Box(Modifier.fillMaxSize())
+                        Stage.ONBOARDING -> Onboarding(model, askNotifications = model.accounts.isNotEmpty(), demo = launch.demo != null) { allow ->
+                            if (launch.demo == null) answerNotifications(allow)
+                            notificationsAnswered = true
+                        }
+                        Stage.HOME -> LagomHome(model, planner, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact)
+                    }
+                }
+                ErrorDialogs(model, planner)
             }
         }
     }
@@ -250,18 +306,7 @@ class MainActivity : ComponentActivity() {
     }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
-    Scaffold(bottomBar = {
-        if (bar) NavigationBar {
-            AppSection.entries.forEach { page ->
-                val unread = if (page == AppSection.MAIL) planner.unreadCount else 0
-                NavigationBarItem(selected = page == section, onClick = { choose(page) }, label = { Text(page.title) }, icon = {
-                    BadgedBox(badge = { if (unread > 0) Badge { Text("$unread", Modifier.semantics { contentDescription = "$unread unread" }) } }) {
-                        Icon(SectionIcons.getValue(page), contentDescription = null)
-                    }
-                })
-            }
-        }
-    }) { padding ->
+    Scaffold(containerColor = lagom.bg, bottomBar = { if (bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             when (section) {
                 AppSection.TODAY -> TodayScreen(planner, model) { id ->
@@ -275,6 +320,12 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+private enum class Stage { LOADING, ONBOARDING, HOME }
+
+/** Errors from either model, over whichever stage shows. */
+@Composable private fun ErrorDialogs(model: MailModel, planner: PlannerModel) {
     model.error?.let { error ->
         AlertDialog(onDismissRequest = { model.error = null }, title = { Text("Mail") }, text = { Text(error) },
             confirmButton = { TextButton(onClick = { model.error = null }) { Text("OK") } })
@@ -285,24 +336,26 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable internal fun LagomTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val colors = if (dark) darkColorScheme(
-        primary = Color(0xFF8AB0F5), onPrimary = Color(0xFF1E1E1E),
-        background = Color(0xFF1E1E1E), onBackground = Color(0xFFF2F2EE),
-        surface = Color(0xFF2C2C2C), onSurface = Color(0xFFF2F2EE),
-        surfaceVariant = Color(0xFF262626), onSurfaceVariant = Color(0xFF9B9B95),
-        outline = Color(0xFF9B9B95), outlineVariant = Color(0xFF3A3A3A),
-        secondary = Color(0xFFF5C22E), onSecondary = Color(0xFF1E1E1E),
-        tertiary = Color(0xFF4CC38A), onTertiary = Color(0xFF1E1E1E), error = Color(0xFFF87171),
-    ) else lightColorScheme(
-        primary = Color(0xFF2A5BB8), onPrimary = Color.White,
-        background = Color.White, onBackground = Color(0xFF111110),
-        surface = Color.White, onSurface = Color(0xFF111110),
-        surfaceVariant = Color(0xFFF5F5F3), onSurfaceVariant = Color(0xFF5F5F5A),
-        outline = Color(0xFF5F5F5A), outlineVariant = Color(0xFFE6E6E2),
-        secondary = Color(0xFF94640A), onSecondary = Color.White,
-        tertiary = Color(0xFF1E6B4E), onTertiary = Color.White, error = Color(0xFFC62828),
-    )
-    MaterialTheme(colorScheme = colors, shapes = Shapes(small = RoundedCornerShape(8.dp), medium = RoundedCornerShape(12.dp)), content = content)
+/** The phone's page bar, iOS `LagomBar`: the four pages and their icons on the sidebar fill, the active one on the grey
+ *  selection with its icon in `sel_icon`. One accent, no Material indicator. */
+@Composable private fun LagomBar(section: AppSection, unread: Int, choose: (AppSection) -> Unit) {
+    val c = lagom
+    Row(Modifier.fillMaxWidth().background(c.sidebar).drawHairline(c.line, top = true).navigationBarsPadding()
+        .padding(horizontal = 10.dp).padding(top = 6.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        AppSection.entries.forEach { page ->
+            val active = page == section
+            val fill by animateColorAsState(if (active) c.sel else c.sidebar, tween(140, easing = EaseOut), label = "page fill")
+            Column(Modifier.weight(1f).heightIn(min = 52.dp).clip(RoundedCornerShape(Radius.control)).background(fill)
+                .selectable(active, role = Role.Tab) { choose(page) }
+                .semantics { contentDescription = if (page == AppSection.MAIL && unread > 0) "Mail, $unread unread" else page.title },
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)) {
+                Box {
+                    LagomIcon(page.icon, tint = if (active) c.selIcon else c.ink2, size = 20.dp)
+                    if (page == AppSection.MAIL && unread > 0) CountBadge(unread, Modifier.align(Alignment.TopStart).offset(x = 14.dp, y = (-6).dp))
+                }
+                Text(page.title, Modifier.clearAndSetSemantics {}, color = c.ink,
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = if (active) FontWeight.Medium else FontWeight.Normal), maxLines = 1)
+            }
+        }
+    }
 }

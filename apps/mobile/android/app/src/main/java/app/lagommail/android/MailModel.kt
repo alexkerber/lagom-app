@@ -117,6 +117,8 @@ internal class MailModel(
     private val now: () -> Long = { System.currentTimeMillis() },
     /** Sends the outbox from WorkManager, which outlives a frozen or killed process. */
     private val sendLater: () -> Unit = {},
+    /** A debug demo store: its accounts have no server or password, so nothing syncs, flags or downloads. */
+    val demo: Boolean = false,
 ) : ViewModel() {
     var downloadingAttachments by mutableStateOf<Set<Pair<Long, String>>>(emptySet()); private set
     var core: LagomCoreInterface? = null; private set
@@ -142,6 +144,8 @@ internal class MailModel(
     fun loadRemoteImages(id: Long) { if (messages.any { it.row.id == id }) remoteImagesIds += id }
     var hasMore by mutableStateOf(false); private set
     var syncing by mutableStateOf(false); private set
+    /** True once a sync has ended, well or not; until then an empty list is not yet known to be empty. */
+    var synced by mutableStateOf(demo); private set
     private var actingId by mutableStateOf<Long?>(null)
     private var readingIds by mutableStateOf<Set<Long>>(emptySet())
     var creatingFolder by mutableStateOf(false); private set
@@ -419,7 +423,7 @@ internal class MailModel(
     /** Sync leaves some bodies out (over 4 MiB, or synced before HTML parts were kept): for mail
      *  without HTML, load_inline fetches the body, at most once per message. */
     private suspend fun loadBody(id: Long, request: Int) {
-        val core = core ?: return
+        val core = core?.takeUnless { demo } ?: return
         val item = messages.firstOrNull { it.row.id == id }?.takeIf { it.htmlBody == null } ?: return
         try {
             val updated = withContext(Dispatchers.IO) { core.loadInline(id); core.message(id) }
@@ -432,7 +436,7 @@ internal class MailModel(
         catch (e: Exception) { if (request == selectionRevision) error = "Could not download this message: ${e.mailMessage()}" }
     }
     suspend fun setRead(id: Long, read: Boolean) {
-        val core = core ?: return
+        val core = core?.takeUnless { demo } ?: return
         if (actingId == id || id in readingIds) return
         readingIds += id
         try {
@@ -449,7 +453,7 @@ internal class MailModel(
         } finally { try { reload() } finally { readingIds -= id } }
     }
     suspend fun sync() {
-        val core = core ?: return
+        val core = core?.takeUnless { demo } ?: return
         if (syncing) { syncAgain = true; return }
         syncing = true
         try {
@@ -459,7 +463,7 @@ internal class MailModel(
                 catch (e: Exception) { error = e.mailMessage() }
                 reload()
             } while (syncAgain)
-        } finally { syncing = false }
+        } finally { syncing = false; synced = true }
     }
     suspend fun act(action: MailAction, id: Long, conversation: Boolean = true, until: Long? = null) =
         change(id, conversation, action.notice) { core, ids ->
