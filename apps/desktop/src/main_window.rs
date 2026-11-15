@@ -96,9 +96,9 @@ pub fn bind_keys(cx: &mut App) {
 
 // Motion per docs/motion.md: the state changes at once, the animation only paints on top.
 // Under reduced motion (`motion::reduced`) nothing travels: rows fade and close the gap.
-const MOTION: Duration = Duration::from_millis(180);
+const MOTION: Duration = crate::theme::motion::ROW;
 /// Colour change behind a swiped row when it crosses a threshold.
-const TINT_FADE: Duration = Duration::from_millis(100);
+const TINT_FADE: Duration = crate::theme::motion::TINT;
 /// Vertical padding and line gap inside a message row.
 const ROW_PAD: f32 = 8.;
 const ROW_GAP: f32 = 2.;
@@ -109,10 +109,10 @@ const SNIPPET_LINES: usize = 2;
 const ROW_H: f32 = 2. * ROW_PAD + 2. * ROW_GAP + (2. * size::BASE + SNIPPET_LINES as f32 * size::SNIPPET) * LEADING;
 
 /// Selection highlight moving to the row J, K or a click selected.
-const GLIDE: Duration = Duration::from_millis(140);
+const GLIDE: Duration = crate::theme::motion::GLIDE;
 /// A press while the highlight still glides (a held arrow key) takes this shorter curve, so the
 /// highlight keeps up with key repeat instead of trailing rows behind.
-const GLIDE_REPEAT: Duration = Duration::from_millis(70);
+const GLIDE_REPEAT: Duration = crate::theme::motion::GLIDE_REPEAT;
 /// Padding around the rows in the list.
 const LIST_PAD: f32 = 6.;
 /// Sidebar rows, the macOS medium sidebar size.
@@ -159,7 +159,7 @@ fn motion() -> Animation {
 }
 
 /// Rows that leave, come back or spring back: long enough to read the motion (see `motion::spring`).
-const SPRING: Duration = Duration::from_millis(280);
+const SPRING: Duration = crate::theme::motion::SPRING;
 
 /// The selection highlight on its way between rows: y positions inside the list.
 #[derive(Clone, Copy)]
@@ -1457,7 +1457,7 @@ fn loading_rows(t: &Theme) -> Div {
     }));
     let rows = match crate::motion::reduced() {
         true => rows.into_any_element(),
-        false => rows.with_animation("list-pulse", Animation::new(Duration::from_millis(1600)).repeat(), |el, d| {
+        false => rows.with_animation("list-pulse", Animation::new(crate::theme::motion::PULSE).repeat(), |el, d| {
             el.opacity(0.7 + 0.3 * (std::f32::consts::TAU * d).cos())
         }).into_any_element(),
     };
@@ -1711,7 +1711,7 @@ impl MainWindow {
         div()
             .debug_selector(|| "sidebar".into())
             .relative()
-            .child(self.glass.background(if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) }))
+            .child(self.glass.background(if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) }))
             .w(px(self.sidebar_w))
             .h_full()
             .flex_shrink_0()
@@ -2650,7 +2650,7 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        let frost = if t.dark { gpui::rgb(0x2A2A2A) } else { gpui::rgb(0xF3F2EF) };
+        let frost = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
         if welcome || self.panes.sidebar_hidden { self.glass.hide(); }
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", Page::Settings(_) => "MainWindow Settings", _ => "MainWindow" })

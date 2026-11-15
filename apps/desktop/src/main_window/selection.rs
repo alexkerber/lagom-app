@@ -164,7 +164,7 @@ impl MainWindow {
             stack = stack.child(card);
         }
         let summary = div().id("selection-summary").flex_1().flex().flex_col().items_center().justify_center().gap(px(16.))
-            .child(stack.with_animation(("selection-stack", depth), Animation::new(Duration::from_millis(180)), |el, v| {
+            .child(stack.with_animation(("selection-stack", depth), Animation::new(crate::theme::motion::ROW), |el, v| {
                 el.top(px(crate::motion::travel(6.) * (1. - spring(v))))
             }))
             .child(div().font_weight(FontWeight::MEDIUM).text_color(t.ink).child(format!("{} messages selected", members.len())))

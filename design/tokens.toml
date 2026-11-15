@@ -1,0 +1,128 @@
+# Edit here, then run python3 scripts/tokens.py (Python 3.11+).
+# RGB colours from the current desktop Dusk theme. Sidebar is the solid glass tint.
+[colors.light]
+bg = 0xFFFFFF
+subtle = 0xF5F5F3
+raised = 0xFFFFFF
+ink = 0x111110
+ink2 = 0x5F5F5A
+line = 0xE6E6E2
+sel = 0xDCDCDC
+accent = 0x2A5BB8
+accent_ink = 0xFFFFFF
+done = 0x1E6B4E
+later = 0x94640A
+danger = 0xC62828
+sidebar = 0xF3F2EF
+press_alpha = 0.12
+
+[colors.dark]
+bg = 0x1E1E1E
+subtle = 0x262626
+raised = 0x2C2C2C
+ink = 0xF2F2EE
+ink2 = 0x9B9B95
+line = 0x3A3A3A
+sel = 0x464646
+accent = 0x8AB0F5
+accent_ink = 0x1E1E1E
+done = 0x4CC38A
+later = 0xF5C22E
+danger = 0xF87171
+sidebar = 0x2A2A2A
+press_alpha = 0.14
+
+# Accessible macOS system accent fills; desktop selection still follows the OS.
+[system_selection]
+graphite = 0x6E6E73
+red = 0xD70015
+orange = 0xC93400
+yellow = 0xA05A00
+green = 0x1F7A36
+blue = 0x0064E1
+purple = 0x8944AB
+pink = 0xD30F45
+
+# Corner radii, in desktop px / iOS pt / Android dp.
+[radii]
+key = 4
+control = 8
+attachment = 10
+panel = 12
+card = 16
+
+# Desktop type sizes in points; mobile uses the factor unless explicitly overridden below.
+[type]
+mobile_factor = 1.15
+leading = 1.25
+reading_leading = 1.4
+
+[type.sizes]
+mono = 11
+small = 11
+snippet = 12
+base = 13
+body = 14
+title = 15
+subject = 20
+display = 26
+
+# Existing desktop motion durations, in milliseconds (including the slow loading pulse).
+# Fade is the fade half of the desktop loading animation, following CALM.
+[motion.ms]
+calm = 150
+fade = 150
+row = 180
+tint = 100
+glide = 140
+glide_repeat = 70
+spring = 280
+compose = 200
+toast = 160
+palette = 120
+empty = 300
+pulse = 1600
+
+# Desktop's normalised spring: damping ratio and angular frequency per duration.
+[motion.spring]
+damping = 0.85
+omega = 5.5
+
+# Preserve iOS's existing whole-point sizes, rather than introducing fractional sizes.
+# Subject is exactly 20 × 1.15 = 23, so needs no override.
+[overrides.ios.type_sizes]
+small = 13
+snippet = 14
+base = 15
+body = 16
+title = 17
+
+# SwiftUI's native spring parameterisation; duration remains the shared 280 ms.
+[overrides.ios.spring]
+bounce = 0.15
+
+# Mobile stores a fixed 8-bit icon tint; desktop lifts the active accent at runtime.
+# Preserve 0x94ADDC exactly (desktop's floating-point half lift rounds to 0x95ADDC).
+[overrides.ios.colors.dark]
+sel_icon = 0x94ADDC
+
+# Android's existing whole-sp scale and looser line heights.
+[overrides.android.type_sizes]
+small = 13
+snippet = 14
+base = 15
+body = 16
+title = 17
+display = 30
+
+[overrides.android.type]
+leading = 1.3
+reading_leading = 1.45
+
+# Compose uses physical stiffness, not the desktop's normalised angular frequency.
+[overrides.android.spring]
+damping = 0.75
+stiffness = 700
+
+[overrides.android.colors.dark]
+sel_icon = 0x94ADDC

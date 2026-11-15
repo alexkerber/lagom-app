@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** The desktop's tokens, `apps/desktop/src/theme.rs` (Dusk accent), light and dark, as iOS `Theme`. */
+/** Shared tokens from design/tokens.toml (Dusk accent), light and dark, as iOS `Theme`. */
 @Immutable internal data class LagomColors(
     val bg: Color, val subtle: Color, val raised: Color, val ink: Color, val ink2: Color, val line: Color,
     /** `sel`: the neutral selection, under ink text. */
@@ -45,35 +45,53 @@ import androidx.compose.ui.unit.sp
     val sidebar: Color,
 )
 
+// BEGIN GENERATED TOKENS (scripts/tokens.py)
 internal val LightColors = LagomColors(
-    bg = Color(0xFFFFFFFF), subtle = Color(0xFFF5F5F3), raised = Color(0xFFFFFFFF), ink = Color(0xFF111110), ink2 = Color(0xFF5F5F5A),
-    line = Color(0xFFE6E6E2), sel = Color(0xFFDCDCDC), selFocus = Color(0xFF2A5BB8), selIcon = Color(0xFF2A5BB8),
-    accent = Color(0xFF2A5BB8), accentInk = Color(0xFFFFFFFF), done = Color(0xFF1E6B4E), later = Color(0xFF94640A), danger = Color(0xFFC62828),
+    bg = Color(0xFFFFFFFF),
+    subtle = Color(0xFFF5F5F3),
+    raised = Color(0xFFFFFFFF),
+    ink = Color(0xFF111110),
+    ink2 = Color(0xFF5F5F5A),
+    line = Color(0xFFE6E6E2),
+    sel = Color(0xFFDCDCDC),
+    selFocus = Color(0xFF2A5BB8),
+    selIcon = Color(0xFF2A5BB8),
+    accent = Color(0xFF2A5BB8),
+    accentInk = Color(0xFFFFFFFF),
+    done = Color(0xFF1E6B4E),
+    later = Color(0xFF94640A),
+    danger = Color(0xFFC62828),
     sidebar = Color(0xFFF3F2EF),
 )
 
 internal val DarkColors = LagomColors(
-    bg = Color(0xFF1E1E1E), subtle = Color(0xFF262626), raised = Color(0xFF2C2C2C), ink = Color(0xFFF2F2EE), ink2 = Color(0xFF9B9B95),
-    line = Color(0xFF3A3A3A), sel = Color(0xFF464646), selFocus = Color(0xFF2A5BB8), selIcon = Color(0xFF94ADDC),
-    accent = Color(0xFF8AB0F5), accentInk = Color(0xFF1E1E1E), done = Color(0xFF4CC38A), later = Color(0xFFF5C22E), danger = Color(0xFFF87171),
+    bg = Color(0xFF1E1E1E),
+    subtle = Color(0xFF262626),
+    raised = Color(0xFF2C2C2C),
+    ink = Color(0xFFF2F2EE),
+    ink2 = Color(0xFF9B9B95),
+    line = Color(0xFF3A3A3A),
+    sel = Color(0xFF464646),
+    selFocus = Color(0xFF2A5BB8),
+    selIcon = Color(0xFF94ADDC),
+    accent = Color(0xFF8AB0F5),
+    accentInk = Color(0xFF1E1E1E),
+    done = Color(0xFF4CC38A),
+    later = Color(0xFFF5C22E),
+    danger = Color(0xFFF87171),
     sidebar = Color(0xFF2A2A2A),
 )
 
-internal val LocalLagomColors = staticCompositionLocalOf { LightColors }
-internal val lagom: LagomColors @Composable @ReadOnlyComposable get() = LocalLagomColors.current
-
-/** The desktop type scale, `theme::size`, × 1.15 as on iOS (a desktop point reads smaller at phone distance). */
 internal object TextSize {
-    val small = 13.sp      // 11
-    val snippet = 14.sp    // 12
-    val base = 15.sp       // 13
-    val body = 16.sp       // 14, message text
-    val title = 17.sp      // 15
-    val subject = 23.sp    // 20
-    val display = 30.sp    // 26
+    val small = 13.sp
+    val snippet = 14.sp
+    val base = 15.sp
+    val body = 16.sp
+    val title = 17.sp
+    val subject = 23.sp
+    val display = 30.sp
 }
 
-/** Corner radii, `theme::radius`. Buttons use `control`, not pills. */
 internal object Radius {
     val key = 4.dp
     val control = 8.dp
@@ -82,12 +100,28 @@ internal object Radius {
     val card = 16.dp
 }
 
+internal const val Leading = 1.3f
+internal const val ReadingLeading = 1.45f
+
+internal object MotionTokens {
+    const val calm = 150
+    const val fade = 150
+    const val empty = 300
+    const val pulse = 1600
+    const val damping = 0.75f
+    const val stiffness = 700f
+}
+// END GENERATED TOKENS
+
+internal val LocalLagomColors = staticCompositionLocalOf { LightColors }
+internal val lagom: LagomColors @Composable @ReadOnlyComposable get() = LocalLagomColors.current
+
 /** Every bar on every page is this tall, so moving between pages never shifts the title. */
 internal val BarHeight = 56.dp
 
-// The platform's system font, as desktop uses SF Pro on macOS; `theme::LEADING` 1.25.
+// The platform's system font, with Android's existing line-height override.
 private fun style(size: TextUnit, weight: FontWeight = FontWeight.Normal) =
-    TextStyle(fontSize = size, lineHeight = size * 1.3f, fontWeight = weight, letterSpacing = 0.sp)
+    TextStyle(fontSize = size, lineHeight = size * Leading, fontWeight = weight, letterSpacing = 0.sp)
 
 private val LagomType = Typography(
     displayLarge = style(TextSize.display, FontWeight.SemiBold), displayMedium = style(TextSize.display, FontWeight.SemiBold),
@@ -198,7 +232,7 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
 @Composable internal fun EmptyState(@DrawableRes icon: Int, title: String, modifier: Modifier = Modifier, detail: String? = null,
     action: (@Composable () -> Unit)? = null) {
     val shown = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { shown.animateTo(1f, tween(300, delayMillis = 150, easing = EaseOut)) }
+    LaunchedEffect(Unit) { shown.animateTo(1f, tween(MotionTokens.empty, delayMillis = MotionTokens.calm, easing = EaseOut)) }
     Column(modifier.fillMaxSize().graphicsLayer { alpha = shown.value }.padding(horizontal = 32.dp).padding(bottom = 64.dp),
         verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         LagomIcon(icon, Modifier.padding(bottom = 16.dp), size = 32.dp)
@@ -213,7 +247,7 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
 @Composable internal fun LoadingRows(modifier: Modifier = Modifier) {
     if (!afterWait(true)) return
     val pulse = rememberInfiniteTransition(label = "loading")
-    val phase by pulse.animateFloat(0f, 1f, infiniteRepeatable(tween(1600, easing = LinearEasing)), label = "pulse")
+    val phase by pulse.animateFloat(0f, 1f, infiniteRepeatable(tween(MotionTokens.pulse, easing = LinearEasing)), label = "pulse")
     val shown = remember { Animatable(0f) }
     LaunchedEffect(Unit) { shown.animateTo(1f, Fade) }
     val bar = lagom.line

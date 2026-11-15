@@ -122,6 +122,10 @@ jobs:
           cargo install cargo-ndk --version 4.1.2 --locked
       - name: Test Android build orchestration
         run: python3 scripts/test-build-android.py
+      - name: Check design tokens and test generator
+        run: |
+          python3 scripts/tokens.py --check
+          python3 scripts/test-tokens.py
       - name: Build Android libraries and Kotlin bindings
         run: scripts/build-android.sh
       - name: Assemble Android app

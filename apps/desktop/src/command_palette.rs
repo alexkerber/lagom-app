@@ -5,7 +5,7 @@
 //! "move <query>" lists folders (Figma "Lagom · Folders", frame 6). Enter there emits `MoveTo`.
 //! A query that matches no command searches the local store and lists messages.
 
-use std::{rc::Rc, time::Duration};
+use std::rc::Rc;
 
 use gpui::{
     div, ease_out_quint, prelude::*, px, Animation, AnimationExt, App, Context, Div, DismissEvent,
@@ -455,7 +455,7 @@ impl Render for CommandPalette {
             .child(dialog)
             // docs/motion.md asks for scale 0.98 → 1, but GPUI divs have no scale transform:
             // the dialog drops 8 px into place on a spring instead, and fades in.
-            .with_animation("command-palette-in", Animation::new(Duration::from_millis(120)), |el, d| {
+            .with_animation("command-palette-in", Animation::new(crate::theme::motion::PALETTE), |el, d| {
                 el.opacity(ease_out_quint()(d)).pt(px(112. - crate::motion::travel(8.) * (1. - spring(d))))
             })
     }

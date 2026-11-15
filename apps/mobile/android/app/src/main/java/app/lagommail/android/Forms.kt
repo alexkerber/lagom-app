@@ -141,7 +141,7 @@ import kotlinx.coroutines.CancellationException
                     overflow = TextOverflow.Ellipsis, color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
             }
             Box(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
-                val body = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * 1.45f)
+                val body = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * ReadingLeading)
                 if (draft.body.isEmpty()) Text("Message · Markdown supported", Modifier.clearAndSetSemantics {}, color = lagom.ink2, style = body)
                 BasicTextField(draft.body, { edit(draft.copy(body = it)) }, Modifier.fillMaxWidth().heightIn(min = 240.dp).semantics { contentDescription = "Message body" },
                     enabled = !model.sending, textStyle = body.copy(color = lagom.ink), cursorBrush = SolidColor(lagom.accent))
