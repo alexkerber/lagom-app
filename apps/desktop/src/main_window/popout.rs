@@ -96,6 +96,7 @@ impl Render for MessageWindow {
         };
         let menu_open = main.message_menu == Some(id);
         self.web.frame(Some((id, &m)), &t, menu_open, window, cx);
+        crate::rich::release(window, cx);
         let web = html::supported() && m.html.is_some();
         let this = cx.entity().downgrade();
         let on_reply = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
@@ -154,7 +155,7 @@ impl Render for MessageWindow {
                     .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
-                    .when(web && self.web.has_remote && !m.remote, |d| {
+                    .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.main.update(cx, |main, _, cx| {
                                 main.inbox.mail[id].remote = true;

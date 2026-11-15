@@ -32,6 +32,8 @@ pub struct Mail {
     pub text: Option<tokio::sync::watch::Receiver<Option<std::sync::Arc<str>>>>,
     /// The HTML part, loaded with the body. Platforms with a web view render it.
     pub html: Option<gpui::SharedString>,
+    /// The HTML part for GPUI to draw, where no web view runs (Linux), prepared with the text.
+    pub rich: Option<std::sync::Arc<crate::rich::Rich>>,
     /// "Load remote images" was clicked for this message.
     pub remote: bool,
     pub attachments: Vec<Attachment>,
@@ -71,6 +73,7 @@ impl Mail {
             body: Vec::new(),
             text: None,
             html: None,
+            rich: None,
             remote: false,
             attachments: Vec::new(),
             unsubscribe: None,
