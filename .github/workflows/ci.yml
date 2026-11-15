@@ -53,6 +53,12 @@ jobs:
         run: cargo test --workspace --locked
       - name: Test HTML sizing script
         run: node --test apps/desktop/src/main_window/html/fit.test.cjs
+      - name: Check mobile icon assets
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/test-icons.py
+          python3 scripts/ios-icons.py --check
+          python3 scripts/android-icons.py --check
 
   apple-mobile:
     name: iOS static library and app
