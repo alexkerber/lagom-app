@@ -8,8 +8,9 @@ struct LagomApp: App {
     @State private var planner = PlannerModel()
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// "Allow" or "Not now" was chosen once; the intro never asks again.
+    /// "Not now" was chosen once; the intro never asks again. "Allow" ends with the system's answer.
     @AppStorage("lagom.notificationsAsked") private var notificationsAsked = false
+    @AppStorage(AppSection.storageKey) private var section: AppSection = .mail
     /// Whether the system still waits for the user's choice; nil until it has said.
     @State private var notificationsUndecided: Bool?
 
@@ -25,14 +26,22 @@ struct LagomApp: App {
                 case .loading: Theme.background.ignoresSafeArea()
                 case .intro, .notifications:
                     OnboardingView(model: model, notifications: stage == .notifications, allow: {
-                        // The system asks over this step; the inbox follows the answer.
-                        Task { await delegate.requestPermission(); notificationsAsked = true }
+                        // The system asks over this step; the inbox follows its answer. No prompt shown, the step stays.
+                        Task { await delegate.requestPermission(); await readNotifications() }
                     }, notNow: { notificationsAsked = true })
                     .transition(.opacity)
                 case .app: RootView(model: model, planner: planner).transition(.opacity)
                 }
             }
             .animation(Motion.move(reduceMotion), value: stage)
+            // After the intro the app opens on Mail's unified Inbox, whatever the last account left behind.
+            .onChange(of: stage) { _, stage in
+                guard stage == .intro else { return }
+                section = .mail
+                model.accountID = nil
+                model.mailbox = .inbox
+                model.searchText = ""
+            }
             .alert("lagom", isPresented: Binding(get: { model.error != nil || planner.error != nil },
                                                 set: { if !$0 { model.error = nil; planner.error = nil } })) {
                 Button("OK") { model.error = nil; planner.error = nil }
