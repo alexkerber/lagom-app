@@ -25,7 +25,7 @@ const MARKDOWN_BODY: &str = "# Notes for Thursday\n\nThanks for the minutes. A f
 /// How long the "Sent" and "Deleted" toasts offer Undo.
 pub(crate) const UNDO_WINDOW: Duration = Duration::from_secs(5);
 /// docs/motion.md: 120–200 ms, ease-out.
-const SLIDE: Duration = Duration::from_millis(200);
+const SLIDE: Duration = crate::theme::motion::COMPOSE;
 /// The word count waits for a pause in typing, so a keystroke never walks the whole body.
 const COUNT_DELAY: Duration = Duration::from_millis(300);
 
@@ -765,7 +765,7 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
         .font_weight(FontWeight::MEDIUM)
         .child(div().flex_1().min_w(px(0.)).line_clamp(1).text_ellipsis().child(label))
         .children(undo)
-        .with_animation("toast-in", Animation::new(Duration::from_millis(160)), |d, v| {
+        .with_animation("toast-in", Animation::new(crate::theme::motion::TOAST), |d, v| {
             d.opacity(ease_out_quint()(v)).relative().top(px(crate::motion::travel(8.) * (1. - spring(v))))
         })
 }

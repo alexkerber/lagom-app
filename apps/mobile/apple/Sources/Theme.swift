@@ -1,31 +1,23 @@
 import SwiftUI
 
-/// The desktop's tokens, `apps/desktop/src/theme.rs`, light and dark.
-enum Theme {
+// BEGIN GENERATED TOKENS (scripts/tokens.py)
+extension Theme {
     static let background = color(0xFFFFFF, 0x1E1E1E)
     static let subtle = color(0xF5F5F3, 0x262626)
     static let raised = color(0xFFFFFF, 0x2C2C2C)
     static let ink = color(0x111110, 0xF2F2EE)
     static let secondary = color(0x5F5F5A, 0x9B9B95)
     static let line = color(0xE6E6E2, 0x3A3A3A)
-    /// `sel`: the neutral selection, under ink text.
     static let selected = color(0xDCDCDC, 0x464646)
-    /// `sel_focus`: the accent as a fill under white text, the same in light and dark.
     static let selection = color(0x2A5BB8, 0x2A5BB8)
-    /// `sel_icon`: the active sidebar icon, lifted halfway to white in dark so it keeps 3:1 on `selected`.
     static let selectionIcon = color(0x2A5BB8, 0x94ADDC)
     static let accent = color(0x2A5BB8, 0x8AB0F5)
-    /// `accent_ink`: text on an accent fill.
     static let accentInk = color(0xFFFFFF, 0x1E1E1E)
     static let done = color(0x1E6B4E, 0x4CC38A)
     static let later = color(0x94640A, 0xF5C22E)
     static let danger = color(0xC62828, 0xF87171)
-    /// The sidebar's glass background on desktop, as a solid fill.
     static let sidebar = color(0xF3F2EF, 0x2A2A2A)
-    /// The current-time line in the agenda, as on the desktop week view.
-    static let now = later
 
-    /// Corner radii, `theme::radius`.
     enum Radius {
         static let key: CGFloat = 4
         static let control: CGFloat = 8
@@ -33,6 +25,33 @@ enum Theme {
         static let panel: CGFloat = 12
         static let card: CGFloat = 16
     }
+}
+
+extension TextSize {
+    var points: CGFloat {
+        switch self {
+        case .small: 13
+        case .snippet: 14
+        case .base: 15
+        case .body: 16
+        case .title: 17
+        case .subject: 23
+        }
+    }
+}
+
+extension Motion {
+    static let spring = Animation.spring(duration: 0.28, bounce: 0.15)
+    static let fade = Animation.easeOut(duration: 0.15)
+    static let calm = Duration.milliseconds(150)
+    static let calmSeconds: Double = 0.15
+}
+// END GENERATED TOKENS
+
+/// Shared tokens from design/tokens.toml, light and dark.
+enum Theme {
+    /// The current-time line in the agenda, as on the desktop week view.
+    static let now = later
 
     /// Account marks cycle through the three accents (Dusk, pine green, gold), as `account_accent` does.
     static func account(_ index: Int) -> Color { [accent, done, later][max(index, 0) % 3] }
@@ -50,12 +69,6 @@ enum Theme {
 /// docs/motion.md on iOS: a spring where something moves and lands, ease-out for fades, and under
 /// Reduce Motion nothing travels, it only fades.
 enum Motion {
-    /// `motion::spring`: damping 0.85 (under 1 % overshoot), the desktop's 280 ms.
-    static let spring = Animation.spring(duration: 0.28, bounce: 0.15)
-    static let fade = Animation.easeOut(duration: 0.15)
-    /// `motion::CALM`: a loading note waits this long, so a quick load never flashes it.
-    static let calm = Duration.milliseconds(150)
-
     /// The spring, or a fade under Reduce Motion.
     static func move(_ reduce: Bool) -> Animation { reduce ? fade : spring }
     /// Slides in from `edge` and fades, or only fades under Reduce Motion.
@@ -63,7 +76,7 @@ enum Motion {
         reduce ? .opacity : .move(edge: edge).combined(with: .opacity)
     }
     /// Fades in once `calm` has passed and leaves at once, so a state shown for a moment never flashes.
-    static var calmIn: AnyTransition { .asymmetric(insertion: .opacity.animation(fade.delay(0.15)), removal: .identity) }
+    static var calmIn: AnyTransition { .asymmetric(insertion: .opacity.animation(fade.delay(calmSeconds)), removal: .identity) }
 }
 
 /// The desktop type scale, `theme::size`, in the system font as on desktop. A macOS point reads
@@ -71,17 +84,6 @@ enum Motion {
 /// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.
 enum TextSize {
     case small, snippet, base, body, title, subject
-
-    var points: CGFloat {
-        switch self {
-        case .small: 13      // 11
-        case .snippet: 14    // 12
-        case .base: 15       // 13
-        case .body: 16       // 14, message text
-        case .title: 17      // 15
-        case .subject: 23    // 20
-        }
-    }
 
     var style: Font.TextStyle {
         switch self {

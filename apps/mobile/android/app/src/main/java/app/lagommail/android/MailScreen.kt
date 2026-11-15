@@ -637,7 +637,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                 if (!plain && message.htmlBody != null) MailHtml(id, message.htmlBody!!, id in model.remoteImagesIds)
                 else SelectionContainer {
                     Text(message.textBody, Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * 1.45f))
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * ReadingLeading))
                 }
             }
             if (message.attachments.isNotEmpty()) {

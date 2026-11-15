@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// A loading note waits this long before it fades in, so fast loads never flash it.
-pub const CALM: Duration = Duration::from_millis(150);
+pub use crate::theme::motion::CALM;
 
 /// The system asks for less motion (docs/motion.md rule 6): moving things then only fade.
 /// `LAGOM_REDUCE_MOTION=1` (or `0`) overrides the system on every platform.
@@ -108,8 +108,7 @@ pub fn calm(d: f32) -> f32 {
 /// Damping ratio and stiffness, per animation duration: under 1 % overshoot, and the motion
 /// spreads over the whole duration (40 % at a quarter, 87 % at a half). The old 0.75/9.5 was done
 /// after a third, so at 60 Hz a row jumped in 2–4 frames.
-const ZETA: f32 = 0.85;
-const OMEGA: f32 = 5.5;
+use crate::theme::motion::{ZETA, OMEGA};
 
 /// A spring released at 0 that settles on 1. `t` is linear progress, 0..=1.
 /// Use it inside the animator of a linear `Animation`: GPUI's `with_easing` asserts the eased

@@ -21,15 +21,15 @@ import kotlinx.coroutines.launch
 // scale, so "Remove animations" ends them at once without code here.
 
 /** Fades and colour: short and ease-out. */
-internal val Fade = tween<Float>(150, easing = EaseOut)
+internal val Fade = tween<Float>(MotionTokens.fade, easing = EaseOut)
 
 /** Things that move and land: about 3 % overshoot, settled in about 200 ms. Never on opacity. */
-internal fun <T> landing(threshold: T? = null) = spring(dampingRatio = 0.75f, stiffness = 700f, visibilityThreshold = threshold)
+internal fun <T> landing(threshold: T? = null) = spring(dampingRatio = MotionTokens.damping, stiffness = MotionTokens.stiffness, visibilityThreshold = threshold)
 
 /** True once [active] has lasted 150 ms, so a quick load never flashes a spinner or a note. */
 @Composable internal fun afterWait(active: Boolean): Boolean {
     var waited by remember { mutableStateOf(false) }
-    LaunchedEffect(active) { if (active) delay(150); waited = active }
+    LaunchedEffect(active) { if (active) delay(MotionTokens.calm.toLong()); waited = active }
     return active && waited
 }
 

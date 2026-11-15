@@ -1,8 +1,6 @@
 //! Empty inbox, "Nothing left." Replaces the message list and reading pane when the inbox is at
 //! zero: the inbox icon, one line, one quiet line under it, and the sync status.
 
-use std::time::Duration;
-
 use gpui::{div, ease_out_quint, prelude::*, px, Animation, AnimationExt, Div, FontWeight, SharedString};
 
 use crate::main_window::{icon, mono};
@@ -22,7 +20,7 @@ pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
         // reduced motion keeps it.
         .with_animation(
             "empty-inbox",
-            Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()),
+            Animation::new(crate::theme::motion::EMPTY).with_easing(ease_out_quint()),
             |el, delta| el.opacity(delta),
         );
 

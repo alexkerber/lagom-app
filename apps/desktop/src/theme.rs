@@ -1,4 +1,4 @@
-//! Design tokens for Concept D "Butik". Source: Claude design canvas, ConceptD and MainWindowD.
+//! Design tokens for Concept D "Butik". Source: design/tokens.toml.
 // The full token set is defined here even where no screen uses a token yet.
 #![allow(dead_code)]
 
@@ -10,17 +10,6 @@ pub enum Accent {
     Dusk,
     PineGreen,
     Gold,
-}
-
-impl Accent {
-    /// (light, dark)
-    fn hex(self) -> (u32, u32) {
-        match self {
-            Accent::Dusk => (0x2A5BB8, 0x8AB0F5),
-            Accent::PineGreen => (0x1E6B4E, 0x4CC38A),
-            Accent::Gold => (0x94640A, 0xF5C22E),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +42,18 @@ pub struct Theme {
     pub press: Rgba,
 }
 
+// BEGIN GENERATED TOKENS (scripts/tokens.py)
+impl Accent {
+    /// (light, dark)
+    fn hex(self) -> (u32, u32) {
+        match self {
+            Accent::Dusk => (0x2A5BB8, 0x8AB0F5),
+            Accent::PineGreen => (0x1E6B4E, 0x4CC38A),
+            Accent::Gold => (0x94640A, 0xF5C22E),
+        }
+    }
+}
+
 impl Theme {
     pub fn light(accent: Accent) -> Self {
         Self {
@@ -74,11 +75,9 @@ impl Theme {
             press: Rgba { a: 0.12, ..rgb(0x111110) },
         }
     }
-
     pub fn dark(accent: Accent) -> Self {
         Self {
             dark: true,
-            // The system dark appearance: a mid-dark window, sheets and fields a step lighter.
             bg: rgb(0x1E1E1E),
             subtle: rgb(0x262626),
             raised: rgb(0x2C2C2C),
@@ -96,7 +95,67 @@ impl Theme {
             press: Rgba { a: 0.14, ..rgb(0xF2F2EE) },
         }
     }
+}
 
+fn accent_fill(value: i32) -> Option<u32> {
+    Some(match value {
+        -1 => 0x6E6E73, // graphite
+        0 => 0xD70015, // red
+        1 => 0xC93400, // orange
+        2 => 0xA05A00, // yellow
+        3 => 0x1F7A36, // green
+        4 => 0x0064E1, // blue
+        5 => 0x8944AB, // purple
+        6 => 0xD30F45, // pink
+        _ => return None,
+    })
+}
+
+pub const SIDEBAR_LIGHT: u32 = 0xF3F2EF;
+pub const SIDEBAR_DARK: u32 = 0x2A2A2A;
+
+pub mod size {
+    pub const MONO: f32 = 11.0;
+    pub const SMALL: f32 = 11.0;
+    pub const SNIPPET: f32 = 12.0;
+    pub const BASE: f32 = 13.0;
+    pub const BODY: f32 = 14.0;
+    pub const TITLE: f32 = 15.0;
+    pub const SUBJECT: f32 = 20.0;
+    pub const DISPLAY: f32 = 26.0;
+}
+
+pub mod radius {
+    pub const KEY: f32 = 4.0;
+    pub const CONTROL: f32 = 8.0;
+    pub const ATTACHMENT: f32 = 10.0;
+    pub const PANEL: f32 = 12.0;
+    pub const CARD: f32 = 16.0;
+}
+
+pub const LEADING: f32 = 1.25;
+pub const READING_LEADING: f32 = 1.4;
+
+pub mod motion {
+    use std::time::Duration;
+    pub const CALM: Duration = Duration::from_millis(150);
+    pub const FADE: Duration = Duration::from_millis(150);
+    pub const ROW: Duration = Duration::from_millis(180);
+    pub const TINT: Duration = Duration::from_millis(100);
+    pub const GLIDE: Duration = Duration::from_millis(140);
+    pub const GLIDE_REPEAT: Duration = Duration::from_millis(70);
+    pub const SPRING: Duration = Duration::from_millis(280);
+    pub const COMPOSE: Duration = Duration::from_millis(200);
+    pub const TOAST: Duration = Duration::from_millis(160);
+    pub const PALETTE: Duration = Duration::from_millis(120);
+    pub const EMPTY: Duration = Duration::from_millis(300);
+    pub const PULSE: Duration = Duration::from_millis(1600);
+    pub const ZETA: f32 = 0.85;
+    pub const OMEGA: f32 = 5.5;
+}
+// END GENERATED TOKENS
+
+impl Theme {
     /// `LAGOM_THEME=light|dark` overrides the system appearance.
     pub fn for_appearance(appearance: WindowAppearance, accent: Accent) -> Self {
         let dark = match std::env::var("LAGOM_THEME").as_deref() {
@@ -148,22 +207,6 @@ fn system_selection() -> Option<u32> {
     })
 }
 
-/// `AppleAccentColor` value to a fill that keeps white text at 4.5:1 or more. AppKit's accents
-/// (orange, yellow, green) are too light for white text, so these are their darker variants.
-fn accent_fill(value: i32) -> Option<u32> {
-    Some(match value {
-        -1 => 0x6E6E73, // graphite
-        0 => 0xD70015,  // red
-        1 => 0xC93400,  // orange
-        2 => 0xA05A00,  // yellow
-        3 => 0x1F7A36,  // green
-        4 => 0x0064E1,  // blue
-        5 => 0x8944AB,  // purple
-        6 => 0xD30F45,  // pink
-        _ => return None,
-    })
-}
-
 pub const DEFAULT_ACCENT: Accent = Accent::Dusk;
 
 pub mod font {
@@ -179,33 +222,6 @@ pub mod font {
             _ => ".SystemUIFont",
         })
     }
-}
-
-/// Type scale in pt, after the macOS text styles: body 13, callout 12, subheadline 11.
-pub mod size {
-    pub const MONO: f32 = 11.0;
-    pub const SMALL: f32 = 11.0;
-    pub const SNIPPET: f32 = 12.0;
-    pub const BASE: f32 = 13.0;
-    /// Message text in the reading pane and the compose body.
-    pub const BODY: f32 = 14.0;
-    pub const TITLE: f32 = 15.0;
-    pub const SUBJECT: f32 = 20.0;
-    pub const DISPLAY: f32 = 26.0;
-}
-
-/// Line height as a multiple of the font size. GPUI's default is 1.618, looser than AppKit text.
-pub const LEADING: f32 = 1.25;
-/// Running text (message bodies) reads better a little looser.
-pub const READING_LEADING: f32 = 1.4;
-
-/// Corner radii in px. Buttons use `CONTROL`, not pills.
-pub mod radius {
-    pub const KEY: f32 = 4.0;
-    pub const CONTROL: f32 = 8.0;
-    pub const ATTACHMENT: f32 = 10.0;
-    pub const PANEL: f32 = 12.0;
-    pub const CARD: f32 = 16.0;
 }
 
 #[cfg(test)]
