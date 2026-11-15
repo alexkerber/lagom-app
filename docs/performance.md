@@ -189,15 +189,29 @@ macos-latest: cold start 29 ms, `load_accounts` 28 ms, `sync.parse_save_1000` 1.
 
 Findings:
 
-- The release binary breaks its budget on Linux: 53.2 MB on ubuntu-latest (PR #131). The gate
-  holds Linux at a 55 MB ceiling (`max_linux` in the budgets file) until the size is cut. The release profile strips debug info (`strip = "debuginfo"`, Cargo's
-  default already) and keeps symbol names for panic backtraces. Loaded sections are 39.6 MB;
-  the other 13.6 MB is the symbol table, so stripping symbols too would still leave it over
-  30 MB. `.text` is 27.4 MB. By crate (`cargo bloat --crates`, share of `.text`): gpui 13 %,
-  zbus 11.6 %, std 9.6 %, naga 5.3 %, lagom_core 3.9 %, lagom 3.9 %, rustls, image,
-  rustybuzz and oo7 2 % each. zbus, naga, oo7 and dbus are Linux only.
-- macOS is 27.4 MB (`__text` 14.3 MB), not the 6.0 MB of the 2026-11-06 baseline. `strip` of
-  the symbols takes it to 21.6 MB.
+- The Linux release binary was 53.2 MB on ubuntu-latest (PR #131), over its 30 MB budget.
+  `.text` was 27.4 MB: gpui 13 %, zbus 11.6 %, std 9.6 %, naga 5.3 % (`cargo bloat --crates`);
+  the symbol table was 13.6 MB. Cut on 2026-11-15, each step measured on ubuntu-latest in CI
+  (the run that measured each size in brackets):
+
+  | Step                                                            | Linux binary           |
+  | --------------------------------------------------------------- | ---------------------- |
+  | Before                                                          | 53.2 MB (43613223446)  |
+  | One zbus: notify-rust held at 4.18, the app on zbus 5 like GPUI | 53.0 MB (43705119901)  |
+  | `lto = "fat"`, `codegen-units = 1`                              | 35.7 MB (43705119901)  |
+  | Desktop binary without its symbol table (`strip = "symbols"`)   | 30.7 MB (43705119901)  |
+  | GPUI's `image` with only the formats GPUI decodes               | 30.0 MB (43710105708)  |
+  | GPUI on ashpd 0.12, the version oo7 uses                        | 29.98 MB (43711959948) |
+  | zbus, zvariant, oo7 and ashpd at `opt-level = "s"`              | 29.89 MB (43715180813) |
+
+  Thin LTO alone gave nothing (52.9 MB). The release build of the binary takes about a quarter
+  longer (428 s to 541 s on ubuntu-latest). Panic backtraces of the desktop app now show
+  addresses, not function names; nothing reads them (no crash reporter, no symbol upload).
+  `lagom-ffi` keeps its symbols, because uniffi-bindgen reads its metadata from them. macOS went
+  from 27.4 to 16.5 MB. Still in the binary: two fontdb, rustybuzz and ttf-parser versions
+  (cosmic-text and resvg), and GPUI's HTTP client (reqwest, hyper). The margin under 30 MB is
+  about 0.1 MB, so new Linux code can break the gate again.
+
 - A jump to one message read inline and held the UI thread for 69 ms at 100k
   (`reload.ui_thread_inline`, an earlier run). It now reads on the background executor:
   `reload.ui_thread_jump` is 0.9–1.1 ms (was 25.7–26.6 ms for the same jump), budget 8 ms.

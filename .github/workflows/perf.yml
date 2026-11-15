@@ -47,8 +47,3 @@ jobs:
         run: python3 scripts/test-perf.py
       - name: Measure budgets (release)
         run: python3 scripts/perf.py
-      # shortcut: temporary size diagnostic for perf/linux-binary-size, remove before merge.
-      - name: Binary sections (Linux, temporary)
-        if: always() && runner.os == 'Linux'
-        continue-on-error: true
-        run: size -A target/release/lagom | sort -k2 -n | tail -10
