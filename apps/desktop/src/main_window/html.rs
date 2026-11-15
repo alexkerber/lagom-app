@@ -3,8 +3,8 @@
 //! date) never goes into the web view: mail CSS such as `position:fixed` paints over anything in
 //! the same document, so the document holds only the CSP, the theme CSS and the mail.
 //!
-//! Linux shows the text part in GPUI instead: wry's child web view there needs GTK's main loop
-//! and X11, and GPUI runs neither.
+//! Linux draws the HTML in GPUI instead (`crate::rich`): wry's child web view there needs GTK's
+//! main loop and X11, and GPUI runs neither.
 //!
 //! HTML mail is untrusted. Nothing is sanitized by hand. Page JavaScript is off, a CSP meta that
 //! comes before the mail blocks scripts, frames, fonts and every remote load (images only after
@@ -254,6 +254,8 @@ impl Web {
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
     pub(super) fn frame<T: WebHost>(&mut self, want: Option<(usize, &Mail)>, theme: &Theme, overlay: bool, window: &mut Window, cx: &mut Context<T>) {
         if !supported() {
+            // GPUI draws the HTML (`rich`); only the "Load remote images" button needs this.
+            self.has_remote = want.and_then(|(_, m)| m.rich.as_ref()).is_some_and(|rich| rich.has_remote);
             return;
         }
         let Some((id, m, html)) = want.and_then(|(id, m)| m.html.as_ref().map(|h| (id, m, h))) else {
@@ -568,6 +570,27 @@ mod tests {
         assert!(matches!(hint_event("1 1 0"), Some(Msg::Hints { over: true, command: true, shift: false })));
         assert!(matches!(hint_event("0 0 0"), Some(Msg::Hints { over: false, command: false, shift: false })));
         for invalid in ["", "1 0", "1 1 1 0", "1 NaN 0", "2 0 0", "1 true false"] { assert!(hint_event(invalid).is_none()); }
+    }
+
+    #[gpui::test]
+    fn rich_mail_offers_remote_images_until_loaded(cx: &mut gpui::TestAppContext) {
+        // Where a web view runs, it reports remote images instead; test windows have none.
+        if supported() { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::new(true, window, cx));
+        let id = view.update_in(cx, |v, window, cx| {
+            v.open_box(None, cx);
+            let id = v.inbox.current().unwrap();
+            let html = r#"<p>Sale <a href="https://shop.example">now</a></p><img src="https://t.example/banner.png">"#;
+            v.inbox.mail[id].html = Some(html.into());
+            v.inbox.mail[id].rich = Some(Arc::new(crate::rich::Rich::new(html)));
+            v.web_frame(window, cx);
+            id
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Load remote images").is_some());
+        view.update(cx, |v, cx| { v.inbox.mail[id].remote = true; cx.notify(); });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Load remote images").is_none());
     }
 
     #[gpui::test]

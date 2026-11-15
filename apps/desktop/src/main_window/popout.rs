@@ -154,7 +154,7 @@ impl Render for MessageWindow {
                     .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
-                    .when(web && self.web.has_remote && !m.remote, |d| {
+                    .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.main.update(cx, |main, _, cx| {
                                 main.inbox.mail[id].remote = true;

@@ -13,6 +13,49 @@ pub fn link_allowed(url: &str) -> bool {
     ["http", "https", "mailto"].iter().any(|s| s.eq_ignore_ascii_case(scheme))
 }
 
+/// The URL a native view fetches for a remote `<img src>` after "Load remote images": the
+/// `https: http:` of `csp`, with a scheme-relative `//host/x` as `https:`. `None` for others.
+pub fn remote_image(src: &str) -> Option<String> {
+    let scheme = src.split_once(':').map_or("", |s| s.0);
+    if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") { return Some(src.into()); }
+    src.starts_with("//").then(|| format!("https:{src}"))
+}
+
+/// The bytes of a base64 `data:` image, the `data:` of `csp`. At most about 10 MiB.
+pub fn data_image(src: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let (meta, data) = src.get(..5).filter(|s| s.eq_ignore_ascii_case("data:")).and_then(|_| src[5..].split_once(','))?;
+    if !meta.to_ascii_lowercase().ends_with(";base64") || data.len() > crate::inline::MAX_INLINE_BYTES / 3 * 4 + 4096 { return None; }
+    let data: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+/// The media type of raster image bytes, by their signature. SVG and anything else is `None`.
+pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
+    Some(match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [b'B', b'M', ..] => "image/bmp",
+        _ => return None,
+    })
+}
+
+/// A remote image for a native view, after "Load remote images": no cookies or referrer, at
+/// most five redirects, 20 seconds and 10 MiB, raster formats only. Needs a Tokio runtime.
+pub async fn fetch_image(url: &str) -> Option<(&'static str, Vec<u8>)> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| reqwest::Client::builder().use_rustls_tls()
+        .timeout(std::time::Duration::from_secs(20))
+        .referer(false)
+        .redirect_policy(reqwest::redirect::Policy::limited(5))
+        .build().ok()).as_ref()?;
+    let response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    let bytes = crate::oauth::body_limit(response, crate::inline::MAX_INLINE_BYTES).await.ok()?;
+    Some((image_type(&bytes)?, bytes.to_vec()))
+}
+
 /// Whether the mail sets its own colours or backgrounds. Such mail assumes white paper; other
 /// HTML takes the theme's ink and background.
 pub fn styled(html: &str) -> bool {
@@ -59,8 +102,23 @@ pub fn inert_tags(html: &str) -> std::borrow::Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::inert_tags;
+    use super::{data_image, image_type, inert_tags, remote_image};
     use std::borrow::Cow;
+
+    #[test]
+    fn native_images_follow_the_csp() {
+        for (src, url) in [("https://a.example/x.png", Some("https://a.example/x.png")), ("HTTP://a/x", Some("HTTP://a/x")), ("//cdn.example/x", Some("https://cdn.example/x")),
+            ("cid:logo", None), ("data:image/png;base64,AA==", None), ("file:///etc/passwd", None), ("javascript:x", None), ("/relative.png", None), ("x.png", None)] {
+            assert_eq!(remote_image(src).as_deref(), url, "{src}");
+        }
+        assert_eq!(data_image("DATA:image/png;BASE64,iVBO\n Rw=="), Some(vec![0x89, b'P', b'N', b'G']));
+        assert_eq!(data_image("data:image/svg+xml,<svg/>"), None, "not base64");
+        assert_eq!(data_image("https://a.example/x.png"), None);
+        assert_eq!(image_type(&[0x89, b'P', b'N', b'G', 0x0d]), Some("image/png"));
+        assert_eq!(image_type(b"GIF89a"), Some("image/gif"));
+        assert_eq!(image_type(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+        assert_eq!(image_type(b"<svg xmlns='http://www.w3.org/2000/svg'/>"), None, "SVG never draws");
+    }
 
     #[test]
     fn srcdoc_and_plugins_are_inert() {

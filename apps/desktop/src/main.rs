@@ -20,6 +20,7 @@ mod notifications;
 mod sync;
 #[cfg(target_os = "macos")]
 mod menus;
+mod rich;
 mod text_input;
 mod theme;
 

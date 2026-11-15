@@ -186,6 +186,12 @@ pub fn rewrite(html: &str, message: i64, windows: bool) -> String {
     out
 }
 
+/// The part a `cid:` image source names, for a native view that reads `src` as written.
+pub fn find<'a>(parts: &'a [InlinePart], src: &str) -> Option<&'a InlinePart> {
+    let cid = src.get(..4).filter(|s| s.eq_ignore_ascii_case("cid:")).and_then(|_| decode_id(&src[4..]))?;
+    parts.iter().find(|p| p.cid == cid)
+}
+
 /// Only the current document's parts are available, including for forged protocol URLs.
 pub fn resolve<'a>(message: i64, parts: &'a [InlinePart], request: &str) -> Option<&'a InlinePart> {
     let cid = request_id(message, request)?;
@@ -251,6 +257,15 @@ mod tests {
             assert!(rewritten.contains("src=\"https://example.test/remote.png\""));
             assert!(!rewritten.contains("cid:Logo"));
         }
+    }
+
+    #[test]
+    fn native_views_find_parts_by_cid_source() {
+        let parts = [InlinePart { cid: "Logo+1@example.test".into(), mime_type: "image/png".into(), data: vec![1] }];
+        assert_eq!(find(&parts, "CID:Logo%2B1%40example.test").map(|p| &p.data), Some(&vec![1]));
+        assert!(find(&parts, "cid:logo+1@example.test").is_none(), "content IDs keep their case");
+        assert!(find(&parts, "https://example.test/Logo+1@example.test").is_none());
+        assert!(find(&parts, "cid:%zz").is_none());
     }
 
     #[test]

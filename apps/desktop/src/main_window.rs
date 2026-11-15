@@ -2217,7 +2217,7 @@ impl MainWindow {
                     .when(!trash, |d| d.child(
                         polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     ))
-                    .when(web && self.web.has_remote && !m.remote, |d| {
+                    .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.inbox.mail[id].remote = true;
                             cx.notify();
@@ -2402,7 +2402,10 @@ fn reading_view(
                 .when(text && loading, |d| d
                     .child(div().text_color(t.ink2).child(m.snippet.clone()))
                     .child(calm(div().text_size(px(size::SMALL)).text_color(t.ink2).child(live::LOADING), ("loading-message", id))))
-                .when(text && !loading, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
+                .when(text && !loading, |d| match &m.rich {
+                    Some(rich) => d.children(rich.view(m, t)),
+                    None => d.children(m.body.iter().map(|p| div().child(p.clone()))),
+                })
                 .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
                     div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
             .children(attachment()))
@@ -3198,6 +3201,7 @@ impl Inbox {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
                 fresh.text = self.mail[id].text.take();
                 fresh.html = self.mail[id].html.take();
+                fresh.rich = self.mail[id].rich.take();
                 fresh.inline = self.mail[id].inline.clone();
                 fresh.inline_referenced = self.mail[id].inline_referenced;
                 fresh.inline_pending = self.mail[id].inline_pending;
