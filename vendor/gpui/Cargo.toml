@@ -333,7 +333,8 @@ version = "1"
 optional = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.ashpd]
-version = "0.11"
+# Lagom: 0.12, the version oo7 uses, so the binary carries one ashpd. The API GPUI calls is unchanged.
+version = "0.12"
 features = ["async-std"]
 optional = true
 default-features = false
