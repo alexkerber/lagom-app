@@ -353,8 +353,7 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)) {
                 Box {
                     LagomIcon(page.icon, tint = if (active) c.selIcon else c.ink2, size = 20.dp)
-                    if (page == AppSection.MAIL && unread > 0) // Beside the icon, not over it: the number has no fill to sit on.
-                        CountBadge(unread, Modifier.align(Alignment.TopStart).offset(x = 23.dp, y = (-4).dp))
+                    if (page == AppSection.MAIL && unread > 0) CountBadge(unread, Modifier.align(Alignment.TopStart).offset(x = 17.dp, y = (-7).dp))
                 }
                 Text(page.title, Modifier.clearAndSetSemantics {}, color = c.ink,
                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = if (active) FontWeight.Medium else FontWeight.Normal), maxLines = 1)

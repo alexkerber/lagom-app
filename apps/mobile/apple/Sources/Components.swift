@@ -83,9 +83,10 @@ struct IconButton: View {
 }
 
 /// The unread count on Mail in the sidebar and the bar: a quiet number, as on desktop (Alex 2026-11-15).
-/// Numbers roll, they do not jump.
+/// On the bar a hairline ring holds it, so it does not float beside the icon. Numbers roll, they do not jump.
 struct Badge: View {
     let count: Int
+    var ring = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -93,6 +94,8 @@ struct Badge: View {
             .contentTransition(.numericText(value: Double(count)))
             .animation(reduceMotion ? nil : Motion.fade, value: count)
             .foregroundStyle(Theme.secondary)
+            .padding(.horizontal, ring ? 5 : 0).frame(minWidth: ring ? 18 : nil, minHeight: ring ? 18 : nil)
+            .overlay { if ring { Capsule().strokeBorder(Theme.secondary.opacity(0.5), lineWidth: 1) } }
     }
 }
 
@@ -293,8 +296,7 @@ struct LagomBar: View {
                     VStack(spacing: 3) {
                         Icon(page.icon, size: 20).foregroundStyle(active ? Theme.selectionIcon : Theme.secondary)
                             .overlay(alignment: .topTrailing) {
-                                if page == .mail && unread > 0 { // Beside the icon, not over it: the number has no fill to sit on.
-                                    Badge(count: unread).fixedSize().alignmentGuide(.trailing) { $0[.leading] - 3 }.offset(y: -4) }
+                                if page == .mail && unread > 0 { Badge(count: unread, ring: true).fixedSize().offset(x: 17, y: -7) }
                             }
                         Text(page.title).lagomFont(.small, active ? .medium : .regular).foregroundStyle(Theme.ink)
                     }
