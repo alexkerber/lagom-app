@@ -149,23 +149,17 @@ struct Heading: View {
     }
 }
 
-/// The desktop's empty pages: a large line icon, or the desktop's line illustration, over a quiet
+/// The desktop's empty pages: a large line icon over a quiet
 /// line, and an optional action.
 struct EmptyState<Action: View>: View {
     let icon: String
     let title: String
     var detail: String? = nil
-    var illustration: String? = nil
     @ViewBuilder var action: Action
 
     var body: some View {
         VStack(spacing: 10) {
-            if let illustration {
-                Image(illustration).resizable().scaledToFit().frame(maxWidth: 240)
-                    .foregroundStyle(Theme.ink).padding(.bottom, 12).accessibilityHidden(true)
-            } else {
-                Icon(icon, size: 36).foregroundStyle(Theme.secondary)
-            }
+            Icon(icon, size: 36).foregroundStyle(Theme.secondary)
             Text(title).lagomFont(.base, .semibold).foregroundStyle(Theme.ink)
             if let detail {
                 Text(detail).lagomFont(.snippet).foregroundStyle(Theme.secondary)
@@ -179,8 +173,8 @@ struct EmptyState<Action: View>: View {
 }
 
 extension EmptyState where Action == EmptyView {
-    init(icon: String, title: String, detail: String? = nil, illustration: String? = nil) {
-        self.init(icon: icon, title: title, detail: detail, illustration: illustration) { EmptyView() }
+    init(icon: String, title: String, detail: String? = nil) {
+        self.init(icon: icon, title: title, detail: detail) { EmptyView() }
     }
 }
 

@@ -76,6 +76,12 @@ struct ReadKey {
     pin: Option<i64>,
 }
 
+impl ReadKey {
+    fn list(&self) -> (String, Option<String>, mail::View) {
+        (self.account.clone(), self.filter.clone(), self.view)
+    }
+}
+
 /// The body of a message whose text is still being read.
 pub(super) const LOADING: &str = "Loading message…";
 
@@ -344,9 +350,12 @@ impl MainWindow {
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
         self.reload_draft_rows(cx);
         self.reload_tasks(cx);
+        let list = self.read_key().map(|k| k.list());
         let Some(live) = &mut self.live else { return };
         live.stale = true;
         let Ok(accounts) = live.store.accounts() else {
+            // No read starts, so loading ends here.
+            self.inbox.landed = list;
             self.confirm_empty_trash = false;
             return;
         };
@@ -446,6 +455,8 @@ impl MainWindow {
             return;
         }
         live.shown = generation;
+        // A failed read ends loading too: the list stays as it was, with the error.
+        self.inbox.landed = Some(key.list());
         let again = generation != live.reads;
         match result {
             Ok(snap) => {
@@ -457,6 +468,9 @@ impl MainWindow {
                 self.inbox.apply(snap, &live.seen, chrono::Local::now());
                 let (want, jump) = (live.want.take(), live.jump.take_if(|(from, ..)| generation >= *from));
                 self.wake_at(due, cx);
+                // The snapshot can change the key itself (Trash learns its folder, a deleted folder
+                // falls back to Inbox); the list on screen is the one this read filled.
+                self.inbox.landed = self.read_key().map(|k| k.list());
                 self.settle_list(before);
                 if let Some((store, then)) = want {
                     if let (true, Some(Then(window, then))) = (self.select_found(store, cx), then) {
@@ -855,6 +869,8 @@ impl MainWindow {
         }
         let mut error = "Mail stopped working. Restart lagom; pending sends are saved in the outbox.".to_string();
         if let Err(rollback) = rollback { error.push_str(" The list may be wrong until lagom restarts."); eprintln!("lagom: {rollback:?}"); }
+        // A list still loading may wait on a read deferred behind the drained moves: run it now.
+        if self.list_loading() { self.reload(cx); }
         self.notify(error, cx);
     }
 
@@ -1183,6 +1199,12 @@ impl MainWindow {
         if let Some(live) = &self.live {
             let _ = live.bridge.send(Cmd::Sync(None));
         }
+    }
+
+    /// The list on screen has no landed read yet (startup, another account or folder), so its
+    /// rows are unknown rather than none.
+    pub(super) fn list_loading(&self) -> bool {
+        self.demo_loading || self.read_key().is_some_and(|k| self.inbox.landed.as_ref() != Some(&k.list()))
     }
 
     /// "Personal · synced 10:12" for the current account, `None` in demo mode.
@@ -1682,6 +1704,63 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(rows(cx), 3);
         view.read_with(cx, |v, _| assert_eq!(v.live.as_ref().unwrap().shown, v.live.as_ref().unwrap().reads));
+        INLINE_READS.set(true);
+    }
+
+    #[gpui::test]
+    fn loading_rows_stand_in_for_inbox_zero_until_the_first_read_lands(cx: &mut TestAppContext) {
+        INLINE_READS.set(false);
+        let (view, cx, _rx) = window(cx);
+        // GPUI keeps debug bounds from earlier frames, so only a first appearance is checked.
+        let drawn = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            (cx.debug_bounds("list-loading").is_some(), cx.debug_bounds("empty-inbox").is_some())
+        };
+        // Startup: the read runs in the background and nothing is known yet.
+        view.update(cx, |v, cx| { v.inbox = Inbox::live(); v.reload(cx); });
+        assert!(view.read_with(cx, |v, _| v.list_loading()));
+        assert_eq!(drawn(cx), (true, false), "loading, not inbox zero");
+        // A read with no rows: now the inbox really is at zero.
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.list_loading()));
+        assert!(drawn(cx).1);
+        // A failed read ends loading too, with the error.
+        view.update(cx, |v, cx| {
+            let key = v.read_key().unwrap();
+            let live = v.live.as_mut().unwrap();
+            v.inbox.landed = None;
+            live.reads += 1;
+            let generation = live.reads;
+            v.read_done(generation, key, vec![], Err(lagom_core::Error::Invalid("broken")), cx);
+        });
+        assert!(!view.read_with(cx, |v, _| v.list_loading()));
+        assert!(view.read_with(cx, |v, _| v.toast.is_some()), "the read error shows");
+        let loading = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.list_loading());
+        // Choosing the account again drops its rows, so it loads again.
+        view.update(cx, |v, cx| v.switch_account(0, cx));
+        assert!(loading(cx));
+        cx.run_until_parked();
+        assert!(!loading(cx));
+        // Trash opened before its folder is known: the read that finds it ends loading.
+        view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            live.store.save_folder(&live.account().unwrap().id, "Trash", Some("/"), lagom_core::store::FolderRole::Trash).unwrap();
+            v.inbox = Inbox::live();
+            v.open_box(v.inbox.find_kind(Kind::Trash), cx);
+        });
+        assert!(loading(cx));
+        cx.run_until_parked();
+        assert!(!loading(cx));
+        // A read waiting behind a move still runs when the worker stops.
+        view.update(cx, |v, cx| {
+            v.live.as_mut().unwrap().op(Op::Undo(0));
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            assert!(v.live.as_ref().unwrap().read.is_none());
+            v.worker_gone(cx);
+        });
+        cx.run_until_parked();
+        assert!(!loading(cx));
         INLINE_READS.set(true);
     }
 
