@@ -75,7 +75,12 @@ impl MainWindow {
             Ok(count) => {
                 self.today.unread = count;
                 #[cfg(not(test))]
-                crate::badge::set(count);
+                {
+                    crate::badge::set(count);
+                    // Without this, macOS asks only at the first new-mail notice, so a badge at start stays hidden.
+                    #[cfg(target_os = "macos")]
+                    if count > 0 { cx.global_mut::<crate::notifications::State>().service.request(); }
+                }
             }
             Err(e) => self.notify(format!("Could not read unread count: {e}"), cx),
         }
