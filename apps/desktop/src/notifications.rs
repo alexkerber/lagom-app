@@ -96,6 +96,7 @@ pub fn init(cx: &mut gpui::App, reopen: impl Fn(&mut gpui::App) -> anyhow::Resul
 pub struct Service {
     platform: platform::Service,
     requested: bool,
+    answered: bool,
     authorized: bool,
     pending: Vec<MessageSummary>,
 }
@@ -103,7 +104,7 @@ pub struct Service {
 impl Service {
     pub fn new() -> (Self, UnboundedReceiver<Event>) {
         let (tx, rx) = unbounded_channel();
-        (Self { platform: platform::Service::new(tx), requested: false, authorized: false, pending: Vec::new() }, rx)
+        (Self { platform: platform::Service::new(tx), requested: false, answered: false, authorized: false, pending: Vec::new() }, rx)
     }
 
     pub fn show(&mut self, messages: Vec<MessageSummary>) {
@@ -116,12 +117,17 @@ impl Service {
             for messages in accounts.values() {
                 if let Some(notice) = notice(messages) { self.platform.show(notice); }
             }
-        } else if !self.requested || !self.pending.is_empty() {
+        } else if !self.answered {
             self.pending.extend(messages);
-            if !self.requested {
-                self.requested = true;
-                self.platform.authorize();
-            }
+            self.request();
+        }
+    }
+
+    /// Asks once. The Dock badge also needs it: macOS hides the badge of an app without badge permission.
+    pub fn request(&mut self) {
+        if !self.requested {
+            self.requested = true;
+            self.platform.authorize();
         }
     }
 
@@ -133,6 +139,7 @@ impl Service {
 
     pub fn authorized(&mut self, allowed: bool) -> Vec<MessageSummary> {
         self.authorized = allowed;
+        self.answered = true;
         let pending = std::mem::take(&mut self.pending);
         if allowed { pending } else { Vec::new() }
     }
@@ -221,6 +228,18 @@ mod tests {
         assert!(events.try_recv().is_err());
         assert!(service.platform.notices.borrow().is_empty());
         assert!(service.pending.is_empty());
+    }
+
+    #[test]
+    fn mail_during_an_early_badge_request_waits_for_the_answer() {
+        let (mut service, mut events) = Service::new();
+        service.request();
+        assert!(matches!(events.try_recv(), Ok(Event::Authorized(true))));
+        service.show(vec![message(11)]);
+        assert!(events.try_recv().is_err(), "one prompt only");
+        let pending = service.authorized(true);
+        service.show(pending);
+        assert_eq!(service.platform.notices.borrow().len(), 1);
     }
 
     fn message(uid: u32) -> MessageSummary {

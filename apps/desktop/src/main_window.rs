@@ -312,6 +312,8 @@ pub struct MainWindow {
     under: Option<usize>,
     // Last pointer position while the left button is down on a row: a click, or a mouse swipe.
     drag: Option<Point<Pixels>>,
+    // The row a mouse drag picked up for a folder: it carries GPUI's drag from the next move on.
+    folder_drag: Option<usize>,
     // (message id, offset it springs back from, start) survives rows leaving the viewport.
     spring: Option<(usize, f32, Instant)>,
     // (move it was, move it is, seq) for the colour behind a swiped row. See `retint`.
@@ -385,6 +387,9 @@ pub struct MainWindow {
     expanded: HashMap<usize, Entity<conversation::MessageBody>>,
     // Messages open in their own windows: (message id, window).
     popouts: Vec<(usize, gpui::WindowHandle<MessageWindow>)>,
+    /// The mail on screen last frame: the selected one, expanded bodies and pop-outs. Others
+    /// drop their decoded HTML images.
+    rich_shown: Vec<usize>,
     _appearance: gpui::Subscription,
     _activation: gpui::Subscription,
     _bounds: gpui::Subscription,
@@ -455,6 +460,7 @@ impl MainWindow {
             swipe: Swipe::Idle,
             under: None,
             drag: None,
+            folder_drag: None,
             spring: None,
             tint: (None, None, 0),
             toast: None,
@@ -508,6 +514,7 @@ impl MainWindow {
             reading_members: Vec::new(),
             expanded: HashMap::new(),
             popouts: Vec::new(),
+            rich_shown: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             _bounds: cx.observe_window_bounds(window, |this, window, cx| {
@@ -1200,6 +1207,27 @@ impl MainWindow {
         self.drag = Some(e.position);
         let before = self.swipe;
         self.swipe.moved_with((e.position.x - last.x).into(), (e.position.y - last.y).into(), MOUSE_SLOP);
+        // A drag that locks vertical, or a swipe carried onto the sidebar, picks the message up for a folder.
+        // shortcut: GPUI starts its drag on the move after this one, so a release on the very move that
+        // crosses onto the sidebar lands nowhere; fine while the sidebar's padding sits before its folders.
+        let over_sidebar = !self.panes.sidebar_hidden && f32::from(e.position.x) < self.sidebar_w;
+        let picked = match (before, self.swipe) {
+            (Swipe::Undecided { id, .. }, Swipe::Scroll) => Some(id),
+            (_, Swipe::Row { id, dx }) if over_sidebar => {
+                self.swipe = Swipe::Scroll;
+                self.spring = Some((id, dx, Instant::now()));
+                Some(id)
+            }
+            _ => None,
+        };
+        if let Some(id) = picked.filter(|_| !self.panes.sidebar_hidden) {
+            self.folder_drag = Some(id);
+            // The drop moves the selection; an unselected row becomes it, as in Finder and Mail.
+            if !self.inbox.is_selected(id) {
+                if let Some(ix) = self.inbox.list().iter().position(|&i| i == id) { self.select(|inbox| inbox.select(ix), cx); }
+            }
+            cx.notify();
+        }
         tick_crossings(before, self.swipe);
         self.retint();
         if self.swipe != before {
@@ -1218,6 +1246,26 @@ impl MainWindow {
         }
     }
 
+    /// A picked-up message lands on folder `f`: the same move as the palette's, with its undo.
+    fn drop_on_folder(&mut self, f: usize, rows: &[usize], cx: &mut Context<Self>) {
+        // Esc cancelled the drag; GPUI still carries it until the button comes up.
+        if self.folder_drag.is_none() { return; }
+        // The drop stops the mouse up before the root sees it, so end the press here.
+        self.release(false, cx);
+        // The keys changed the selection mid-drag: the card no longer names what would move.
+        if self.inbox.selected_rows() != rows { return; }
+        let accounts: HashSet<_> = self.inbox.selected_members().into_iter().map(|id| self.inbox.mail[id].account.clone()).collect();
+        if accounts.len() > 1 {
+            return self.notify("Select messages from one account to move to a folder", cx);
+        }
+        // The sidebar lists the open account's folders.
+        let open = self.live.as_ref().and_then(|l| l.account()).map(|a| a.id.clone());
+        if open.is_some_and(|open| accounts.iter().any(|a| *a != open)) {
+            return self.notify("Choose a folder in the message's account", cx);
+        }
+        self.act(Move::Folder(f), cx);
+    }
+
     /// Starts a short cross-fade when the move a release would make changes.
     fn retint(&mut self) {
         let to = match self.swipe {
@@ -1234,6 +1282,7 @@ impl MainWindow {
     fn release(&mut self, act: bool, cx: &mut Context<Self>) {
         // Esc mid-drag ends the drag too; the later mouse up then does nothing.
         self.drag = None;
+        self.folder_drag = None;
         let Some((id, dx, what)) = self.swipe.end() else { return };
         self.retint();
         let ix = self.inbox.list().iter().position(|&i| i == id);
@@ -1769,6 +1818,7 @@ impl MainWindow {
         let rows = folders::tree(all, false);
         let shown = folders::shown(rows.len(), self.all_folders);
         let slot = || div().size(px(16.)).flex_shrink_0();
+        let sel = t.sel;
         let mut list = div().id("folder-rows").flex().flex_col().min_h(px(0.)).gap(px(2.))
             .overflow_y_scroll().track_scroll(&self.folder_scroll);
         for &(f, depth) in &rows[..shown] {
@@ -1789,6 +1839,9 @@ impl MainWindow {
                     .pl(px(10. + 22. * depth as f32))
                     .text_color(color)
                     .on_click(cx.listener(move |this, _, _, cx| this.open_box(Some(f), cx)))
+                    // The open folder is no target: a move there changes nothing.
+                    .when(!active, |d| d.drag_over::<DragMail>(move |s, _, _, _| s.bg(sel))
+                        .on_drop(cx.listener(move |this, drag: &DragMail, _, cx| this.drop_on_folder(f, &drag.rows, cx))))
                     .when(nested, |d| match chevron {
                         Some(c) => d.child(c),
                         None => d.child(slot()),
@@ -1958,7 +2011,13 @@ impl MainWindow {
                         this.select(|inbox| inbox.click(i, modifiers.shift, modifiers.secondary()), cx)
                     }
                 }))
-                .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)));
+                .on_scroll_wheel(cx.listener(move |this, _, _, _| this.under = Some(id)))
+                .when(self.folder_drag == Some(id), |d| {
+                    let rows = self.inbox.selected_rows();
+                    let subject = rows.first().map_or_else(|| self.inbox.mail[id].subject.clone(), |&r| self.inbox.mail[r].subject.clone());
+                    let drag = DragMail { subject: subject.into(), rows, theme: *t, offset: Point::default() };
+                    d.on_drag(drag, |drag, offset, _, cx| cx.new(|_| DragMail { offset, ..drag.clone() }))
+                });
             #[cfg(test)]
             let el = el.debug_selector(move || format!("row-{id}"));
             // Under the fingers the row follows dx; after a short swipe it springs back from it.
@@ -2217,7 +2276,7 @@ impl MainWindow {
                     .when(!trash, |d| d.child(
                         polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     ))
-                    .when(web && self.web.has_remote && !m.remote, |d| {
+                    .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.inbox.mail[id].remote = true;
                             cx.notify();
@@ -2237,6 +2296,21 @@ impl MainWindow {
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
             .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
+    }
+
+    /// Mail that left the screen drops its decoded images (up to 128 MiB each): checked only
+    /// when what is on screen changes.
+    fn forget_hidden_images(&mut self, cx: &App) {
+        // A closed pop-out shows nothing.
+        self.popouts.retain(|(_, h)| h.read(cx).is_ok());
+        let mut shown: Vec<usize> = self.inbox.single().into_iter().chain(self.expanded.keys().copied()).chain(self.popouts.iter().map(|(id, _)| *id)).collect();
+        shown.sort_unstable();
+        shown.dedup();
+        if shown == self.rich_shown { return; }
+        for (id, mail) in self.inbox.mail.iter().enumerate() {
+            if let Some(rich) = mail.rich.as_ref().filter(|_| shown.binary_search(&id).is_err()) { rich.forget(); }
+        }
+        self.rich_shown = shown;
     }
 
     /// One quiet line above the message body: "Unsubscribe from …", a confirm step, then the outcome.
@@ -2286,6 +2360,33 @@ pub(crate) fn icon_button(t: &Theme, id: &'static str, path: &'static str, tip: 
 }
 
 pub(crate) struct Tip(pub(crate) Theme, pub(crate) SharedString);
+
+/// What the pointer carries on the way to a folder: the subject, and a count for several.
+#[derive(Clone)]
+struct DragMail {
+    subject: SharedString,
+    // The selection when it was picked up. The drop moves it only if it is still the selection.
+    rows: Vec<usize>,
+    theme: Theme,
+    // Where the row was grabbed. GPUI places the view that far up and left of the pointer.
+    offset: Point<Pixels>,
+}
+
+impl Render for DragMail {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        div().pl(self.offset.x + px(12.)).pt(self.offset.y + px(8.)).child(
+            div().flex().items_center().gap(px(8.)).max_w(px(280.)).px(px(10.)).py(px(6.))
+                .rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).shadow_md()
+                .text_color(t.ink).text_size(px(size::SMALL)).font_family(font::ui())
+                .child(div().min_w(px(0.)).one_line().child(self.subject.clone()))
+                .when(self.rows.len() > 1, |d| d.child(
+                    div().flex_shrink_0().h(px(16.)).min_w(px(16.)).px(px(5.)).rounded_full()
+                        .flex().items_center().justify_center().bg(t.accent).text_color(t.accent_ink)
+                        .font_weight(FontWeight::SEMIBOLD).child(self.rows.len().to_string()))),
+        )
+    }
+}
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2402,7 +2503,10 @@ fn reading_view(
                 .when(text && loading, |d| d
                     .child(div().text_color(t.ink2).child(m.snippet.clone()))
                     .child(calm(div().text_size(px(size::SMALL)).text_color(t.ink2).child(live::LOADING), ("loading-message", id))))
-                .when(text && !loading, |d| d.children(m.body.iter().map(|p| div().child(p.clone()))))
+                .when(text && !loading, |d| match &m.rich {
+                    Some(rich) => d.children(rich.view(m, t)),
+                    None => d.children(m.body.iter().map(|p| div().child(p.clone()))),
+                })
                 .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
                     div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
             .children(attachment()))
@@ -2442,6 +2546,8 @@ impl Render for MainWindow {
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
         (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
         self.web_frame(window, cx);
+        self.forget_hidden_images(cx);
+        crate::rich::release(window, cx);
         // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
         let welcome = matches!(self.page, Page::AddAccount(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
         let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
@@ -3198,6 +3304,7 @@ impl Inbox {
                 fresh.body = std::mem::take(&mut self.mail[id].body);
                 fresh.text = self.mail[id].text.take();
                 fresh.html = self.mail[id].html.take();
+                fresh.rich = self.mail[id].rich.take();
                 fresh.inline = self.mail[id].inline.clone();
                 fresh.inline_referenced = self.mail[id].inline_referenced;
                 fresh.inline_pending = self.mail[id].inline_pending;
@@ -4291,6 +4398,75 @@ mod dispatch {
             let expected = row_y(v.inbox.list().len() - 1) + polish::GROUP_H + LIST_PAD - height;
             assert!((f32::from(v.scroll.max_offset().height) - expected).abs() < 1.);
         });
+    }
+
+    #[gpui::test]
+    fn drag_a_row_onto_a_folder_moves_it_and_undo_brings_it_back(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| { v.panes = Panes::new(1440.); cx.notify(); });
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        cx.run_until_parked();
+        frame(cx);
+        // A click without movement selects and picks nothing up.
+        let row = cx.debug_bounds("row-1").unwrap().center();
+        cx.simulate_click(row, Default::default());
+        assert!(view.read_with(cx, |v, cx| v.inbox.current() == Some(1) && v.folder_drag.is_none() && !cx.has_active_drag()));
+        let row = cx.debug_bounds("row-3").unwrap().center();
+        let folder = cx.debug_bounds("folder-2").unwrap().center();
+        cx.simulate_mouse_down(row, MouseButton::Left, Default::default());
+        // Down past the slop: the row is picked up and selected, and no swipe starts.
+        cx.simulate_mouse_move(row + gpui::point(px(0.), px(10.)), MouseButton::Left, Default::default());
+        assert!(view.read_with(cx, |v, _| v.folder_drag == Some(3) && v.inbox.current() == Some(3) && v.swipe.offset(3).is_none()));
+        frame(cx);
+        cx.simulate_mouse_move(folder, MouseButton::Left, Default::default());
+        assert!(cx.update(|_, cx| cx.has_active_drag()));
+        frame(cx);
+        cx.simulate_mouse_up(folder, MouseButton::Left, Default::default());
+        view.read_with(cx, |v, cx| {
+            assert!(!cx.has_active_drag() && v.folder_drag.is_none() && v.drag.is_none());
+            assert!(v.inbox.folders[2].items.contains(&3));
+            assert!(!v.inbox.list().contains(&3));
+            assert_eq!(v.inbox.open, None, "the drop moves the message without opening the folder");
+        });
+        cx.simulate_keystrokes("secondary-z");
+        view.read_with(cx, |v, _| {
+            assert!(!v.inbox.folders[2].items.contains(&3));
+            assert!(v.inbox.list().contains(&3));
+        });
+        // The keys move the selection mid-drag: the drop moves nothing.
+        let row = cx.debug_bounds("row-3").unwrap().center();
+        cx.simulate_mouse_down(row, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(row + gpui::point(px(0.), px(10.)), MouseButton::Left, Default::default());
+        frame(cx);
+        cx.simulate_mouse_move(folder, MouseButton::Left, Default::default());
+        cx.simulate_keystrokes("down");
+        frame(cx);
+        cx.simulate_mouse_up(folder, MouseButton::Left, Default::default());
+        assert!(view.read_with(cx, |v, _| v.inbox.folders[2].items == [12] && v.folder_drag.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_sideways_swipe_carried_onto_the_sidebar_becomes_a_folder_drag(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| { v.panes = Panes::new(1440.); cx.notify(); });
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        cx.run_until_parked();
+        frame(cx);
+        let row = cx.debug_bounds("row-3").unwrap().center();
+        cx.simulate_mouse_down(row, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(row - gpui::point(px(40.), px(0.)), MouseButton::Left, Default::default());
+        assert!(view.read_with(cx, |v, _| v.swipe.offset(3).is_some() && v.folder_drag.is_none()));
+        let folder = cx.debug_bounds("folder-2").unwrap();
+        // Just onto the sidebar, past its divider (which takes the pointer for itself).
+        let edge = gpui::point(px(view.read_with(cx, |v, _| v.sidebar_w) - 12.), row.y);
+        cx.simulate_mouse_move(edge, MouseButton::Left, Default::default());
+        // The row springs back instead of acting, and the message rides to the folder.
+        assert!(view.read_with(cx, |v, _| v.swipe.offset(3).is_none() && v.folder_drag == Some(3) && v.spring.is_some_and(|s| s.0 == 3)));
+        frame(cx);
+        cx.simulate_mouse_move(folder.center(), MouseButton::Left, Default::default());
+        frame(cx);
+        cx.simulate_mouse_up(folder.center(), MouseButton::Left, Default::default());
+        assert!(view.read_with(cx, |v, _| v.inbox.folders[2].items.contains(&3) && !v.inbox.list().contains(&3)));
     }
 
     #[gpui::test]

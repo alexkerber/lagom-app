@@ -1046,15 +1046,18 @@ impl MainWindow {
                                 let text: std::sync::Arc<str> = lagom_core::mime::readable_text(&m.body_text, Some(&html)).into_owned().into();
                                 let body = mail::paragraphs(&text);
                                 let inline_referenced = !lagom_core::inline::referenced_ids(&html).is_empty();
-                                (text, body, inline_referenced)
+                                // Linux has no web view: GPUI draws the HTML.
+                                let rich = cfg!(target_os = "linux").then(|| std::sync::Arc::new(crate::rich::Rich::new(&html)));
+                                (text, body, inline_referenced, rich)
                             });
                             cx.spawn(async move |this, cx| {
-                                let (ready, body, inline_referenced) = read.await;
+                                let (ready, body, inline_referenced, rich) = read.await;
                                 this.update(cx, |this, cx| {
                                     if !this.live.as_ref().is_some_and(|live| Rc::ptr_eq(&live.store, &source)) { return; }
                                     let Some(mail) = this.inbox.mail.get_mut(id).filter(|m| m.store == Some(store)
                                         && m.text.as_ref().is_some_and(|current| current.same_channel(&text))) else { return };
                                     mail.body = body;
+                                    mail.rich = rich;
                                     mail.inline_referenced = inline_referenced;
                                     send.send(Some(ready)).ok();
                                     if let Some(body) = this.expanded.get(&id) {
@@ -2100,7 +2103,11 @@ mod tests {
             v.open_message(selected, false, cx);
         });
         cx.run_until_parked();
-        view.read_with(cx, |v, _| assert_eq!(v.inbox.mail[v.inbox.single().unwrap()].body, ["Hello & welcome", "Read the news"]));
+        view.read_with(cx, |v, _| {
+            let mail = &v.inbox.mail[v.inbox.single().unwrap()];
+            assert_eq!(mail.body, ["Hello & welcome", "Read the news"]);
+            assert_eq!(mail.rich.is_some(), cfg!(target_os = "linux"), "GPUI draws the HTML only without a web view");
+        });
         cx.simulate_keystrokes("r");
         let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
         assert!(quote.ends_with("> Hello & welcome\n> \n> Read the news"), "{quote:?}");
@@ -6116,6 +6123,11 @@ mod tests {
             v.inbox.select_all();
             assert!(!v.prepare_move("move ", window, cx));
             assert!(v.palette.is_none());
+            // A drop onto a folder keeps the same rule.
+            v.folder_drag = v.inbox.list().first().copied();
+            v.drop_on_folder(0, &v.inbox.selected_rows(), cx);
+            assert!(v.toast.as_ref().is_some_and(|t| t.0.contains("one account")));
+            assert!(v.inbox.batches.is_empty());
             let row = v.inbox.list().iter().position(|&id| v.inbox.mail[id].store == Some(message)).unwrap();
             v.inbox.select(row);
             // The other account's list opens first; the palette opens once its read lands.

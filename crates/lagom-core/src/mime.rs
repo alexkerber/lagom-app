@@ -4,6 +4,7 @@ use crate::{
 };
 use html5ever::tokenizer::{states::RawKind, BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer};
 use html5ever::{local_name, LocalName};
+use std::sync::Arc;
 use mail_parser::{AddressList, MessageParser, PartKind};
 
 pub const MAX_MIME_BYTES: usize = 4 * 1024 * 1024;
@@ -39,12 +40,142 @@ const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{20
 /// unclosed formatting element in each later block, so a 20 KB mail can build millions of nodes
 /// at sync. Time and memory here are linear in the input.
 pub fn html_to_text(html: &str) -> String {
+    clean_lines(read(html, None).text.trim_end())
+}
+
+fn read(html: &str, marks: Option<Vec<Mark>>) -> TextState {
     let queue = BufferQueue::default();
     queue.push_back(html.into());
-    let tokenizer = Tokenizer::new(TextSink::default(), Default::default());
+    let tokenizer = Tokenizer::new(TextSink(TextState { marks, ..Default::default() }.into()), Default::default());
     let _ = tokenizer.feed(&queue);
     tokenizer.end();
-    clean_lines(tokenizer.sink.0.into_inner().text.trim_end())
+    tokenizer.sink.0.into_inner()
+}
+
+/// Text with one style: a native view draws mail HTML as paragraphs of these.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Run {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    /// The `href` of the link around it, as written. Shared: runs of one link point at one copy.
+    pub link: Option<Arc<str>>,
+}
+
+/// An `<img>`: its `src` as written, its `width` attribute in CSS pixels, and the link around it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub src: Arc<str>,
+    pub width: Option<f32>,
+    pub link: Option<Arc<str>>,
+}
+
+/// A paragraph, or images side by side with no text between them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    Text(Vec<Run>),
+    Images(Vec<Image>),
+}
+
+/// A link, emphasis or image in the text that `read` collects. It stands in the text as one
+/// private-use character, so a hidden element cuts its marks together with its text.
+enum Mark {
+    Link(Option<Arc<str>>),
+    Bold(bool),
+    /// Headings do not nest, and a heading's end tag closes any heading: on or off, no count.
+    Heading(bool),
+    Italic(bool),
+    Image(Arc<str>, Option<f32>),
+}
+
+/// Marks are U+F0000 and up, in Supplementary Private Use Area-A, which mail text never needs.
+const MARK: u32 = 0xF0000;
+const MARKS: usize = 0xFFFE;
+
+fn mark_index(c: char) -> Option<usize> {
+    (c as u32).checked_sub(MARK).map(|i| i as usize).filter(|&i| i < MARKS)
+}
+
+/// The visible part of mail HTML as blocks for a native view: the text of `html_to_text`, with
+/// bold, italic, links and images. Styles, scripts and hidden elements show nothing. At most
+/// 100 000 characters and 256 images, as GPUI lays out all text on screen.
+pub fn html_to_blocks(html: &str) -> Vec<Block> {
+    let state = read(html, Some(Vec::new()));
+    let marks = state.marks.unwrap_or_default();
+    let mut out = Blocks::default();
+    for paragraph in clean_lines(state.text.trim_end()).split("\n\n") {
+        for c in paragraph.chars() {
+            let Some(mark) = mark_index(c).and_then(|i| marks.get(i)) else { out.push(c); continue };
+            match mark {
+                Mark::Link(href) => out.link = href.clone(),
+                Mark::Bold(on) => out.bold = if *on { out.bold + 1 } else { out.bold.saturating_sub(1) },
+                Mark::Heading(on) => out.heading = *on,
+                Mark::Italic(on) => out.italic = if *on { out.italic + 1 } else { out.italic.saturating_sub(1) },
+                Mark::Image(src, width) => out.image(Image { src: src.clone(), width: *width, link: out.link.clone() }),
+            }
+            out.gap = true;
+        }
+        out.flush();
+        out.row = false;
+    }
+    out.blocks
+}
+
+#[derive(Default)]
+struct Blocks {
+    blocks: Vec<Block>,
+    runs: Vec<Run>,
+    /// Open `b`/`strong`/heading and `i`/`em` elements.
+    bold: usize,
+    italic: usize,
+    heading: bool,
+    link: Option<Arc<str>>,
+    /// The last block is an image row that the next image joins.
+    row: bool,
+    /// A mark came after the last character: white space on both sides of it collapses.
+    gap: bool,
+    chars: usize,
+    images: usize,
+}
+
+impl Blocks {
+    fn push(&mut self, c: char) {
+        if self.chars >= 100_000 { return; }
+        let last = self.runs.last().and_then(|r| r.text.chars().last());
+        if self.gap && c.is_whitespace() && last.is_none_or(char::is_whitespace) { return; }
+        self.gap = false;
+        self.chars += 1;
+        let (bold, italic) = (self.bold > 0 || self.heading, self.italic > 0);
+        match self.runs.last_mut() {
+            Some(run) if run.bold == bold && run.italic == italic && run.link == self.link => run.text.push(c),
+            _ => self.runs.push(Run { text: c.into(), bold, italic, link: self.link.clone() }),
+        }
+    }
+
+    fn image(&mut self, image: Image) {
+        self.flush();
+        if self.chars >= 100_000 || self.images >= 256 { return; }
+        self.images += 1;
+        match self.blocks.last_mut() {
+            Some(Block::Images(row)) if self.row => row.push(image),
+            _ => self.blocks.push(Block::Images(vec![image])),
+        }
+        self.row = true;
+    }
+
+    /// The paragraph so far, without white space at its ends.
+    fn flush(&mut self) {
+        let mut runs = std::mem::take(&mut self.runs);
+        let Some(first) = runs.iter().position(|r| !r.text.trim().is_empty()) else { return };
+        runs.drain(..first);
+        while runs.last().is_some_and(|r| r.text.trim().is_empty()) { runs.pop(); }
+        let Some(first) = runs.first_mut() else { return };
+        first.text = first.text.trim_start().into();
+        let last = runs.last_mut().unwrap();
+        last.text = last.text.trim_end().into();
+        self.blocks.push(Block::Text(runs));
+        self.row = false;
+    }
 }
 
 #[derive(Default)]
@@ -73,6 +204,8 @@ struct TextState {
     form: bool,
     /// Open `select` elements, at most one when well formed.
     selects: usize,
+    /// For `html_to_blocks`: what each mark character in `text` stands for.
+    marks: Option<Vec<Mark>>,
 }
 
 /// Elements tracked inside a hidden element. Deeper nesting keeps it hidden to the end of the mail.
@@ -248,6 +381,10 @@ impl TokenSink for TextSink {
         let mut state = self.0.borrow_mut();
         match token {
             Token::TagToken(tag) => return state.tag(tag),
+            // Mark characters from the mail, raw or as entities, would forge links and images.
+            Token::CharacterTokens(chars) if state.marks.is_some() && chars.chars().any(|c| mark_index(c).is_some()) => {
+                state.chars(&chars.chars().filter(|&c| mark_index(c).is_none()).collect::<String>())
+            }
             Token::CharacterTokens(chars) => state.chars(&chars),
             // Unclosed at the end: hidden to the end, as in a DOM.
             Token::EOFToken => state.unhide(),
@@ -416,10 +553,12 @@ impl TextState {
                 if start { self.pre += 1; } else { self.pre -= 1; }
                 if self.pre == 0 { self.close(name); }
             }
+            self.mark(&tag);
             return result;
         }
         if !start {
             self.p &= *name != local_name!("p");
+            self.mark(&tag);
             self.close(name);
             return result;
         }
@@ -441,7 +580,30 @@ impl TextState {
             self.skip_newline = true;
         }
         if void { self.close(name); }
+        self.mark(&tag);
         result
+    }
+
+    /// For `html_to_blocks`: a mark character for a link, emphasis or image tag.
+    fn mark(&mut self, tag: &Tag) {
+        let Some(marks) = self.marks.as_mut().filter(|m| m.len() < MARKS) else { return };
+        let start = tag.kind == TagKind::StartTag;
+        let attr = |name: &str| tag.attrs.iter().find(|a| &*a.name.local == name).map(|a| a.value.trim().to_string());
+        let mark = match &*tag.name {
+            // A new `<a>` closes the one before, with or without `href`.
+            // Longer links are no links: real ones fit, and each run would scan it.
+            "a" => Mark::Link(attr("href").filter(|href| start && href.len() <= 16 * 1024).map(Into::into)),
+            "b" | "strong" => Mark::Bold(start),
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Mark::Heading(start),
+            "i" | "em" => Mark::Italic(start),
+            "img" | "image" if start => match attr("src").filter(|s| !s.is_empty()) {
+                Some(src) => Mark::Image(src.into(), attr("width").and_then(|w| w.trim_end_matches("px").parse().ok()).filter(|w: &f32| w.is_finite() && *w >= 0.)),
+                None => return,
+            },
+            _ => return,
+        };
+        self.text.push(char::from_u32(MARK + marks.len() as u32).unwrap());
+        marks.push(mark);
     }
 
     fn chars(&mut self, chars: &str) {
@@ -742,6 +904,63 @@ pub(crate) fn parse_within(raw: &[u8], limit: usize) -> Result<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(text: &str, bold: bool, italic: bool, link: Option<&str>) -> Run {
+        Run { text: text.into(), bold, italic, link: link.map(Into::into) }
+    }
+
+    fn link(href: &str) -> Option<Arc<str>> {
+        Some(href.into())
+    }
+
+    #[test]
+    fn blocks_keep_links_emphasis_and_images() {
+        let html = r#"<style>p{color:red}</style><script>alert(1)</script><p>Hi <b>bold</b> and <em>soft</em>, <a href="https://x.example/a">read <i>this</i></a>.</p>
+            <table><tr><td><a href="https://shop.example"><img src="cid:logo@x" width="120px"></a></td><td><img src=https://t.example/p.gif width=1></td></tr></table>
+            <p>After<br>line</p>"#;
+        assert_eq!(html_to_blocks(html), vec![
+            Block::Text(vec![run("Hi ", false, false, None), run("bold", true, false, None), run(" and ", false, false, None), run("soft", false, true, None),
+                run(", ", false, false, None), run("read ", false, false, Some("https://x.example/a")), run("this", false, true, Some("https://x.example/a")), run(".", false, false, None)]),
+            Block::Images(vec![
+                Image { src: "cid:logo@x".into(), width: Some(120.), link: link("https://shop.example") },
+                Image { src: "https://t.example/p.gif".into(), width: Some(1.), link: None },
+            ]),
+            Block::Text(vec![run("After\nline", false, false, None)]),
+        ]);
+    }
+
+    #[test]
+    fn blocks_hide_what_text_hides() {
+        let html = r#"<div style="display:none"><a href="https://t.example">pre</a><img src="https://t.example/x.gif"></div><img hidden src="https://t.example/y.gif"><p>Kept <a href="https://ok.example">link</a> text</p>"#;
+        assert_eq!(html_to_blocks(html), vec![Block::Text(vec![run("Kept ", false, false, None), run("link", false, false, Some("https://ok.example")), run(" text", false, false, None)])]);
+        // Mark characters in the mail, raw or as entities, are dropped: no forged link or image,
+        // and no replay of a mark that a hidden element cut.
+        let forged = format!("<p>a{}b&#xF0000;c&#983041;</p>", char::from_u32(MARK).unwrap());
+        assert_eq!(html_to_blocks(&forged), vec![Block::Text(vec![run("abc", false, false, None)])]);
+        let replay = r#"<div hidden><img src="https://t.example/x.gif"></div><p>&#xF0000;Shown</p>"#;
+        assert_eq!(html_to_blocks(replay), vec![Block::Text(vec![run("Shown", false, false, None)])]);
+        // A heading start closes no other heading, and an omitted `</th>` leaves nothing bold.
+        assert_eq!(html_to_blocks("<h1>A<h2>B</h2><p>C<table><tr><th>D<td>E</table>"), vec![
+            Block::Text(vec![run("A\nB", true, false, None)]), Block::Text(vec![run("C\nD E", false, false, None)]),
+        ]);
+        // Links inside `pre` stay links and keep the spacing around them.
+        assert_eq!(html_to_blocks("<pre>x <a href=https://p.example>y</a>  z</pre>"),
+            vec![Block::Text(vec![run("x ", false, false, None), run("y", false, false, Some("https://p.example")), run("  z", false, false, None)])]);
+        // An unclosed `<b>` stays bold to the end, as in a browser; a stray `</b>` changes nothing.
+        assert_eq!(html_to_blocks("</b><p><b>x</p><p>y"), vec![Block::Text(vec![run("x", true, false, None)]), Block::Text(vec![run("y", true, false, None)])]);
+    }
+
+    #[test]
+    fn blocks_agree_with_text() {
+        let newsletter = include_str!("../tests/fixtures/newsletter.html");
+        let text: String = html_to_blocks(newsletter).iter().filter_map(|b| match b {
+            Block::Text(runs) => Some(runs.iter().map(|r| r.text.as_str()).collect::<String>()),
+            Block::Images(_) => None,
+        }).collect::<Vec<_>>().join("\n\n");
+        let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(words(&text), words(&html_to_text(newsletter)));
+    }
+
     #[test]
     fn multipart_reply_keeps_plain_text_and_quote_levels() {
         let plain = "My reply\n\n> Previous answer\n\nPlain-only detail";
@@ -909,6 +1128,9 @@ mod tests {
             let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
             assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?} for {} bytes", start.elapsed(), html.len());
             assert!(m.body_text.trim_start().starts_with(text), "{:?}", &m.body_text.trim_start()[..20.min(m.body_text.trim_start().len())]);
+            let start = std::time::Instant::now();
+            html_to_blocks(&html);
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "blocks: {:?} for {} bytes", start.elapsed(), html.len());
         }
     }
 
