@@ -63,6 +63,9 @@ pub struct Live {
     shown: u64,
     /// The list read in flight, at most one.
     read: Option<Task<()>>,
+    /// The list (account, filter, view) whose read landed last, or failed. Until the list on
+    /// screen has one, its rows are unknown: it shows loading rows, never "Nothing left.".
+    landed: Option<(String, Option<String>, mail::View)>,
 }
 
 /// What a list read asks for. A result for another key belongs to a list no longer on screen.
@@ -74,6 +77,12 @@ struct ReadKey {
     limit: u32,
     group: bool,
     pin: Option<i64>,
+}
+
+impl ReadKey {
+    fn list(&self) -> (String, Option<String>, mail::View) {
+        (self.account.clone(), self.filter.clone(), self.view)
+    }
 }
 
 /// The body of a message whose text is still being read.
@@ -208,6 +217,7 @@ impl Live {
             reads: 0,
             shown: 0,
             read: None,
+            landed: None,
         })
     }
 
@@ -344,9 +354,12 @@ impl MainWindow {
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
         self.reload_draft_rows(cx);
         self.reload_tasks(cx);
+        let list = self.read_key().map(|k| k.list());
         let Some(live) = &mut self.live else { return };
         live.stale = true;
         let Ok(accounts) = live.store.accounts() else {
+            // No read starts, so loading ends here.
+            live.landed = list;
             self.confirm_empty_trash = false;
             return;
         };
@@ -446,6 +459,8 @@ impl MainWindow {
             return;
         }
         live.shown = generation;
+        // A failed read ends loading too: the list stays as it was, with the error.
+        live.landed = Some(key.list());
         let again = generation != live.reads;
         match result {
             Ok(snap) => {
@@ -1185,6 +1200,12 @@ impl MainWindow {
         }
     }
 
+    /// The list on screen has no landed read yet (startup, another account or folder), so its
+    /// rows are unknown rather than none.
+    pub(super) fn list_loading(&self) -> bool {
+        self.demo_loading || self.live.as_ref().is_some_and(|l| self.read_key().is_some_and(|k| l.landed.as_ref() != Some(&k.list())))
+    }
+
     /// "Personal · synced 10:12" for the current account, `None` in demo mode.
     pub(super) fn sync_line(&self) -> Option<SharedString> {
         let live = self.live.as_ref()?;
@@ -1682,6 +1703,37 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(rows(cx), 3);
         view.read_with(cx, |v, _| assert_eq!(v.live.as_ref().unwrap().shown, v.live.as_ref().unwrap().reads));
+        INLINE_READS.set(true);
+    }
+
+    #[gpui::test]
+    fn loading_rows_stand_in_for_inbox_zero_until_the_first_read_lands(cx: &mut TestAppContext) {
+        INLINE_READS.set(false);
+        let (view, cx, _rx) = window(cx);
+        // GPUI keeps debug bounds from earlier frames, so only a first appearance is checked.
+        let drawn = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            (cx.debug_bounds("list-loading").is_some(), cx.debug_bounds("empty-inbox").is_some())
+        };
+        // Startup: the read runs in the background and nothing is known yet.
+        view.update(cx, |v, cx| { v.inbox = Inbox::live(); v.reload(cx); });
+        assert!(view.read_with(cx, |v, _| v.list_loading()));
+        assert_eq!(drawn(cx), (true, false), "loading, not inbox zero");
+        // A read with no rows: now the inbox really is at zero.
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.list_loading()));
+        assert!(drawn(cx).1);
+        // A failed read ends loading too, with the error.
+        view.update(cx, |v, cx| {
+            let key = v.read_key().unwrap();
+            let live = v.live.as_mut().unwrap();
+            live.landed = None;
+            live.reads += 1;
+            let generation = live.reads;
+            v.read_done(generation, key, vec![], Err(lagom_core::Error::Invalid("broken")), cx);
+        });
+        assert!(!view.read_with(cx, |v, _| v.list_loading()));
+        assert!(view.read_with(cx, |v, _| v.toast.is_some()), "the read error shows");
         INLINE_READS.set(true);
     }
 
@@ -4045,6 +4097,7 @@ mod tests {
             reads: 0,
             shown: 0,
             read: None,
+            landed: None,
         }
     }
 

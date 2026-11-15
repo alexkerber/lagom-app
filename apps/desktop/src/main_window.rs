@@ -306,6 +306,8 @@ pub struct MainWindow {
     entering: Vec<Ghost>,
     // The list the last store read drew. Only a read of that same list moves rows (`settle_list`).
     last_read: Option<(Option<usize>, Option<String>, bool, bool)>,
+    /// `LAGOM_SCREEN=loading`: the demo inbox stays in its first read, for screenshots.
+    demo_loading: bool,
     seq: usize,
     swipe: Swipe,
     // The row under the pointer for the current scroll event. Rows set it before the list reads it.
@@ -424,7 +426,7 @@ impl MainWindow {
         };
         let inbox = match &live {
             Some(_) => Inbox::live(),
-            None => Inbox::demo(if screen == "empty" { 0 } else { INBOX_LEN }),
+            None => Inbox::demo(if matches!(screen, "empty" | "loading") { 0 } else { INBOX_LEN }),
         };
         let viewport = f32::from(window.viewport_size().width);
         // Demo mode never resolves a store path or reads/writes preferences.
@@ -456,6 +458,7 @@ impl MainWindow {
             ghosts: Vec::new(),
             entering: Vec::new(),
             last_read: None,
+            demo_loading: demo && screen == "loading",
             seq: 0,
             swipe: Swipe::Idle,
             under: None,
@@ -1440,6 +1443,25 @@ fn calm(el: Div, id: impl Into<ElementId>) -> AnyElement {
     el.with_animation(id, Animation::new(2 * crate::motion::CALM), |el, d| el.opacity(crate::motion::calm(d))).into_any_element()
 }
 
+/// Placeholder rows while a list's first read runs, shaped like message rows and fading down
+/// the list. A slow pulse shows work; under reduced motion they stay still.
+fn loading_rows(t: &Theme) -> Div {
+    let bar = |w: f32, h: f32| div().w(gpui::relative(w)).h(px(h)).rounded(px(radius::KEY)).bg(t.line);
+    let rows = div().flex().flex_col().children([0.42, 0.3, 0.5, 0.36, 0.46].into_iter().enumerate().map(|(i, w)| {
+        // Lined up with a row's text: past the 7 px unread dot and its 6 px gap.
+        div().h(px(ROW_H)).flex_shrink_0().flex().flex_col().justify_center().gap(px(8.)).pl(px(23.)).pr(px(10.))
+            .opacity(1. - i as f32 * 0.18)
+            .child(bar(w, 10.)).child(bar(w + 0.3, 10.)).child(bar(0.9, 8.)).child(bar(0.62, 8.))
+    }));
+    let rows = match crate::motion::reduced() {
+        true => rows.into_any_element(),
+        false => rows.with_animation("list-pulse", Animation::new(Duration::from_millis(1600)).repeat(), |el, d| {
+            el.opacity(0.7 + 0.3 * (std::f32::consts::TAU * d).cos())
+        }).into_any_element(),
+    };
+    div().debug_selector(|| "list-loading".into()).child(rows)
+}
+
 /// Times, counts and other secondary labels: the system font with tabular figures, so digits
 /// line up and a changing count never shifts its neighbours.
 pub(crate) fn mono(text: impl Into<SharedString>, color: Rgba) -> Div {
@@ -2109,6 +2131,8 @@ impl MainWindow {
                 );
             }
         }
+        let loading = self.inbox.list().is_empty() && self.list_loading();
+        if loading { rows.push(calm(loading_rows(t), "list-loading")); }
 
         let filter = div()
             .flex().p(px(2.)).rounded(px(radius::CONTROL)).bg(t.subtle)
@@ -2130,6 +2154,9 @@ impl MainWindow {
         let left = self.inbox.shown_count();
         let subtitle = if self.confirm_empty_trash && self.inbox.open_kind() == Some(Kind::Trash) {
             "Delete all permanently?".to_string()
+        } else if loading {
+            // "0 left" would be a guess until the read lands.
+            self.sync_state().map_or_else(|| "Loading…".into(), String::from)
         } else {
             match self.sync_state() {
                 Some(sync) => format!("{left} left · {sync}"),
@@ -2238,6 +2265,8 @@ impl MainWindow {
         let t = &self.theme;
         if self.inbox.multi() { return self.selection_pane(cx); }
         let Some(id) = self.inbox.single() else {
+            // Nothing to say before the list is known.
+            if self.inbox.list().is_empty() && self.list_loading() { return div().flex_1(); }
             let more = self.has_more();
             return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
                 .child(icon("icons/inbox.svg", t.ink2, 32.))
@@ -2565,7 +2594,7 @@ impl Render for MainWindow {
             window.set_window_title(&title);
             self.title = title;
         }
-        let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && self.inbox.account_filter.is_none() && !self.inbox.unread_only;
+        let empty = matches!(self.page, Page::Mail) && self.inbox.list().is_empty() && self.inbox.open.is_none() && self.inbox.account_filter.is_none() && !self.inbox.unread_only && !self.list_loading();
         let reading = matches!(self.page, Page::Mail) && !empty && self.inbox.current().is_some();
         if matches!(self.page, Page::Settings(_)) { self.prepare_signatures(window, cx); }
         let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
