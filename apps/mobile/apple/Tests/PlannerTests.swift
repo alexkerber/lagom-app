@@ -41,8 +41,6 @@ final class PresentationTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: icons.appendingPathComponent(set).appendingPathComponent(name)),
                            try Data(contentsOf: desktop.appendingPathComponent(name)), name)
         }
-        XCTAssertEqual(try Data(contentsOf: apple.appendingPathComponent("Assets.xcassets/EmptyTray.imageset/empty-tray.svg")),
-                       try Data(contentsOf: apple.appendingPathComponent("../../desktop/assets/illustrations/empty-tray.svg")))
     }
 
     func testDateGroupsStopAtTheStartOfTheWeek() {

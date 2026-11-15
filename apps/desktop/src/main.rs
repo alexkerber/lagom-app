@@ -136,7 +136,6 @@ impl AssetSource for Assets {
             "app-icon.png" => include_bytes!("../../../brand/app-icon/export/lagom-512.png"),
             "icons/list-bullets.svg" => include_bytes!("../assets/icons/list-bullets.svg"),
             "icons/list-numbers.svg" => include_bytes!("../assets/icons/list-numbers.svg"),
-            "illustrations/empty-tray.svg" => include_bytes!("../assets/illustrations/empty-tray.svg"),
             "logos/google.svg" => include_bytes!("../assets/logos/google.svg"),
             "logos/microsoft.svg" => include_bytes!("../assets/logos/microsoft.svg"),
             _ => return Ok(None),

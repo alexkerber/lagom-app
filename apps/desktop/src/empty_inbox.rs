@@ -1,9 +1,9 @@
 //! Empty inbox, "Nothing left." Replaces the message list and reading pane when the inbox is at
-//! zero: one small illustration, one line, one quiet line under it, and the sync status.
+//! zero: the inbox icon, one line, one quiet line under it, and the sync status.
 
 use std::time::Duration;
 
-use gpui::{div, ease_out_quint, prelude::*, px, svg, Animation, AnimationExt, Div, FontWeight, SharedString};
+use gpui::{div, ease_out_quint, prelude::*, px, Animation, AnimationExt, Div, FontWeight, SharedString};
 
 use crate::main_window::{icon, mono};
 use crate::theme::{size, Theme};
@@ -15,11 +15,7 @@ pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
         .flex_col()
         .items_center()
         .text_center()
-        .child({
-            let mut tray = svg().path("illustrations/empty-tray.svg").w(px(120.)).text_color(t.ink2);
-            tray.style().aspect_ratio = Some(320. / 200.);
-            tray.mb(px(28.))
-        })
+        .child(div().mb(px(16.)).child(icon("icons/inbox.svg", t.ink2, 32.)))
         .child(div().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD).child("Nothing left."))
         .child(div().mt(px(6.)).text_color(t.ink2).child("Not too much. Not too little. Just right."))
         // Calm fade-in, no confetti (docs/motion.md). Plays once per element id. A fade only, so
