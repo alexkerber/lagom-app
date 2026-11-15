@@ -123,6 +123,14 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [x] iOS intro before the app (Alex 2026-11-15): no account shows Welcome, Choose account (Google, Microsoft, Other (IMAP) through the existing sign-in and form) and then Notifications once; removing the last account returns to it. Gate tests in `LaunchStageTests`; not run on a device or with VoiceOver. Android builds the same copy in parallel.
 - [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
 - [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, a hand test of each. HTML mail on Linux draws a safe subset (#138); a hand check on Linux is not done.
+- [x] Sidebar polish (Alex 2026-11-15): counts, chevrons and the new-folder button on one edge (#145); Folders with less indent, trailing chevrons and an uncut "N more" (#147); a closed cloud for the sync icons (#146); unread on Mail as a quiet number on every platform (#148).
+- [ ] Shared elements across desktop, iPad/tablet and phones (Alex 2026-11-15). Inventory done 2026-11-15. Steps:
+  - [ ] one token file for all three platforms — PR #149. Closes on merge.
+  - [ ] iOS icons generated from the desktop SVGs — PR #150. Closes on merge.
+  - [ ] shared copy and the sync-status text in lagom-core, so mobile gains the failed and re-auth states.
+  - [ ] iOS inbox zero, loading rows and toast as on desktop.
+  - [ ] All/Unread with labels and a raised search field on Android.
+  - [ ] a sidebar on Android tablets, as on iPad.
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
