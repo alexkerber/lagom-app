@@ -48,15 +48,13 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Date
 
-// Material's outlined icons for the page bar; the app has no icon library.
-private fun icon(name: String, path: String) = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
-    .addPath(addPathNodes(path), fill = SolidColor(Color.Black)).build()
-internal val SectionIcons = mapOf(
-    AppSection.TODAY to icon("Today", "M12 5.69l5 4.5V18h-2v-6H9v6H7v-7.81l5-4.5M12 3L2 12h3v8h6v-6h2v6h6v-8h3L12 3z"),
-    AppSection.MAIL to icon("Mail", "M22 6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6zm-2 0l-8 5-8-5h16zm0 12H4V8l8 5 8-5v10z"),
-    AppSection.CALENDAR to icon("Calendar", "M20 3h-1V1h-2v2H7V1H5v2H4c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 18H4V10h16v11zm0-13H4V5h16v3z"),
-    AppSection.TODO to icon("Todo", "M19 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.11 0 2-.9 2-2V5c0-1.1-.89-2-2-2zm0 16H5V5h14v14zM17.99 9l-1.41-1.42-6.59 6.59-2.58-2.57-1.42 1.41 4 3.99z"),
-)
+/** The desktop sidebar's page icon, as iOS `AppSection.icon`. */
+internal val AppSection.icon: Int get() = when (this) {
+    AppSection.TODAY -> R.drawable.ic_home
+    AppSection.MAIL -> R.drawable.ic_mail
+    AppSection.CALENDAR -> R.drawable.ic_calendar
+    AppSection.TODO -> R.drawable.ic_todo
+}
 
 /** The minute, kept current so the now line and past events move on their own. */
 @Composable private fun nowSeconds(): Long {
@@ -71,10 +69,8 @@ internal val SectionIcons = mapOf(
 
 /** A page title as on desktop and iOS: semibold, actions on the right. */
 @Composable private fun PageTitle(title: String, trailing: @Composable RowScope.() -> Unit = {}) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 4.dp, top = 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.weight(1f))
+    TopBar(Modifier.statusBarsPadding()) {
+        BarTitle(title, Modifier.weight(1f))
         trailing()
     }
 }
@@ -91,19 +87,11 @@ internal val SectionIcons = mapOf(
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         val ink = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.38f)
-        Text("+", Modifier.width(22.dp).clearAndSetSemantics {}, color = ink, textAlign = TextAlign.Center)
+        LagomIcon(R.drawable.ic_plus, Modifier.padding(horizontal = 2.dp), tint = ink)
         Text(title, color = ink)
     }
 }
 
-/** The desktop's empty pages: a quiet title and line in the middle. */
-@Composable private fun EmptyState(title: String, detail: String, modifier: Modifier = Modifier) {
-    Column(modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-        Text(detail, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
-    }
-}
 
 /** Pull to refresh for a planner page; the indicator shows only for the pull. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -178,7 +166,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 /** The current time in gold across the schedule. */
 @Composable private fun NowLine(now: Long) {
     val time = clock(now)
-    val gold = MaterialTheme.colorScheme.secondary
+    val gold = lagom.later
     Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).clearAndSetSemantics { contentDescription = "Now, $time" },
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(time, Modifier.widthIn(min = 52.dp), color = gold, style = MaterialTheme.typography.labelSmall)
@@ -225,12 +213,12 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
             onClick(if (todo.done) "Mark as not done" else "Mark as done") { toggle(); true }
         }, contentAlignment = Alignment.Center) {
             Box(Modifier.size(21.dp).border(1.dp, colors.onSurfaceVariant, CircleShape), contentAlignment = Alignment.Center) {
-                if (todo.done) Icon(CheckIcon, contentDescription = null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                if (todo.done) LagomIcon(R.drawable.ic_done, size = 14.dp)
             }
         }
         Text(todo.title, Modifier.weight(1f), color = if (todo.done) colors.onSurfaceVariant else colors.onSurface,
             textDecoration = if (todo.done) TextDecoration.LineThrough else null)
-        if (todo.fromMail) Icon(SectionIcons.getValue(AppSection.MAIL), contentDescription = "From mail", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+        if (todo.fromMail) LagomIcon(R.drawable.ic_linked_mail, size = 16.dp, label = "From mail")
         val due = if (todo.done) null else todo.due?.let(words::due)
         if (due != null) {
             val (label, overdue) = due
@@ -251,9 +239,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     Column(Modifier.fillMaxSize()) {
         PageTitle("Todo") {
             Box {
-                TextButton(onClick = { menu = true }, Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Add" }) {
-                    Text("+", style = MaterialTheme.typography.titleLarge)
-                }
+                LagomIconButton("Add", R.drawable.ic_plus) { menu = true }
                 DropdownMenu(menu, { menu = false }) {
                     DropdownMenuItem(text = { Text("New task") }, enabled = planner.lists.isNotEmpty(), onClick = { menu = false; adding = planner.defaultList })
                     DropdownMenuItem(text = { Text("New list") }, onClick = { menu = false; newList = true })
@@ -262,7 +248,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         }
         Refreshable(planner, { planner.reloadTodos() }, Modifier.weight(1f)) {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                if (planner.lists.isEmpty()) item(key = "empty") { EmptyState("No lists", "Add a list to start.", Modifier.fillParentMaxSize()) }
+                if (planner.lists.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_todo, "No lists", Modifier.fillParentMaxSize(), "Add a list to start.") }
                 planner.lists.forEach { list ->
                     val all = planner.todos[list.id].orEmpty()
                     val done = all.filter { it.done }
@@ -276,7 +262,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                                 showDone = if (open) showDone - list.id else showDone + list.id
                             }.semantics { stateDescription = if (open) "Expanded" else "Collapsed" }.padding(horizontal = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(if (open) "⌄" else "›", Modifier.clearAndSetSemantics {}, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                LagomIcon(if (open) R.drawable.ic_chevron else R.drawable.ic_chevron_right, size = 16.dp)
                                 Text("Completed (${done.size})", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
@@ -393,18 +379,16 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     val today = LocalDate.now()
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, top = 8.dp).semantics(mergeDescendants = true) { heading() },
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(localDate(today, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TopBar(Modifier.statusBarsPadding().semantics(mergeDescendants = true) { heading() }) {
+            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge)
+            Text(localDate(today, "yyyy"), Modifier.padding(start = 2.dp), style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Normal),
+                color = lagom.ink2)
         }
         Refreshable(planner, { planner.reloadAgenda() }, Modifier.weight(1f)) {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                 if (planner.agenda.isEmpty()) item(key = "empty") {
-                    if (planner.calendarConnected) EmptyState("Nothing scheduled", "No events in the next two weeks.", Modifier.fillParentMaxSize())
-                    else EmptyState("Calendar needs a Google account",
-                        "lagom shows your Google Calendar here. Google Calendar sync is coming to Android; mail accounts with a password have no calendar.",
-                        Modifier.fillParentMaxSize())
+                    if (planner.calendarConnected) EmptyState(R.drawable.ic_calendar, "Nothing scheduled", Modifier.fillParentMaxSize(), "No events in the next two weeks.")
+                    else EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillParentMaxSize(), CalendarNeedsGoogle)
                 }
                 // Core lists events by day, so grouping keeps the days in order.
                 planner.agenda.groupBy { it.day }.forEach { (day, events) ->
@@ -431,6 +415,9 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     }
 }
 
+private const val CalendarNeedsGoogle =
+    "lagom shows your Google Calendar here. Google Calendar sync is coming to Android; mail accounts with a password have no calendar."
+
 private val HourHeight = 60.dp
 private val Gutter = 48.dp
 
@@ -442,9 +429,7 @@ private val Gutter = 48.dp
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         WeekHeader(planner)
         if (!planner.calendarConnected && planner.week.isEmpty()) {
-            EmptyState("Calendar needs a Google account",
-                "lagom shows your Google Calendar here. Google Calendar sync is coming to Android; mail accounts with a password have no calendar.",
-                Modifier.fillMaxSize())
+            EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(), CalendarNeedsGoogle)
         } else {
             Row(Modifier.padding(top = 8.dp)) {
                 Spacer(Modifier.width(Gutter))
@@ -478,11 +463,9 @@ private val Gutter = 48.dp
             Text(localDate(thursday, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.weight(1f))
-        TextButton(onClick = { planner.perform { planner.showWeek(-1) } },
-            Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Previous week" }) { Text("‹", style = MaterialTheme.typography.titleLarge) }
-        OutlinedButton(onClick = { planner.perform { planner.showWeek(0) } }, Modifier.heightIn(min = 48.dp)) { Text("Today") }
-        TextButton(onClick = { planner.perform { planner.showWeek(1) } },
-            Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Next week" }) { Text("›", style = MaterialTheme.typography.titleLarge) }
+        LagomIconButton("Previous week", R.drawable.ic_chevron_left) { planner.perform { planner.showWeek(-1) } }
+        HouseButton("Today") { planner.perform { planner.showWeek(0) } }
+        LagomIconButton("Next week", R.drawable.ic_chevron_right) { planner.perform { planner.showWeek(1) } }
     }
 }
 
@@ -594,7 +577,7 @@ private val Gutter = 48.dp
     val time = Instant.ofEpochSecond(now).atZone(ZoneId.systemDefault())
     val today = days.indexOf(time.toLocalDate())
     if (today < 0) return
-    val gold = MaterialTheme.colorScheme.secondary
+    val gold = lagom.later
     val label = clock(now)
     val y = HourHeight * (time.hour + time.minute / 60f)
     BoxWithConstraints(modifier.clearAndSetSemantics { contentDescription = "Now, $label" }) {
@@ -602,6 +585,6 @@ private val Gutter = 48.dp
         Box(Modifier.offset(x = Gutter, y = y).width(maxWidth - Gutter).height(1.5.dp).background(gold))
         Box(Modifier.offset(x = Gutter + column * today - 3.5.dp, y = y - 2.75.dp).size(7.dp).background(gold, CircleShape))
         Text(label, Modifier.offset(y = y - 9.dp).width(Gutter - 4.dp).background(gold, RoundedCornerShape(4.dp)),
-            color = MaterialTheme.colorScheme.onSecondary, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, maxLines = 1)
+            color = lagom.accentInk, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, maxLines = 1)
     }
 }

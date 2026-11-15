@@ -112,6 +112,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [ ] folders and Move to folder with Undo, Android list mark read/unread, Empty Trash and account name on iOS and Android — PR `mobile/parity-round-2` (2026-11-14). Closes on merge.
   - [ ] Android Today, Todo and the phone Calendar list with the page bar — PR `android/planner` (2026-11-14). Closes on merge.
   - [ ] next gaps from the table: Android tablet Calendar week grid; create a folder on mobile — PR `mobile/parity-round-3` (2026-11-14). Closes on merge.
+  - [ ] Android in lagom's look: desktop colour tokens and line icons, one accent, a fixed top bar, onboarding (Welcome, account, notifications), skeleton rows and inbox zero, debug-only demo mode — PR `android/lagom-theme` (2026-11-15). Closes on merge.
 - [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).
