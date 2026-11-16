@@ -131,7 +131,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [ ] iOS inbox zero, loading rows and toast as on desktop.
   - [x] All/Unread with labels and a raised search field on Android (#152).
   - [ ] the system tab bar on phones with lagom's icons and a quiet count (Alex 2026-11-16: "ja till flikraden") — PR `core/shared-copy`. Closes on merge. Android not checked on a device.
-  - [ ] a sidebar on Android tablets, as on iPad.
+  - [ ] a sidebar on Android tablets, as on iPad, from 840 dp — PR `android/tablet-sidebar`. Closes on merge. Not seen on a device.
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.

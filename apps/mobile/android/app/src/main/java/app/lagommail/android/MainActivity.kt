@@ -263,7 +263,9 @@ class MainActivity : ComponentActivity() {
                             if (launch.demo == null) answerNotifications(allow)
                             notificationsAnswered = true
                         }
-                        Stage.HOME -> LagomHome(model, planner, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact)
+                        Stage.HOME -> LagomHome(model, planner, size.widthSizeClass != WindowWidthSizeClass.Compact && size.heightSizeClass != WindowHeightSizeClass.Compact,
+                            // Below 840 dp the sidebar would leave the reading pane too narrow; the bar stays.
+                            sidebar = size.widthSizeClass == WindowWidthSizeClass.Expanded && size.heightSizeClass != WindowHeightSizeClass.Compact)
                     }
                 }
                 ErrorDialogs(model, planner)
@@ -273,7 +275,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /** The phone page bar or tablet sidebar. The last page comes back at the next start. */
-@Composable internal fun LagomHome(model: MailModel, planner: PlannerModel, twoPane: Boolean) {
+@Composable internal fun LagomHome(model: MailModel, planner: PlannerModel, twoPane: Boolean, sidebar: Boolean = false) {
     val settings = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
     // A share or notification that landed during loading or onboarding opens on Mail, where it lives.
     var section by remember { mutableStateOf(if (model.draft != null || model.accountForm != null || model.selectedId != null) AppSection.MAIL
@@ -310,12 +312,12 @@ class MainActivity : ComponentActivity() {
     }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
-    Scaffold(containerColor = if (twoPane) lagom.sidebar else lagom.bg,
-        bottomBar = { if (!twoPane && bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
+    Scaffold(containerColor = if (sidebar) lagom.sidebar else lagom.bg,
+        bottomBar = { if (!sidebar && bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
         Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            if (twoPane) LagomSidebar(model, section, planner.unreadCount, enabled = !mailOpen, choose = ::choose)
+            if (sidebar) LagomSidebar(model, section, planner.unreadCount, enabled = !mailOpen, choose = ::choose)
             val panel = RoundedCornerShape(Radius.panel)
-            Box(Modifier.weight(1f).fillMaxHeight().then(if (twoPane)
+            Box(Modifier.weight(1f).fillMaxHeight().then(if (sidebar)
                 Modifier.padding(top = 8.dp, bottom = 8.dp, end = 8.dp).clip(panel).background(lagom.bg).border(1.dp, lagom.line, panel)
                 else Modifier)) {
                 when (section) {
