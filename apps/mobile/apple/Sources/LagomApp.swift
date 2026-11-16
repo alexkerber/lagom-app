@@ -275,7 +275,7 @@ struct MailView: View {
                 .foregroundStyle(Theme.ink)
                 HStack(spacing: 6) {
                     // Synced is the quiet default: the cloud shows only while it syncs or fails.
-                    if status.icon != "cloud-synced" { Icon(status.icon, size: 16) }
+                    if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
                     Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(1)
                         .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
