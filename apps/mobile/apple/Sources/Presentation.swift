@@ -205,3 +205,16 @@ func weekBlocks(_ events: [AgendaItem], day: Date, calendar: Calendar = .current
     for j in group..<blocks.count { blocks[j].lanes = lanes.count }
     return blocks
 }
+
+/// How far a mail row is dragged picks the move, as on desktop: right past `reach` is Done; left past `reach`
+/// is Later, and past 60 % of the row it is Delete where Delete is allowed. Short of `reach` nothing happens.
+enum SwipeStage: Equatable {
+    case done, later, delete
+
+    init?(dx: Double, width: Double, reach: Double = 120, canDelete: Bool) {
+        if dx >= reach { self = .done }
+        else if canDelete && dx <= -width * 0.6 { self = .delete }
+        else if dx <= -reach { self = .later }
+        else { return nil }
+    }
+}

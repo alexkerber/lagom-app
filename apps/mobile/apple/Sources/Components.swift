@@ -360,3 +360,93 @@ extension SidebarRow where Leading == AnyView {
         }, action: action)
     }
 }
+
+/// The desktop swipe on a mail row: the row follows the finger, the colour behind it shows the move a release
+/// makes (`SwipeStage`), a light tick marks each stage, and a release short of a stage springs back.
+struct StageSwipe: ViewModifier {
+    let canDelete: Bool
+    let enabled: Bool
+    let act: (SwipeStage) -> Void
+    @State private var dx: CGFloat = 0
+    @State private var width: CGFloat = 1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        let stage = SwipeStage(dx: dx, width: width, canDelete: canDelete)
+        content
+            // Opaque, so the colour behind never shows through the text.
+            .background(Theme.background)
+            .offset(x: dx)
+            .background { backdrop(stage) }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max($0, 1) }
+            .gesture(HorizontalPan(enabled: enabled, changed: { dx = $0 }, ended: release))
+            .sensoryFeedback(.impact(weight: .light), trigger: stage) { _, new in new != nil }
+    }
+
+    private func release(_ x: CGFloat) {
+        guard let stage = SwipeStage(dx: x, width: width, canDelete: canDelete) else {
+            withAnimation(Motion.move(reduceMotion)) { dx = 0 }
+            return
+        }
+        // The row leaves the way it was going; the list drops it, and a refusal brings it back with the reload.
+        withAnimation(Motion.move(reduceMotion)) { dx = x > 0 ? width : -width } completion: {
+            act(stage)
+            dx = 0
+        }
+    }
+
+    private func backdrop(_ stage: SwipeStage?) -> some View {
+        let right = dx > 0
+        let shown = stage ?? (right ? .done : .later)
+        let (fill, icon, title): (Color, String, String) = switch shown {
+        case .done: (Theme.done, "done", "Done")
+        case .later: (Theme.later, "later", "Later")
+        case .delete: (Theme.danger, "trash", "Delete")
+        }
+        return HStack(spacing: 8) {
+            Icon(icon, size: 20)
+            Text(title).lagomFont(.base, .medium)
+        }
+        .foregroundStyle(stage == nil ? Theme.secondary : Theme.accentInk)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: right ? .leading : .trailing)
+        .background(stage == nil ? Theme.subtle : fill)
+        .animation(.easeOut(duration: 0.1), value: stage)
+        .opacity(dx == 0 ? 0 : 1)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A pan that starts only when the finger moves more sideways than up or down, so the list still scrolls.
+private struct HorizontalPan: UIGestureRecognizerRepresentable {
+    let enabled: Bool
+    let changed: (CGFloat) -> Void
+    let ended: (CGFloat) -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func updateUIGestureRecognizer(_ pan: UIPanGestureRecognizer, context: Context) { pan.isEnabled = enabled }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
+        let x = pan.translation(in: pan.view).x
+        switch pan.state {
+        case .changed: changed(x)
+        case .ended, .cancelled, .failed: ended(pan.state == .ended ? x : 0)
+        default: break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let pan = gesture as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: pan.view)
+            return abs(velocity.x) > abs(velocity.y)
+        }
+    }
+}
