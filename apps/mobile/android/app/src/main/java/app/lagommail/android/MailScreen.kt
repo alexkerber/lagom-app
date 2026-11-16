@@ -13,9 +13,13 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
@@ -36,19 +40,22 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import app.lagommail.core.*
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
-import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable internal fun MailScreen(model: MailModel, twoPane: Boolean) {
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
@@ -373,7 +380,14 @@ private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+internal fun swipeStage(dx: Float, rowWidth: Float, reach: Float, canDelete: Boolean): MailAction? = when {
+    dx >= reach -> MailAction.Done
+    dx < 0f && canDelete && -dx >= rowWidth * 3f / 5f -> MailAction.Delete
+    dx <= -reach -> MailAction.Later
+    else -> null
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, mark: Color?, onSelect: () -> Unit,
     onAction: (MailAction) -> Unit, onRead: () -> Unit, onMove: (MailFolder) -> Unit, onNewFolder: () -> Unit) {
     // A long press opens what iOS's context menu has: Mark read or unread, and Move to.
@@ -384,42 +398,98 @@ private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
     val currentBusy by rememberUpdatedState(busy)
     // motion.md: a release past 120 dp acts; short of it the row springs back.
     val reach = with(LocalDensity.current) { 120.dp.toPx() }
-    val state = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
-        if (!currentBusy && value == SwipeToDismissBoxValue.StartToEnd) currentAction(MailAction.Done)
-        value == SwipeToDismissBoxValue.Settled || !currentBusy
-    }, positionalThreshold = { reach })
+    val offset = remember { Animatable(0f) }
+    var width by remember { mutableFloatStateOf(0f) }
+    var settling by remember { mutableStateOf(false) }
+    var submitted by remember { mutableStateOf(false) }
+    var released by remember { mutableStateOf<MailAction?>(null) }
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
-    // Colour and haptics use the release line, so what the row shows is what letting go does.
-    val past by remember(state, reach) { derivedStateOf { abs(runCatching { state.requireOffset() }.getOrDefault(0f)) >= reach } }
-    LaunchedEffect(past) { if (past) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate) }
-    // The row stays out while Done runs and leaves with the list; if Done failed, it comes back. Check the offset, not
-    // currentValue: once Done starts, busy vetoes the settle, so the row can rest at the edge while still "Settled".
-    LaunchedEffect(busy) { if (!busy && state.dismissDirection == SwipeToDismissBoxValue.StartToEnd) state.reset() }
-    val revealed = state.currentValue == SwipeToDismissBoxValue.EndToStart
-    val view = RowPresentation(row)
-    SwipeToDismissBox(state = state, gesturesEnabled = !busy, backgroundContent = {
-        val c = lagom
-        // `swipe_done` once the release would act; the subtle fill short of it.
-        val fill by animateColorAsState(if (past) c.done else c.subtle, tween(100, easing = EaseOut), label = "swipe fill")
-        val ink by animateColorAsState(if (past) c.accentInk else c.ink2, tween(100, easing = EaseOut), label = "swipe ink")
-        if (state.dismissDirection == SwipeToDismissBoxValue.StartToEnd) Row(Modifier.fillMaxSize().background(fill).padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            LagomIcon(R.drawable.ic_done, tint = ink, size = 20.dp)
-            Text("Done", color = ink, style = MaterialTheme.typography.labelLarge)
-        } else Row(Modifier.fillMaxSize().background(c.subtle).padding(end = 8.dp)
-            .then(if (revealed) Modifier else Modifier.clearAndSetSemantics {}),
-            horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            LagomIconButton("Later", R.drawable.ic_later, enabled = !busy, tint = c.later) { scope.launch { state.reset(); currentAction(MailAction.Later) } }
-            if (canDelete) LagomIconButton("Delete", R.drawable.ic_trash, enabled = !busy, tint = c.danger) {
-                scope.launch { state.reset(); currentAction(MailAction.Delete) }
+    val stage = released ?: swipeStage(offset.value, width, reach, canDelete)
+    val direction = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1 else 1
+    // A surviving row returns after the action finishes, including a failure before busy was drawn.
+    LaunchedEffect(busy, submitted) {
+        if (submitted && !busy) {
+            withFrameNanos { }
+            if (!currentBusy) {
+                offset.animateTo(0f, landing())
+                submitted = false
+                released = null
+                settling = false
             }
-            LagomIconButton("Cancel", R.drawable.ic_close) { scope.launch { state.reset() } }
         }
-    }) {
-        Box {
+    }
+    val view = RowPresentation(row)
+    Box(Modifier.clipToBounds().onSizeChanged { width = it.width.toFloat() }
+        .pointerInput(busy, canDelete, reach) {
+            if (busy) return@pointerInput
+            var dx = 0f
+            detectHorizontalDragGestures(
+                onDragStart = { dx = offset.value },
+                onHorizontalDrag = { change, amount ->
+                    if (!currentBusy && !settling) {
+                        change.consume()
+                        val before = swipeStage(dx, width, reach, canDelete)
+                        dx = (dx + amount).coerceIn(-width, width)
+                        val after = swipeStage(dx, width, reach, canDelete)
+                        if (after != null && after != before) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                        scope.launch(start = CoroutineStart.UNDISPATCHED) { offset.snapTo(dx) }
+                    }
+                },
+                onDragCancel = {
+                    if (!settling) scope.launch { offset.animateTo(0f, landing()) }
+                },
+                onDragEnd = {
+                    if (!settling) {
+                        settling = true
+                        val action = if (currentBusy) null else swipeStage(dx, width, reach, canDelete)
+                        released = action
+                        scope.launch {
+                            if (action != null) {
+                                offset.animateTo(if (dx > 0f) width else -width, tween(150, easing = EaseOut))
+                                if (!currentBusy) {
+                                    currentAction(action)
+                                    submitted = true
+                                    return@launch
+                                }
+                            }
+                            offset.animateTo(0f, landing())
+                            released = null
+                            settling = false
+                        }
+                    }
+                },
+            )
+        }) {
+        val c = lagom
+        val fill by animateColorAsState(when (stage) {
+            MailAction.Done -> c.done
+            MailAction.Later -> c.later
+            MailAction.Delete -> c.danger
+            null -> c.subtle
+        }, tween(100, easing = EaseOut), label = "swipe fill")
+        val ink by animateColorAsState(if (stage != null) c.accentInk else c.ink2, tween(100, easing = EaseOut), label = "swipe ink")
+        val shown = stage ?: if (offset.value >= 0f) MailAction.Done else MailAction.Later
+        Row(Modifier.matchParentSize().background(fill).padding(horizontal = 20.dp).clearAndSetSemantics {},
+            horizontalArrangement = if (offset.value >= 0f) Arrangement.Absolute.Left else Arrangement.Absolute.Right,
+            verticalAlignment = Alignment.CenterVertically) {
+            LagomIcon(when (shown) {
+                MailAction.Done -> R.drawable.ic_done
+                MailAction.Later -> R.drawable.ic_later
+                MailAction.Delete -> R.drawable.ic_trash
+            }, tint = ink, size = 20.dp)
+            if (stage != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(when (shown) {
+                    MailAction.Done -> "Done"
+                    MailAction.Later -> "Later"
+                    MailAction.Delete -> "Delete"
+                }, color = ink, style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        Box(Modifier.offset { IntOffset((offset.value * direction).roundToInt(), 0) }) {
         Column(Modifier.combinedClickable(onLongClickLabel = "More actions", onLongClick = { if (!busy) menu = true }, onClick = onSelect)
-            .then(if (revealed) Modifier.clearAndSetSemantics {} else Modifier.semantics {
+            .semantics {
             stateDescription = if (row.unread) "Unread" else "Read"
             customActions = listOf(CustomAccessibilityAction("Done") { if (!busy) onAction(MailAction.Done); !busy },
                 CustomAccessibilityAction("Later") { if (!busy) onAction(MailAction.Later); !busy }) +
@@ -427,7 +497,7 @@ private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
                 CustomAccessibilityAction(readLabel) { if (!busy) onRead(); !busy } +
                 targets.map { folder -> CustomAccessibilityAction("Move to ${folder.path}") { if (!busy) onMove(folder); !busy } } +
                 CustomAccessibilityAction("Move to a new folder") { if (!busy) onNewFolder(); !busy }
-        }).fillMaxWidth().heightIn(min = RowHeight).background(lagom.bg).padding(start = 10.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)) {
+        }.fillMaxWidth().heightIn(min = RowHeight).background(lagom.bg).padding(start = 10.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)) {
             // The desktop list row: unread dot, account bar, sender and time; subject and a two-line snippet under them.
             val c = lagom
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
