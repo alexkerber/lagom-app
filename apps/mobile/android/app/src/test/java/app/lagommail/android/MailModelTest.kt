@@ -28,10 +28,10 @@ class MailModelTest {
     @Test fun syncStatusTracksFailureAndSuccessfulCompletionTime() = runTest(dispatcher) {
         val core = FakeCore()
         val model = model(core, now = { 1_700_000_000_000 })
-        assertEquals(SyncState.NotSynced, model.syncState)
+        assertEquals(SyncState.Syncing, model.syncState)
         model.start()
         assertEquals(core.mailCounts(), model.counts)
-        assertEquals(SyncState.NotSynced, model.syncState)
+        assertEquals(SyncState.Syncing, model.syncState)
         model.sync()
         assertEquals(SyncState.Synced(1_700_000_000), model.syncState)
         core.rejectSync = true

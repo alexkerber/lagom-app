@@ -5,7 +5,7 @@ final class MailModelTests: XCTestCase {
         let model = MailModel()
         let core = ComposeFixtureCore(noHandle: .init())
         model.core = core
-        XCTAssertEqual(model.syncState, .notSynced)
+        XCTAssertEqual(model.syncState, .syncing)
         core.rejectSync = true
         await model.sync()
         XCTAssertEqual(model.syncState, .failed)

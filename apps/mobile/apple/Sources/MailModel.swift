@@ -265,7 +265,8 @@ final class MailModel {
     @ObservationIgnored private var draftWrite: Task<Void, Error>?
     var preparingCompose = false
     var syncing = false
-    private(set) var syncState: SyncState = .notSynced
+    // Like the desktop: unknown until the first sync ends.
+    private(set) var syncState: SyncState = Storage.demo ? .synced(at: Int64(Date().timeIntervalSince1970)) : .syncing
     private var actingID: Int64?
     private var readingIDs: Set<Int64> = []
     private(set) var creatingFolder = false

@@ -122,11 +122,10 @@ internal fun Mailbox.label(): String = when (this) {
                         LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        LagomIcon(when (status.icon) {
-                            "cloud-synced" -> R.drawable.ic_cloud_synced
-                            "cloud-failed" -> R.drawable.ic_cloud_failed
-                            else -> R.drawable.ic_cloud_syncing
-                        }, size = 14.dp)
+                        // Synced is the quiet default: the cloud shows only while it syncs or fails.
+                        if (status.icon != "cloud-synced") {
+                            LagomIcon(if (status.icon == "cloud-failed") R.drawable.ic_cloud_failed else R.drawable.ic_cloud_syncing, size = 14.dp)
+                        }
                         Text(status.text, color = lagom.ink2, style = MaterialTheme.typography.bodySmall, maxLines = 1,
                             overflow = TextOverflow.Ellipsis)
                     }

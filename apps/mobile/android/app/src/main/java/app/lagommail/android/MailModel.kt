@@ -144,7 +144,8 @@ internal class MailModel(
     fun loadRemoteImages(id: Long) { if (messages.any { it.row.id == id }) remoteImagesIds += id }
     var hasMore by mutableStateOf(false); private set
     var syncing by mutableStateOf(false); private set
-    var syncState by mutableStateOf<SyncState>(SyncState.NotSynced); private set
+    // Like the desktop: unknown until the first sync ends.
+    var syncState by mutableStateOf<SyncState>(if (demo) SyncState.Synced(now() / 1000) else SyncState.Syncing); private set
     var counts by mutableStateOf<List<MailCounts>>(emptyList()); private set
     /** True once a sync has ended, well or not; until then an empty list is not yet known to be empty. */
     var synced by mutableStateOf(demo); private set
