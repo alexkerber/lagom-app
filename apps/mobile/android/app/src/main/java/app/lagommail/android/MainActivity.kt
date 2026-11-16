@@ -21,6 +21,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.selection.selectable
@@ -271,7 +272,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Today, Mail, Calendar and Todo with the page bar, as iOS on a phone. The last page comes back at the next start. */
+/** The phone page bar or tablet sidebar. The last page comes back at the next start. */
 @Composable internal fun LagomHome(model: MailModel, planner: PlannerModel, twoPane: Boolean) {
     val settings = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
     // A share or notification that landed during loading or onboarding opens on Mail, where it lives.
@@ -309,17 +310,24 @@ class MainActivity : ComponentActivity() {
     }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
-    Scaffold(containerColor = lagom.bg, bottomBar = { if (bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            when (section) {
-                AppSection.TODAY -> TodayScreen(planner, model) { id ->
-                    show(AppSection.MAIL)
-                    opening = model.perform { model.openInbox(id) }
+    Scaffold(containerColor = if (twoPane) lagom.sidebar else lagom.bg,
+        bottomBar = { if (!twoPane && bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
+        Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+            if (twoPane) LagomSidebar(model, section, planner.unreadCount, enabled = !mailOpen, choose = ::choose)
+            val panel = RoundedCornerShape(Radius.panel)
+            Box(Modifier.weight(1f).fillMaxHeight().then(if (twoPane)
+                Modifier.padding(top = 8.dp, bottom = 8.dp, end = 8.dp).clip(panel).background(lagom.bg).border(1.dp, lagom.line, panel)
+                else Modifier)) {
+                when (section) {
+                    AppSection.TODAY -> TodayScreen(planner, model) { id ->
+                        show(AppSection.MAIL)
+                        opening = model.perform { model.openInbox(id) }
+                    }
+                    AppSection.MAIL -> MailScreen(model, twoPane)
+                    // The tablet layouts' breakpoint: a phone, also in landscape, keeps the day list.
+                    AppSection.CALENDAR -> CalendarScreen(planner, grid = twoPane)
+                    AppSection.TODO -> TodoScreen(planner)
                 }
-                AppSection.MAIL -> MailScreen(model, twoPane)
-                // The tablet layouts' breakpoint: a phone, also in landscape, keeps the day list.
-                AppSection.CALENDAR -> CalendarScreen(planner, grid = twoPane)
-                AppSection.TODO -> TodoScreen(planner)
             }
         }
     }
