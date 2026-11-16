@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -346,6 +347,8 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
         AppSection.entries.forEach { page ->
             val active = page == section
             NavigationBarItem(active, { choose(page) },
+                // Material clears the icon slot's semantics when a label is present, so the badge says nothing to TalkBack.
+                modifier = Modifier.semantics { if (page == AppSection.MAIL && unread > 0) stateDescription = "$unread unread" },
                 icon = {
                     BadgedBox(badge = {
                         // Quiet, as on desktop and iOS: grey, not the Material red.
