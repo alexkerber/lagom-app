@@ -267,6 +267,8 @@ final class MailModel {
     var syncing = false
     /// True once a sync has ended, well or not; until then an empty list is not yet known to be empty.
     private(set) var synced = Storage.demo
+    /// Demo: rows Done, Later, Delete or Move took. The fixture store has no server, so they leave in memory only.
+    private var demoHidden: Set<Int64> = []
     // Like the desktop: unknown until the first sync ends.
     private(set) var syncState: SyncState = Storage.demo ? .synced(at: Int64(Date().timeIntervalSince1970)) : .syncing
     private var actingID: Int64?
@@ -357,7 +359,8 @@ final class MailModel {
             self.accounts = accounts
             self.folders = folders
             self.failures = failures
-            rows = more ? rows + page.filter { next in !rows.contains { $0.id == next.id } } : page
+            let shown = page.filter { !$0.messageIds.contains(where: demoHidden.contains) }
+            rows = more ? rows + shown.filter { next in !rows.contains { $0.id == next.id } } : shown
             self.hasMore = hasMore
             wake(at: due)
             await openPendingMailto()
@@ -580,12 +583,16 @@ final class MailModel {
         defer { actingID = nil }
         do {
             let changes: [MailChange]
-            switch action {
+            if Storage.demo {
+                // The row leaves in memory, and Undo brings it back, as the desktop demo does.
+                demoHidden.formUnion(ids)
+                changes = ids.map { MailChange(id: $0, account: "", headerId: "", fromFolder: 0, toFolder: 0, snoozedUntil: nil) }
+            } else { switch action {
             case .done: changes = try await core.done(ids: ids)
             case .later: changes = try await core.later(ids: ids, untilUnix: until ?? core.laterChoices()[1].untilUnix)
             case .delete: changes = try await core.delete(ids: ids)
             case .move(let folder): changes = try await core.moveToFolder(ids: ids, folderId: folder.id)
-            }
+            } }
             if selectedID == id { selectedID = nil; message = nil; messages = []; expandedIDs = []; remoteImagesIDs = [] }
             offerUndo(changes, notice: action.notice)
         } catch { self.error = error.localizedDescription }
@@ -673,6 +680,7 @@ final class MailModel {
         notice = nil
         actingID = changes[0].id
         defer { actingID = nil }
+        if Storage.demo { demoHidden.subtract(changes.map(\.id)); await reload(); return }
         do { try await core.undo(changes: changes) } catch { self.error = error.localizedDescription }
         await reload()
     }
