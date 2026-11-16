@@ -338,26 +338,22 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
     }
 }
 
-/** The phone's page bar, iOS `LagomBar`: the four pages and their icons on the sidebar fill, the active one on the grey
- *  selection with its icon in `sel_icon`. One accent, no Material indicator. */
+/** The phone's page bar, iOS's system tab bar: Material's NavigationBar on the sidebar fill, lagom's icons, the grey
+ *  selection with its icon in `sel_icon`, and a quiet unread count. */
 @Composable private fun LagomBar(section: AppSection, unread: Int, choose: (AppSection) -> Unit) {
     val c = lagom
-    Row(Modifier.fillMaxWidth().background(c.sidebar).drawHairline(c.line, top = true).navigationBarsPadding()
-        .padding(horizontal = 10.dp).padding(top = 6.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    NavigationBar(Modifier.drawHairline(c.line, top = true), containerColor = c.sidebar, tonalElevation = 0.dp) {
         AppSection.entries.forEach { page ->
             val active = page == section
-            val fill by animateColorAsState(if (active) c.sel else c.sidebar, tween(140, easing = EaseOut), label = "page fill")
-            Column(Modifier.weight(1f).heightIn(min = 52.dp).clip(RoundedCornerShape(Radius.control)).background(fill)
-                .selectable(active, role = Role.Tab) { choose(page) }
-                .semantics { contentDescription = if (page == AppSection.MAIL && unread > 0) "Mail, $unread unread" else page.title },
-                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)) {
-                Box {
-                    LagomIcon(page.icon, tint = if (active) c.selIcon else c.ink2, size = 20.dp)
-                    if (page == AppSection.MAIL && unread > 0) CountBadge(unread, Modifier.align(Alignment.TopStart).offset(x = 17.dp, y = (-7).dp))
-                }
-                Text(page.title, Modifier.clearAndSetSemantics {}, color = c.ink,
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = if (active) FontWeight.Medium else FontWeight.Normal), maxLines = 1)
-            }
+            NavigationBarItem(active, { choose(page) },
+                icon = {
+                    BadgedBox(badge = {
+                        // Quiet, as on desktop and iOS: grey, not the Material red.
+                        if (page == AppSection.MAIL && unread > 0) Badge(containerColor = c.ink2.copy(alpha = 0.25f), contentColor = c.ink) { Text("$unread") }
+                    }) { LagomIcon(page.icon, tint = if (active) c.selIcon else c.ink2, size = 24.dp) }
+                },
+                label = { Text(page.title, maxLines = 1) },
+                colors = NavigationBarItemDefaults.colors(indicatorColor = c.sel, selectedTextColor = c.ink, unselectedTextColor = c.ink2))
         }
     }
 }

@@ -13,6 +13,19 @@ struct RootView: View {
     /// A message Today asked to open once the Inbox scope has reloaded.
     @State private var pending: Int64?
 
+    init(model: MailModel, planner: PlannerModel) {
+        self.model = model
+        self.planner = planner
+        // The unread count stays quiet, as on desktop: grey, not the system red.
+        let look = UITabBarAppearance()
+        look.configureWithDefaultBackground()
+        for item in [look.stackedLayoutAppearance, look.inlineLayoutAppearance, look.compactInlineLayoutAppearance] {
+            item.normal.badgeBackgroundColor = UIColor(Theme.secondary.opacity(0.25))
+            item.normal.badgeTextAttributes = [.foregroundColor: UIColor(Theme.ink)]
+        }
+        UITabBar.appearance().standardAppearance = look
+    }
+
     var body: some View {
         Group {
             if width == .regular && height == .regular {
@@ -27,15 +40,21 @@ struct RootView: View {
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
-                VStack(spacing: 0) {
-                    page(section).frame(maxHeight: .infinity)
-                    // A message reads full height; its back button returns to the list and the bar.
-                    if !(section == .mail && model.selectedID != nil) {
-                        LagomBar(section: $section, unread: planner.unreadCount)
+                // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
+                TabView(selection: $section) {
+                    ForEach(AppSection.allCases) { page in
+                        Tab(value: page) {
+                            self.page(page)
+                                .background(Theme.background.ignoresSafeArea())
+                                // A message reads full height; its back button returns to the list and the bar.
+                                .toolbar(page == .mail && model.selectedID != nil ? .hidden : .visible, for: .tabBar)
+                        } label: {
+                            Label { Text(page.title) } icon: { Image(uiImage: tabIcon(page.icon)) }
+                        }
+                        .badge(page == .mail ? planner.unreadCount : 0)
                     }
                 }
-                .background(Theme.background.ignoresSafeArea())
-                .ignoresSafeArea(.keyboard, edges: .bottom)
+                .tint(Theme.selectionIcon)
             }
         }
         .foregroundStyle(Theme.ink)
