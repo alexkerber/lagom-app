@@ -2159,8 +2159,8 @@ impl MainWindow {
             // "0 left" would be a guess until the read lands.
             self.sync_state().map_or_else(|| "Loading…".into(), String::from)
         } else {
-            match self.sync_state() {
-                Some(sync) => format!("{left} left · {sync}"),
+            match self.sync_text(Some(left as u64)) {
+                Some(sync) => sync.to_string(),
                 None => format!("{left} left"),
             }
         };
@@ -2194,7 +2194,8 @@ impl MainWindow {
                             .min_w(px(0.))
                             .child(div().font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
                             .child(div().id("sync-status").flex().items_center().gap(px(6.))
-                                .child(icon(self.sync_icon(), t.ink2, 16.))
+                                // Synced is the quiet default: the cloud shows only while it syncs or fails.
+                                .when(self.sync_icon() != "icons/cloud-synced.svg", |d| d.child(icon(self.sync_icon(), t.ink2, 16.)))
                                 .child(roll(mono(subtitle, t.ink2).one_line(), format!("left-{left}")))
                                 // A failed sync says why on hover and tries again on click.
                                 .when_some(self.sync_error(), |d, error| {

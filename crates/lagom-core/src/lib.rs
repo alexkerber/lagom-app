@@ -19,6 +19,7 @@ pub mod outbox;
 pub mod later;
 mod drafts;
 pub mod store;
+pub mod sync_status;
 pub mod threading;
 pub mod tasks;
 pub mod unsubscribe;

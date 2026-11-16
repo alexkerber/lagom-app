@@ -265,6 +265,8 @@ final class MailModel {
     @ObservationIgnored private var draftWrite: Task<Void, Error>?
     var preparingCompose = false
     var syncing = false
+    // Like the desktop: unknown until the first sync ends.
+    private(set) var syncState: SyncState = Storage.demo ? .synced(at: Int64(Date().timeIntervalSince1970)) : .syncing
     private var actingID: Int64?
     private var readingIDs: Set<Int64> = []
     private(set) var creatingFolder = false
@@ -546,7 +548,13 @@ final class MailModel {
         defer { syncing = false }
         repeat {
             syncAgain = false
-            do { try await core.syncAll() } catch { self.error = error.localizedDescription }
+            do {
+                try await core.syncAll()
+                syncState = .synced(at: Int64(Date().timeIntervalSince1970))
+            } catch {
+                syncState = .failed
+                self.error = error.localizedDescription
+            }
             await reload()
         } while syncAgain
     }

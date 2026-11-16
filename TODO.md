@@ -125,11 +125,12 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, a hand test of each. HTML mail on Linux draws a safe subset (#138); a hand check on Linux is not done.
 - [x] Sidebar polish (Alex 2026-11-15): counts, chevrons and the new-folder button on one edge (#145); Folders with less indent, trailing chevrons and an uncut "N more" (#147); a closed cloud for the sync icons (#146); unread on Mail as a quiet number on every platform (#148).
 - [ ] Shared elements across desktop, iPad/tablet and phones (Alex 2026-11-15). Inventory done 2026-11-15. Steps:
-  - [ ] one token file for all three platforms — PR #149. Closes on merge.
-  - [ ] iOS icons generated from the desktop SVGs — PR #150. Closes on merge.
-  - [ ] shared copy and the sync-status text in lagom-core, so mobile gains the failed and re-auth states.
+  - [x] one token file for all three platforms (#149).
+  - [x] iOS icons generated from the desktop SVGs (#150).
+  - [ ] the sync-status text in lagom-core, so mobile gains the failed state; the cloud shows only while it syncs or fails (Alex 2026-11-16: "C") — PR `core/shared-copy`. Closes on merge. Mobile has no typed re-auth state yet.
   - [ ] iOS inbox zero, loading rows and toast as on desktop.
-  - [ ] All/Unread with labels and a raised search field on Android.
+  - [x] All/Unread with labels and a raised search field on Android (#152).
+  - [ ] the system tab bar on phones with lagom's icons and a quiet count (Alex 2026-11-16: "ja till flikraden") — PR `core/shared-copy`. Closes on merge. Android not checked on a device.
   - [ ] a sidebar on Android tablets, as on iPad.
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.

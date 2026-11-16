@@ -237,7 +237,8 @@ struct MailView: View {
     /// also narrows Later, Sent, Done and Trash.
     private var mailboxMenu: some View {
         let name = model.mailbox == .drafts || model.searchText.isEmpty ? title : "Search"
-        let left = model.mailbox == .inbox && model.folder == nil && !model.accounts.isEmpty ? "\(planner.inboxLeft(account: model.accountID)) left" : nil
+        let left = model.mailbox == .inbox && model.folder == nil && !model.accounts.isEmpty ? planner.inboxLeft(account: model.accountID) : nil
+        let status = syncStatus(state: syncShown && model.syncing ? .syncing : model.syncState, remaining: left)
         return Menu {
             // No mailbox shows as chosen while a folder is open.
             Picker("Mailbox", selection: Binding(get: { model.folder == nil ? Optional(model.mailbox) : nil }, set: { if let box = $0 { model.mailbox = box } })) {
@@ -273,17 +274,16 @@ struct MailView: View {
                 }
                 .foregroundStyle(Theme.ink)
                 HStack(spacing: 6) {
-                    Icon(syncShown ? "cloud-syncing" : "cloud-synced", size: 16)
-                    if let left {
-                        Text(left).lagomFont(.small).monospacedDigit()
-                            .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
-                    }
+                    // Synced is the quiet default: the cloud shows only while it syncs or fails.
+                    if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
+                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(1)
+                        .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
                 .foregroundStyle(Theme.secondary)
             }
             .frame(minHeight: 44).contentShape(Rectangle())
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel([name, model.syncing ? "Syncing" : "Synced", left, "mailboxes and accounts"].compactMap { $0 }.joined(separator: ", "))
+            .accessibilityLabel([name, status.text, "mailboxes and accounts"].joined(separator: ", "))
         }
         .task(id: model.syncing) {
             guard model.syncing else { syncShown = false; return }
