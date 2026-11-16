@@ -141,7 +141,7 @@ struct MailView: View {
             ZStack {
                 if let notice = model.notice {
                     HStack(spacing: 12) {
-                        Text(notice).lagomFont(.base, .medium).foregroundStyle(Theme.ink).lineLimit(1)
+                        Text(notice).lagomFont(.base, .medium).foregroundStyle(Theme.ink).lineLimit(3).padding(.vertical, 8)
                             .contentTransition(.opacity)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if model.undoSendID != nil {

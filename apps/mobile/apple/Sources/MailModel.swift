@@ -547,7 +547,8 @@ final class MailModel {
         guard let core, !Storage.demo else { return }
         if syncing { syncAgain = true; return }
         syncing = true
-        defer { syncing = false; synced = true }
+        // A sync before the first account says nothing about that account's list.
+        defer { syncing = false; if !accounts.isEmpty { synced = true } }
         repeat {
             syncAgain = false
             do {
