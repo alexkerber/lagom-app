@@ -362,7 +362,7 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
                 icon = {
                     BadgedBox(badge = {
                         // Quiet, as on desktop and iOS: grey, not the Material red.
-                        if (page == AppSection.MAIL && unread > 0) Badge(containerColor = c.ink2.copy(alpha = 0.25f), contentColor = c.ink) { Text("$unread") }
+                        if (page == AppSection.MAIL && unread > 0) Badge(containerColor = c.ink2, contentColor = c.sidebar) { Text("$unread") }
                     }) { LagomIcon(page.icon, tint = if (active) c.selIcon else c.ink2, size = 24.dp) }
                 },
                 label = { Text(page.title, maxLines = 1) },
