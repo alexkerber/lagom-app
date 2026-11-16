@@ -129,7 +129,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] iOS icons generated from the desktop SVGs (#150).
   - [x] the sync-status text in lagom-core, so mobile gains the failed state; the cloud shows only while it syncs or fails (Alex 2026-11-16: "C") (#153). Mobile has no typed re-auth state yet.
   - [x] iOS inbox zero, loading rows and toast as on desktop (#154). Loading rows not seen on screen (the demo starts synced).
-  - [ ] Mobile demo: Done, Later, Delete and Move asked the server and failed with "could not open the password"; now they stay in memory with Undo, as on desktop — PR `mobile/demo-actions`. Closes on merge. Counts in the demo do not follow.
+  - [x] Mobile demo: Done, Later, Delete and Move stay in memory with Undo, as on desktop (#156). Counts in the demo do not follow.
   - [x] All/Unread with labels and a raised search field on Android (#152).
   - [x] the system tab bar on phones with lagom's icons and a quiet count (Alex 2026-11-16: "ja till flikraden") (#153). Android not checked on a device.
   - [ ] a sidebar on Android tablets, as on iPad, from 840 dp — PR #155. Closes on merge. Not seen on a device.
