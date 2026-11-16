@@ -408,15 +408,19 @@ struct MailView: View {
             }.disabled(model.working)
             Button("Move to…") { moving = (row.account, row.id) }.disabled(model.working)
         }
-        .swipeActions(edge: .leading) {
-            Button { act(.done, id: row.id) } label: { Label("Done", image: "done") }.tint(Theme.done)
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if model.mailbox != .trash {
-                Button(role: .destructive) { act(.delete, id: row.id) } label: { Label("Delete", image: "trash") }
-                    .tint(Theme.danger)
+        // How far the row is dragged picks Done, Later or Delete, as on desktop; no small buttons to aim at.
+        .modifier(StageSwipe(canDelete: model.mailbox != .trash, enabled: !model.working) { stage in
+            switch stage {
+            case .done: act(.done, id: row.id)
+            case .later: act(.later, id: row.id)
+            case .delete: act(.delete, id: row.id)
             }
-            Button { act(.later, id: row.id) } label: { Label("Later", image: "later") }.tint(Theme.later)
+        })
+        // The swipe's moves for VoiceOver, which the drag cannot reach.
+        .accessibilityActions {
+            Button("Done") { act(.done, id: row.id) }
+            Button("Later") { act(.later, id: row.id) }
+            if model.mailbox != .trash { Button("Delete") { act(.delete, id: row.id) } }
         }
     }
 

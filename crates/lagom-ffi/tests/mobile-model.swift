@@ -496,6 +496,7 @@ struct ModelChecks {
     }
 
     @MainActor static func main() async throws {
+        swipeStagesFollowTheDesktop()
         try await foldersMoveEmptyTrashAndName()
         await newFolderListsAtOnceAndShowsRefusals()
         try await undoDoneAndNewMailSignature()
@@ -775,6 +776,16 @@ struct ModelChecks {
         precondition(LaunchStage(storeOpen: true, hasAccount: true, notificationsAsked: false, notificationsUndecided: nil) == .loading)
         precondition(LaunchStage(storeOpen: true, hasAccount: true, notificationsAsked: false, notificationsUndecided: false) == .app)
         print("Launch gate checks passed")
+    }
+
+    /// Desktop's `swipe_threshold_decides_the_move` and `long_left_swipe_deletes` on a 400 pt row.
+    static func swipeStagesFollowTheDesktop() {
+        let stage = { (dx: Double, canDelete: Bool) in SwipeStage(dx: dx, width: 400, canDelete: canDelete) }
+        precondition(stage(0, true) == nil && stage(119, true) == nil && stage(-119, true) == nil)
+        precondition(stage(120, true) == .done && stage(-120, true) == .later)
+        precondition(stage(-239, true) == .later && stage(-240, true) == .delete)
+        precondition(stage(-300, false) == .later, "without Delete, Later stays the furthest stage")
+        print("Swipe stages: passed")
     }
 
     @MainActor static func wake() async {
