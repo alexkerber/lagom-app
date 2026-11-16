@@ -137,25 +137,32 @@ struct MailView: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            // The Sending notice rises from the bottom edge on the spring; its text changes in place.
+            // The desktop toast: a raised card over the list that rises on the spring; its text changes in place.
             ZStack {
                 if let notice = model.notice {
-                    HStack {
-                        Text(notice).lagomFont(.snippet).foregroundStyle(Theme.secondary)
+                    HStack(spacing: 12) {
+                        Text(notice).lagomFont(.base, .medium).foregroundStyle(Theme.ink).lineLimit(1)
                             .contentTransition(.opacity)
-                        Spacer()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         if model.undoSendID != nil {
                             Button("Undo") { Task { await model.undoSend() } }
-                                .frame(minWidth: 44, minHeight: 44).accessibilityLabel("Undo send")
+                                .padding(.horizontal, 8).frame(minWidth: 44, minHeight: 44).accessibilityLabel("Undo send")
                                 .disabled(model.composeBusy || model.preparingCompose)
                         } else if !model.undoChanges.isEmpty {
                             Button("Undo") { Task { await model.undoAction() } }
-                                .frame(minWidth: 44, minHeight: 44).disabled(model.working)
+                                .padding(.horizontal, 8).frame(minWidth: 44, minHeight: 44).disabled(model.working)
                         } else {
-                            Button("Dismiss") { model.notice = nil }.frame(minWidth: 44, minHeight: 44)
+                            Button("Dismiss") { model.notice = nil }.padding(.horizontal, 8).frame(minWidth: 44, minHeight: 44)
                         }
                     }
-                    .padding(.horizontal, 10).background(Theme.background)
+                    // The buttons read in the label's size; the label keeps its own weight.
+                    .lagomFont(.base, .semibold).buttonStyle(.borderless)
+                    .padding(.leading, 14).padding(.trailing, 6)
+                    .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.panel))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.panel).strokeBorder(Theme.line))
+                    .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+                    .accessibilityElement(children: .contain)
                     .transition(Motion.slide(.bottom, reduceMotion))
                 }
             }
@@ -370,10 +377,13 @@ struct MailView: View {
                 Group {
                     if unreadOnly && rows.isEmpty && !model.rows.isEmpty {
                         EmptyState(icon: "read", title: "No unread mail")
-                    } else if model.rows.isEmpty && model.failures.isEmpty && !model.syncing {
+                    } else if model.rows.isEmpty && model.failures.isEmpty && !model.synced {
+                        // Until the first sync lands, quiet placeholder rows stand in, not inbox zero (desktop #141).
+                        LoadingRows()
+                    } else if model.rows.isEmpty && model.failures.isEmpty {
                         if model.mailbox == .inbox && model.folder == nil && model.searchText.isEmpty {
-                            // Inbox zero, as on desktop: the inbox icon, no confetti.
-                            EmptyState(icon: "inbox", title: "Nothing left.")
+                            // Inbox zero, as on desktop: the inbox icon, one line, no confetti.
+                            EmptyState(icon: "inbox", title: "Nothing left.", detail: "Not too much. Not too little. Just right.")
                         } else {
                             EmptyState(icon: "inbox", title: "No mail here", detail: "Pull to refresh your mail.")
                         }

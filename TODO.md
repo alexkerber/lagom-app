@@ -128,7 +128,8 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] one token file for all three platforms (#149).
   - [x] iOS icons generated from the desktop SVGs (#150).
   - [ ] the sync-status text in lagom-core, so mobile gains the failed state; the cloud shows only while it syncs or fails (Alex 2026-11-16: "C") — PR `core/shared-copy`. Closes on merge. Mobile has no typed re-auth state yet.
-  - [ ] iOS inbox zero, loading rows and toast as on desktop.
+  - [ ] iOS inbox zero, loading rows and toast as on desktop — PR `ios/inbox-parity`. Closes on merge. Loading rows not seen on screen (the demo starts synced).
+  - [ ] iOS demo: Delete asks the server and fails with "could not open the password"; demo actions should stay in memory as on desktop (found 2026-11-16).
   - [x] All/Unread with labels and a raised search field on Android (#152).
   - [ ] the system tab bar on phones with lagom's icons and a quiet count (Alex 2026-11-16: "ja till flikraden") — PR `core/shared-copy`. Closes on merge. Android not checked on a device.
   - [ ] a sidebar on Android tablets, as on iPad.
