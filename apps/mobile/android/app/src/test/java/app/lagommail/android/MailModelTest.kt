@@ -150,6 +150,19 @@ class MailModelTest {
         core.onRestore = null
     }
 
+    @Test fun demoActionsStayInMemoryAndUndoBringsTheRowBack() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1), row(2)) }
+        val model = MailModel(open = { core }, attachmentDirectory = File(temporary.newFolder(), "attachments"), now = { 0 },
+            sendLater = { sendLaters++ }, demo = true)
+        model.start()
+        model.act(MailAction.Delete, 2)
+        assertEquals("Deleted", model.notice); assertEquals(listOf(1L), model.rows.map { it.id })
+        assertTrue(core.deleted.isEmpty()); assertEquals(2, core.mail.size)
+        model.undoAction()
+        assertTrue(core.undone.isEmpty()); assertNull(model.notice)
+        assertEquals(listOf(1L, 2L), model.rows.map { it.id })
+    }
+
     @Test fun doneOffersUndoForFiveSecondsAndUndoHandsBackTheChanges() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = listOf(row(1), row(2)) }; val model = model(core); model.start()
         model.act(MailAction.Done, 2)

@@ -149,6 +149,8 @@ internal class MailModel(
     var counts by mutableStateOf<List<MailCounts>>(emptyList()); private set
     /** True once a sync has ended, well or not; until then an empty list is not yet known to be empty. */
     var synced by mutableStateOf(demo); private set
+    /** Demo: rows Done, Later, Delete or Move took; they leave in memory only. */
+    private var demoHidden = emptySet<Long>()
     private var actingId by mutableStateOf<Long?>(null)
     private var readingIds by mutableStateOf<Set<Long>>(emptySet())
     var creatingFolder by mutableStateOf(false); private set
@@ -297,7 +299,7 @@ internal class MailModel(
             this.counts = counts
             this.folders = folders
             this.failures = failures
-            rows = (if (append) old + page else page).distinctBy { it.id }
+            rows = (if (append) old + page else page).distinctBy { it.id }.filter { row -> row.messageIds.none { it in demoHidden } }
             this.hasMore = hasMore
             appliedRevision = request
             openPendingShare()
@@ -492,7 +494,11 @@ internal class MailModel(
         val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds ?: listOf(id) else listOf(id)
         actingId = id
         try {
-            val changes = run(core, ids)
+            val changes = if (demo) {
+                // The fixture store has no server: the row leaves in memory, and Undo brings it back, as on desktop.
+                demoHidden = demoHidden + ids
+                ids.map { MailChange(it, "", "", 0, 0, null) }
+            } else run(core, ids)
             if (selectedId == id || messages.any { it.row.id in ids }) clearSelection()
             offerUndo(changes, text)
         // Busy until the list shows the result, so a swiped row never comes back before it leaves.
@@ -550,6 +556,7 @@ internal class MailModel(
         undoChanges = emptyList()
         notice = null
         actingId = changes.first().id
+        if (demo) { demoHidden = demoHidden - changes.map { it.id }.toSet(); try { reload() } finally { actingId = null }; return }
         try { core.undo(changes) } finally { try { reload() } finally { actingId = null } }
     }
     /** The reading view's "Unsubscribe from …" line: the run in progress, and what finished this session. */
