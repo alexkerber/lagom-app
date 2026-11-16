@@ -265,6 +265,8 @@ final class MailModel {
     @ObservationIgnored private var draftWrite: Task<Void, Error>?
     var preparingCompose = false
     var syncing = false
+    /// True once a sync has ended, well or not; until then an empty list is not yet known to be empty.
+    private(set) var synced = Storage.demo
     // Like the desktop: unknown until the first sync ends.
     private(set) var syncState: SyncState = Storage.demo ? .synced(at: Int64(Date().timeIntervalSince1970)) : .syncing
     private var actingID: Int64?
@@ -545,7 +547,8 @@ final class MailModel {
         guard let core, !Storage.demo else { return }
         if syncing { syncAgain = true; return }
         syncing = true
-        defer { syncing = false }
+        // A sync before the first account says nothing about that account's list.
+        defer { syncing = false; if !accounts.isEmpty { synced = true } }
         repeat {
             syncAgain = false
             do {
