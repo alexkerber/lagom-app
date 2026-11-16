@@ -127,11 +127,12 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] Shared elements across desktop, iPad/tablet and phones (Alex 2026-11-15). Inventory done 2026-11-15. Steps:
   - [x] one token file for all three platforms (#149).
   - [x] iOS icons generated from the desktop SVGs (#150).
-  - [ ] the sync-status text in lagom-core, so mobile gains the failed state; the cloud shows only while it syncs or fails (Alex 2026-11-16: "C") — PR `core/shared-copy`. Closes on merge. Mobile has no typed re-auth state yet.
-  - [ ] iOS inbox zero, loading rows and toast as on desktop.
+  - [x] the sync-status text in lagom-core, so mobile gains the failed state; the cloud shows only while it syncs or fails (Alex 2026-11-16: "C") (#153). Mobile has no typed re-auth state yet.
+  - [x] iOS inbox zero, loading rows and toast as on desktop (#154). Loading rows not seen on screen (the demo starts synced).
+  - [ ] iOS demo: Delete asks the server and fails with "could not open the password"; demo actions should stay in memory as on desktop (found 2026-11-16).
   - [x] All/Unread with labels and a raised search field on Android (#152).
-  - [ ] the system tab bar on phones with lagom's icons and a quiet count (Alex 2026-11-16: "ja till flikraden") — PR `core/shared-copy`. Closes on merge. Android not checked on a device.
-  - [ ] a sidebar on Android tablets, as on iPad, from 840 dp — PR `android/tablet-sidebar`. Closes on merge. Not seen on a device.
+  - [x] the system tab bar on phones with lagom's icons and a quiet count (Alex 2026-11-16: "ja till flikraden") (#153). Android not checked on a device.
+  - [ ] a sidebar on Android tablets, as on iPad, from 840 dp — PR #155. Closes on merge. Not seen on a device.
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.

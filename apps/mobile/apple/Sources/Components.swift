@@ -95,6 +95,39 @@ struct Badge: View {
     }
 }
 
+/// Placeholder rows while the first sync runs, shaped like message rows and fading down the list (desktop
+/// `loading_rows`, Android `LoadingRows`). They pulse slowly; under Reduce Motion they stay still.
+struct LoadingRows: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dim = false
+
+    var body: some View {
+        GeometryReader { geometry in
+        let room = max(geometry.size.width - 49, 0)
+        VStack(spacing: 0) {
+            ForEach(Array([0.42, 0.3, 0.5, 0.36, 0.46].enumerated()), id: \.offset) { index, width in
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array([(width, 10.0), (width + 0.3, 10.0), (0.9, 8.0), (0.62, 8.0)].enumerated()), id: \.offset) { _, bar in
+                        RoundedRectangle(cornerRadius: Theme.Radius.key).fill(Theme.line)
+                            .frame(width: room * bar.0, height: bar.1)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 92, alignment: .leading)
+                .padding(.leading, 33).padding(.trailing, 16)
+                .opacity(1 - Double(index) * 0.18)
+            }
+        }
+        }
+        .opacity(dim ? 0.7 : 1)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { dim = true }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading mail")
+    }
+}
+
 /// A spinner that appears only once a wait passes `Motion.calm`, so a quick load never flashes it.
 struct CalmProgress: View {
     let label: String
