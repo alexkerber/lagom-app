@@ -124,7 +124,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] macOS experience (Alex 2026-11-13): a better macOS feel, beyond the desktop basics. Includes the "does not feel 100 %" items.
 - [ ] Windows and Linux as good as macOS (Alex 2026-11-13): CI builds and tests all three today. Missing: installers, Windows notifications and WebView2 checks, a hand test of each. HTML mail on Linux draws a safe subset (#138); a hand check on Linux is not done.
 - [x] Sidebar polish (Alex 2026-11-15): counts, chevrons and the new-folder button on one edge (#145); Folders with less indent, trailing chevrons and an uncut "N more" (#147); a closed cloud for the sync icons (#146); unread on Mail as a quiet number on every platform (#148).
-- [ ] Mobile swipe by distance, as on desktop (Alex 2026-11-16: "beroende på hur långt du drar ... istället för de små ikonerna"): right past 120 pt Done, left past 120 pt Later, past 60 % Delete; no buttons behind the row. iOS PR `ios/swipe-stages`, Android PR `android/swipe-stages`. Closes on merge of both.
+- [x] Mobile swipe by distance, as on desktop (Alex 2026-11-16: "beroende på hur långt du drar ... istället för de små ikonerna"): right past 120 pt Done, left past 120 pt Later, past 60 % Delete; no buttons behind the row. iOS #159, Android #160. Not tried on a real iPhone; VoiceOver/TalkBack not tried by hand.
 - [ ] Shared elements across desktop, iPad/tablet and phones (Alex 2026-11-15). Inventory done 2026-11-15. Steps:
   - [x] one token file for all three platforms (#149).
   - [x] iOS icons generated from the desktop SVGs (#150).
