@@ -11,6 +11,8 @@ END = "// END GENERATED TOKENS"
 DESKTOP = Path("apps/desktop/src/theme.rs")
 IOS = Path("apps/mobile/apple/Sources/Theme.swift")
 ANDROID = Path("apps/mobile/android/app/src/main/java/app/lagommail/android/Theme.kt")
+SITE = Path("site/index.html")
+SITE_PAGES = (SITE, Path("site/privacy.html"), Path("site/support.html"))
 MOBILE_COLORS = {
     "bg": ("background", "bg"), "subtle": ("subtle", "subtle"),
     "raised": ("raised", "raised"), "ink": ("ink", "ink"),
@@ -121,19 +123,31 @@ def kotlin(tokens):
     return "\n".join(out)
 
 
+def css(tokens):
+    # The site is light only; its one colour is the app icon, so the focus ring stays ink, not accent.
+    c = tokens["colors"]["light"]
+    hexes = {name: f"#{c[key]:06X}" for name, key in (("bg", "bg"), ("card", "subtle"), ("ink", "ink"), ("ink2", "ink2"), ("line", "line"))}
+    return "      " + " ".join(f"--{name}: {value};" for name, value in hexes.items()) + f"\n      --accent: {hexes['ink']}; --radius: {number(tokens['radii']['control'])}px;"
+
+
 def generated(tokens):
-    return {DESKTOP: rust(tokens), IOS: swift(tokens), ANDROID: kotlin(tokens)}
+    return {DESKTOP: rust(tokens), IOS: swift(tokens), ANDROID: kotlin(tokens)} | dict.fromkeys(SITE_PAGES, css(tokens))
 
 
-def replace_block(source, block):
-    if source.count(BEGIN) != 1 or source.count(END) != 1:
+def markers(path):
+    """CSS has no line comments, so the site wraps the same markers in /* */."""
+    return (f"/* {BEGIN} */", f"/* {END} */") if Path(path).suffix == ".html" else (BEGIN, END)
+
+
+def replace_block(source, block, begin=BEGIN, end=END):
+    if source.count(begin) != 1 or source.count(end) != 1:
         raise ValueError("expected exactly one pair of generated-token markers")
-    before, rest = source.split(BEGIN)
-    old, after = rest.split(END)
+    before, rest = source.split(begin)
+    old, after = rest.split(end)
     newline = "\r\n" if old.startswith("\r\n") else "\n"
     if not before.endswith("\n") or not old.startswith(newline) or not old.endswith(newline) or not after.startswith(newline):
         raise ValueError("generated-token markers must be on their own lines")
-    return before + BEGIN + newline + block.replace("\n", newline) + newline + END + after
+    return before + begin + newline + block.replace("\n", newline) + newline + end + after
 
 
 def generate(root, check=False):
@@ -144,7 +158,7 @@ def generate(root, check=False):
     for path, block in generated(tokens).items():
         source = (root / path).read_bytes().decode("utf-8")
         try:
-            updated = replace_block(source, block)
+            updated = replace_block(source, block, *markers(path))
         except ValueError as error:
             raise ValueError(f"{path}: {error}") from error
         if source != updated:

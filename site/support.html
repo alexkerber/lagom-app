@@ -15,7 +15,12 @@
     @font-face { font-family: "Hauora Sans"; font-weight: 600; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-600.woff2") format("woff2"); }
     @font-face { font-family: "Hauora Sans"; font-weight: 700; font-style: normal; font-display: swap; src: url("fonts/hauora-sans-700.woff2") format("woff2"); }
     @font-face { font-family: "Geist Mono"; font-weight: 400; font-style: normal; font-display: swap; src: url("fonts/geist-mono-400.woff2") format("woff2"); }
-    :root { --bg: #FFFFFF; --card: #F6F6F4; --ink: #111110; --ink2: #6B6B66; --line: #EBEBE7; --accent: #111110; }
+    :root {
+/* // BEGIN GENERATED TOKENS (scripts/tokens.py) */
+      --bg: #FFFFFF; --card: #F5F5F3; --ink: #111110; --ink2: #5F5F5A; --line: #E6E6E2;
+      --accent: #111110; --radius: 8px;
+/* // END GENERATED TOKENS */
+    }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
     a { color: inherit; }
@@ -26,7 +31,7 @@
     .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 700; letter-spacing: -0.05em; line-height: 1; }
     .brand img { border-radius: 22%; }
     .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
-    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
+    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: var(--radius); text-decoration: none; }
     .links a:hover, .links a[aria-current] { background: var(--card); }
     .text { max-width: 40rem; padding: clamp(32px, 6vw, 72px) 0 0; overflow-wrap: anywhere; }
     h1 { margin: 0 0 8px; font-size: clamp(40px, 6vw, 64px); font-weight: 700; line-height: 1.05; letter-spacing: -0.04em; }

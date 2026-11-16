@@ -23,8 +23,10 @@
 
     /* White and calm. The only colour is the app icon. */
     :root {
-      --bg: #FFFFFF; --card: #F6F6F4; --ink: #111110; --ink2: #6B6B66; --line: #EBEBE7;
-      --accent: #111110;
+/* // BEGIN GENERATED TOKENS (scripts/tokens.py) */
+      --bg: #FFFFFF; --card: #F5F5F3; --ink: #111110; --ink2: #5F5F5A; --line: #E6E6E2;
+      --accent: #111110; --radius: 8px;
+/* // END GENERATED TOKENS */
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 "Hauora Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -41,7 +43,7 @@
     .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 700; letter-spacing: -0.05em; line-height: 1; }
     .brand img { border-radius: 22%; }
     .links { display: flex; flex-wrap: wrap; gap: 4px; font-size: 15px; font-weight: 500; }
-    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 999px; text-decoration: none; }
+    .links a { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: var(--radius); text-decoration: none; }
     .links a:hover { background: var(--card); }
 
     /* Hero: the icon is larger than its column and runs off the right edge. */
@@ -55,7 +57,7 @@
     .lede { margin: 0; font-size: 19px; color: var(--ink2); }
     .lede strong { color: var(--ink); font-weight: 600; }
     .ctas { display: flex; flex-wrap: wrap; gap: 12px; }
-    .btn { display: flex; align-items: center; height: 52px; padding: 0 26px; border-radius: 999px; border: 1px solid var(--line); text-decoration: none; font-size: 16px; font-weight: 600; background: var(--bg); }
+    .btn { display: flex; align-items: center; height: 52px; padding: 0 26px; border-radius: var(--radius); border: 1px solid var(--line); text-decoration: none; font-size: 16px; font-weight: 600; background: var(--bg); }
     .btn:hover { background: var(--card); }
     .btn.primary { border-color: var(--ink); color: #fff; background: var(--ink); }
     .btn.primary:hover { background: #33332F; }

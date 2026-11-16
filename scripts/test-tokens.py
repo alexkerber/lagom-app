@@ -40,9 +40,11 @@ class Tokens(unittest.TestCase):
         changed["type"]["mobile_factor"] = 1.2
         changed["motion"]["ms"]["calm"] = 175
         output = tokens.generated(changed)
-        for block in output.values():
+        for path, block in output.items():
             self.assertIn("123456", block)
-            self.assertIn("175", block)
+            if path not in tokens.SITE_PAGES:
+                self.assertIn("175", block)
+        self.assertIn("--radius: 9px", output[tokens.SITE])
         self.assertIn("CONTROL: f32 = 9.0", output[tokens.DESKTOP])
         self.assertIn("control: CGFloat = 9", output[tokens.IOS])
         self.assertIn("control = 9.dp", output[tokens.ANDROID])
@@ -56,13 +58,14 @@ class Tokens(unittest.TestCase):
             (root / "design").mkdir()
             (root / "design/tokens.toml").write_bytes(self.source)
             before, after = "// hand-written café\r\n", "\n// keep this too\r\n"
-            original = (before + tokens.BEGIN + "\nstale\n" + tokens.END + after).encode()
+            stale = {path: (before + "\nstale\n".join(tokens.markers(path)) + after).encode() for path in tokens.generated(self.data)}
+            original = stale[tokens.DESKTOP]
             for path in tokens.generated(self.data):
-                (root / path).parent.mkdir(parents=True)
-                (root / path).write_bytes(original)
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_bytes(stale[path])
             self.assertEqual(tokens.generate(root, check=True), 1)
             for path in tokens.generated(self.data):
-                self.assertEqual((root / path).read_bytes(), original)
+                self.assertEqual((root / path).read_bytes(), stale[path])
             self.assertEqual(tokens.generate(root), 0)
             self.assertEqual(tokens.generate(root, check=True), 0)
             snapshots = {path: (root / path).read_bytes() for path in tokens.generated(self.data)}
