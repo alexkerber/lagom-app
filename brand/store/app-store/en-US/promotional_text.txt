@@ -1,1 +1,1 @@
-Done, Reply and Later. Three buttons, and a list that says how many are left. Your mail stays on your phone and your mail server.
+Done, Reply or Later. Each message gets one answer, and the list tells you how many are left. Then Today shows what is due, and the rest of the day is yours.
