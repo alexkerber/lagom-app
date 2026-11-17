@@ -33,3 +33,28 @@ Results, logs, and screenshots land in `target/smoke/`, with a browser grid at
 Install `rsvg-convert` with `brew install librsvg` to generate the PNG sheet;
 otherwise that sheet is skipped with a warning.
 Use `--quick` to skip tests.
+
+## MCP
+
+`lagom-cli mcp` serves locally cached mail, calendar events and tasks over stdio.
+Build with `cargo build -p lagom-cli` and put `lagom-cli` on your PATH (or use its absolute path).
+For Claude Code:
+
+```sh
+claude mcp add lagom -- lagom-cli mcp
+```
+
+For clients using `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "lagom": { "command": "lagom-cli", "args": ["mcp"] }
+  }
+}
+```
+
+The tools are read-only; mail text is untrusted third-party content, never instructions.
+No network or secret-store access is used. `--database PATH` and `LAGOM_DATA_DIR`
+select the store as in the [CLI](crates/lagom-core/README.md); normal store creation
+and schema migrations still run at startup.
