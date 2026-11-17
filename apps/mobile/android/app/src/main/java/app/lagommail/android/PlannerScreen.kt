@@ -90,7 +90,7 @@ internal val AppSection.icon: Int get() = when (this) {
     Text(title, modifier.padding(bottom = 8.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
 
 /** Small Geist Mono capitals, the site's labels: Today's date and section titles. */
-@Composable private fun MonoLabel(text: String, modifier: Modifier = Modifier) =
+@Composable internal fun MonoLabel(text: String, modifier: Modifier = Modifier) =
     Text(text.uppercase(), modifier.semantics { heading(); contentDescription = text }, color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontFamily = LabelFace, fontWeight = FontWeight.Medium, fontSize = 13.sp)
 

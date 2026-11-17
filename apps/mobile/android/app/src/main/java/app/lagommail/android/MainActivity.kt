@@ -316,10 +316,8 @@ class MainActivity : ComponentActivity() {
         bottomBar = { if (!sidebar && bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
         Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             if (sidebar) LagomSidebar(model, section, planner.unreadCount, enabled = !mailOpen, choose = ::choose)
-            val panel = RoundedCornerShape(Radius.panel)
-            Box(Modifier.weight(1f).fillMaxHeight().then(if (sidebar)
-                Modifier.padding(top = 8.dp, bottom = 8.dp, end = 8.dp).clip(panel).background(lagom.bg).border(1.dp, lagom.line, panel)
-                else Modifier)) {
+            // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop and iPad.
+            Box(Modifier.weight(1f).fillMaxHeight().background(lagom.bg)) {
                 when (section) {
                     AppSection.TODAY -> TodayScreen(planner, model, open = ::show) { id ->
                         show(AppSection.MAIL)
@@ -353,7 +351,7 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
  *  selection with its icon in `sel_icon`, and a quiet unread count. */
 @Composable private fun LagomBar(section: AppSection, unread: Int, choose: (AppSection) -> Unit) {
     val c = lagom
-    NavigationBar(Modifier.drawHairline(c.line, top = true), containerColor = c.sidebar, tonalElevation = 0.dp) {
+    NavigationBar(containerColor = c.sidebar, tonalElevation = 0.dp) {
         AppSection.entries.forEach { page ->
             val active = page == section
             NavigationBarItem(active, { choose(page) },

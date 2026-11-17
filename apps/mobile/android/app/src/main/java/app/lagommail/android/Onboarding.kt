@@ -5,7 +5,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -118,10 +118,10 @@ private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
     }
 }
 
-/** One account kind: a bordered row as tall as a list row, its icon, the name and a chevron. */
+/** One account kind: a filled row as tall as a list row, its icon, the name and a chevron. */
 @Composable private fun Choice(title: String, icon: Int, onClick: () -> Unit) {
     val c = lagom
-    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(Radius.panel)).border(1.dp, c.line, RoundedCornerShape(Radius.panel))
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(Radius.panel)).background(c.subtle)
         .clickable(role = Role.Button, onClick = onClick).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         LagomIcon(icon, size = 20.dp)
