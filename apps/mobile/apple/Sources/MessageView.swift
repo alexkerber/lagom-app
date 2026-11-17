@@ -52,6 +52,7 @@ struct MessageView: View {
     @Bindable var model: MailModel
     @Environment(\.colorScheme) private var scheme
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.railInset) private var railInset
     @Environment(\.openURL) private var openURL
     @State private var showText = false
     @State private var confirmUnsubscribe = false
@@ -77,7 +78,8 @@ struct MessageView: View {
             .padding(width == .regular ? 20 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-            Button { Task { await model.prepareCompose(id: row.id, kind: .reply) } } label: {
+            // On the Duo, Reply sits in the right column instead.
+            if railInset == 0 { Button { Task { await model.prepareCompose(id: row.id, kind: .reply) } } label: {
                 HStack(spacing: 8) {
                     Icon("reply")
                     Text("Reply to \(RowPresentation(row).sender)").lagomFont(.base).lineLimit(1)
@@ -90,7 +92,7 @@ struct MessageView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(model.preparingCompose)
+            .disabled(model.preparingCompose) }
         }
         .padding(pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)

@@ -142,13 +142,8 @@ struct MailView: View {
         }
         // Below the Duo's status bar (about 150 pt) and centred on its tab bar, which sits 6 pt in from the
         // column's centre; both measured in the Duo simulator.
-        .overlay(alignment: .topTrailing) {
-            if railInset > 0 { railTop.frame(width: railInset).offset(x: railInset - 6).padding(.top, 168) }
-        }
-        // The tab bar hides while a message is open, so Done and Delete take its place at the bottom.
-        .overlay(alignment: .bottomTrailing) {
-            if railInset > 0 { railBottom.frame(width: railInset).offset(x: railInset - 6).padding(.bottom, 24) }
-        }
+        // The tab bar hides while a message is open, so Delete and Done take its place at the bottom.
+        .railColumn(top: { railTop }, bottom: { railBottom })
         .safeAreaInset(edge: .bottom) {
             // The desktop toast: a raised card over the list that rises on the spring; its text changes in place.
             ZStack {
@@ -238,15 +233,10 @@ struct MailView: View {
         .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
     }
 
-    /// The Duo's right column (Alex 2026-11-17): New message and the filter as their own buttons over the list;
-    /// with a message open, Reply, Reply all, Forward and More at the top, Done and Delete at the bottom.
-    private func railButton(_ title: String, icon: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Icon(icon, label: title).frame(width: 48, height: 48).contentShape(Circle())
-        }
-        .buttonStyle(.plain).foregroundStyle(selected ? Theme.selectionIcon : Theme.ink)
-        .background(.regularMaterial, in: Circle())
-        .accessibilityAddTraits(selected ? .isSelected : [])
+    /// The Duo's right column: New message and the filter over the list; with a message open, Back, Reply,
+    /// Reply all, Forward and More at the top, Delete and Done at the bottom.
+    private func railButton(_ title: String, icon: String, primary: Bool = false, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        RailButton(title: title, icon: icon, primary: primary, selected: selected, action: action)
     }
 
     @ViewBuilder private var railTop: some View {
@@ -268,7 +258,7 @@ struct MailView: View {
                 } label: {
                     Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
                 }
-                .foregroundStyle(Theme.ink).background(.regularMaterial, in: Circle())
+                .foregroundStyle(Theme.ink).modifier(RailGlass())
             }
             .disabled(model.working || model.preparingCompose)
         } else {
@@ -290,10 +280,7 @@ struct MailView: View {
         if let id = model.selectedID {
             VStack(spacing: 8) {
                 if model.mailbox != .trash { railButton("Delete", icon: "trash") { act(.delete, id: id) } }
-                Button { act(.done, id: id) } label: {
-                    Icon("done", label: "Done").frame(width: 48, height: 48).contentShape(Circle())
-                }
-                .buttonStyle(.plain).foregroundStyle(Theme.accentInk).background(Theme.accent, in: Circle())
+                railButton("Done", icon: "done", primary: true) { act(.done, id: id) }
             }
             .disabled(model.working)
         }

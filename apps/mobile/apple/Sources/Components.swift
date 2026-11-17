@@ -270,13 +270,14 @@ struct SheetScaffold<Content: View, Footer: View>: View {
     let cancel: () -> Void
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
+    @Environment(\.railInset) private var railInset
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(title).lagomFont(.base, .semibold).accessibilityAddTraits(.isHeader)
                 Spacer()
-                IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled)
+                if railInset == 0 { IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }
             }
             .padding(.leading, 16).padding(.trailing, 6).frame(minHeight: 50)
             .background(Theme.subtle)
@@ -286,6 +287,7 @@ struct SheetScaffold<Content: View, Footer: View>: View {
         }
         .foregroundStyle(Theme.ink)
         .background(Theme.raised)
+        .railColumn(top: { RailButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }, bottom: { EmptyView() })
     }
 }
 
@@ -453,5 +455,62 @@ extension EnvironmentValues {
     var railInset: CGFloat {
         get { self[RailInsetKey.self] }
         set { self[RailInsetKey.self] = newValue }
+    }
+}
+
+/// The Duo's right column (Alex 2026-11-17), the same on every screen: close, back and secondary actions at
+/// the top under the status bar; the main action, and Delete, at the bottom. Elsewhere it draws nothing.
+private struct RailColumn<Top: View, Bottom: View>: ViewModifier {
+    @Environment(\.railInset) private var inset
+    let top: Top
+    let bottom: Bottom
+
+    func body(content: Content) -> some View {
+        content
+            // Below the status bar (about 150 pt) and centred on the tab bar, which sits 6 pt in from the
+            // column's centre; both measured in the Duo simulator.
+            .overlay(alignment: .topTrailing) {
+                if inset > 0 { top.frame(width: inset).offset(x: inset - 6).padding(.top, 168) }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if inset > 0 { bottom.frame(width: inset).offset(x: inset - 6).padding(.bottom, 8) }
+            }
+    }
+}
+
+extension View {
+    func railColumn(@ViewBuilder top: () -> some View, @ViewBuilder bottom: () -> some View) -> some View {
+        modifier(RailColumn(top: top(), bottom: bottom()))
+    }
+}
+
+/// One round action in the right column, in the system bar's Liquid Glass; the main action is tinted with the accent.
+struct RailButton: View {
+    let title: String
+    let icon: String
+    var primary = false
+    var selected = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Icon(icon, label: title).frame(width: 48, height: 48).contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(primary ? Theme.accentInk : selected ? Theme.selectionIcon : Theme.ink)
+        .modifier(RailGlass(primary: primary))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+struct RailGlass: ViewModifier {
+    var primary = false
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(primary ? .regular.tint(Theme.accent).interactive() : .regular.interactive(), in: Circle())
+        } else {
+            content.background(primary ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.regularMaterial), in: Circle())
+        }
     }
 }
