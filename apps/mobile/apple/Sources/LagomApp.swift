@@ -344,7 +344,7 @@ struct MailView: View {
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
-                    Text(name).lagomFont(.base, .bold).lineLimit(1)
+                    Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).lineLimit(1)
                     Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
                 }
                 .foregroundStyle(Theme.ink)

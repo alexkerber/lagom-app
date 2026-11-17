@@ -225,7 +225,7 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
 
 /** A page title as on desktop and iOS: semibold at the title size. */
 @Composable internal fun BarTitle(title: String, modifier: Modifier = Modifier) =
-    Text(title, modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Text(title, modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
 
 /** The desktop's empty pages: a large line icon over a title and one quiet line, and an optional action. Fades in after
  *  150 ms, so a quick load never flashes it (motion.md). */
@@ -236,7 +236,7 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
     Column(modifier.fillMaxSize().graphicsLayer { alpha = shown.value }.padding(horizontal = 32.dp).padding(bottom = 64.dp),
         verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         LagomIcon(icon, Modifier.padding(bottom = 16.dp), size = 32.dp)
-        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), textAlign = TextAlign.Center)
         detail?.let { Text(it, Modifier.padding(top = 6.dp), color = lagom.ink2, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center) }
         action?.let { Box(Modifier.padding(top = 20.dp)) { it() } }
     }

@@ -414,7 +414,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding().semantics(mergeDescendants = true) { heading() }) {
-            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge)
+            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
             Text(localDate(today, "yyyy"), Modifier.padding(start = 2.dp), style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Normal),
                 color = lagom.ink2)
         }
@@ -493,7 +493,7 @@ private val Gutter = 48.dp
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(localDate(thursday, "MMMM"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(localDate(thursday, "MMMM"), style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
             Text(localDate(thursday, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.weight(1f))

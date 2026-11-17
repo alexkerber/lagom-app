@@ -410,7 +410,7 @@ struct CalendarView: View {
     private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text(Date.now, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
+                Text(Date.now, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
                 Text(Date.now, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
             }
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
@@ -517,7 +517,7 @@ private struct WeekGrid: View {
         let thursday = calendar.date(byAdding: .day, value: 3, to: planner.weekStart) ?? planner.weekStart
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(thursday, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
+                Text(thursday, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
                 Text(thursday, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
             }
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)

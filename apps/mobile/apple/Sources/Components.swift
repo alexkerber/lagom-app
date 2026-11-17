@@ -160,7 +160,7 @@ struct PageTitle<Trailing: View>: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(title).lagomFont(.title, .semibold).accessibilityAddTraits(.isHeader)
+            Text(title).font(.custom(Theme.Face.display, size: TextSize.title.points, relativeTo: .headline)).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             trailing
         }
@@ -189,7 +189,7 @@ struct EmptyState<Action: View>: View {
     var body: some View {
         VStack(spacing: 10) {
             Icon(icon, size: 36).foregroundStyle(Theme.secondary)
-            Text(title).lagomFont(.base, .semibold).foregroundStyle(Theme.ink)
+            Text(title).font(.custom(Theme.Face.display, size: TextSize.title.points, relativeTo: .headline)).foregroundStyle(Theme.ink)
             if let detail {
                 Text(detail).lagomFont(.snippet).foregroundStyle(Theme.secondary)
             }
@@ -275,7 +275,7 @@ struct SheetScaffold<Content: View, Footer: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(title).lagomFont(.base, .semibold).accessibilityAddTraits(.isHeader)
+                Text(title).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).accessibilityAddTraits(.isHeader)
                 Spacer()
                 if railInset == 0 { IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }
             }
