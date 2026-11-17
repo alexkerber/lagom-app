@@ -104,6 +104,21 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 6. Run the workflow once with `workflow_dispatch` and check that the log shows `Authority=Developer ID Application`
    and an accepted notarization.
 
+### Mac App Store
+
+`LAGOM_MAS=1 scripts/package-macos.sh 1.2.3` builds the store version. Add `LAGOM_MAS_UPLOAD=1` to upload it.
+
+- The app is sandboxed with `apps/desktop/macos/appstore.entitlements`: network client, Downloads and
+  files the user picks. Its data lives in `~/Library/Containers/com.alexkerber.lagom`, apart from the dmg
+  version's data. The two versions do not share accounts.
+- The bundle ID is the iOS one, `com.alexkerber.lagom`. Add macOS as a platform on the same App Store
+  Connect record: one name, one universal purchase.
+- The script signs ad hoc with the entitlements, wraps the app in an `.xcarchive` and lets
+  `xcodebuild -exportArchive` sign it for the store with automatic signing (team `3KFU9JQ5LH`), as the
+  iOS release does. No certificate to create by hand. Not verified end to end: App Store Connect
+  answered 500 on 2026-11-17.
+- No dmg and no notarization; the store does both jobs.
+
 ## Windows
 
 - Build the installer on `windows-latest` from the tag. Set `FILEVERSION`/`PRODUCTVERSION` in
