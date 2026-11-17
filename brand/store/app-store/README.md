@@ -17,8 +17,7 @@ of fastlane `deliver`, so a later upload script can read them as they are. Paste
 Before you submit:
 
 - The name "lagom" can be taken on the App Store. Then use "lagom mail".
-- `lagommail.app/support` and `lagommail.app/privacy` do not exist yet. Make both pages on the site, or
-  point the files at pages that exist. App Review opens both.
+- `lagommail.app/support` and `lagommail.app/privacy` are live (checked 2026-11-17). App Review opens both.
 - The description names only what the iOS app does on `main`. Google and Microsoft sign-in are not in
   the iOS app yet, so the copy says "Gmail works with an app-specific password". Update it when they land.
 
