@@ -11,44 +11,65 @@ struct TodayView: View {
     let planner: PlannerModel
     let model: MailModel
     let openMail: (Int64?) -> Void
+    let open: (AppSection) -> Void
     @Environment(\.horizontalSizeClass) private var width
     @State private var newTask = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "Today") {
-                Text(Date.now, format: .dateTime.weekday(.wide).day().month(.wide))
-                    .lagomFont(.small).foregroundStyle(Theme.secondary)
-            }
-            .modifier(PagePadding()).padding(.top, 8)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 32) {
-                    if width == .regular {
-                        HStack(alignment: .top, spacing: 32) { schedule; tasks }
-                    } else {
-                        schedule
-                        tasks
-                    }
-                    mail
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                sentence
+                if width == .regular {
+                    HStack(alignment: .top, spacing: 32) { schedule; tasks }
+                } else {
+                    schedule
+                    tasks
                 }
-                .modifier(PagePadding()).padding(.vertical, 16)
+                mail
             }
-            .refreshable { await planner.reload() }
-            if planner.unreadCount > 0 {
-                Button { openMail(nil) } label: {
-                    HStack(spacing: 8) {
-                        Icon("mail")
-                        Text("\(planner.unreadCount) unread in Inbox").lagomFont(.base)
-                        Icon("chevron-right")
-                    }
-                    .foregroundStyle(Theme.secondary).frame(minHeight: 44).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .modifier(PagePadding()).padding(.bottom, 4)
-            }
+            .modifier(PagePadding()).padding(.vertical, 16)
         }
+        .refreshable { await planner.reload() }
         .background(Theme.background)
         .sheet(isPresented: $newTask) { NewTaskView(planner: planner, list: planner.defaultList, due: Date()) }
+    }
+
+    /// The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page.
+    private var sentence: some View {
+        let now = Date.now
+        let greeting = switch Calendar.current.component(.hour, from: now) {
+        case 0..<12: "Good morning."
+        case 12..<18: "Good afternoon."
+        default: "Good evening."
+        }
+        func count(_ n: Int, _ one: String, _ many: String, _ none: String) -> String { n == 0 ? none : n == 1 ? "1 \(one)" : "\(n) \(many)" }
+        func part(_ text: String, _ link: String? = nil) -> AttributedString {
+            var part = AttributedString(text)
+            // A link run keeps its own colour: ink for the counts, the words between them ink2.
+            part.foregroundColor = link == nil ? Theme.secondary : Theme.ink
+            if let link { part.link = URL(string: "lagom-today:\(link)") }
+            return part
+        }
+        var line = AttributedString(greeting + "\n")
+        line.foregroundColor = Theme.ink
+        line += part(count(planner.unreadCount, "unread", "unread", "Nothing unread"), "mail") + part(", ")
+        line += part(count(planner.today?.events.count ?? 0, "event", "events", "no events"), "calendar") + part(" and ")
+        line += part(count(planner.today?.tasks.count ?? 0, "task due", "tasks due", "nothing due"), "todo") + part(".")
+        return VStack(alignment: .leading, spacing: 12) {
+            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
+            Text(line)
+                .font(.custom("Hauora-Bold", size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                .lineSpacing(-2).tint(Theme.ink).accessibilityAddTraits(.isHeader)
+                .environment(\.openURL, OpenURLAction { url in
+                    switch url.absoluteString {
+                    case "lagom-today:mail": openMail(nil)
+                    case "lagom-today:calendar": open(.calendar)
+                    case "lagom-today:todo": open(.todo)
+                    default: return .systemAction
+                    }
+                    return .handled
+                })
+        }
     }
 
     private var schedule: some View {
@@ -57,7 +78,7 @@ struct TodayView: View {
         // The now line sits before the first timed event still to start, as on desktop.
         let nowIndex = events.firstIndex { !$0.allDay && Date(timeIntervalSince1970: TimeInterval($0.startUnix)) > now } ?? events.count
         return VStack(alignment: .leading, spacing: 4) {
-            Heading(title: "Schedule").padding(.bottom, 8)
+            MonoLabel(text: "Schedule").padding(.bottom, 8)
             if events.isEmpty {
                 quiet(planner.calendarConnected ? "Nothing scheduled today." : "Your calendar shows here once a Google account is connected. Google sign-in is coming to iPhone and iPad.",
                       icon: "calendar")
@@ -74,7 +95,7 @@ struct TodayView: View {
 
     private var tasks: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Heading(title: "To do").padding(.bottom, 8)
+            MonoLabel(text: "To do").padding(.bottom, 8)
             let tasks = planner.today?.tasks ?? []
             if tasks.isEmpty { quiet("Nothing due today.", icon: "todo").padding(.bottom, 6) }
             ForEach(tasks, id: \.id) { todo in
@@ -87,7 +108,7 @@ struct TodayView: View {
 
     private var mail: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Heading(title: "Mail").padding(.bottom, 8)
+            MonoLabel(text: "Mail").padding(.bottom, 8)
             let unread = planner.today?.unread ?? []
             if unread.isEmpty {
                 quiet(model.accounts.isEmpty ? "Add an account in Mail to see new mail here." : "No unread mail in Inbox.", icon: "inbox")
@@ -106,6 +127,15 @@ struct TodayView: View {
                 .accessibilityHint("Opens the message")
             }
         }
+    }
+}
+
+/// Small Geist Mono capitals, the site's labels: Today's date and section titles.
+private struct MonoLabel: View {
+    let text: String
+    var body: some View {
+        Text(text.uppercased()).font(.custom("GeistMono-Medium", size: 13, relativeTo: .footnote))
+            .foregroundStyle(Theme.secondary).accessibilityLabel(text).accessibilityAddTraits(.isHeader)
     }
 }
 

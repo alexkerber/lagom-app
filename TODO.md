@@ -61,6 +61,11 @@
 - [ ] Command palette, compose and empty inbox: structure from B, dressed in D tokens.
 - [x] Inbox zero and first-read loading (owner 2026-11-15: "0 inbox som flashar förbi när man startar"). "Nothing left." is now one small illustration, one line and the sync status. Until a list's first store read lands (startup, account or folder switch), quiet placeholder rows fade in after 150 ms instead of inbox zero; a read error ends them. `LAGOM_SCREEN=loading` is a smoke screen; a headless test covers loading, landing at zero and a failed read.
 - [x] Typeface trial: Hauora Sans for Today's sentence, Geist Mono for labels (Alex chose A over a serif, 2026-11-17). Mobile Today still uses the system font.
+- [ ] Type follow-ups (Alex 2026-11-17, "kör 1–4 efter mobilen"):
+  - [ ] Letter spacing in vendored GPUI; tighten Hauora at 48 pt as the site does (−0.04 em).
+  - [ ] Tabular numerals for schedule times and counts (`tnum`).
+  - [ ] Font tokens in `design/tokens.toml` (display = Hauora, label = Geist Mono) for desktop, iOS, Android and the site.
+  - [ ] Hauora and mono labels on the other pages: Mail, Calendar and Todo titles, empty states.
 - [x] Performance: CI that measures the budgets in `docs/performance.md` (goal: the most optimised mail app). `scripts/perf.py` runs headless release benchmarks (search, open, reload, cold start to first list, MIME, HTML text, sync save, binary size) against `docs/performance-budgets.toml` in `.github/workflows/perf.yml` on Linux and macOS. Times fail above budget × 2. Frame times, memory and idle CPU need a window and are not gated.
 - [x] Performance: a jump to one message (search hit, notification, task link, Move) reads on the background executor. The old list stays until the read lands; the completion opens the list, selects the message and runs the follow-up (Move palette, popout Done/Later). `reload.ui_thread_jump` at 100k (release, M4 Max): 0.9–1.1 ms instead of 26 ms; budget 8 ms in `docs/performance-budgets.toml`. Native frame timing not measured.
 - [x] Performance: the Linux release binary was 53.2 MB, over its 30 MB budget. Now 29.9 MB on ubuntu-latest and 16.5 MB on macOS: fat LTO, no symbol table in the desktop binary, one zbus and one ashpd, GPUI's image formats only (steps and CI runs in `docs/performance.md`). The `max_linux` ceiling is gone; Linux uses the 30 MB budget.

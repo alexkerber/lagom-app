@@ -112,7 +112,7 @@ struct RootView: View {
 
     @ViewBuilder private func page(_ section: AppSection) -> some View {
         switch section {
-        case .today: TodayView(planner: planner, model: model, openMail: openMail)
+        case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 })
         case .mail: MailView(model: model, planner: planner, addAccount: $addAccount, removing: $removing)
         case .calendar: CalendarView(planner: planner, model: model)
         case .todo: TodoView(planner: planner)

@@ -40,6 +40,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
+import java.time.LocalTime
 import app.lagommail.core.*
 import kotlinx.coroutines.delay
 import java.time.Instant
@@ -79,6 +90,38 @@ internal val AppSection.icon: Int get() = when (this) {
 @Composable private fun Heading(title: String, modifier: Modifier = Modifier) =
     Text(title, modifier.padding(bottom = 8.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
 
+/** The desktop's bundled faces (OFL; licences in apps/desktop/assets/fonts): Today's sentence and labels. */
+private val Hauora = FontFamily(Font(R.font.hauora_bold, FontWeight.Bold))
+private val GeistMono = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Medium))
+
+/** Small Geist Mono capitals, the site's labels: Today's date and section titles. */
+@Composable private fun MonoLabel(text: String, modifier: Modifier = Modifier) =
+    Text(text.uppercase(), modifier.semantics { heading(); contentDescription = text }, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontFamily = GeistMono, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+
+/** The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page. */
+@Composable private fun TodaySentence(planner: PlannerModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
+    val wide = LocalConfiguration.current.screenWidthDp >= 600
+    val ink = MaterialTheme.colorScheme.onSurface
+    val greeting = when (LocalTime.now().hour) { in 0..11 -> "Good morning."; in 12..17 -> "Good afternoon."; else -> "Good evening." }
+    fun count(n: Int, one: String, many: String, none: String) = when (n) { 0 -> none; 1 -> "1 $one"; else -> "$n $many" }
+    val text = buildAnnotatedString {
+        withStyle(SpanStyle(color = ink)) { append(greeting + "\n") }
+        fun link(label: String, go: () -> Unit) = withLink(LinkAnnotation.Clickable(label, TextLinkStyles(SpanStyle(color = ink))) { go() }) { append(label) }
+        link(count(planner.unreadCount, "unread", "unread", "Nothing unread")) { openMail(null) }
+        append(", ")
+        link(count(planner.today?.events?.size ?: 0, "event", "events", "no events")) { open(AppSection.CALENDAR) }
+        append(" and ")
+        link(count(planner.today?.tasks?.size ?: 0, "task due", "tasks due", "nothing due")) { open(AppSection.TODO) }
+        append(".")
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        MonoLabel(localDate(LocalDate.now(), "EEEEdMMMM"))
+        Text(text, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = Hauora,
+            fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, lineHeight = if (wide) 50.sp else 36.sp)
+    }
+}
+
 @Composable private fun Quiet(text: String) =
     Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
 
@@ -109,19 +152,16 @@ private fun openLink(context: android.content.Context, planner: PlannerModel, li
 private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
 
 /** The calm Today page, as iOS `TodayView`: schedule, what is due, and a short look at unread mail. */
-@Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, openMail: (Long?) -> Unit) {
+@Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
     var newTask by rememberSaveable { mutableStateOf(false) }
     val now = nowSeconds()
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
-        PageTitle("Today") {
-            Text(localDate(LocalDate.now(), "EEEEdMMMM"), Modifier.padding(end = 12.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-        }
         Refreshable(planner, { planner.reload() }, Modifier.weight(1f)) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(32.dp)) {
+                TodaySentence(planner, open, openMail)
                 Column {
-                    Heading("Schedule")
+                    MonoLabel("Schedule", Modifier.padding(bottom = 8.dp))
                     val events = planner.today?.events.orEmpty()
                     if (events.isEmpty()) Quiet(if (planner.calendarConnected) "Nothing scheduled today."
                         else "Your calendar shows here once a Google account is connected. Google Calendar sync is coming to Android.")
@@ -134,14 +174,14 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     if (events.isNotEmpty() && nowIndex == events.size) NowLine(now)
                 }
                 Column {
-                    Heading("To do")
+                    MonoLabel("To do", Modifier.padding(bottom = 8.dp))
                     val tasks = planner.today?.tasks.orEmpty()
                     if (tasks.isEmpty()) Quiet("Nothing due today.")
                     tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { planner.toggle(todo) } } }
                     AddRow("New task", enabled = planner.lists.isNotEmpty()) { newTask = true }
                 }
                 Column {
-                    Heading("Mail")
+                    MonoLabel("Mail", Modifier.padding(bottom = 8.dp))
                     val unread = planner.today?.unread.orEmpty()
                     if (unread.isEmpty()) Quiet(if (model.accounts.isEmpty()) "Add an account in Mail to see new mail here." else "No unread mail in Inbox.")
                     unread.forEach { row ->
@@ -155,9 +195,6 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     }
                 }
             }
-        }
-        if (planner.unreadCount > 0) TextButton(onClick = { openMail(null) }, Modifier.padding(horizontal = 4.dp).heightIn(min = 48.dp)) {
-            Text("${planner.unreadCount} unread in Inbox  ›", Modifier.semantics { contentDescription = "${planner.unreadCount} unread in Inbox" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
     if (newTask) NewTaskDialog(planner, planner.defaultList, LocalDate.now()) { newTask = false }
