@@ -6,6 +6,8 @@
     <key>com.apple.security.app-sandbox</key><true/>
     <!-- IMAP, SMTP and HTTPS to the user's own servers; remote images in the reading pane. -->
     <key>com.apple.security.network.client</key><true/>
+    <!-- Google and Microsoft sign-in receive the browser callback on a loopback listener. -->
+    <key>com.apple.security.network.server</key><true/>
     <!-- Received attachments are saved to Downloads (lagom-core attachment.rs). -->
     <key>com.apple.security.files.downloads.read-write</key><true/>
     <!-- Attach files: the open panel in compose. -->
