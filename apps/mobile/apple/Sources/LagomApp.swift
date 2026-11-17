@@ -254,6 +254,8 @@ struct MailView: View {
             // A message opened from a notification can be outside the loaded page; its own row stands in.
             let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) } ?? model.message?.row
             VStack(spacing: 4) {
+                // Back first, under the status bar, though a swipe goes back too (Alex 2026-11-17).
+                railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
                 railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
                 railButton("Forward", icon: "forward") { Task { await model.prepareCompose(id: id, kind: .forward) } }
@@ -533,20 +535,15 @@ struct MailView: View {
             let id = model.selectedID ?? message.row.id
             VStack(spacing: 0) {
                 // Labels where they fit, as on desktop; icons alone in a narrow pane.
-                Group {
-                    if railInset > 0 {
-                        // The actions sit in the right column on the Duo.
-                        IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }
-                            .padding(.leading, -6).frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        // Labels where they fit, as on desktop; icons alone in a narrow pane.
-                        ViewThatFits(in: .horizontal) {
-                            actions(message, iconOnly: !regular)
-                            actions(message, iconOnly: true)
-                        }
+                // On the Duo every action, Back too, sits in the right column.
+                if railInset == 0 {
+                    // Labels where they fit, as on desktop; icons alone in a narrow pane.
+                    ViewThatFits(in: .horizontal) {
+                        actions(message, iconOnly: !regular)
+                        actions(message, iconOnly: true)
                     }
+                    .padding(.horizontal, 16).frame(minHeight: 56)
                 }
-                .padding(.horizontal, 16).frame(minHeight: 56)
                 ConversationView(model: model).id(id)
             }
             .background(Theme.background)
@@ -555,7 +552,7 @@ struct MailView: View {
             // While the message loads its list preview stands in, under a bar as tall as the toolbar.
             VStack(spacing: 0) {
                 HStack {
-                    if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                    if !split && railInset == 0 { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
                 }
                 .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
                 MessagePreview(row: row)
