@@ -5,6 +5,8 @@
 # skips notarization. Notarization: an App Store Connect API key (LAGOM_NOTARY_KEY path,
 # LAGOM_NOTARY_KEY_ID, LAGOM_NOTARY_ISSUER) or else the notarytool keychain profile
 # LAGOM_NOTARY_PROFILE (default lagom-notary). LAGOM_NOTARIZE=0 skips it. See docs/release.md.
+# LAGOM_MAS=1 builds for the Mac App Store instead: sandboxed, the iOS bundle ID (one universal
+# purchase), and Xcode signs and exports it from an archive (LAGOM_MAS_UPLOAD=1 uploads it). No dmg.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$repo"
@@ -18,6 +20,9 @@ profile=${LAGOM_NOTARY_PROFILE:-lagom-notary}
 out=target/macos
 app=$out/lagom.app
 dmg=$out/lagom-$version.dmg
+mas=${LAGOM_MAS:-0}
+bundle_id=app.lagommail.desktop
+[[ $mas == 0 ]] || bundle_id=com.alexkerber.lagom
 # Releases are universal. LAGOM_MAC_TARGETS=aarch64-apple-darwin gives a local build on a Mac without the Intel Rust target.
 read -ra targets <<< "${LAGOM_MAC_TARGETS:-aarch64-apple-darwin x86_64-apple-darwin}"
 
@@ -53,7 +58,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleName</key><string>lagom</string>
     <key>CFBundleDisplayName</key><string>lagom</string>
-    <key>CFBundleIdentifier</key><string>app.lagommail.desktop</string>
+    <key>CFBundleIdentifier</key><string>$bundle_id</string>
     <key>CFBundleExecutable</key><string>lagom</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -65,6 +70,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key><true/>
     <!-- Lets Intel Macs with two GPUs stay on the integrated one. -->
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <!-- Standard TLS only; see "Export compliance" in docs/release.md. -->
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
     <!-- mailto links: Settings can make lagom the default mail app. -->
     <key>CFBundleURLTypes</key>
     <array>
@@ -77,6 +84,55 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 plutil -lint "$app/Contents/Info.plist" >/dev/null
+
+if [[ $mas != 0 ]]; then
+    # Sign locally with the sandbox entitlements; Xcode re-signs for the store and keeps them.
+    codesign --force --sign - --entitlements apps/desktop/macos/appstore.entitlements "$app"
+    archive=$out/lagom.xcarchive
+    mkdir -p "$archive/Products/Applications"
+    cp -R "$app" "$archive/Products/Applications/"
+    cat > "$archive/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>ArchiveVersion</key><integer>2</integer>
+    <key>Name</key><string>lagom</string>
+    <key>SchemeName</key><string>lagom</string>
+    <key>CreationDate</key><date>$(date -u +%Y-%m-%dT%H:%M:%SZ)</date>
+    <key>ApplicationProperties</key>
+    <dict>
+        <key>ApplicationPath</key><string>Applications/lagom.app</string>
+        <key>CFBundleIdentifier</key><string>$bundle_id</string>
+        <key>CFBundleShortVersionString</key><string>${version%%-*}</string>
+        <key>CFBundleVersion</key><string>$build_number</string>
+        <key>Architectures</key><array>$(for a in $(lipo -archs "$app/Contents/MacOS/lagom"); do printf "<string>%s</string>" "$a"; done)</array>
+    </dict>
+</dict>
+</plist>
+PLIST
+    options=$out/ExportOptions.plist
+    cat > "$options" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key><string>app-store-connect</string>
+    <key>teamID</key><string>3KFU9JQ5LH</string>
+    <key>signingStyle</key><string>automatic</string>
+    <key>destination</key><string>$([[ ${LAGOM_MAS_UPLOAD:-0} != 0 ]] && echo upload || echo export)</string>
+</dict>
+</plist>
+PLIST
+    auth=(-allowProvisioningUpdates)
+    if [[ -n ${LAGOM_ASC_KEY:-} ]]; then
+        auth+=(-authenticationKeyPath "$LAGOM_ASC_KEY" -authenticationKeyID "$LAGOM_ASC_KEY_ID"
+            -authenticationKeyIssuerID "$LAGOM_ASC_ISSUER")
+    fi
+    xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options" -exportPath "$out/appstore" "${auth[@]}"
+    echo "$out/appstore"
+    exit 0
+fi
 
 # No entitlements file: the app is not sandboxed, and the hardened runtime allows everything it
 # uses (network, keychain, notifications, WKWebView, which runs in Apple's own processes).
