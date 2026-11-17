@@ -66,6 +66,8 @@ body = 14
 title = 15
 subject = 20
 display = 26
+# Today's date and counts: large, with some weight (Alex 2026-11-17: "stora fonter och lite kraft").
+hero = 48
 
 # Existing desktop motion durations, in milliseconds (including the slow loading pulse).
 # Fade is the fade half of the desktop loading animation, following CALM.

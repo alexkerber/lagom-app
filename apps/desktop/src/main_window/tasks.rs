@@ -462,6 +462,13 @@ impl MainWindow {
         }
     }
 
+    /// Open tasks due today or earlier, for Today's count.
+    pub(super) fn due_today(&self) -> usize {
+        let day = self.today.day.as_str();
+        today_tasks(&self.today.tasks, self.today.default, day).iter()
+            .filter(|task| task.due.as_deref().is_some_and(|due| due.get(..10).unwrap_or(due) <= day)).count()
+    }
+
     pub(super) fn home_tasks(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let mut tasks = today_tasks(&self.today.tasks, self.today.default, &self.today.day);
@@ -471,9 +478,8 @@ impl MainWindow {
             (due.is_none(), due, t.position, t.id)
         });
         div().debug_selector(|| "home-tasks".into()).min_w(px(0.)).flex().flex_col().gap(px(4.))
-            .child(div().font_weight(FontWeight::SEMIBOLD).mb(px(8.)).child("To do"))
-            .when(tasks.is_empty() && self.today.leaving.is_empty(), |d| d.child(div().py(px(16.)).flex().flex_col().gap(px(8.))
-                .child(icon("icons/todo.svg", t.ink2, 32.)).child(mono("Nothing to do today", t.ink2))))
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::SUBJECT)).mb(px(8.)).child("To do"))
+            .when(tasks.is_empty() && self.today.leaving.is_empty(), |d| d.child(div().text_color(t.ink2).py(px(4.)).child("Nothing to do today")))
             .children(tasks.into_iter().map(|task| self.task_row(task, self.today.leaving.iter().any(|t| t.id == task.id), cx)))
             .child(self.add_task_row(self.today.default, true, cx))
             .children(self.task_input(Edit::AddList).map(|input| div().child(input)))

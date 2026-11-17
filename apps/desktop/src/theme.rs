@@ -123,6 +123,7 @@ pub mod size {
     pub const TITLE: f32 = 15.0;
     pub const SUBJECT: f32 = 20.0;
     pub const DISPLAY: f32 = 26.0;
+    pub const HERO: f32 = 48.0;
 }
 
 pub mod radius {

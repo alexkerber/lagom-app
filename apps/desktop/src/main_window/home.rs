@@ -87,29 +87,42 @@ impl MainWindow {
         cx.notify();
     }
 
-    pub(super) fn unread_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// One large count that opens its page: unread mail, today's events or due tasks.
+    fn stat(&self, id: &'static str, count: usize, label: &str, cx: &mut Context<Self>, open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static) -> Stateful<Div> {
         let t = self.theme;
-        pressable(div().id("home-unread"), &t, false).debug_selector(|| "home-unread".into())
-            .flex().items_center().gap(px(8.)).h(px(32.)).rounded(px(radius::CONTROL)).text_color(t.ink2)
-            .child(icon("icons/mail.svg", t.ink2, 16.))
-            .child(format!("{} unread in Inbox", self.today.unread))
-            .child(icon("icons/chevron-right.svg", t.ink2, 16.))
-            .on_click(cx.listener(|this, _, window, cx| { this.open_box(None, cx); window.focus(&this.focus); }))
+        pressable(div().id(id), &t, false).debug_selector(move || id.into())
+            .flex().flex_col().gap(px(4.)).min_w(px(140.)).px(px(12.)).py(px(10.)).rounded(px(radius::PANEL))
+            .child(div().text_size(px(size::HERO)).font_weight(FontWeight::BOLD).line_height(relative(1.))
+                .text_color(if count == 0 { t.ink2 } else { t.ink }).child(count.to_string()))
+            .child(div().text_size(px(size::TITLE)).text_color(t.ink2).child(label.to_owned()))
+            .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
     }
 
     pub(super) fn home_view(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let stacked = window.viewport_size().width < px(900.);
-        div().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(24.))
-            .child(div().flex().items_center().justify_between().gap(px(16.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Today"))
-                .child(mono(chrono::Local::now().format("%A %-d %B").to_string(), t.ink2)))
+        let now = chrono::Local::now();
+        let due = self.due_today();
+        let events = self.today.events.len();
+        let plural = |n: usize, one: &str, many: &str| if n == 1 { one.to_owned() } else { many.to_owned() };
+        // An empty schedule is said by its count; the list shows only events or the calendar consent row.
+        let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
+        let schedule = events > 0 || !has_calendar;
+        div().flex_1().min_w(px(0.)).flex().flex_col()
             .child(div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll)
-                .child(div().flex().gap(px(32.)).when(stacked, |d| d.flex_col())
-                    .child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx)))
-                    .child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.home_tasks(cx)))))
-            .children(self.task_hint(window))
-            .child(self.unread_view(cx))
+                .child(// A block, not a flex column: inside a column, taffy sized task titles to their shortest sibling and cut them.
+                    div().w_full().px(px(48.)).pt(px(40.)).pb(px(48.))
+                    .child(div().mb(px(40.)).flex().flex_col().text_size(px(size::HERO)).font_weight(FontWeight::BOLD).line_height(relative(1.1))
+                        .child(now.format("%A").to_string())
+                        .child(div().text_color(t.ink2).child(now.format("%-d %B").to_string())))
+                    .child(div().mb(px(40.)).flex().flex_wrap().gap(px(8.)).ml(px(-12.))
+                        .child(self.stat("home-unread", self.today.unread, "unread", cx, |this, window, cx| { this.open_box(None, cx); window.focus(&this.focus); }))
+                        .child(self.stat("home-events", events, &plural(events, "event today", "events today"), cx, |this, window, cx| this.show_section(2, window, cx)))
+                        .child(self.stat("home-due", due, &plural(due, "task due", "tasks due"), cx, |this, window, cx| this.show_section(3, window, cx))))
+                    .child(div().flex().gap(px(48.)).when(stacked || !schedule, |d| d.flex_col())
+                        .when(schedule, |d| d.child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx))))
+                        .child(div().min_w(px(0.)).when(!stacked && schedule, |d| d.flex_1()).child(self.home_tasks(cx))))))
+            .children(self.task_hint(window).map(|hint| div().px(px(48.)).pb(px(16.)).child(hint)))
     }
 }
 
