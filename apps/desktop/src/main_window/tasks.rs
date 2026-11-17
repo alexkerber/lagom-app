@@ -478,7 +478,7 @@ impl MainWindow {
             (due.is_none(), due, t.position, t.id)
         });
         div().debug_selector(|| "home-tasks".into()).min_w(px(0.)).flex().flex_col().gap(px(4.))
-            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::SUBJECT)).mb(px(8.)).child("To do"))
+            .child(home::heading(&t, "To do").mb(px(8.)))
             .when(tasks.is_empty() && self.today.leaving.is_empty(), |d| d.child(div().text_color(t.ink2).py(px(4.)).child("Nothing to do today")))
             .children(tasks.into_iter().map(|task| self.task_row(task, self.today.leaving.iter().any(|t| t.id == task.id), cx)))
             .child(self.add_task_row(self.today.default, true, cx))

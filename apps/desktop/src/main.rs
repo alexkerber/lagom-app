@@ -36,6 +36,16 @@ use main_window::MainWindow;
 /// Icons and fonts compiled into the binary.
 struct Assets;
 
+/// Faces for the type trial (`LAGOM_TYPE`), all OFL; licences sit next to them.
+const TRIAL_FONTS: [&[u8]; 6] = [
+    include_bytes!("../assets/fonts/Hauora-Medium.ttf"),
+    include_bytes!("../assets/fonts/Hauora-Bold.ttf"),
+    include_bytes!("../assets/fonts/Hauora-ExtraBold.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/InstrumentSerif-Regular.ttf"),
+];
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
@@ -219,6 +229,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         // All text is the system font. Geist Mono (palette key caps) comes from the system if
         // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.
+        cx.text_system().add_fonts(TRIAL_FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load");
         main_window::bind_keys(cx);
         text_input::bind_keys(cx);
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.

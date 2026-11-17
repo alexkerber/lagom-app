@@ -66,7 +66,7 @@ impl MainWindow {
         let now = chrono::Local::now();
         let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
         let mut agenda = div().debug_selector(|| "today-agenda".into()).w_full().flex().flex_col().gap(px(12.))
-            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::SUBJECT)).child("Schedule"));
+            .child(home::heading(&t, "Schedule"));
         if !has_calendar {
             let account = self.today.calendar_accounts.first().map(|(a, _)| a.id.clone());
             return agenda.child(pressable(div().id("home-calendar-consent"), &t, false)

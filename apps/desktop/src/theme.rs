@@ -223,6 +223,19 @@ pub mod font {
             _ => ".SystemUIFont",
         })
     }
+
+    /// Type trial (Alex 2026-11-17): `LAGOM_TYPE=a` is the site's Hauora Sans with Geist Mono labels,
+    /// `LAGOM_TYPE=b` is Instrument Serif. Unset: the shipped look.
+    /// shortcut: env switch for a side-by-side choice; make the winner the default and drop the loser.
+    pub fn trial() -> Option<char> {
+        static TRIAL: std::sync::OnceLock<Option<char>> = std::sync::OnceLock::new();
+        *TRIAL.get_or_init(|| std::env::var("LAGOM_TYPE").ok().and_then(|v| v.chars().next()).filter(|c| matches!(c, 'a' | 'b')))
+    }
+
+    /// Dates, counts and the Today sentence.
+    pub fn display() -> &'static str {
+        match trial() { Some('a') => "Hauora", Some('b') => "Instrument Serif", _ => ui() }
+    }
 }
 
 #[cfg(test)]

@@ -98,6 +98,34 @@ impl MainWindow {
             .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
     }
 
+    /// Type trial: the day said as a sentence in two tones. The counts are ink and open their page.
+    fn today_sentence(&self, now: chrono::DateTime<chrono::Local>, events: usize, due: usize, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let serif = font::trial() == Some('b');
+        let weight = if serif { FontWeight::NORMAL } else { FontWeight::BOLD };
+        use chrono::Timelike;
+        let greeting = match now.hour() { 0..=11 => "Good morning.", 12..=17 => "Good afternoon.", _ => "Good evening." };
+        let space = if serif { 14. } else { 12. };
+        let count = |n: usize, one: &str, many: &str, none: &str| match n { 0 => none.to_owned(), 1 => format!("1 {one}"), n => format!("{n} {many}") };
+        let part = |id: &'static str, text: String, open: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            div().id(id).debug_selector(move || id.into()).text_color(t.ink).cursor_pointer().hover(|s| s.opacity(0.7))
+                .child(text).on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
+        };
+        let gray = |text: &'static str| div().text_color(t.ink2).mr(px(space)).child(text);
+        let date = now.format("%A %-d %B").to_string();
+        div().mb(px(48.)).flex().flex_col().gap(px(16.))
+            .child(if serif { div().text_size(px(size::TITLE)).text_color(t.ink2).child(date) } else { label(&t, date) })
+            .child(div().font_family(font::display()).font_weight(weight).text_size(px(if serif { 64. } else { size::HERO }))
+                .line_height(relative(1.05)).max_w(px(900.))
+                .child(greeting)
+                .child(div().flex().flex_wrap()
+                    .child(div().flex().mr(px(space)).child(part("home-unread", count(self.today.unread, "unread", "unread", "Nothing unread"), |this, window, cx| { this.open_box(None, cx); window.focus(&this.focus); })).child(div().text_color(t.ink2).child(",")))
+                    .child(part("home-events", count(events, "event", "events", "no events"), |this, window, cx| this.show_section(2, window, cx)).mr(px(space)))
+                    .child(gray("and"))
+                    .child(part("home-due", count(due, "task due", "tasks due", "nothing due"), |this, window, cx| this.show_section(3, window, cx)))
+                    .child(div().text_color(t.ink2).child("."))))
+    }
+
     pub(super) fn home_view(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let stacked = window.viewport_size().width < px(900.);
@@ -112,18 +140,33 @@ impl MainWindow {
             .child(div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll)
                 .child(// A block, not a flex column: inside a column, taffy sized task titles to their shortest sibling and cut them.
                     div().w_full().px(px(48.)).pt(px(40.)).pb(px(48.))
+                    .when(font::trial().is_some(), |d| d.child(self.today_sentence(now, events, due, cx)))
+                    .when(font::trial().is_none(), |d| d
                     .child(div().mb(px(40.)).flex().flex_col().text_size(px(size::HERO)).font_weight(FontWeight::BOLD).line_height(relative(1.1))
                         .child(now.format("%A").to_string())
                         .child(div().text_color(t.ink2).child(now.format("%-d %B").to_string())))
                     .child(div().mb(px(40.)).flex().flex_wrap().gap(px(8.)).ml(px(-12.))
                         .child(self.stat("home-unread", self.today.unread, "unread", cx, |this, window, cx| { this.open_box(None, cx); window.focus(&this.focus); }))
                         .child(self.stat("home-events", events, &plural(events, "event today", "events today"), cx, |this, window, cx| this.show_section(2, window, cx)))
-                        .child(self.stat("home-due", due, &plural(due, "task due", "tasks due"), cx, |this, window, cx| this.show_section(3, window, cx))))
+                        .child(self.stat("home-due", due, &plural(due, "task due", "tasks due"), cx, |this, window, cx| this.show_section(3, window, cx)))))
                     .child(div().flex().gap(px(48.)).when(stacked || !schedule, |d| d.flex_col())
                         .when(schedule, |d| d.child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx))))
                         .child(div().min_w(px(0.)).when(!stacked && schedule, |d| d.flex_1()).child(self.home_tasks(cx))))))
             .children(self.task_hint(window).map(|hint| div().px(px(48.)).pb(px(16.)).child(hint)))
     }
+}
+
+/// A section title on Today: Geist Mono capitals in trial A, the serif in trial B, else bold sans.
+pub(super) fn heading(t: &Theme, text: &'static str) -> Div {
+    match font::trial() {
+        Some('a') => label(t, text.to_owned()),
+        Some('b') => div().font_family(font::display()).text_size(px(30.)).line_height(relative(1.1)).child(text),
+        _ => div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::SUBJECT)).child(text),
+    }
+}
+
+fn label(t: &Theme, text: String) -> Div {
+    div().font_family(font::MONO).font_weight(FontWeight::MEDIUM).text_size(px(12.)).text_color(t.ink2).child(text.to_uppercase())
 }
 
 #[cfg(test)]
