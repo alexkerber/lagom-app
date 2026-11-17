@@ -172,7 +172,7 @@ impl MainWindow {
         #[cfg(test)]
         let summary = summary.debug_selector(move || format!("{} messages selected", members.len()));
         div().flex_1().min_w(px(0.)).h_full().flex().flex_col()
-            .child(toolbar(t).flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.)).px(px(16.))
+            .child(toolbar().flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.)).px(px(16.))
                 .when(!trash, |d| d
                     .child(polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))))
                     .child(button(t, "Delete", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Delete, cx)))))

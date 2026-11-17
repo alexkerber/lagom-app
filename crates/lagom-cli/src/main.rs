@@ -1,3 +1,5 @@
+mod mcp;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use lagom_core::{
@@ -64,6 +66,8 @@ impl From<SignInProvider> for Provider {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Serve read-only tools over MCP stdio.
+    Mcp,
     Tasks {
         #[command(subcommand)]
         command: TasksCommand,
@@ -291,6 +295,7 @@ async fn main() -> Result<()> {
         None => Store::open_default()?,
     };
     match args.command {
+        Command::Mcp => mcp::run(&store)?,
         Command::Tasks { command } => match command {
             TasksCommand::Lists => {
                 for list in store.task_lists()? {

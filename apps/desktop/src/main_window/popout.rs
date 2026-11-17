@@ -145,7 +145,7 @@ impl Render for MessageWindow {
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
             .child(
-                toolbar(&t)
+                toolbar()
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     // macOS: the traffic lights sit in the toolbar, as in the main window's sidebar.
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
