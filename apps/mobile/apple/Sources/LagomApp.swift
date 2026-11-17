@@ -188,8 +188,8 @@ struct MailView: View {
         .sensoryFeedback(.impact(weight: .light), trigger: acted)
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
-        .sheet(item: $signing) { account in SignatureView(model: model, account: account) }
+        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft).duoRail() }
+        .sheet(item: $signing) { account in SignatureView(model: model, account: account).duoRail() }
         .alert("Your name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
             TextField("Your name", text: $newName).textContentType(.name)
             Button("Save") {
@@ -222,7 +222,7 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
-        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing) }
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing).duoRail() }
     }
 
     private var composeButton: some View {

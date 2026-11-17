@@ -31,7 +31,7 @@ struct TodayView: View {
         }
         .refreshable { await planner.reload() }
         .background(Theme.background)
-        .sheet(isPresented: $newTask) { NewTaskView(planner: planner, list: planner.defaultList, due: Date()) }
+        .sheet(isPresented: $newTask) { NewTaskView(planner: planner, list: planner.defaultList, due: Date()).duoRail() }
     }
 
     /// The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page.
@@ -318,7 +318,7 @@ struct TodoView: View {
         }
         .background(Theme.background)
         .sheet(item: Binding(get: { adding.map(ListID.init) }, set: { adding = $0?.id })) { list in
-            NewTaskView(planner: planner, list: list.id, due: nil)
+            NewTaskView(planner: planner, list: list.id, due: nil).duoRail()
         }
         .alert("New list", isPresented: $newList) {
             TextField("Name", text: $listName)

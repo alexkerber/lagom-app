@@ -33,7 +33,7 @@ struct OnboardingView: View {
         .foregroundStyle(Theme.ink)
         // The page changes in place, so VoiceOver starts again at its top.
         .onChange(of: step) { _, _ in AccessibilityNotification.ScreenChanged().post() }
-        .sheet(isPresented: $other) { AddAccountView(model: model, providers: false) }
+        .sheet(isPresented: $other) { AddAccountView(model: model, providers: false).duoRail() }
     }
 
     /// One step: Back on Choose account, then the content centred and scrolling under large text.

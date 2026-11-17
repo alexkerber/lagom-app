@@ -41,7 +41,6 @@ struct RootView: View {
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
-                GeometryReader { proxy in
                 TabView(selection: $section) {
                     // Settings opens from the mailbox menu on a phone; it is rarely used (Alex 2026-11-17).
                     ForEach(AppSection.allCases.filter { $0 != .settings }) { page in
@@ -58,15 +57,12 @@ struct RootView: View {
                 }
                 .tint(Theme.selectionIcon)
                 .onAppear { if section == .settings { section = .mail } }
-                // A wide right inset on a phone is the Duo's column: lagom's actions join the bar there.
-                // A landscape iPhone has insets on both sides, so it keeps the header buttons.
-                .environment(\.railInset, UIDevice.current.userInterfaceIdiom == .phone && proxy.safeAreaInsets.trailing > 40
-                             && proxy.safeAreaInsets.leading < 20 ? proxy.safeAreaInsets.trailing : 0)
-                }
+                // The Duo's column: lagom's actions join the system bar there.
+                .duoRail()
             }
         }
         .foregroundStyle(Theme.ink)
-        .sheet(isPresented: $addAccount) { AddAccountView(model: model) }
+        .sheet(isPresented: $addAccount) { AddAccountView(model: model).duoRail() }
         .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             if let account = removing {
                 Button("Remove \(account.email)", role: .destructive) { Task { await model.remove(account) }; removing = nil }

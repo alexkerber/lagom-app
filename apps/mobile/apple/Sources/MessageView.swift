@@ -147,6 +147,8 @@ struct MessageView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
+                // The Duo's column replies to the open conversation; this one replies to this message.
+                if railInset > 0 { Button("Reply") { Task { await model.prepareCompose(id: row.id, kind: .reply) } } }
                 Button("Reply all") { Task { await model.prepareCompose(id: row.id, kind: .replyAll) } }
                 Button("Forward") { Task { await model.prepareCompose(id: row.id, kind: .forward) } }
                 Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: row.id, read: row.unread) } }
