@@ -9,7 +9,14 @@ use lagom_core::{
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
-use super::clean;
+/// The CLI's control-character escape, plus bidi and invisible direction marks, which can reorder what a
+/// person or model reads (U+202E turns "exe.txt" into "txt.exe").
+fn clean(value: &str) -> String {
+    super::clean(value).chars().map(|c| match c {
+        '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => c.escape_unicode().to_string(),
+        c => c.to_string(),
+    }).collect()
+}
 
 pub(super) fn run(store: &Store) -> Result<()> {
     let mut stdout = io::stdout().lock();
@@ -23,7 +30,8 @@ pub(super) fn run(store: &Store) -> Result<()> {
 }
 
 fn error(id: &Value, code: i32, message: &str) -> String {
-    json!({"jsonrpc":"2.0", "id":id, "error":{"code":code,"message":message}}).to_string()
+    // Messages can quote client input, such as an unknown argument name.
+    json!({"jsonrpc":"2.0", "id":id, "error":{"code":code,"message":clean(message)}}).to_string()
 }
 
 fn handle(store: &Store, line: &str, now: DateTime<Local>) -> Option<String> {
@@ -660,4 +668,12 @@ mod tests {
             invoke(&store, "list_todos", json!({"list":list.name}))
         );
     }
+
+    #[test]
+    fn output_escapes_bidi_and_control_characters() {
+        assert_eq!(clean("a\u{202E}b\u{1b}c\nd"), "a\\u{202e}b\\u{1b}c\nd");
+        let reply: Value = serde_json::from_str(&error(&json!(1), -32602, "bad \u{1b}[2J")).unwrap();
+        assert!(!reply["error"]["message"].as_str().unwrap().contains('\u{1b}'));
+    }
+
 }
