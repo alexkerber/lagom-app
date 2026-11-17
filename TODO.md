@@ -21,7 +21,7 @@
 - [ ] Formatting baseline: `cargo fmt --check` reports existing style differences; no formatter configuration or CI routine is established.
 - [x] Desktop UI framework: GPUI.
 - [x] Build and start on macOS (2026-11-06).
-- [ ] Build on Linux and Windows (CI).
+- [x] Build on Linux and Windows (CI): the `ci.yml` test matrix runs macOS, Ubuntu and Windows.
 - [x] Linux smoke start under Xvfb was flaky (2 of 44 package runs). Cause: `gdbus call` reads argument types from introspection but gives up after 3 s. Cold D-Bus activation took 3.0 s and 3.4 s in the failed runs (at most 2.7 s in 43 passing runs). gdbus then sent `"{}"` as a string, the call failed with a signature mismatch, and xvfb-run removed the X server under the running app. Its `_NET_WM_STATE` and `ERROR_SURFACE_LOST_KHR` panics were that teardown. The smoke step now types the argument (`@a{sv} {}`). GNOME sends typed calls, so users are not affected.
 - [x] AppImage smoke start: it ran with `APPIMAGE_EXTRACT_AND_RUN`, so the 10 s timeout included unpacking, and `cmd || test $? = 124` passed when lagom exited at once with 0. The step now unpacks first and passes only when lagom is still alive at the timeout.
 - [x] RustSec CI audit on every push and pull request with cargo-audit 0.23.0; vulnerabilities fail and informational/yanked warnings remain visible. Local audit: no vulnerabilities or ignored advisories.
