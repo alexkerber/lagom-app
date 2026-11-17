@@ -26,6 +26,11 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// Tasks due today or earlier, as desktop `due_today`: the first ten characters of `due` are its date.
+func dueCount(_ tasks: [Todo], day: String) -> Int {
+    tasks.filter { todo in todo.due.map { String($0.prefix(10)) <= day } ?? false }.count
+}
+
 /// What the window shows: nothing until the store has its accounts, the intro without an account,
 /// the notifications step once after one, then the app.
 enum LaunchStage: Equatable {

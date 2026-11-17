@@ -57,9 +57,11 @@ struct RootView: View {
                     }
                 }
                 .tint(Theme.selectionIcon)
-                // A wide right inset on a phone is the Duo's column: lagom's actions join the bar there.
                 .onAppear { if section == .settings { section = .mail } }
-                .environment(\.railInset, UIDevice.current.userInterfaceIdiom == .phone && proxy.safeAreaInsets.trailing > 40 ? proxy.safeAreaInsets.trailing : 0)
+                // A wide right inset on a phone is the Duo's column: lagom's actions join the bar there.
+                // A landscape iPhone has insets on both sides, so it keeps the header buttons.
+                .environment(\.railInset, UIDevice.current.userInterfaceIdiom == .phone && proxy.safeAreaInsets.trailing > 40
+                             && proxy.safeAreaInsets.leading < 20 ? proxy.safeAreaInsets.trailing : 0)
                 }
             }
         }

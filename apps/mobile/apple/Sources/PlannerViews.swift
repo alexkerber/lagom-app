@@ -54,7 +54,7 @@ struct TodayView: View {
         line.foregroundColor = Theme.ink
         line += part(count(planner.unreadCount, "unread", "unread", "Nothing unread"), "mail") + part(", ")
         line += part(count(planner.today?.events.count ?? 0, "event", "events", "no events"), "calendar") + part(" and ")
-        line += part(count(planner.today?.tasks.count ?? 0, "task due", "tasks due", "nothing due"), "todo") + part(".")
+        line += part(count(dueCount(planner.today?.tasks ?? [], day: planner.today?.day ?? ""), "task due", "tasks due", "nothing due"), "todo") + part(".")
         return VStack(alignment: .leading, spacing: 12) {
             MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)

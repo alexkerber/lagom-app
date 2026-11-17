@@ -112,7 +112,9 @@ private val GeistMono = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Med
         append(", ")
         link(count(planner.today?.events?.size ?: 0, "event", "events", "no events")) { open(AppSection.CALENDAR) }
         append(" and ")
-        link(count(planner.today?.tasks?.size ?: 0, "task due", "tasks due", "nothing due")) { open(AppSection.TODO) }
+        // Only tasks due today or earlier, as desktop `due_today`; Today's list also shows undated and future ones.
+        val due = planner.today?.let { today -> today.tasks.count { task -> task.due?.take(10)?.let { it <= today.day } ?: false } } ?: 0
+        link(count(due, "task due", "tasks due", "nothing due")) { open(AppSection.TODO) }
         append(".")
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

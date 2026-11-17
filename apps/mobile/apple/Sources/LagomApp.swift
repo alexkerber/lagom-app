@@ -114,6 +114,8 @@ struct MailView: View {
     @State private var syncShown = false
 
     private var regular: Bool { width == .regular && height == .regular }
+    /// The iPad sidebar holds Search and Settings; an unfolded Duo is regular too but has no sidebar.
+    private var sidebar: Bool { regular && UIDevice.current.userInterfaceIdiom == .pad }
     /// List and reading pane side by side only where both fit; a narrow iPad pushes the message as a phone does.
     private var split: Bool { regular && paneWidth >= 740 }
 
@@ -249,7 +251,8 @@ struct MailView: View {
 
     @ViewBuilder private var railTop: some View {
         if let id = model.selectedID {
-            let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) }
+            // A message opened from a notification can be outside the loaded page; its own row stands in.
+            let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) } ?? model.message?.row
             VStack(spacing: 4) {
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
                 railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
@@ -307,7 +310,7 @@ struct MailView: View {
                 } else if railInset == 0 && !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
                 if railInset == 0 { composeButton.padding(.trailing, -6) }
             }
-            if !regular && model.mailbox != .drafts { SearchField(text: $model.searchText) }
+            if !sidebar && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
     }
@@ -346,7 +349,7 @@ struct MailView: View {
                 }
             }
             // Rarely used, so not in the tab bar on a phone (Alex 2026-11-17).
-            if !regular { Button("Settings") { settingsOpen = true } }
+            if !sidebar { Button("Settings") { settingsOpen = true } }
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
