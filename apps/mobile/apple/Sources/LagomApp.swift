@@ -237,7 +237,6 @@ struct MailView: View {
             if !regular && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
-        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
     }
 
     /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
@@ -461,7 +460,6 @@ struct MailView: View {
                     actions(message, iconOnly: true)
                 }
                 .padding(.horizontal, 16).frame(minHeight: 56)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
                 ConversationView(model: model).id(id)
             }
             .background(Theme.background)
@@ -473,7 +471,6 @@ struct MailView: View {
                     if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
                 }
                 .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
                 MessagePreview(row: row)
             }
             .background(Theme.background)

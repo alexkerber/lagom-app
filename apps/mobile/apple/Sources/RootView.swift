@@ -28,15 +28,15 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if width == .regular && height == .regular {
+            // The sidebar is for iPad only. An unfolded iPhone Duo is regular both ways too, but keeps the
+            // system bar, which iOS puts on its right edge (Alex 2026-11-17).
+            if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
                     SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
                         .frame(width: 240)
+                    // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop.
                     page(section)
-                        .background(Theme.background)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.panel))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.panel).strokeBorder(Theme.line))
-                        .padding([.top, .bottom, .trailing], 8)
+                        .background(Theme.background.ignoresSafeArea())
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
@@ -116,11 +116,12 @@ struct RootView: View {
         case .mail: MailView(model: model, planner: planner, addAccount: $addAccount, removing: $removing)
         case .calendar: CalendarView(planner: planner, model: model)
         case .todo: TodoView(planner: planner)
+        case .settings: SettingsView(model: model, addAccount: $addAccount, removing: $removing)
         }
     }
 }
 
-/// The desktop sidebar: brand, Search, the four pages, Mail's mailboxes with per-account Inbox, then Accounts.
+/// The desktop sidebar without the brand (Alex 2026-11-17): Search, the pages, Mail's mailboxes with per-account Inbox, then Accounts.
 struct SidebarView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
@@ -131,11 +132,6 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 10) {
-                Image("Brand").resizable().frame(width: 26, height: 26).accessibilityHidden(true)
-                Text("lagom").lagomFont(.base, .semibold)
-            }
-            .padding(.horizontal, 8).frame(height: 40)
             SearchField(text: $model.searchText)
                 .onChange(of: model.searchText) { _, text in if !text.isEmpty { section = .mail } }
             ScrollView {

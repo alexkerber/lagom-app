@@ -131,7 +131,7 @@ struct TodayView: View {
 }
 
 /// Small Geist Mono capitals, the site's labels: Today's date and section titles.
-private struct MonoLabel: View {
+struct MonoLabel: View {
     let text: String
     var body: some View {
         Text(text.uppercased()).font(.custom("GeistMono-Medium", size: 13, relativeTo: .footnote))

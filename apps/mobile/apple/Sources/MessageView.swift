@@ -77,7 +77,6 @@ struct MessageView: View {
             .padding(width == .regular ? 20 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.line))
             Button { Task { await model.prepareCompose(id: row.id, kind: .reply) } } label: {
                 HStack(spacing: 8) {
                     Icon("reply")
@@ -87,8 +86,7 @@ struct MessageView: View {
                 }
                 .foregroundStyle(Theme.secondary)
                 .padding(.horizontal, 12).frame(minHeight: 44)
-                .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
+                .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -135,7 +133,6 @@ struct MessageView: View {
             Text(initials).lagomFont(.small, .semibold).lineLimit(1).minimumScaleFactor(0.5)
                 .frame(width: 36, height: 36)
                 .background(Theme.subtle, in: Circle())
-                .overlay(Circle().strokeBorder(Theme.line))
                 .accessibilityHidden(true)
             // The address wraps, and a very long one keeps its domain, so a look-alike sender stays visible.
             VStack(alignment: .leading, spacing: 2) {
@@ -196,7 +193,6 @@ struct MessageView: View {
                         }
                         .padding(.horizontal, 14).frame(minHeight: 44)
                         .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.attachment))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.attachment).strokeBorder(Theme.line))
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -228,7 +224,6 @@ struct MessagePreview: View {
             .padding(width == .regular ? 20 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.line))
         }
         .padding(pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)

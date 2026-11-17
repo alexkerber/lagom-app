@@ -15,10 +15,8 @@ struct HouseButtonStyle: ButtonStyle {
             .foregroundStyle(primary ? Theme.accentInk : Theme.ink)
             .padding(.horizontal, 12)
             .frame(minHeight: 34)
-            .background(primary ? Theme.accent : Theme.background, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-            .overlay {
-                if !primary { RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line) }
-            }
+            // No outline, as desktop since #168: a quiet fill marks the button.
+            .background(primary ? Theme.accent : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
             .opacity(configuration.isPressed ? 0.8 : enabled ? 1 : 0.5)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
@@ -223,7 +221,6 @@ struct FilterControl: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: unreadOnly)
         .padding(2)
         .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
     }
 
     private func segment(_ title: String, icon: String, unread: Bool) -> some View {
@@ -231,7 +228,8 @@ struct FilterControl: View {
         return Button { unreadOnly = unread } label: {
             HStack(spacing: 6) {
                 Icon(icon, size: 16).foregroundStyle(on ? Theme.ink : Theme.secondary)
-                Text(title).lagomFont(.small).foregroundStyle(Theme.ink)
+                // One line: "Unread" broke in two on the folded Duo.
+                Text(title).lagomFont(.small).foregroundStyle(Theme.ink).lineLimit(1).fixedSize()
             }
             .padding(.horizontal, 10).frame(minHeight: 28)
             .background(on ? Theme.raised : .clear, in: RoundedRectangle(cornerRadius: 6))
@@ -260,8 +258,7 @@ struct SearchField: View {
             }
         }
         .padding(.horizontal, 8).frame(minHeight: 44)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
+        .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
     }
 }
 
@@ -283,11 +280,9 @@ struct SheetScaffold<Content: View, Footer: View>: View {
             }
             .padding(.leading, 16).padding(.trailing, 6).frame(minHeight: 50)
             .background(Theme.subtle)
-            .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
             content
             HStack(spacing: 10) { footer }
                 .padding(.horizontal, 16).frame(minHeight: 64)
-                .overlay(alignment: .top) { Theme.line.frame(height: 1) }
         }
         .foregroundStyle(Theme.ink)
         .background(Theme.raised)
