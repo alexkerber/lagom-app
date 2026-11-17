@@ -18,6 +18,33 @@ struct ComposeView: View {
     @State private var photos: [PhotosPickerItem] = []
     @State private var attaching = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.railInset) private var railInset
+
+    private var cannotSend: Bool { sending || attaching || (draft.to.isEmpty && draft.cc.isEmpty && draft.bcc.isEmpty) || draft.account.isEmpty }
+
+    private func send() {
+        Task {
+            guard model.core != nil else { return }
+            sending = true
+            defer { sending = false }
+            do {
+                model.composeDraft = draft
+                try await model.sendCompose()
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private var attachMenu: some View {
+        Menu {
+            Button("Files") { pickingFiles = true }
+            Button("Photos") { pickingPhotos = true }
+        } label: {
+            Icon("attachment").foregroundStyle(Theme.secondary).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        }
+        .disabled(attaching)
+        .accessibilityLabel("Attach")
+    }
 
     var body: some View {
         SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { cancelling = true }) {
@@ -93,34 +120,18 @@ struct ComposeView: View {
                 .scrollContentBackground(.hidden)
                 .overlay(alignment: .topLeading) {
                     if draft.body.isEmpty {
-                        Text("Message · Markdown supported").lagomFont(.body).foregroundStyle(Theme.secondary)
+                        Text("Message").lagomFont(.body).foregroundStyle(Theme.secondary)
                             .padding(.top, 8).padding(.leading, 5).allowsHitTesting(false).accessibilityHidden(true)
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .accessibilityLabel("Message body")
         } footer: {
-            HouseButton(title: "Send", icon: "send", primary: true) {
-                Task {
-                    guard model.core != nil else { return }
-                    sending = true
-                    defer { sending = false }
-                    do {
-                        model.composeDraft = draft
-                        try await model.sendCompose()
-                        dismiss()
-                    } catch { self.error = error.localizedDescription }
-                }
+            // On the Duo, Send and Attach sit at the bottom of the right column.
+            if railInset == 0 {
+                HouseButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
+                attachMenu
             }
-            .disabled(sending || attaching || (draft.to.isEmpty && draft.cc.isEmpty && draft.bcc.isEmpty) || draft.account.isEmpty)
-            Menu {
-                Button("Files") { pickingFiles = true }
-                Button("Photos") { pickingPhotos = true }
-            } label: {
-                Icon("attachment").foregroundStyle(Theme.secondary).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-            }
-            .disabled(attaching)
-            .accessibilityLabel("Attach")
             if sending { CalmProgress(label: "Sending") }
             Spacer(minLength: 0)
             if let error {
@@ -156,6 +167,12 @@ struct ComposeView: View {
             Button("Discard", role: .destructive) { close(discard: true) }
             Button("Cancel", role: .cancel) { }
         }
+        .railColumn(top: { EmptyView() }, bottom: {
+            VStack(spacing: 8) {
+                attachMenu.frame(width: 48, height: 48).modifier(RailGlass())
+                RailButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
+            }
+        })
         .disabled(sending)
         .interactiveDismissDisabled(sending)
         .task(id: draft.account) {

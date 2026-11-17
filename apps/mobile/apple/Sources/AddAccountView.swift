@@ -167,7 +167,7 @@ struct SignatureView: View {
                     .scrollContentBackground(.hidden)
                     .overlay(alignment: .topLeading) {
                         if text.isEmpty {
-                            Text("Added to new mail, replies and forwards. Markdown supported.").lagomFont(.body).foregroundStyle(Theme.secondary)
+                            Text("Added to new mail, replies and forwards.").lagomFont(.body).foregroundStyle(Theme.secondary)
                                 .padding(.top, 8).padding(.leading, 5).allowsHitTesting(false).accessibilityHidden(true)
                         }
                     }

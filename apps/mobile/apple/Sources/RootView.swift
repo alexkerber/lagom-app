@@ -28,21 +28,22 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if width == .regular && height == .regular {
+            // The sidebar is for iPad only. An unfolded iPhone Duo is regular both ways too, but keeps the
+            // system bar, which iOS puts on its right edge (Alex 2026-11-17).
+            if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
                     SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
                         .frame(width: 240)
+                    // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop.
                     page(section)
-                        .background(Theme.background)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.panel))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.panel).strokeBorder(Theme.line))
-                        .padding([.top, .bottom, .trailing], 8)
+                        .background(Theme.background.ignoresSafeArea())
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
                 TabView(selection: $section) {
-                    ForEach(AppSection.allCases) { page in
+                    // Settings opens from the mailbox menu on a phone; it is rarely used (Alex 2026-11-17).
+                    ForEach(AppSection.allCases.filter { $0 != .settings }) { page in
                         Tab(value: page) {
                             self.page(page)
                                 .background(Theme.background.ignoresSafeArea())
@@ -55,10 +56,13 @@ struct RootView: View {
                     }
                 }
                 .tint(Theme.selectionIcon)
+                .onAppear { if section == .settings { section = .mail } }
+                // The Duo's column: lagom's actions join the system bar there.
+                .duoRail()
             }
         }
         .foregroundStyle(Theme.ink)
-        .sheet(isPresented: $addAccount) { AddAccountView(model: model) }
+        .sheet(isPresented: $addAccount) { AddAccountView(model: model).duoRail() }
         .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             if let account = removing {
                 Button("Remove \(account.email)", role: .destructive) { Task { await model.remove(account) }; removing = nil }
@@ -112,15 +116,16 @@ struct RootView: View {
 
     @ViewBuilder private func page(_ section: AppSection) -> some View {
         switch section {
-        case .today: TodayView(planner: planner, model: model, openMail: openMail)
+        case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 })
         case .mail: MailView(model: model, planner: planner, addAccount: $addAccount, removing: $removing)
         case .calendar: CalendarView(planner: planner, model: model)
         case .todo: TodoView(planner: planner)
+        case .settings: SettingsView(model: model, addAccount: $addAccount, removing: $removing)
         }
     }
 }
 
-/// The desktop sidebar: brand, Search, the four pages, Mail's mailboxes with per-account Inbox, then Accounts.
+/// The desktop sidebar without the brand (Alex 2026-11-17): Search, the pages, Mail's mailboxes with per-account Inbox, then Accounts.
 struct SidebarView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
@@ -131,11 +136,6 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 10) {
-                Image("Brand").resizable().frame(width: 26, height: 26).accessibilityHidden(true)
-                Text("lagom").lagomFont(.base, .semibold)
-            }
-            .padding(.horizontal, 8).frame(height: 40)
             SearchField(text: $model.searchText)
                 .onChange(of: model.searchText) { _, text in if !text.isEmpty { section = .mail } }
             ScrollView {

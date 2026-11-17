@@ -113,8 +113,15 @@ final class PresentationTests: XCTestCase {
 
     func testSectionsKeepTheirStoredNames() {
         // `@AppStorage` restores these strings; renaming one would reset the user's last page.
-        XCTAssertEqual(AppSection.allCases.map(\.rawValue), ["today", "mail", "calendar", "todo"])
+        XCTAssertEqual(AppSection.allCases.map(\.rawValue), ["today", "mail", "calendar", "todo", "settings"])
         XCTAssertEqual(MailboxChoice.trash.mailbox, .trash)
+    }
+
+    func testDueTasksCountOnlyTodayAndEarlier() {
+        // Today's list also shows a few undated and future tasks; the sentence counts only the due ones, as desktop.
+        func todo(_ due: String?) -> Todo { Todo(id: 1, list: 1, title: "t", due: due, done: false, fromMail: false) }
+        let tasks = [todo("2026-11-16"), todo("2026-11-17T09:00:00Z"), todo("2026-11-18"), todo(nil)]
+        XCTAssertEqual(dueCount(tasks, day: "2026-11-17"), 2)
     }
 }
 

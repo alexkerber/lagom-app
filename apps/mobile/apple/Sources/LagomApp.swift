@@ -98,10 +98,12 @@ struct MailView: View {
     @State private var moving: (account: String, id: Int64)?
     @State private var newFolder: NewFolderTarget?
     @State private var confirmEmptyTrash = false
+    @State private var settingsOpen = false
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.railInset) private var railInset
     /// Rows Done, Later or Delete just took: they leave at once and come back only if the core refuses.
     @State private var leaving: Set<Int64> = []
     /// The row ids the list last drew, to tell a few arriving rows from a whole page loading.
@@ -112,6 +114,8 @@ struct MailView: View {
     @State private var syncShown = false
 
     private var regular: Bool { width == .regular && height == .regular }
+    /// The iPad sidebar holds Search and Settings; an unfolded Duo is regular too but has no sidebar.
+    private var sidebar: Bool { regular && UIDevice.current.userInterfaceIdiom == .pad }
     /// List and reading pane side by side only where both fit; a narrow iPad pushes the message as a phone does.
     private var split: Bool { regular && paneWidth >= 740 }
 
@@ -136,6 +140,10 @@ struct MailView: View {
                 }
             }
         }
+        // Below the Duo's status bar (about 150 pt) and centred on its tab bar, which sits 6 pt in from the
+        // column's centre; both measured in the Duo simulator.
+        // The tab bar hides while a message is open, so Delete and Done take its place at the bottom.
+        .railColumn(top: { railTop }, bottom: { railBottom })
         .safeAreaInset(edge: .bottom) {
             // The desktop toast: a raised card over the list that rises on the spring; its text changes in place.
             ZStack {
@@ -180,8 +188,8 @@ struct MailView: View {
         .sensoryFeedback(.impact(weight: .light), trigger: acted)
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
-        .sheet(item: $signing) { account in SignatureView(model: model, account: account) }
+        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft).duoRail() }
+        .sheet(item: $signing) { account in SignatureView(model: model, account: account).duoRail() }
         .alert("Your name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
             TextField("Your name", text: $newName).textContentType(.name)
             Button("Save") {
@@ -214,6 +222,65 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing).duoRail() }
+    }
+
+    private var composeButton: some View {
+        IconButton(title: "New message", icon: "compose") {
+            let account = model.accountID ?? model.accounts.first?.id ?? ""
+            Task { await model.newMessage(account: account) }
+        }
+        .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
+    }
+
+    /// The Duo's right column: New message over the list; with a message open, Back, Reply,
+    /// Reply all, Forward and More at the top, Delete and Done at the bottom.
+    private func railButton(_ title: String, icon: String, primary: Bool = false, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        RailButton(title: title, icon: icon, primary: primary, selected: selected, action: action)
+    }
+
+    @ViewBuilder private var railTop: some View {
+        if let id = model.selectedID {
+            // A message opened from a notification can be outside the loaded page; its own row stands in.
+            let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) } ?? model.message?.row
+            VStack(spacing: 4) {
+                // Back first, under the status bar, though a swipe goes back too (Alex 2026-11-17).
+                railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
+                RailGroup {
+                railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
+                railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
+                railButton("Forward", icon: "forward") { Task { await model.prepareCompose(id: id, kind: .forward) } }
+                Menu {
+                    Button("Later") { laterChoices = model.core?.laterChoices() ?? []; laterID = id }
+                    if let row { Button("Move to") { moving = (row.account, id) } }
+                    if let row {
+                        Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: id, read: row.unread) } }
+                    }
+                } label: {
+                    Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
+                }
+                .foregroundStyle(Theme.ink)
+                }
+            }
+            .disabled(model.working || model.preparingCompose)
+        } else {
+            // The filter stays in the list header beside the mailbox: it sorts the list, it is not an action (Alex 2026-11-17).
+            railButton("New message", icon: "compose") {
+                let account = model.accountID ?? model.accounts.first?.id ?? ""
+                Task { await model.newMessage(account: account) }
+            }
+            .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
+        }
+    }
+
+    @ViewBuilder private var railBottom: some View {
+        if let id = model.selectedID {
+            VStack(spacing: 8) {
+                if model.mailbox != .trash { railButton("Delete", icon: "trash") { act(.delete, id: id) } }
+                railButton("Done", icon: "done", primary: true) { act(.done, id: id) }
+            }
+            .disabled(model.working)
+        }
     }
 
     /// The desktop list header: title, a sync mark with what is left, the All/Unread filter.
@@ -227,17 +294,11 @@ struct MailView: View {
                     HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
                         .disabled(model.rows.isEmpty || model.working)
                 } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
-                IconButton(title: "New message", icon: "compose") {
-                    let account = model.accountID ?? model.accounts.first?.id ?? ""
-                    Task { await model.newMessage(account: account) }
-                }
-                .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
-                .padding(.trailing, -6)
+                if railInset == 0 { composeButton.padding(.trailing, -6) }
             }
-            if !regular && model.mailbox != .drafts { SearchField(text: $model.searchText) }
+            if !sidebar && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
-        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
     }
 
     /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
@@ -273,6 +334,8 @@ struct MailView: View {
                     Button("Remove account", role: .destructive) { removing = account }
                 }
             }
+            // Rarely used, so not in the tab bar on a phone (Alex 2026-11-17).
+            if !sidebar { Button("Settings") { settingsOpen = true } }
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -456,12 +519,15 @@ struct MailView: View {
             let id = model.selectedID ?? message.row.id
             VStack(spacing: 0) {
                 // Labels where they fit, as on desktop; icons alone in a narrow pane.
-                ViewThatFits(in: .horizontal) {
-                    actions(message, iconOnly: !regular)
-                    actions(message, iconOnly: true)
+                // On the Duo every action, Back too, sits in the right column.
+                if railInset == 0 {
+                    // Labels where they fit, as on desktop; icons alone in a narrow pane.
+                    ViewThatFits(in: .horizontal) {
+                        actions(message, iconOnly: !regular)
+                        actions(message, iconOnly: true)
+                    }
+                    .padding(.horizontal, 16).frame(minHeight: 56)
                 }
-                .padding(.horizontal, 16).frame(minHeight: 56)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
                 ConversationView(model: model).id(id)
             }
             .background(Theme.background)
@@ -470,10 +536,9 @@ struct MailView: View {
             // While the message loads its list preview stands in, under a bar as tall as the toolbar.
             VStack(spacing: 0) {
                 HStack {
-                    if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                    if !split && railInset == 0 { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
                 }
                 .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
                 MessagePreview(row: row)
             }
             .background(Theme.background)

@@ -15,10 +15,8 @@ struct HouseButtonStyle: ButtonStyle {
             .foregroundStyle(primary ? Theme.accentInk : Theme.ink)
             .padding(.horizontal, 12)
             .frame(minHeight: 34)
-            .background(primary ? Theme.accent : Theme.background, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-            .overlay {
-                if !primary { RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line) }
-            }
+            // No outline, as desktop since #168: a quiet fill marks the button.
+            .background(primary ? Theme.accent : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
             .opacity(configuration.isPressed ? 0.8 : enabled ? 1 : 0.5)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
@@ -223,7 +221,6 @@ struct FilterControl: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: unreadOnly)
         .padding(2)
         .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
     }
 
     private func segment(_ title: String, icon: String, unread: Bool) -> some View {
@@ -231,7 +228,8 @@ struct FilterControl: View {
         return Button { unreadOnly = unread } label: {
             HStack(spacing: 6) {
                 Icon(icon, size: 16).foregroundStyle(on ? Theme.ink : Theme.secondary)
-                Text(title).lagomFont(.small).foregroundStyle(Theme.ink)
+                // One line: "Unread" broke in two on the folded Duo.
+                Text(title).lagomFont(.small).foregroundStyle(Theme.ink).lineLimit(1).fixedSize()
             }
             .padding(.horizontal, 10).frame(minHeight: 28)
             .background(on ? Theme.raised : .clear, in: RoundedRectangle(cornerRadius: 6))
@@ -260,8 +258,7 @@ struct SearchField: View {
             }
         }
         .padding(.horizontal, 8).frame(minHeight: 44)
-        .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
+        .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
     }
 }
 
@@ -273,24 +270,24 @@ struct SheetScaffold<Content: View, Footer: View>: View {
     let cancel: () -> Void
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
+    @Environment(\.railInset) private var railInset
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(title).lagomFont(.base, .semibold).accessibilityAddTraits(.isHeader)
                 Spacer()
-                IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled)
+                if railInset == 0 { IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }
             }
             .padding(.leading, 16).padding(.trailing, 6).frame(minHeight: 50)
             .background(Theme.subtle)
-            .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
             content
             HStack(spacing: 10) { footer }
                 .padding(.horizontal, 16).frame(minHeight: 64)
-                .overlay(alignment: .top) { Theme.line.frame(height: 1) }
         }
         .foregroundStyle(Theme.ink)
         .background(Theme.raised)
+        .railColumn(top: { RailButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }, bottom: { EmptyView() })
     }
 }
 
@@ -449,4 +446,117 @@ private struct HorizontalPan: UIGestureRecognizerRepresentable {
             return abs(velocity.x) > abs(velocity.y)
         }
     }
+}
+
+/// The width of a right-edge column the system gives a phone, as on the iPhone Duo, where the status bar
+/// and the tab bar sit at the right. Zero elsewhere. Mail puts its New message and filter buttons there.
+private struct RailInsetKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+extension EnvironmentValues {
+    var railInset: CGFloat {
+        get { self[RailInsetKey.self] }
+        set { self[RailInsetKey.self] = newValue }
+    }
+}
+
+/// The Duo's right column (Alex 2026-11-17), the same on every screen: close, back and secondary actions at
+/// the top under the status bar; the main action, and Delete, at the bottom. Elsewhere it draws nothing.
+private struct RailColumn<Top: View, Bottom: View>: ViewModifier {
+    @Environment(\.railInset) private var inset
+    let top: Top
+    let bottom: Bottom
+
+    func body(content: Content) -> some View {
+        content
+            // Below the status bar (about 150 pt) and centred on the tab bar, which sits 6 pt in from the
+            // column's centre; both measured in the Duo simulator.
+            .overlay(alignment: .topTrailing) {
+                if inset > 0 { top.frame(width: inset).offset(x: inset - 6).padding(.top, 168) }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if inset > 0 { bottom.frame(width: inset).offset(x: inset - 6).padding(.bottom, 8) }
+            }
+    }
+}
+
+/// Reads the Duo column from this view's own safe area: the main window, and each sheet separately,
+/// since a sheet that does not reach the column must keep its own buttons.
+private struct DuoRail: ViewModifier {
+    func body(content: Content) -> some View {
+        GeometryReader { proxy in
+            // A wide right inset with none on the left; a landscape iPhone has insets on both sides.
+            content.environment(\.railInset, UIDevice.current.userInterfaceIdiom == .phone && proxy.safeAreaInsets.trailing > 40
+                                && proxy.safeAreaInsets.leading < 20 ? proxy.safeAreaInsets.trailing : 0)
+        }
+    }
+}
+
+extension View {
+    func duoRail() -> some View { modifier(DuoRail()) }
+
+    func railColumn(@ViewBuilder top: () -> some View, @ViewBuilder bottom: () -> some View) -> some View {
+        modifier(RailColumn(top: top(), bottom: bottom()))
+    }
+}
+
+/// One round action in the right column, in the system bar's Liquid Glass; the main action is tinted with the accent.
+/// Inside a `RailGroup` it draws no glass of its own: the group's capsule holds it, as Apple groups related controls.
+struct RailButton: View {
+    let title: String
+    let icon: String
+    var primary = false
+    var selected = false
+    let action: () -> Void
+    @Environment(\.inRailGroup) private var grouped
+
+    var body: some View {
+        Button(action: action) {
+            Icon(icon, label: title).frame(width: 48, height: 48).contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(primary ? Theme.accentInk : selected ? Theme.selectionIcon : Theme.ink)
+        .background(selected && grouped ? Theme.subtle : .clear, in: Circle())
+        .modifier(RailGlass(primary: primary, shape: grouped ? nil : Circle()))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Related actions in one glass capsule (Reply, Reply all, Forward, More).
+struct RailGroup<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 0) { content }
+            .environment(\.inRailGroup, true)
+            .modifier(RailGlass(shape: Capsule()))
+    }
+}
+
+private struct InRailGroupKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var inRailGroup: Bool {
+        get { self[InRailGroupKey.self] }
+        set { self[InRailGroupKey.self] = newValue }
+    }
+}
+
+/// Liquid Glass on iOS 26, a material before it; nil draws nothing (a button inside a group).
+struct RailGlass<S: Shape>: ViewModifier {
+    var primary = false
+    var shape: S?
+
+    func body(content: Content) -> some View {
+        if let shape {
+            if #available(iOS 26.0, *) {
+                content.glassEffect(primary ? .regular.tint(Theme.accent).interactive() : .regular.interactive(), in: shape)
+            } else {
+                content.background(primary ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.regularMaterial), in: shape)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension RailGlass where S == Circle {
+    init(primary: Bool = false) { self.primary = primary; shape = Circle() }
 }

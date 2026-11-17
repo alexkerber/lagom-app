@@ -1,8 +1,8 @@
 import Foundation
 
-/// The four top-level pages, as on desktop (⌘1–4). The raw value is what `@AppStorage` restores.
+/// The top-level pages, as on desktop (⌘1–4, then Settings). The raw value is what `@AppStorage` restores.
 enum AppSection: String, CaseIterable, Identifiable {
-    case today, mail, calendar, todo
+    case today, mail, calendar, todo, settings
     static let storageKey = "lagom.section"
     var id: String { rawValue }
     var title: String {
@@ -11,6 +11,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .mail: "Mail"
         case .calendar: "Calendar"
         case .todo: "Todo"
+        case .settings: "Settings"
         }
     }
     /// The desktop sidebar icon.
@@ -20,8 +21,14 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .mail: "mail"
         case .calendar: "calendar"
         case .todo: "todo"
+        case .settings: "settings"
         }
     }
+}
+
+/// Tasks due today or earlier, as desktop `due_today`: the first ten characters of `due` are its date.
+func dueCount(_ tasks: [Todo], day: String) -> Int {
+    tasks.filter { todo in todo.due.map { String($0.prefix(10)) <= day } ?? false }.count
 }
 
 /// What the window shows: nothing until the store has its accounts, the intro without an account,

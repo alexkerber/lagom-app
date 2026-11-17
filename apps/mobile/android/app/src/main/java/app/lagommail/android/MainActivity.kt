@@ -321,7 +321,7 @@ class MainActivity : ComponentActivity() {
                 Modifier.padding(top = 8.dp, bottom = 8.dp, end = 8.dp).clip(panel).background(lagom.bg).border(1.dp, lagom.line, panel)
                 else Modifier)) {
                 when (section) {
-                    AppSection.TODAY -> TodayScreen(planner, model) { id ->
+                    AppSection.TODAY -> TodayScreen(planner, model, open = ::show) { id ->
                         show(AppSection.MAIL)
                         opening = model.perform { model.openInbox(id) }
                     }

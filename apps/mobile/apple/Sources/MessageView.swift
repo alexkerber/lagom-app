@@ -52,6 +52,7 @@ struct MessageView: View {
     @Bindable var model: MailModel
     @Environment(\.colorScheme) private var scheme
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.railInset) private var railInset
     @Environment(\.openURL) private var openURL
     @State private var showText = false
     @State private var confirmUnsubscribe = false
@@ -77,8 +78,8 @@ struct MessageView: View {
             .padding(width == .regular ? 20 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.line))
-            Button { Task { await model.prepareCompose(id: row.id, kind: .reply) } } label: {
+            // On the Duo, Reply sits in the right column instead.
+            if railInset == 0 { Button { Task { await model.prepareCompose(id: row.id, kind: .reply) } } label: {
                 HStack(spacing: 8) {
                     Icon("reply")
                     Text("Reply to \(RowPresentation(row).sender)").lagomFont(.base).lineLimit(1)
@@ -87,12 +88,11 @@ struct MessageView: View {
                 }
                 .foregroundStyle(Theme.secondary)
                 .padding(.horizontal, 12).frame(minHeight: 44)
-                .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line))
+                .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(model.preparingCompose)
+            .disabled(model.preparingCompose) }
         }
         .padding(pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
@@ -135,7 +135,6 @@ struct MessageView: View {
             Text(initials).lagomFont(.small, .semibold).lineLimit(1).minimumScaleFactor(0.5)
                 .frame(width: 36, height: 36)
                 .background(Theme.subtle, in: Circle())
-                .overlay(Circle().strokeBorder(Theme.line))
                 .accessibilityHidden(true)
             // The address wraps, and a very long one keeps its domain, so a look-alike sender stays visible.
             VStack(alignment: .leading, spacing: 2) {
@@ -148,6 +147,8 @@ struct MessageView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
+                // The Duo's column replies to the open conversation; this one replies to this message.
+                if railInset > 0 { Button("Reply") { Task { await model.prepareCompose(id: row.id, kind: .reply) } } }
                 Button("Reply all") { Task { await model.prepareCompose(id: row.id, kind: .replyAll) } }
                 Button("Forward") { Task { await model.prepareCompose(id: row.id, kind: .forward) } }
                 Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: row.id, read: row.unread) } }
@@ -196,7 +197,6 @@ struct MessageView: View {
                         }
                         .padding(.horizontal, 14).frame(minHeight: 44)
                         .background(Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.attachment))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.attachment).strokeBorder(Theme.line))
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -228,7 +228,6 @@ struct MessagePreview: View {
             .padding(width == .regular ? 20 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.line))
         }
         .padding(pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
