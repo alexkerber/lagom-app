@@ -612,6 +612,12 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets letter spacing in thousandths of an em for this element and its children (lagom patch).
+    fn tracking(mut self, thousandths: i16) -> Self {
+        self.text_style().get_or_insert_with(Default::default).tracking = Some(thousandths);
+        self
+    }
+
     /// Sets the font family of this element and its children.
     fn font_family(mut self, family_name: impl Into<SharedString>) -> Self {
         self.text_style()

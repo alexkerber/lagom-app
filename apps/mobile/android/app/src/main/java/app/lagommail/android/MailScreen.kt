@@ -125,7 +125,7 @@ internal fun Mailbox.label(): String = when (this) {
                 Column(Modifier.clip(RoundedCornerShape(Radius.control)).clickable(onClickLabel = "Mailboxes and accounts") { menu = true }
                     .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {

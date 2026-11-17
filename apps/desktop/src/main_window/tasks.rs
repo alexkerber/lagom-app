@@ -627,7 +627,7 @@ impl MainWindow {
         }
         div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
             .child(div().flex().items_center().justify_between()
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Todo"))
+                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE)).child("Todo"))
                 .child(icon_button(&t, "new-list", "icons/plus.svg", "New list")
                     .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
             .children(self.task_input(Edit::AddList).map(|input| div().child(input)))

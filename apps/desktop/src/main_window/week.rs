@@ -308,7 +308,7 @@ impl MainWindow {
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| { this.week.drag = None; cx.notify(); })).flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
             .child(div().flex().flex_wrap().items_center().gap(px(8.))
-                .child(div().flex_1().flex().gap(px(6.)).text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
+                .child(div().flex_1().flex().gap(px(6.)).font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD)
                     .min_w(px(170.)).child(div().debug_selector(|| "calendar-title-month".into()).child(self.week.anchor.format("%B").to_string())).child(div().debug_selector(|| "calendar-title-year".into()).text_color(t.ink2).child(self.week.anchor.format("%Y").to_string())))
                 .child(div().flex().items_center().border_1().border_color(t.line).rounded(px(radius::CONTROL))
                     .child(icon_button(&t, "previous-week", "icons/previous.svg", "Previous period · ←").on_click(cx.listener(|this, _, window, cx| { this.move_week(-1, cx); window.focus(&this.focus); })))

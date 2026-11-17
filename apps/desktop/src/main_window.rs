@@ -2188,7 +2188,7 @@ impl MainWindow {
                             .flex()
                             .flex_col()
                             .min_w(px(0.))
-                            .child(div().font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
+                            .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).one_line().child(self.list_title()))
                             .child(div().id("sync-status").flex().items_center().gap(px(6.))
                                 // Synced is the quiet default: the cloud shows only while it syncs or fails.
                                 .when(self.sync_icon() != "icons/cloud-synced.svg", |d| d.child(icon(self.sync_icon(), t.ink2, 16.)))
@@ -2268,11 +2268,11 @@ impl MainWindow {
             let more = self.has_more();
             return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
                 .child(icon("icons/inbox.svg", t.ink2, 32.))
-                .when(!self.inbox.unread_only, |d| d.child("No messages"))
-                .when(self.inbox.unread_only, |d| d
-                    .child(if more { "No unread messages in loaded mail" } else { "No unread messages" })
-                    .when(more, |d| d.child(button(t, "Load more", None)
-                        .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))))));
+                // Empty pages speak in the display face, as Today does.
+                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE))
+                    .child(match (self.inbox.unread_only, more) { (false, _) => "No messages", (true, true) => "No unread messages in loaded mail", (true, false) => "No unread messages" }))
+                .when(self.inbox.unread_only && more, |d| d.child(button(t, "Load more", None)
+                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx)))));
         };
         let m = &self.inbox.mail[id];
         let trash = self.inbox.open_kind() == Some(Kind::Trash);

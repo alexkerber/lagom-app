@@ -216,6 +216,7 @@ impl LineWrapper {
                 buffer,
                 self.font_size,
                 &[FontRun {
+                    tracking: 0,
                     len: buffer.len(),
                     font_id: self.font_id,
                 }],
@@ -332,6 +333,7 @@ mod tests {
         input_run_len
             .iter()
             .map(|run_len| TextRun {
+                tracking: 0,
                 len: *run_len,
                 font: Font {
                     family: "Dummy".into(),
@@ -688,6 +690,7 @@ mod tests {
             let text_system = WindowTextSystem::new(cx.text_system().clone());
 
             let normal = TextRun {
+                tracking: 0,
                 len: 0,
                 font: font("Helvetica"),
                 color: Default::default(),
@@ -696,6 +699,7 @@ mod tests {
                 background_color: None,
             };
             let bold = TextRun {
+                tracking: 0,
                 len: 0,
                 font: font("Helvetica").bold(),
                 color: Default::default(),

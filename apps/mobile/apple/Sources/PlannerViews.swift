@@ -13,6 +13,8 @@ struct TodayView: View {
     let openMail: (Int64?) -> Void
     let open: (AppSection) -> Void
     @Environment(\.horizontalSizeClass) private var width
+    /// Dynamic Type scale of the display size, so tracking stays the same share of an em.
+    @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
     @State private var newTask = false
 
     var body: some View {
@@ -58,7 +60,8 @@ struct TodayView: View {
         return VStack(alignment: .leading, spacing: 12) {
             MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)
-                .font(.custom("Hauora-Bold", size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
                 .lineSpacing(-2).tint(Theme.ink).accessibilityAddTraits(.isHeader)
                 .environment(\.openURL, OpenURLAction { url in
                     switch url.absoluteString {
@@ -134,7 +137,7 @@ struct TodayView: View {
 struct MonoLabel: View {
     let text: String
     var body: some View {
-        Text(text.uppercased()).font(.custom("GeistMono-Medium", size: 13, relativeTo: .footnote))
+        Text(text.uppercased()).font(.custom(Theme.Face.label, size: 13, relativeTo: .footnote))
             .foregroundStyle(Theme.secondary).accessibilityLabel(text).accessibilityAddTraits(.isHeader)
     }
 }
@@ -409,7 +412,7 @@ struct CalendarView: View {
     private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text(Date.now, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
+                Text(Date.now, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
                 Text(Date.now, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
             }
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
@@ -516,7 +519,7 @@ private struct WeekGrid: View {
         let thursday = calendar.date(byAdding: .day, value: 3, to: planner.weekStart) ?? planner.weekStart
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(thursday, format: .dateTime.month(.wide)).lagomFont(.subject, .bold)
+                Text(thursday, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
                 Text(thursday, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
             }
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)

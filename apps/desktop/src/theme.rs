@@ -134,6 +134,13 @@ pub mod radius {
     pub const CARD: f32 = 16.0;
 }
 
+pub mod face {
+    pub const DISPLAY: &str = "Hauora";
+    pub const LABEL: &str = "Geist Mono";
+    /// Thousandths of an em.
+    pub const DISPLAY_TRACKING: i16 = -45;
+}
+
 pub const LEADING: f32 = 1.25;
 pub const READING_LEADING: f32 = 1.4;
 
@@ -211,7 +218,7 @@ fn system_selection() -> Option<u32> {
 pub const DEFAULT_ACCENT: Accent = Accent::Dusk;
 
 pub mod font {
-    pub const MONO: &str = "Geist Mono"; // key caps and Today labels
+    pub const MONO: &str = super::face::LABEL; // key caps and Today labels
 
     /// All text: the platform's system font (SF Pro on macOS), so the app reads as native.
     /// GPUI maps ".SystemUIFont" per platform.
@@ -225,7 +232,7 @@ pub mod font {
     }
 
     /// Dates, counts and the Today sentence: Hauora Sans, the site's face (Alex 2026-11-17).
-    pub const DISPLAY: &str = "Hauora";
+    pub const DISPLAY: &str = super::face::DISPLAY;
 }
 
 #[cfg(test)]

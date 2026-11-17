@@ -40,14 +40,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.Font
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import java.time.LocalTime
@@ -90,14 +89,10 @@ internal val AppSection.icon: Int get() = when (this) {
 @Composable private fun Heading(title: String, modifier: Modifier = Modifier) =
     Text(title, modifier.padding(bottom = 8.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
 
-/** The desktop's bundled faces (OFL; licences in apps/desktop/assets/fonts): Today's sentence and labels. */
-private val Hauora = FontFamily(Font(R.font.hauora_bold, FontWeight.Bold))
-private val GeistMono = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Medium))
-
 /** Small Geist Mono capitals, the site's labels: Today's date and section titles. */
 @Composable private fun MonoLabel(text: String, modifier: Modifier = Modifier) =
     Text(text.uppercase(), modifier.semantics { heading(); contentDescription = text }, color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontFamily = GeistMono, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+        fontFamily = LabelFace, fontWeight = FontWeight.Medium, fontSize = 13.sp)
 
 /** The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page. */
 @Composable private fun TodaySentence(planner: PlannerModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
@@ -119,8 +114,8 @@ private val GeistMono = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Med
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         MonoLabel(localDate(LocalDate.now(), "EEEEdMMMM"))
-        Text(text, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = Hauora,
-            fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, lineHeight = if (wide) 50.sp else 36.sp)
+        Text(text, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = DisplayFace,
+            fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, letterSpacing = DisplayTracking.em, lineHeight = if (wide) 50.sp else 36.sp)
     }
 }
 
@@ -208,7 +203,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     val gold = lagom.later
     Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).clearAndSetSemantics { contentDescription = "Now, $time" },
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(time, Modifier.widthIn(min = 52.dp), color = gold, style = MaterialTheme.typography.labelSmall)
+        Text(time, Modifier.widthIn(min = 52.dp), color = gold, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
         Box(Modifier.weight(1f).height(2.dp).background(gold, RoundedCornerShape(1.dp)))
     }
 }
@@ -226,7 +221,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         if (!event.allDay) stateDescription = "$start – $end"
     }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(if (event.allDay) "All day" else start, Modifier.widthIn(min = 52.dp).clearAndSetSemantics {},
-            color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+            color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
         Box(Modifier.width(2.dp).height(28.dp).background(colors.primary, RoundedCornerShape(1.dp)))
         Column(Modifier.weight(1f).clearAndSetSemantics {}) {
             Text(title, color = if (past) colors.onSurfaceVariant else colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -419,7 +414,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding().semantics(mergeDescendants = true) { heading() }) {
-            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge)
+            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
             Text(localDate(today, "yyyy"), Modifier.padding(start = 2.dp), style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Normal),
                 color = lagom.ink2)
         }
@@ -498,7 +493,7 @@ private val Gutter = 48.dp
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(localDate(thursday, "MMMM"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(localDate(thursday, "MMMM"), style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
             Text(localDate(thursday, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.weight(1f))
@@ -586,7 +581,7 @@ private val Gutter = 48.dp
         Column(Modifier.clearAndSetSemantics {}) {
             Text(if (compact && !event.allDay) "$title · $start" else title, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium,
                 maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
-            if (!compact && !event.allDay) Text(start, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+            if (!compact && !event.allDay) Text(start, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"), maxLines = 1)
         }
     }
 }
@@ -624,6 +619,6 @@ private val Gutter = 48.dp
         Box(Modifier.offset(x = Gutter, y = y).width(maxWidth - Gutter).height(1.5.dp).background(gold))
         Box(Modifier.offset(x = Gutter + column * today - 3.5.dp, y = y - 2.75.dp).size(7.dp).background(gold, CircleShape))
         Text(label, Modifier.offset(y = y - 9.dp).width(Gutter - 4.dp).background(gold, RoundedCornerShape(4.dp)),
-            color = lagom.accentInk, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center, maxLines = 1)
+            color = lagom.accentInk, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"), textAlign = TextAlign.Center, maxLines = 1)
     }
 }

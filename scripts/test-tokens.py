@@ -32,6 +32,12 @@ class Tokens(unittest.TestCase):
         self.assertIn("Animation.spring(duration: 0.28, bounce: 0.15)", rendered[tokens.IOS])
         self.assertIn("const val damping = 0.75f", rendered[tokens.ANDROID])
         self.assertIn("const val stiffness = 700f", rendered[tokens.ANDROID])
+        # One face list for every platform: family names, PostScript names, resource names and tracking.
+        self.assertIn('pub const DISPLAY: &str = "Hauora";', rendered[tokens.DESKTOP])
+        self.assertIn("DISPLAY_TRACKING: i16 = -45;", rendered[tokens.DESKTOP])
+        self.assertIn('static let label = "GeistMono-Medium"', rendered[tokens.IOS])
+        self.assertIn("Font(R.font.hauora_bold, FontWeight.Bold)", rendered[tokens.ANDROID])
+        self.assertIn("--display-tracking: -0.045em;", rendered[tokens.SITE])
 
     def test_shared_edits_propagate_and_overrides_win(self):
         changed = copy.deepcopy(self.data)

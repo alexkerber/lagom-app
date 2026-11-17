@@ -2526,6 +2526,7 @@ dependencies = [
  "strum 0.27.2",
  "taffy",
  "thiserror 2.0.21",
+ "unicode-segmentation",
  "usvg",
  "uuid",
  "waker-fn",

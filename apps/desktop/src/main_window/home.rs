@@ -102,7 +102,7 @@ impl MainWindow {
         // Word gaps are margins: a phrase and its punctuation wrap together.
         div().mb(px(48.)).flex().flex_col().gap(px(16.))
             .child(label(&t, now.format("%A %-d %B").to_string()))
-            .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::HERO))
+            .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::HERO)).tracking(crate::theme::face::DISPLAY_TRACKING)
                 .line_height(relative(1.05)).max_w(px(900.))
                 .child(greeting)
                 .child(div().flex().flex_wrap()
@@ -143,6 +143,20 @@ fn label(t: &Theme, text: String) -> Div {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn tracking_tightens_each_glyph(cx: &mut TestAppContext) {
+        // −40/1000 em at 48 px pulls each of "ab"'s two glyphs in by 1.92 px (vendored GPUI patch).
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| {
+            let style = window.text_style();
+            let width = |text: &str, tracking| window.text_system()
+                .layout_line(text, px(48.), &[gpui::TextRun { tracking, ..style.to_run(text.len()) }], None).width;
+            assert!((width("ab", 0) - width("ab", -40) - px(3.84)).abs() < px(0.01));
+            // An accent belongs to its letter: "é" written as e and a combining mark is one step, not two.
+            assert!((width("e\u{301}b", 0) - width("e\u{301}b", -40) - px(3.84)).abs() < px(0.01));
+        });
+    }
 
     #[test]
     fn first_start_and_legacy_preferences_open_mail() {

@@ -69,6 +69,16 @@ display = 26
 # Today's date and counts: large, with some weight (Alex 2026-11-17: "stora fonter och lite kraft").
 hero = 48
 
+# The bundled faces (OFL, apps/desktop/assets/fonts): display for Today's sentence and page titles,
+# label for small capitals. Families as the font files name them; the site's web fonts are "Hauora Sans".
+[type.faces]
+display = "Hauora"
+display_weight = "Bold"
+label = "Geist Mono"
+label_weight = "Medium"
+# Thousandths of an em, as the site's .display.
+display_tracking = -45
+
 # Existing desktop motion durations, in milliseconds (including the slow loading pulse).
 # Fade is the fade half of the desktop loading animation, following CALM.
 [motion.ms]
