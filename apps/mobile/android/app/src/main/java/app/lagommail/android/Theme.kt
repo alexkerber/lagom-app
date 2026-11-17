@@ -22,6 +22,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -91,6 +93,10 @@ internal object TextSize {
     val subject = 23.sp
     val display = 30.sp
 }
+
+internal val DisplayFace = FontFamily(Font(R.font.hauora_bold, FontWeight.Bold))
+internal val LabelFace = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Medium))
+internal const val DisplayTracking = -0.045f
 
 internal object Radius {
     val key = 4.dp

@@ -58,7 +58,8 @@ struct TodayView: View {
         return VStack(alignment: .leading, spacing: 12) {
             MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)
-                .font(.custom("Hauora-Bold", size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                .tracking((width == .regular ? 48 : 34) * Theme.Face.displayTracking)
                 .lineSpacing(-2).tint(Theme.ink).accessibilityAddTraits(.isHeader)
                 .environment(\.openURL, OpenURLAction { url in
                     switch url.absoluteString {
@@ -134,7 +135,7 @@ struct TodayView: View {
 struct MonoLabel: View {
     let text: String
     var body: some View {
-        Text(text.uppercased()).font(.custom("GeistMono-Medium", size: 13, relativeTo: .footnote))
+        Text(text.uppercased()).font(.custom(Theme.Face.label, size: 13, relativeTo: .footnote))
             .foregroundStyle(Theme.secondary).accessibilityLabel(text).accessibilityAddTraits(.isHeader)
     }
 }

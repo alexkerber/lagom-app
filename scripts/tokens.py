@@ -30,6 +30,15 @@ def number(value):
     return f"{value:g}"
 
 
+def faces(tokens):
+    """Family, PostScript name (iOS) and resource name (Android) of each face, and the display tracking in ems."""
+    f = tokens["type"]["faces"]
+    def face(role):
+        family, weight = f[role], f[f"{role}_weight"]
+        return family, f"{family.replace(' ', '')}-{weight}", f"{family.lower().replace(' ', '_')}_{weight.lower()}", weight
+    return face("display"), face("label"), f["display_tracking"] / 1000
+
+
 def mobile_sizes(tokens, platform):
     sizes = {key: value * tokens["type"]["mobile_factor"] for key, value in tokens["type"]["sizes"].items()}
     sizes.update(tokens["overrides"][platform]["type_sizes"])
@@ -74,6 +83,9 @@ def rust(tokens):
         out += ["", f"pub mod {module} {{"]
         out += [f"    pub const {key.upper()}: f32 = {float(value)};" for key, value in values.items()]
         out.append("}")
+    display, label, _ = faces(tokens)
+    out += ["", "pub mod face {", f'    pub const DISPLAY: &str = "{display[0]}";', f'    pub const LABEL: &str = "{label[0]}";',
+            "    /// Thousandths of an em.", f"    pub const DISPLAY_TRACKING: i16 = {tokens['type']['faces']['display_tracking']};", "}"]
     out += ["", f"pub const LEADING: f32 = {tokens['type']['leading']};",
             f"pub const READING_LEADING: f32 = {tokens['type']['reading_leading']};",
             "", "pub mod motion {", "    use std::time::Duration;"]
@@ -89,7 +101,11 @@ def swift(tokens):
     out += [f"    static let {names[0]} = color(0x{light[key]:06X}, 0x{dark[key]:06X})" for key, names in MOBILE_COLORS.items()]
     out += ["", "    enum Radius {"]
     out += [f"        static let {key}: CGFloat = {number(value)}" for key, value in tokens["radii"].items()]
-    out += ["    }", "}", "", "extension TextSize {", "    var points: CGFloat {", "        switch self {"]
+    display, label, tracking = faces(tokens)
+    out += ["    }", "", "    /// PostScript names of the bundled faces; tracking in ems.", "    enum Face {",
+            f'        static let display = "{display[1]}"', f'        static let label = "{label[1]}"',
+            f"        static let displayTracking: CGFloat = {number(tracking)}", "    }"]
+    out += ["}", "", "extension TextSize {", "    var points: CGFloat {", "        switch self {"]
     sizes = mobile_sizes(tokens, "ios")
     out += [f"        case .{key}: {number(sizes[key])}" for key in MOBILE_SIZES]
     ms = tokens["motion"]["ms"]
@@ -111,7 +127,10 @@ def kotlin(tokens):
     out.append("internal object TextSize {")
     sizes = mobile_sizes(tokens, "android")
     out += [f"    val {key} = {number(sizes[key])}.sp" for key in (*MOBILE_SIZES, "display")]
-    out += ["}", "", "internal object Radius {"]
+    display, label, tracking = faces(tokens)
+    out += ["}", ""]
+    out += [f"internal val {name}Face = FontFamily(Font(R.font.{face[2]}, FontWeight.{face[3]}))" for name, face in (("Display", display), ("Label", label))]
+    out += [f"internal const val DisplayTracking = {number(tracking)}f", "", "internal object Radius {"]
     out += [f"    val {key} = {number(value)}.dp" for key, value in tokens["radii"].items()]
     out += ["}", ""]
     typography = tokens["type"] | tokens["overrides"]["android"]["type"]
@@ -127,7 +146,8 @@ def css(tokens):
     # The site is light only; its one colour is the app icon, so the focus ring stays ink, not accent.
     c = tokens["colors"]["light"]
     hexes = {name: f"#{c[key]:06X}" for name, key in (("bg", "bg"), ("card", "subtle"), ("ink", "ink"), ("ink2", "ink2"), ("line", "line"))}
-    return "      " + " ".join(f"--{name}: {value};" for name, value in hexes.items()) + f"\n      --accent: {hexes['ink']}; --radius: {number(tokens['radii']['control'])}px;"
+    tracking = faces(tokens)[2]
+    return "      " + " ".join(f"--{name}: {value};" for name, value in hexes.items()) + f"\n      --accent: {hexes['ink']}; --radius: {number(tokens['radii']['control'])}px; --display-tracking: {number(tracking)}em;"
 
 
 def generated(tokens):

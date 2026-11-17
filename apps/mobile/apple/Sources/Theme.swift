@@ -25,6 +25,13 @@ extension Theme {
         static let panel: CGFloat = 12
         static let card: CGFloat = 16
     }
+
+    /// PostScript names of the bundled faces; tracking in ems.
+    enum Face {
+        static let display = "Hauora-Bold"
+        static let label = "GeistMono-Medium"
+        static let displayTracking: CGFloat = -0.045
+    }
 }
 
 extension TextSize {

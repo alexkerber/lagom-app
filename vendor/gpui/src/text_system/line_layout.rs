@@ -564,6 +564,7 @@ impl LineLayoutCache {
             let mut layout = self
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
+            apply_tracking(&mut layout, runs);
 
             if let Some(force_width) = force_width {
                 let mut glyph_pos = 0;
@@ -597,6 +598,28 @@ impl LineLayoutCache {
 pub struct FontRun {
     pub(crate) len: usize,
     pub(crate) font_id: FontId,
+    /// Letter spacing in thousandths of an em; platforms shape without it (lagom patch).
+    pub(crate) tracking: i16,
+}
+
+/// Adds each run's letter spacing after every glyph, as CSS `letter-spacing` does, and widens the line.
+fn apply_tracking(layout: &mut LineLayout, runs: &[FontRun]) {
+    if runs.iter().all(|run| run.tracking == 0) {
+        return;
+    }
+    let mut shift = px(0.);
+    for glyph in layout.runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
+        glyph.position.x += shift;
+        let mut end = 0;
+        let run = runs.iter().find(|run| {
+            end += run.len;
+            glyph.index < end
+        });
+        if let Some(run) = run {
+            shift += layout.font_size * (run.tracking as f32 / 1000.);
+        }
+    }
+    layout.width += shift;
 }
 
 trait AsCacheKeyRef {

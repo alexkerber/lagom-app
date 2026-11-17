@@ -37,5 +37,6 @@ imap-proto = { path = "vendor/imap-proto" }
 # shortcut: bound attributes per tag so tokenizing mail HTML stays linear; drop when upstream checks duplicates in constant time.
 html5ever = { path = "vendor/html5ever" }
 
-# shortcut: GPUI 0.2.2 filters Dock reopen and cannot observe test quit, drop when upstream fixes both.
+# shortcut: GPUI 0.2.2 filters Dock reopen, cannot observe test quit and has no letter spacing (`tracking`, applied after shaping;
+# the truncation measure ignores it); drop when upstream fixes all three.
 gpui = { path = "vendor/gpui" }

@@ -1192,7 +1192,7 @@ impl TextElement {
             _ => color,
         };
         let underline = marked.then_some(UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false });
-        TextRun { len, font, color, background_color: None, underline, strikethrough: None }
+        TextRun { len, font, color, background_color: None, underline, strikethrough: None, tracking: style.tracking }
     }
 }
 

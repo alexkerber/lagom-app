@@ -396,6 +396,9 @@ pub struct TextStyle {
 
     /// The number of lines to display before truncating the text
     pub line_clamp: Option<usize>,
+
+    /// Letter spacing in thousandths of an em, as type tools count tracking (lagom patch).
+    pub tracking: i16,
 }
 
 impl Default for TextStyle {
@@ -417,6 +420,7 @@ impl Default for TextStyle {
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
+            tracking: 0,
         }
     }
 }
@@ -486,6 +490,7 @@ impl TextStyle {
             background_color: self.background_color,
             underline: self.underline,
             strikethrough: self.strikethrough,
+            tracking: self.tracking,
         }
     }
 }
