@@ -2294,7 +2294,7 @@ impl MainWindow {
             .flex()
             .flex_col()
             .child(
-                toolbar(t)
+                toolbar()
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
                     .child(polish::shortcut_button(t, "Reply", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
@@ -2366,7 +2366,7 @@ impl MainWindow {
 enum Unsub { Confirm, Working, Done }
 
 /// The bar above a message: buttons on a macOS toolbar's height.
-fn toolbar(t: &Theme) -> Div {
+fn toolbar() -> Div {
     div().flex().items_center().gap(px(8.)).h(px(HEADER_H)).flex_shrink_0()
 }
 
@@ -2647,7 +2647,6 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        let frost = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
         if welcome || self.panes.sidebar_hidden { self.glass.hide(); }
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", Page::Settings(_) => "MainWindow Settings", _ => "MainWindow" })
@@ -2730,7 +2729,8 @@ impl Render for MainWindow {
             .line_height(relative(LEADING))
             .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.sidebar(cx)))
             .child(
-                div().flex_1().min_w(px(0.)).h_full().flex().bg(frost).child(div()
+                // The content meets the sidebar at a straight edge: no inset panel, so no stray corner.
+                div().flex_1().min_w(px(0.)).h_full().flex().bg(t.bg).child(div()
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
@@ -2739,7 +2739,6 @@ impl Render for MainWindow {
                     .mr(px(8.))
                     .when(welcome, |d| d.ml(px(8.)))
                     .bg(t.bg)
-                    .rounded(px(radius::PANEL))
                     .overflow_hidden()
                     .relative()
                     .child(panel)

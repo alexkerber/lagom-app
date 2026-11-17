@@ -67,7 +67,7 @@ impl MainWindow {
     pub(super) fn drafts_view(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         div().flex_1().min_w(px(0.)).flex().flex_col()
-            .child(toolbar(t).px(px(20.)).child("Drafts"))
+            .child(toolbar().px(px(20.)).child("Drafts"))
             .child(div().id("draft-list").debug_selector(|| "draft-list".into()).flex_1().min_h(px(0.)).overflow_y_scroll()
                 .p(px(20.)).flex().flex_col().gap(px(8.))
                 .when(self.draft_rows.is_empty(), |d| d.child(div().text_color(t.ink2).child("No drafts")))
