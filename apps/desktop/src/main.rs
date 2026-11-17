@@ -229,7 +229,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         // All text is the system font. Geist Mono (palette key caps) comes from the system if
         // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.
-        cx.text_system().add_fonts(TRIAL_FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load");
+        if theme::font::trial().is_some() { cx.text_system().add_fonts(TRIAL_FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load"); }
         main_window::bind_keys(cx);
         text_input::bind_keys(cx);
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.
