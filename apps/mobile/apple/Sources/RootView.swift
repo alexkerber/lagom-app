@@ -41,8 +41,10 @@ struct RootView: View {
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
+                GeometryReader { proxy in
                 TabView(selection: $section) {
-                    ForEach(AppSection.allCases) { page in
+                    // Settings opens from the mailbox menu on a phone; it is rarely used (Alex 2026-11-17).
+                    ForEach(AppSection.allCases.filter { $0 != .settings }) { page in
                         Tab(value: page) {
                             self.page(page)
                                 .background(Theme.background.ignoresSafeArea())
@@ -55,6 +57,10 @@ struct RootView: View {
                     }
                 }
                 .tint(Theme.selectionIcon)
+                // A wide right inset on a phone is the Duo's column: lagom's actions join the bar there.
+                .onAppear { if section == .settings { section = .mail } }
+                .environment(\.railInset, UIDevice.current.userInterfaceIdiom == .phone && proxy.safeAreaInsets.trailing > 40 ? proxy.safeAreaInsets.trailing : 0)
+                }
             }
         }
         .foregroundStyle(Theme.ink)

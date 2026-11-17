@@ -98,10 +98,12 @@ struct MailView: View {
     @State private var moving: (account: String, id: Int64)?
     @State private var newFolder: NewFolderTarget?
     @State private var confirmEmptyTrash = false
+    @State private var settingsOpen = false
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.railInset) private var railInset
     /// Rows Done, Later or Delete just took: they leave at once and come back only if the core refuses.
     @State private var leaving: Set<Int64> = []
     /// The row ids the list last drew, to tell a few arriving rows from a whole page loading.
@@ -135,6 +137,15 @@ struct MailView: View {
                         }
                 }
             }
+        }
+        // Below the Duo's status bar (about 150 pt) and centred on its tab bar, which sits 6 pt in from the
+        // column's centre; both measured in the Duo simulator.
+        .overlay(alignment: .topTrailing) {
+            if railInset > 0 { railTop.frame(width: railInset).offset(x: railInset - 6).padding(.top, 168) }
+        }
+        // The tab bar hides while a message is open, so Done and Delete take its place at the bottom.
+        .overlay(alignment: .bottomTrailing) {
+            if railInset > 0 { railBottom.frame(width: railInset).offset(x: railInset - 6).padding(.bottom, 24) }
         }
         .safeAreaInset(edge: .bottom) {
             // The desktop toast: a raised card over the list that rises on the spring; its text changes in place.
@@ -214,6 +225,73 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing) }
+    }
+
+    private var composeButton: some View {
+        IconButton(title: "New message", icon: "compose") {
+            let account = model.accountID ?? model.accounts.first?.id ?? ""
+            Task { await model.newMessage(account: account) }
+        }
+        .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
+    }
+
+    /// The Duo's right column (Alex 2026-11-17): New message and the filter as their own buttons over the list;
+    /// with a message open, Reply, Reply all, Forward and More at the top, Done and Delete at the bottom.
+    private func railButton(_ title: String, icon: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Icon(icon, label: title).frame(width: 48, height: 48).contentShape(Circle())
+        }
+        .buttonStyle(.plain).foregroundStyle(selected ? Theme.selectionIcon : Theme.ink)
+        .background(.regularMaterial, in: Circle())
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    @ViewBuilder private var railTop: some View {
+        if let id = model.selectedID {
+            let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) }
+            VStack(spacing: 4) {
+                railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
+                railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
+                railButton("Forward", icon: "forward") { Task { await model.prepareCompose(id: id, kind: .forward) } }
+                Menu {
+                    Button("Later") { laterChoices = model.core?.laterChoices() ?? []; laterID = id }
+                    if let row { Button("Move to") { moving = (row.account, id) } }
+                    if let row {
+                        Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: id, read: row.unread) } }
+                    }
+                } label: {
+                    Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
+                }
+                .foregroundStyle(Theme.ink).background(.regularMaterial, in: Circle())
+            }
+            .disabled(model.working || model.preparingCompose)
+        } else {
+            VStack(spacing: 8) {
+                railButton("New message", icon: "compose") {
+                    let account = model.accountID ?? model.accounts.first?.id ?? ""
+                    Task { await model.newMessage(account: account) }
+                }
+                .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
+                if !model.accounts.isEmpty && model.mailbox != .drafts && !(model.mailbox == .trash && model.folder == nil) {
+                    railButton(unreadOnly ? "Unread only" : "All mail", icon: unreadOnly ? "unread" : "filter-all", selected: unreadOnly) { unreadOnly.toggle() }
+                        .accessibilityHint("Shows only unread mail")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var railBottom: some View {
+        if let id = model.selectedID {
+            VStack(spacing: 8) {
+                if model.mailbox != .trash { railButton("Delete", icon: "trash") { act(.delete, id: id) } }
+                Button { act(.done, id: id) } label: {
+                    Icon("done", label: "Done").frame(width: 48, height: 48).contentShape(Circle())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.accentInk).background(Theme.accent, in: Circle())
+            }
+            .disabled(model.working)
+        }
     }
 
     /// The desktop list header: title, a sync mark with what is left, the All/Unread filter.
@@ -226,13 +304,8 @@ struct MailView: View {
                     // In Trash the filter makes way for Empty Trash, as on desktop.
                     HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
                         .disabled(model.rows.isEmpty || model.working)
-                } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
-                IconButton(title: "New message", icon: "compose") {
-                    let account = model.accountID ?? model.accounts.first?.id ?? ""
-                    Task { await model.newMessage(account: account) }
-                }
-                .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
-                .padding(.trailing, -6)
+                } else if railInset == 0 && !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
+                if railInset == 0 { composeButton.padding(.trailing, -6) }
             }
             if !regular && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
@@ -272,6 +345,8 @@ struct MailView: View {
                     Button("Remove account", role: .destructive) { removing = account }
                 }
             }
+            // Rarely used, so not in the tab bar on a phone (Alex 2026-11-17).
+            if !regular { Button("Settings") { settingsOpen = true } }
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -455,9 +530,18 @@ struct MailView: View {
             let id = model.selectedID ?? message.row.id
             VStack(spacing: 0) {
                 // Labels where they fit, as on desktop; icons alone in a narrow pane.
-                ViewThatFits(in: .horizontal) {
-                    actions(message, iconOnly: !regular)
-                    actions(message, iconOnly: true)
+                Group {
+                    if railInset > 0 {
+                        // The actions sit in the right column on the Duo.
+                        IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }
+                            .padding(.leading, -6).frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        // Labels where they fit, as on desktop; icons alone in a narrow pane.
+                        ViewThatFits(in: .horizontal) {
+                            actions(message, iconOnly: !regular)
+                            actions(message, iconOnly: true)
+                        }
+                    }
                 }
                 .padding(.horizontal, 16).frame(minHeight: 56)
                 ConversationView(model: model).id(id)

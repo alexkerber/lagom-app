@@ -445,3 +445,13 @@ private struct HorizontalPan: UIGestureRecognizerRepresentable {
         }
     }
 }
+
+/// The width of a right-edge column the system gives a phone, as on the iPhone Duo, where the status bar
+/// and the tab bar sit at the right. Zero elsewhere. Mail puts its New message and filter buttons there.
+private struct RailInsetKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+extension EnvironmentValues {
+    var railInset: CGFloat {
+        get { self[RailInsetKey.self] }
+        set { self[RailInsetKey.self] = newValue }
+    }
+}

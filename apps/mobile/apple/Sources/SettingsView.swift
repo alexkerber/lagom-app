@@ -1,20 +1,27 @@
 import SwiftUI
 import UIKit
 
-/// The desktop's Settings page on a phone: accounts, notifications and about (Alex 2026-11-17).
+/// The desktop's Settings page: accounts, notifications and about (Alex 2026-11-17). A page in the iPad
+/// sidebar; on a phone a sheet from the mailbox menu, where accounts already live.
 struct SettingsView: View {
     let model: MailModel
+    var accounts = true
     @Binding var addAccount: Bool
     @Binding var removing: MailAccount?
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                Text("Settings").font(.custom("Hauora-Bold", size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
-                    .accessibilityAddTraits(.isHeader)
-                group("Accounts") {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Settings").font(.custom("Hauora-Bold", size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    if !accounts { IconButton(title: "Close", icon: "close") { dismiss() } }
+                }
+                if accounts { group("Accounts") {
                     ForEach(model.accounts, id: \.id) { account in
                         HStack {
                             Text(account.email).lagomFont(.base).lineLimit(1)
@@ -25,7 +32,7 @@ struct SettingsView: View {
                         .frame(minHeight: 44)
                     }
                     row("Add account", icon: "plus") { addAccount = true }
-                }
+                } }
                 group("Notifications") {
                     row("Notification settings", icon: nil) {
                         if let url = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(url) }
