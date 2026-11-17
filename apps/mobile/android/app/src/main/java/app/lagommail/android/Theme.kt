@@ -186,8 +186,8 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
         // A full-width button passes its width on to the drawn shape.
         propagateMinConstraints = true) {
         Row(Modifier.minimumInteractiveComponentSize().heightIn(min = 36.dp).clip(RoundedCornerShape(Radius.control))
-            .background(if (primary) c.accent else c.bg)
-            .then(if (primary) Modifier else Modifier.border(1.dp, c.line, RoundedCornerShape(Radius.control)))
+            // No outline, as desktop since #168: a quiet fill marks the button.
+            .background(if (primary) c.accent else c.subtle)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { if (iconOnly) contentDescription = text }
             .alpha(if (enabled) 1f else 0.5f)
@@ -210,11 +210,10 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
     }
 }
 
-/** The bar at the top of every page: one height, a hairline under it, nothing that grows or collapses. */
+/** The bar at the top of every page: one height, nothing that grows or collapses. No line under it, as desktop since #168. */
 @Composable internal fun TopBar(modifier: Modifier = Modifier, start: Dp = 16.dp, end: Dp = 4.dp, content: @Composable RowScope.() -> Unit) {
-    val line = lagom.line
     Row(modifier.fillMaxWidth().height(BarHeight).background(lagom.bg)
-        .drawHairline(line).padding(start = start, end = end),
+        .padding(start = start, end = end),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp), content = content)
 }
 

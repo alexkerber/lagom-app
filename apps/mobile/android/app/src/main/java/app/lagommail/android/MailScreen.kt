@@ -62,13 +62,15 @@ import kotlin.math.roundToInt
     var removing by remember { mutableStateOf<MailAccount?>(null) }
     var signing by remember { mutableStateOf<MailAccount?>(null) }
     var naming by remember { mutableStateOf<MailAccount?>(null) }
+    var settings by remember { mutableStateOf(false) }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
     val rise = with(LocalDensity.current) { 12.dp.roundToPx() }
     Box(Modifier.fillMaxSize()) {
-        Box(if (overlay != null) Modifier.clearAndSetSemantics {} else Modifier) {
-            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onName = { naming = it }, onRetry = { retrying = it })
+        Box(if (overlay != null || settings) Modifier.clearAndSetSemantics {} else Modifier) {
+            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onName = { naming = it }, onRetry = { retrying = it },
+                onSettings = { settings = true })
         }
         AnimatedContent(overlay, Modifier.fillMaxSize(), contentKey = { it?.let { screen -> screen::class } }, label = "screen", transitionSpec = {
             when {
@@ -87,6 +89,9 @@ import kotlin.math.roundToInt
             }
         }
     }
+    // Settings gives way to Compose and Add account, which the tablet sidebar can open under it.
+    LaunchedEffect(overlay != null) { if (overlay != null) settings = false }
+    if (settings && overlay == null) SettingsScreen { settings = false }
     removing?.let { account ->
         AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove account?") }, text = { Text("Remove ${account.email} and its local mail?") },
             confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove") } },
@@ -109,7 +114,7 @@ internal fun Mailbox.label(): String = when (this) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit,
-    onName: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit) {
+    onName: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit, onSettings: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
     Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) {
@@ -175,6 +180,8 @@ internal fun Mailbox.label(): String = when (this) {
                         DropdownMenuItem(text = { Text("Signature for ${account.email}") }, onClick = { menu = false; onSign(account) })
                         DropdownMenuItem(text = { Text("Remove ${account.email}") }, onClick = { menu = false; onRemove(account) })
                     }
+                    HorizontalDivider()
+                    DropdownMenuItem(text = { Text("Settings") }, onClick = { menu = false; onSettings() })
                 }
             }
             LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
@@ -190,7 +197,7 @@ internal fun Mailbox.label(): String = when (this) {
                     if (drafts.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_edit_draft, "No drafts", rowMotion(true).fillParentMaxSize()) }
                     items(drafts, key = { it.id }) { draft ->
                         Column(rowMotion(true).fillMaxWidth().heightIn(min = 48.dp).clickable(onClickLabel = "Edit draft") { model.perform { model.openDraft(draft) } }
-                            .drawHairline(lagom.line).padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            .padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(draft.subject.ifEmpty { "(No subject)" }, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(draft.to, color = lagom.ink2, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(listOfNotNull(model.accounts.find { it.id == draft.account }?.email, draft.updatedUnix.takeIf { it > 0 }?.let {
@@ -244,7 +251,7 @@ internal fun Mailbox.label(): String = when (this) {
 @Composable private fun Inbox(model: MailModel, onRetry: (SendFailure) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         // Search and the filter sit in one fixed band under the bar, so nothing above the list moves as it loads.
-        Row(Modifier.fillMaxWidth().drawHairline(lagom.line).padding(horizontal = 16.dp, vertical = 8.dp),
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SearchField(model.searchText, Modifier.weight(1f)) { model.perform { model.changeSearch(it) } }
             if (model.mailbox == Mailbox.TRASH && model.folder == null) {
@@ -332,8 +339,8 @@ internal fun Mailbox.label(): String = when (this) {
 /** The desktop sidebar's Search field: an icon, the text, and Clear once there is some. */
 @Composable private fun SearchField(text: String, modifier: Modifier = Modifier, change: (String) -> Unit) {
     val c = lagom
-    // Raised, as the desktop search field (Alex 2026-11-15: one look on every platform).
-    Row(modifier.height(40.dp).background(c.raised, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control))
+    // A subtle fill and no outline, as desktop and iOS (Alex 2026-11-15: one look on every platform).
+    Row(modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control))
         .padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         LagomIcon(R.drawable.ic_search, size = 16.dp)
         Box(Modifier.weight(1f)) {
@@ -351,7 +358,7 @@ internal fun Mailbox.label(): String = when (this) {
 /** All / Unread, the desktop list header's filter: icon and label in a small segmented well; the chosen one raised. */
 @Composable private fun FilterControl(unreadOnly: Boolean, choose: (Boolean) -> Unit) {
     val c = lagom
-    Row(Modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control)).border(1.dp, c.line, RoundedCornerShape(Radius.control)).padding(3.dp)) {
+    Row(Modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control)).padding(3.dp)) {
         listOf(false to ("All" to R.drawable.ic_filter_all), true to ("Unread" to R.drawable.ic_unread)).forEach { (unread, choice) ->
             val on = unreadOnly == unread
             // The highlight moves in 140 ms ease-out, as the desktop selection.
@@ -360,7 +367,8 @@ internal fun Mailbox.label(): String = when (this) {
                 .selectable(on, role = Role.Tab) { choose(unread) }.padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 LagomIcon(choice.second, tint = if (on) c.ink else c.ink2, size = 16.dp)
-                Text(choice.first, color = if (on) c.ink else c.ink2, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                // One line: "Unread" broke in two on a narrow phone, as on the folded Duo.
+                Text(choice.first, color = if (on) c.ink else c.ink2, style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
             }
         }
     }
@@ -724,7 +732,6 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                         val downloading = (id to part.section) in model.downloadingAttachments
                         val name = safeAttachmentName(part.filename)
                         Row(Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(Radius.attachment)).background(c.subtle)
-                            .border(1.dp, c.line, RoundedCornerShape(Radius.attachment))
                             .clickable(enabled = !downloading, onClickLabel = "Open", role = Role.Button) { openAttachment(part) }
                             .padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             if (afterWait(downloading)) CircularProgressIndicator(Modifier.size(16.dp), color = c.ink2, strokeWidth = 2.dp)
@@ -740,7 +747,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
             }
             // The desktop reply box: one quiet line that opens Reply.
             Row(Modifier.fillMaxWidth().padding(bottom = 12.dp).heightIn(min = 48.dp).clip(RoundedCornerShape(Radius.control))
-                .background(c.raised).border(1.dp, c.line, RoundedCornerShape(Radius.control))
+                .background(c.subtle)
                 .clickable(enabled = !model.working, role = Role.Button) { model.perform { model.reply(id) } }.padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 LagomIcon(R.drawable.ic_reply)
@@ -757,7 +764,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     val sender = RowPresentation(row).sender
     val initials = sender.split(" ").filter { it.isNotEmpty() }.take(2).map { it.first().uppercaseChar() }.joinToString("")
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.size(36.dp).background(c.subtle, CircleShape).border(1.dp, c.line, CircleShape).clearAndSetSemantics {},
+        Box(Modifier.size(36.dp).background(c.subtle, CircleShape).clearAndSetSemantics {},
             contentAlignment = Alignment.Center) {
             Text(initials, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold), maxLines = 1)
         }

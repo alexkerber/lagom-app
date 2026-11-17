@@ -31,12 +31,8 @@ internal fun List<MailCounts>.sidebarCount(box: Mailbox, account: String? = null
     fun active(box: Mailbox, account: String? = null) =
         !model.showingDrafts && model.folder == null && model.mailbox == box && model.accountId == account
     Column(Modifier.width(240.dp).fillMaxHeight().padding(horizontal = 12.dp).padding(top = 8.dp)) {
-        Row(Modifier.heightIn(min = 40.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            AppIcon(26.dp)
-            Text("lagom", fontWeight = FontWeight.SemiBold)
-        }
-        Column(Modifier.padding(top = 20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        // No logo, as the iPad sidebar: the pages start at the top.
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 AppSection.entries.forEach { page ->
                     SidebarRow(page.title, page.icon, active = section == page, page = true, enabled = enabled,
