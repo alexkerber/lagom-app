@@ -246,6 +246,7 @@ struct MailView: View {
             VStack(spacing: 4) {
                 // Back first, under the status bar, though a swipe goes back too (Alex 2026-11-17).
                 railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
+                RailGroup {
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
                 railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
                 railButton("Forward", icon: "forward") { Task { await model.prepareCompose(id: id, kind: .forward) } }
@@ -258,7 +259,8 @@ struct MailView: View {
                 } label: {
                     Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
                 }
-                .foregroundStyle(Theme.ink).modifier(RailGlass())
+                .foregroundStyle(Theme.ink)
+                }
             }
             .disabled(model.working || model.preparingCompose)
         } else {

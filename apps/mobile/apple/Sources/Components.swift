@@ -485,12 +485,14 @@ extension View {
 }
 
 /// One round action in the right column, in the system bar's Liquid Glass; the main action is tinted with the accent.
+/// Inside a `RailGroup` it draws no glass of its own: the group's capsule holds it, as Apple groups related controls.
 struct RailButton: View {
     let title: String
     let icon: String
     var primary = false
     var selected = false
     let action: () -> Void
+    @Environment(\.inRailGroup) private var grouped
 
     var body: some View {
         Button(action: action) {
@@ -498,19 +500,49 @@ struct RailButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(primary ? Theme.accentInk : selected ? Theme.selectionIcon : Theme.ink)
-        .modifier(RailGlass(primary: primary))
+        .background(selected && grouped ? Theme.subtle : .clear, in: Circle())
+        .modifier(RailGlass(primary: primary, shape: grouped ? nil : Circle()))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
-struct RailGlass: ViewModifier {
+/// Related actions in one glass capsule (Reply, Reply all, Forward, More).
+struct RailGroup<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 0) { content }
+            .environment(\.inRailGroup, true)
+            .modifier(RailGlass(shape: Capsule()))
+    }
+}
+
+private struct InRailGroupKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var inRailGroup: Bool {
+        get { self[InRailGroupKey.self] }
+        set { self[InRailGroupKey.self] = newValue }
+    }
+}
+
+/// Liquid Glass on iOS 26, a material before it; nil draws nothing (a button inside a group).
+struct RailGlass<S: Shape>: ViewModifier {
     var primary = false
+    var shape: S?
 
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content.glassEffect(primary ? .regular.tint(Theme.accent).interactive() : .regular.interactive(), in: Circle())
+        if let shape {
+            if #available(iOS 26.0, *) {
+                content.glassEffect(primary ? .regular.tint(Theme.accent).interactive() : .regular.interactive(), in: shape)
+            } else {
+                content.background(primary ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.regularMaterial), in: shape)
+            }
         } else {
-            content.background(primary ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.regularMaterial), in: Circle())
+            content
         }
     }
+}
+
+extension RailGlass where S == Circle {
+    init(primary: Bool = false) { self.primary = primary; shape = Circle() }
 }
