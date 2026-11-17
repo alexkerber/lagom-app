@@ -211,7 +211,7 @@ fn system_selection() -> Option<u32> {
 pub const DEFAULT_ACCENT: Accent = Accent::Dusk;
 
 pub mod font {
-    pub const MONO: &str = "Geist Mono"; // key caps in the command palette
+    pub const MONO: &str = "Geist Mono"; // key caps and Today labels
 
     /// All text: the platform's system font (SF Pro on macOS), so the app reads as native.
     /// GPUI maps ".SystemUIFont" per platform.
@@ -224,18 +224,8 @@ pub mod font {
         })
     }
 
-    /// Type trial (Alex 2026-11-17): `LAGOM_TYPE=a` is the site's Hauora Sans with Geist Mono labels,
-    /// `LAGOM_TYPE=b` is Instrument Serif. Unset: the shipped look.
-    /// shortcut: env switch for a side-by-side choice; make the winner the default and drop the loser.
-    pub fn trial() -> Option<char> {
-        static TRIAL: std::sync::OnceLock<Option<char>> = std::sync::OnceLock::new();
-        *TRIAL.get_or_init(|| std::env::var("LAGOM_TYPE").ok().and_then(|v| v.chars().next()).filter(|c| matches!(c, 'a' | 'b')))
-    }
-
-    /// Dates, counts and the Today sentence.
-    pub fn display() -> &'static str {
-        match trial() { Some('a') => "Hauora", Some('b') => "Instrument Serif", _ => ui() }
-    }
+    /// Dates, counts and the Today sentence: Hauora Sans, the site's face (Alex 2026-11-17).
+    pub const DISPLAY: &str = "Hauora";
 }
 
 #[cfg(test)]
