@@ -9,6 +9,8 @@ struct SettingsView: View {
     @Binding var addAccount: Bool
     @Binding var removing: MailAccount?
     @Environment(\.horizontalSizeClass) private var width
+    /// Dynamic Type scale of the display size, so tracking stays the same share of an em.
+    @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
 
@@ -17,7 +19,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 32) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Settings").font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
-                        .tracking((width == .regular ? 48 : 34) * Theme.Face.displayTracking)
+                        .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
                         .accessibilityAddTraits(.isHeader)
                     Spacer()
                     if !accounts { IconButton(title: "Close", icon: "close") { dismiss() } }

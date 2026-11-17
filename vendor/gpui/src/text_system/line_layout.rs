@@ -564,7 +564,7 @@ impl LineLayoutCache {
             let mut layout = self
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
-            apply_tracking(&mut layout, runs);
+            apply_tracking(&mut layout, &text, runs);
 
             if let Some(force_width) = force_width {
                 let mut glyph_pos = 0;
@@ -602,21 +602,34 @@ pub struct FontRun {
     pub(crate) tracking: i16,
 }
 
-/// Adds each run's letter spacing after every glyph, as CSS `letter-spacing` does, and widens the line.
-fn apply_tracking(layout: &mut LineLayout, runs: &[FontRun]) {
+/// Adds each run's letter spacing after every grapheme cluster, as CSS `letter-spacing` does, and widens
+/// the line. Clusters, not glyphs: an accent stays on its letter, and a ligature still counts each letter.
+fn apply_tracking(layout: &mut LineLayout, text: &str, runs: &[FontRun]) {
+    use unicode_segmentation::UnicodeSegmentation;
     if runs.iter().all(|run| run.tracking == 0) {
         return;
     }
+    let mut ends = runs.iter().scan(0, |end, run| {
+        *end += run.len;
+        Some((*end, run.tracking))
+    });
+    let mut run = ends.next();
+    // Each cluster's start and the spacing of the clusters before it.
+    let mut before = Vec::new();
     let mut shift = px(0.);
+    for (start, _) in text.grapheme_indices(true) {
+        while let Some((end, _)) = run
+            && start >= end
+        {
+            run = ends.next();
+        }
+        before.push((start, shift));
+        shift += layout.font_size * (run.map_or(0, |(_, tracking)| tracking) as f32 / 1000.);
+    }
     for glyph in layout.runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
-        glyph.position.x += shift;
-        let mut end = 0;
-        let run = runs.iter().find(|run| {
-            end += run.len;
-            glyph.index < end
-        });
-        if let Some(run) = run {
-            shift += layout.font_size * (run.tracking as f32 / 1000.);
+        let cluster = before.partition_point(|(start, _)| *start <= glyph.index);
+        if cluster > 0 {
+            glyph.position.x += before[cluster - 1].1;
         }
     }
     layout.width += shift;

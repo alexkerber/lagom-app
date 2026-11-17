@@ -150,9 +150,11 @@ mod tests {
         let cx = cx.add_empty_window();
         cx.update(|window, _| {
             let style = window.text_style();
-            let width = |tracking| window.text_system()
-                .layout_line("ab", px(48.), &[gpui::TextRun { tracking, ..style.to_run(2) }], None).width;
-            assert!((width(0) - width(-40) - px(3.84)).abs() < px(0.01), "{:?} vs {:?}", width(0), width(-40));
+            let width = |text: &str, tracking| window.text_system()
+                .layout_line(text, px(48.), &[gpui::TextRun { tracking, ..style.to_run(text.len()) }], None).width;
+            assert!((width("ab", 0) - width("ab", -40) - px(3.84)).abs() < px(0.01));
+            // An accent belongs to its letter: "é" written as e and a combining mark is one step, not two.
+            assert!((width("e\u{301}b", 0) - width("e\u{301}b", -40) - px(3.84)).abs() < px(0.01));
         });
     }
 

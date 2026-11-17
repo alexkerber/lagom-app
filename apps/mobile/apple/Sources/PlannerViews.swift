@@ -13,6 +13,8 @@ struct TodayView: View {
     let openMail: (Int64?) -> Void
     let open: (AppSection) -> Void
     @Environment(\.horizontalSizeClass) private var width
+    /// Dynamic Type scale of the display size, so tracking stays the same share of an em.
+    @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
     @State private var newTask = false
 
     var body: some View {
@@ -59,7 +61,7 @@ struct TodayView: View {
             MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)
                 .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
-                .tracking((width == .regular ? 48 : 34) * Theme.Face.displayTracking)
+                .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
                 .lineSpacing(-2).tint(Theme.ink).accessibilityAddTraits(.isHeader)
                 .environment(\.openURL, OpenURLAction { url in
                     switch url.absoluteString {

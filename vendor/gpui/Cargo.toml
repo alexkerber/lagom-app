@@ -269,6 +269,10 @@ version = "=0.9.0"
 [dependencies.thiserror]
 version = "2.0.12"
 
+# lagom patch: letter spacing follows grapheme clusters.
+[dependencies.unicode-segmentation]
+version = "1.10"
+
 [dependencies.usvg]
 version = "0.45.0"
 default-features = false
@@ -320,8 +324,6 @@ features = ["unstable"]
 [dev-dependencies.rand]
 version = "0.9"
 
-[dev-dependencies.unicode-segmentation]
-version = "1.10"
 
 [dev-dependencies.util]
 version = "0.2.2"
