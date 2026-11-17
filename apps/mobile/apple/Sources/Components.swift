@@ -478,7 +478,21 @@ private struct RailColumn<Top: View, Bottom: View>: ViewModifier {
     }
 }
 
+/// Reads the Duo column from this view's own safe area: the main window, and each sheet separately,
+/// since a sheet that does not reach the column must keep its own buttons.
+private struct DuoRail: ViewModifier {
+    func body(content: Content) -> some View {
+        GeometryReader { proxy in
+            // A wide right inset with none on the left; a landscape iPhone has insets on both sides.
+            content.environment(\.railInset, UIDevice.current.userInterfaceIdiom == .phone && proxy.safeAreaInsets.trailing > 40
+                                && proxy.safeAreaInsets.leading < 20 ? proxy.safeAreaInsets.trailing : 0)
+        }
+    }
+}
+
 extension View {
+    func duoRail() -> some View { modifier(DuoRail()) }
+
     func railColumn(@ViewBuilder top: () -> some View, @ViewBuilder bottom: () -> some View) -> some View {
         modifier(RailColumn(top: top(), bottom: bottom()))
     }

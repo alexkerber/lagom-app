@@ -188,8 +188,8 @@ struct MailView: View {
         .sensoryFeedback(.impact(weight: .light), trigger: acted)
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
-        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft) }
-        .sheet(item: $signing) { account in SignatureView(model: model, account: account) }
+        .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft).duoRail() }
+        .sheet(item: $signing) { account in SignatureView(model: model, account: account).duoRail() }
         .alert("Your name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
             TextField("Your name", text: $newName).textContentType(.name)
             Button("Save") {
@@ -222,7 +222,7 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
-        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing) }
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing).duoRail() }
     }
 
     private var composeButton: some View {
@@ -233,7 +233,7 @@ struct MailView: View {
         .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
     }
 
-    /// The Duo's right column: New message and the filter over the list; with a message open, Back, Reply,
+    /// The Duo's right column: New message over the list; with a message open, Back, Reply,
     /// Reply all, Forward and More at the top, Delete and Done at the bottom.
     private func railButton(_ title: String, icon: String, primary: Bool = false, selected: Bool = false, action: @escaping () -> Void) -> some View {
         RailButton(title: title, icon: icon, primary: primary, selected: selected, action: action)
@@ -264,17 +264,12 @@ struct MailView: View {
             }
             .disabled(model.working || model.preparingCompose)
         } else {
-            VStack(spacing: 8) {
-                railButton("New message", icon: "compose") {
-                    let account = model.accountID ?? model.accounts.first?.id ?? ""
-                    Task { await model.newMessage(account: account) }
-                }
-                .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
-                if !model.accounts.isEmpty && model.mailbox != .drafts && !(model.mailbox == .trash && model.folder == nil) {
-                    railButton(unreadOnly ? "Unread only" : "All mail", icon: unreadOnly ? "unread" : "filter-all", selected: unreadOnly) { unreadOnly.toggle() }
-                        .accessibilityHint("Shows only unread mail")
-                }
+            // The filter stays in the list header beside the mailbox: it sorts the list, it is not an action (Alex 2026-11-17).
+            railButton("New message", icon: "compose") {
+                let account = model.accountID ?? model.accounts.first?.id ?? ""
+                Task { await model.newMessage(account: account) }
             }
+            .disabled(model.accounts.isEmpty || model.core == nil || model.preparingCompose)
         }
     }
 
@@ -298,7 +293,7 @@ struct MailView: View {
                     // In Trash the filter makes way for Empty Trash, as on desktop.
                     HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
                         .disabled(model.rows.isEmpty || model.working)
-                } else if railInset == 0 && !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
+                } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
                 if railInset == 0 { composeButton.padding(.trailing, -6) }
             }
             if !sidebar && model.mailbox != .drafts { SearchField(text: $model.searchText) }
