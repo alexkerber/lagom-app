@@ -1506,7 +1506,7 @@ pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Statefu
     el.when(!selected, |el| el.hover(move |s| s.bg(Rgba { a: press.a / 2., ..press }).text_color(ink)).active(move |s| s.bg(press)))
 }
 
-/// A push button. `fill`: the colour of a primary button; `None` is a bordered one. Shortcuts
+/// A push button. `fill`: the colour of a primary button; `None` is a borderless one that fills on hover. Shortcuts
 /// live in the menus and the command palette, not on the button.
 pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
     button_label(t, label, fill, None)
@@ -1535,7 +1535,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
     match fill {
         // A translucent tint would replace the fill, so a filled button dims a little instead.
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
-        None => pressable(base.border_1().border_color(t.line).bg(t.bg).text_color(t.ink), t, false),
+        None => pressable(base.text_color(t.ink), t, false),
     }
 }
 
@@ -1732,8 +1732,6 @@ impl MainWindow {
                     .h(px(28.))
                     .px(px(8.))
                     .rounded(px(radius::CONTROL))
-                    .border_1()
-                    .border_color(t.line)
                     .bg(t.raised)
                     .text_color(t.ink2)
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))
@@ -2185,8 +2183,6 @@ impl MainWindow {
                     .when(self.confirm_empty_trash, |d| d.flex_col().items_start().py(px(8.)))
                     .flex_shrink_0()
                     .px(px(16.))
-                    .border_b_1()
-                    .border_color(t.line)
                     .child(
                         div()
                             .flex()
@@ -2371,7 +2367,7 @@ enum Unsub { Confirm, Working, Done }
 
 /// The bar above a message: buttons on a macOS toolbar's height.
 fn toolbar(t: &Theme) -> Div {
-    div().flex().items_center().gap(px(8.)).h(px(HEADER_H)).flex_shrink_0().border_b_1().border_color(t.line)
+    div().flex().items_center().gap(px(8.)).h(px(HEADER_H)).flex_shrink_0()
 }
 
 /// A borderless glyph button with a tooltip, as in a macOS toolbar.
@@ -2494,7 +2490,7 @@ fn reading_view(
         pressable(div().id(("attachment", index)), t, false)
             .flex().items_center().gap(px(12.)).min_w(px(0.)).flex_shrink_0()
             .px(px(14.)).py(px(10.)).rounded(px(radius::ATTACHMENT))
-            .border_1().border_color(t.line).bg(t.subtle)
+            .bg(t.subtle)
             .text_size(px(size::SNIPPET)).line_height(relative(LEADING))
             .child(icon("icons/attachment.svg", t.ink2, 16.))
             .child(div().flex_1().min_w(px(0.)).flex().font_weight(FontWeight::MEDIUM)
@@ -2510,7 +2506,7 @@ fn reading_view(
         .child(div().flex_shrink_0().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
             .debug_selector(|| "reading-subject".into()).child(m.subject.clone()))
         .child(div().flex().flex_col().gap(px(20.)).p(px(20.))
-            .bg(t.raised).border_1().border_color(t.line).rounded(px(radius::CARD))
+            .bg(t.raised).rounded(px(radius::CARD))
             .debug_selector(|| "message-card".into())
             .when(web, |d| d.flex_1().min_h(px(180.)))
             .when(!web, |d| d.flex_shrink_0())
@@ -2544,7 +2540,7 @@ fn reading_view(
         .when(!web, |d| d.child(div().flex_1()))
         .child(pressable(div().id("reply-box"), t, false).debug_selector(|| "reply-box".into())
             .flex().flex_shrink_0().items_center().gap(px(8.)).w_full().h(px(36.)).px(px(12.))
-            .rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).text_color(t.ink2)
+            .rounded(px(radius::CONTROL)).bg(t.subtle).text_color(t.ink2)
             .tooltip(move |_, cx| cx.new(|_| Tip(theme, "Reply · R".into())).into()).on_click(on_reply)
             .child(icon("icons/reply.svg", t.ink2, 16.))
             .child(div().min_w(px(0.)).one_line()
@@ -2743,8 +2739,6 @@ impl Render for MainWindow {
                     .mr(px(8.))
                     .when(welcome, |d| d.ml(px(8.)))
                     .bg(t.bg)
-                    .border_1()
-                    .border_color(t.line)
                     .rounded(px(radius::PANEL))
                     .overflow_hidden()
                     .relative()
