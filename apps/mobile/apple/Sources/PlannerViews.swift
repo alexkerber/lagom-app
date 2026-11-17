@@ -267,12 +267,14 @@ struct TodoView: View {
     @State private var newList = false
     @State private var listName = ""
     @State private var showDone: Set<Int64> = []
+    @Environment(\.railInset) private var railInset
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PageTitle(title: "Todo") {
                 Menu {
-                    Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
+                    // On the Duo, New task is in the right column.
+                    if railInset == 0 { Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty) }
                     Button("New list") { listName = ""; newList = true }
                 } label: { Icon("plus") }
                     .menuStyle(.button).buttonStyle(IconButtonStyle())
@@ -468,7 +470,7 @@ private struct WeekGrid: View {
         .background(Theme.background)
         .task { await planner.reloadWeek() }
         // A new week opens on today when it holds today, else on its Monday.
-        .onChange(of: planner.weekStart) { _, start in
+        .onChange(of: planner.weekStart, initial: true) { _, start in
             selected = calendar.isDate(PlannerModel.monday(.now), inSameDayAs: start) ? calendar.startOfDay(for: .now) : start
         }
         .railColumn(top: {
@@ -551,7 +553,7 @@ private struct WeekGrid: View {
                 .overlay(alignment: .topLeading) { NowLine24(days: days, hour: Self.hour, gutter: Self.gutter).padding(.top, 12) }
         }
         .scrollPosition($position)
-        .task(id: "\(planner.weekStart) \(first)") { position.scrollTo(y: CGFloat(first) * Self.hour) }
+        .task(id: "\(planner.weekStart) \(first) \(oneDay ? selected : planner.weekStart)") { position.scrollTo(y: CGFloat(first) * Self.hour) }
         .refreshable { await planner.reloadAgenda() }
     }
 
