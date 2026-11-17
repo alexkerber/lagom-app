@@ -36,6 +36,15 @@ use main_window::MainWindow;
 /// Icons and fonts compiled into the binary.
 struct Assets;
 
+/// Bundled faces, all OFL; licences sit next to them. Text stays the system font.
+const FONTS: [&[u8]; 5] = [
+    include_bytes!("../assets/fonts/Hauora-Medium.ttf"),
+    include_bytes!("../assets/fonts/Hauora-Bold.ttf"),
+    include_bytes!("../assets/fonts/Hauora-ExtraBold.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+];
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
@@ -217,8 +226,8 @@ fn main() {
     for url in mailto_args(std::env::args()) { links.send(url).ok(); }
     app.on_open_urls(move |urls| for url in urls { links.send(url).ok(); });
     app.run(move |cx: &mut App| {
-        // All text is the system font. Geist Mono (palette key caps) comes from the system if
-        // installed, else GPUI falls back. shortcut: bundle Geist Mono or drop it before release.
+        // Text is the system font; Hauora (Today's sentence) and Geist Mono (labels, key caps) are bundled.
+        cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load");
         main_window::bind_keys(cx);
         text_input::bind_keys(cx);
         // After bind_keys: the macOS menu reads its shortcuts from the keymap when it is built.

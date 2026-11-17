@@ -66,7 +66,7 @@ impl MainWindow {
         let now = chrono::Local::now();
         let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
         let mut agenda = div().debug_selector(|| "today-agenda".into()).w_full().flex().flex_col().gap(px(12.))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Schedule"));
+            .child(home::heading(&t, "Schedule"));
         if !has_calendar {
             let account = self.today.calendar_accounts.first().map(|(a, _)| a.id.clone());
             return agenda.child(pressable(div().id("home-calendar-consent"), &t, false)
@@ -81,8 +81,7 @@ impl MainWindow {
                 })));
         }
         if self.today.events.is_empty() {
-            return agenda.child(div().py(px(16.)).flex().flex_col().gap(px(8.))
-                .child(icon("icons/calendar.svg", t.ink2, 32.)).child(mono("Nothing scheduled today", t.ink2)));
+            return agenda.child(div().text_color(t.ink2).child("Nothing scheduled today"));
         }
         let now_line = || div().debug_selector(|| "today-now".into()).flex().items_center().gap(px(10.)).min_h(px(24.))
             .child(mono(now.format("%H:%M").to_string(), t.swipe_later).w(px(48.)).flex_shrink_0())

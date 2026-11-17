@@ -123,6 +123,7 @@ pub mod size {
     pub const TITLE: f32 = 15.0;
     pub const SUBJECT: f32 = 20.0;
     pub const DISPLAY: f32 = 26.0;
+    pub const HERO: f32 = 48.0;
 }
 
 pub mod radius {
@@ -210,7 +211,7 @@ fn system_selection() -> Option<u32> {
 pub const DEFAULT_ACCENT: Accent = Accent::Dusk;
 
 pub mod font {
-    pub const MONO: &str = "Geist Mono"; // key caps in the command palette
+    pub const MONO: &str = "Geist Mono"; // key caps and Today labels
 
     /// All text: the platform's system font (SF Pro on macOS), so the app reads as native.
     /// GPUI maps ".SystemUIFont" per platform.
@@ -222,6 +223,9 @@ pub mod font {
             _ => ".SystemUIFont",
         })
     }
+
+    /// Dates, counts and the Today sentence: Hauora Sans, the site's face (Alex 2026-11-17).
+    pub const DISPLAY: &str = "Hauora";
 }
 
 #[cfg(test)]

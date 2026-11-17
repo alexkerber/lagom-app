@@ -87,30 +87,56 @@ impl MainWindow {
         cx.notify();
     }
 
-    pub(super) fn unread_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The day said as a sentence in two tones (Alex 2026-11-17 chose this over large counts and a serif).
+    /// The counts are ink and open their page; the words between them are ink2.
+    fn today_sentence(&self, now: chrono::DateTime<chrono::Local>, events: usize, due: usize, cx: &mut Context<Self>) -> Div {
+        use chrono::Timelike;
         let t = self.theme;
-        pressable(div().id("home-unread"), &t, false).debug_selector(|| "home-unread".into())
-            .flex().items_center().gap(px(8.)).h(px(32.)).rounded(px(radius::CONTROL)).text_color(t.ink2)
-            .child(icon("icons/mail.svg", t.ink2, 16.))
-            .child(format!("{} unread in Inbox", self.today.unread))
-            .child(icon("icons/chevron-right.svg", t.ink2, 16.))
-            .on_click(cx.listener(|this, _, window, cx| { this.open_box(None, cx); window.focus(&this.focus); }))
+        let greeting = match now.hour() { 0..=11 => "Good morning.", 12..=17 => "Good afternoon.", _ => "Good evening." };
+        let count = |n: usize, one: &str, many: &str, none: &str| match n { 0 => none.to_owned(), 1 => format!("1 {one}"), n => format!("{n} {many}") };
+        let part = |id: &'static str, text: String, open: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            div().id(id).debug_selector(move || id.into()).text_color(t.ink).cursor_pointer().hover(|s| s.opacity(0.7))
+                .child(text).on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
+        };
+        let gray = |text: &'static str| div().text_color(t.ink2).child(text);
+        // Word gaps are margins: a phrase and its punctuation wrap together.
+        div().mb(px(48.)).flex().flex_col().gap(px(16.))
+            .child(label(&t, now.format("%A %-d %B").to_string()))
+            .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::HERO))
+                .line_height(relative(1.05)).max_w(px(900.))
+                .child(greeting)
+                .child(div().flex().flex_wrap()
+                    .child(div().flex().mr(px(12.)).child(part("home-unread", count(self.today.unread, "unread", "unread", "Nothing unread"), |this, window, cx| { this.open_box(None, cx); window.focus(&this.focus); })).child(gray(",")))
+                    .child(part("home-events", count(events, "event", "events", "no events"), |this, window, cx| this.show_section(2, window, cx)).mr(px(12.)))
+                    .child(gray("and").mr(px(12.)))
+                    .child(div().flex().child(part("home-due", count(due, "task due", "tasks due", "nothing due"), |this, window, cx| this.show_section(3, window, cx))).child(gray(".")))))
     }
 
     pub(super) fn home_view(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
         let stacked = window.viewport_size().width < px(900.);
-        div().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(24.))
-            .child(div().flex().items_center().justify_between().gap(px(16.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(size::TITLE)).child("Today"))
-                .child(mono(chrono::Local::now().format("%A %-d %B").to_string(), t.ink2)))
+        let now = chrono::Local::now();
+        let due = self.due_today();
+        let events = self.today.events.len();
+        // An empty schedule is said by its count; the list shows only events or the calendar consent row.
+        let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
+        let schedule = events > 0 || !has_calendar;
+        div().flex_1().min_w(px(0.)).flex().flex_col()
             .child(div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll)
-                .child(div().flex().gap(px(32.)).when(stacked, |d| d.flex_col())
-                    .child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx)))
-                    .child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.home_tasks(cx)))))
-            .children(self.task_hint(window))
-            .child(self.unread_view(cx))
+                .child(// A block, not a flex column: inside a column, taffy sized task titles to their shortest sibling and cut them.
+                    div().w_full().px(px(48.)).pt(px(40.)).pb(px(48.))
+                    .child(self.today_sentence(now, events, due, cx))
+                    .child(div().flex().gap(px(48.)).when(stacked || !schedule, |d| d.flex_col())
+                        .when(schedule, |d| d.child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx))))
+                        .child(div().min_w(px(0.)).when(!stacked && schedule, |d| d.flex_1()).child(self.home_tasks(cx))))))
+            .children(self.task_hint(window).map(|hint| div().px(px(48.)).pb(px(16.)).child(hint)))
     }
+}
+
+/// A section title on Today: small Geist Mono capitals, like the site's labels.
+pub(super) fn heading(t: &Theme, text: &'static str) -> Div { label(t, text.to_owned()) }
+
+fn label(t: &Theme, text: String) -> Div {
+    div().font_family(font::MONO).font_weight(FontWeight::MEDIUM).text_size(px(12.)).text_color(t.ink2).child(text.to_uppercase())
 }
 
 #[cfg(test)]
