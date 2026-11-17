@@ -89,7 +89,9 @@ import kotlin.math.roundToInt
             }
         }
     }
-    if (settings) SettingsScreen { settings = false }
+    // Settings gives way to Compose and Add account, which the tablet sidebar can open under it.
+    LaunchedEffect(overlay != null) { if (overlay != null) settings = false }
+    if (settings && overlay == null) SettingsScreen { settings = false }
     removing?.let { account ->
         AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove account?") }, text = { Text("Remove ${account.email} and its local mail?") },
             confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove") } },

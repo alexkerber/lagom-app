@@ -1,18 +1,19 @@
 package app.lagommail.android
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -23,8 +24,11 @@ import androidx.compose.ui.unit.dp
 @Composable internal fun SettingsScreen(close: () -> Unit) {
     val context = LocalContext.current
     BackHandler(onBack = close)
-    fun open(intent: Intent) = context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    Column(Modifier.fillMaxSize().background(lagom.bg)) {
+    var failed by remember { mutableStateOf<String?>(null) }
+    fun open(intent: Intent) = try { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        catch (_: ActivityNotFoundException) { failed = "No app on this phone can open this." }
+    // A Surface, not a Column: it takes every touch, so nothing reaches the list underneath.
+    Surface(Modifier.fillMaxSize(), color = lagom.bg) { Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding()) {
             BarTitle("Settings", Modifier.weight(1f))
             LagomIconButton("Close", R.drawable.ic_close, onClick = close)
@@ -42,9 +46,10 @@ import androidx.compose.ui.unit.dp
                 val version = context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
                 Text("lagom $version", Modifier.heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically), color = lagom.ink2,
                     style = MaterialTheme.typography.bodySmall)
+                failed?.let { Text(it, color = lagom.danger, style = MaterialTheme.typography.bodySmall) }
             }
         }
-    }
+    } }
 }
 
 @Composable private fun Group(title: String, content: @Composable ColumnScope.() -> Unit) = Column {
