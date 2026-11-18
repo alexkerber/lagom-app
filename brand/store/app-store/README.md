@@ -70,7 +70,7 @@ daytime hour, with the status bar at the real time so the now line and the clock
 1. **Mail.** "Done, Reply or Later." / "Every message gets one answer."
 2. **Today.** "Your day in one sentence." / "Unread mail, events and tasks at a glance."
 3. **Calendar.** "Your week at a glance." / "Your calendar, next to your mail."
-4. **Todo.** "Lists that stay simple." / "Turn a message into a task."
+4. **To-do.** "Lists that stay simple." / "Turn a message into a task."
 5. **Dark mail.** "Calm, day and night." / "Private by default. No tracking, no ads."
 
 ## Review notes (per release)
