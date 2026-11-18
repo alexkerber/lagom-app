@@ -53,7 +53,7 @@ pub(super) struct Week {
     suggestion: usize,
     guest_error: Option<String>,
     pub(super) scroll_to_now: bool,
-    days: Vec<Vec<AgendaEvent>>,
+    pub(super) days: Vec<Vec<AgendaEvent>>,
     windows: Vec<Option<(i64, i64)>>,
     pub(super) detail: Option<AgendaEvent>,
     pub(super) editor: Option<new_event::Editor>,
@@ -147,12 +147,22 @@ fn calendar_title(title: gpui::StyledText) -> Div {
     div().w_full().flex_shrink_0().whitespace_nowrap().text_ellipsis().child(title)
 }
 
-fn event_time(event: &CalendarEvent) -> String {
+/// The detail panel's time line: "14:00–16:00  Sun, 22 Nov", "All day  Sun, 22 Nov", or both dates when it spans days.
+fn event_when<T: chrono::TimeZone>(event: &CalendarEvent, zone: &T, today: NaiveDate, locale: chrono::Locale) -> String {
+    let date = |d: NaiveDate| d.format_localized(if d.year() == today.year() { "%a, %-d %b" } else { "%a, %-d %b %Y" }, locale).to_string();
     if event.all_day {
-        let last = NaiveDate::parse_from_str(&event.end, "%Y-%m-%d").ok().and_then(|d| d.pred_opt()).map(|d| d.to_string()).unwrap_or_else(|| event.end.clone());
-        if event.start == last { format!("All day · {}", event.start) } else { format!("All day · {} – {last}", event.start) }
+        let first = NaiveDate::parse_from_str(&event.start, "%Y-%m-%d").ok();
+        let last = NaiveDate::parse_from_str(&event.end, "%Y-%m-%d").ok().and_then(|d| d.pred_opt());
+        return match (first, last) {
+            (Some(first), Some(last)) if last > first => format!("All day  {} – {}", date(first), date(last)),
+            (Some(first), _) => format!("All day  {}", date(first)),
+            _ => format!("All day  {}", event.start),
+        };
     }
-    else { format!("{} – {}", mail::full_date(event.start_utc), mail::full_date(event.end_utc)) }
+    let local = |stamp| chrono::DateTime::from_timestamp(stamp, 0).unwrap_or_default().with_timezone(zone).naive_local();
+    let (start, end) = (local(event.start_utc), local(event.end_utc));
+    if end.date() == start.date() { format!("{}–{}  {}", start.format("%H:%M"), end.format("%H:%M"), date(start.date())) }
+    else { format!("{} {} – {} {}", date(start.date()), start.format("%H:%M"), date(end.date()), end.format("%H:%M")) }
 }
 fn short_time(event: &CalendarEvent) -> String {
     let time = |stamp| chrono::DateTime::from_timestamp(stamp, 0).map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
@@ -245,7 +255,8 @@ impl MainWindow {
     }
 
     fn toggle_calendar_panel(&mut self, cx: &mut Context<Self>) {
-        let show = !self.week.panel.unwrap_or(false);
+        let open = self.week.detail.take().is_some();
+        let show = !(self.week.panel.unwrap_or(false) || open);
         self.week.panel = Some(show);
         cx.set_global(PanelPreference(show));
         cx.notify();
@@ -261,16 +272,19 @@ impl MainWindow {
     }
 
     fn event_block(&self, entry: &AgendaEvent, title: gpui::StyledText, day: usize, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
-        let index = self.live.as_ref().and_then(|l| l.accounts.iter().position(|a| a.id == entry.account)).unwrap_or(0);
-        let accent = self.account_accent(index);
+        let accent = self.event_accent(entry);
         let t = self.theme;
+        let selected = self.event_selected(entry);
+        // Selected: a solid accent block in the ink filled buttons use, as in Spark.
+        let ink2 = if selected { Rgba { a: 0.85, ..t.accent_ink } } else { t.ink2 };
         let entry = entry.clone();
-        pressable(div().id(("week-event", day * 100_000 + ix)), &t, false)
+        pressable(div().id(("week-event", day * 100_000 + ix)), &t, selected)
             .debug_selector(move || format!("week-event-{day}-{ix}"))
             .flex().flex_col().px(px(5.)).py(px(2.)).rounded(px(radius::CONTROL)).overflow_hidden()
-            .bg(Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent }).border_l_2().border_color(accent)
+            .bg(if selected { accent } else { Rgba { a: if t.dark { 0.22 } else { 0.12 }, ..accent } }).border_l_2().border_color(accent)
+            .when(selected, |d| d.text_color(t.accent_ink))
             .child(calendar_title(title).debug_selector(|| "week-title".into()).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM))
-            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/camera.svg", t.ink2, 16.))).child(mono(short_time(&entry.event), t.ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
+            .when(!entry.event.all_day && !compact(&entry.event), |d| d.child(div().flex().items_center().gap(px(4.)).when(entry.event.join_url.is_some(), |d| d.child(icon("icons/camera.svg", ink2, 16.))).child(mono(short_time(&entry.event), ink2).flex_1().min_w(px(0.)).flex_shrink_0().whitespace_nowrap().text_ellipsis().debug_selector(|| "week-time".into()))))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.week.detail = Some(entry.clone());
@@ -294,6 +308,8 @@ impl MainWindow {
         let count = self.week.view.days();
         let show_panel = *self.week.panel.get_or_insert_with(|| cx.try_global::<PanelPreference>().map_or(f32::from(window.viewport_size().width) > 1200., |p| p.0));
         if show_panel { self.prepare_calendar_guests(window, cx); }
+        // An open event fills the panel, showing it if hidden; closing restores `week.panel` as it was.
+        let show_panel = show_panel || self.week.detail.is_some();
         let allowed = self.demo || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed) || self.week.days.iter().any(|d| !d.is_empty());
         let mut page = div().relative()
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
@@ -440,23 +456,6 @@ impl MainWindow {
         body = body.child(calendar);
         if show_panel { body = body.child(self.calendar_panel(window, cx)); }
         page = page.child(body).child(mono("← → navigate · T today · N new event", t.ink2));
-        if let Some(entry) = &self.week.detail {
-            page = page.child(div().id("event-detail").debug_selector(|| "event-detail".into()).absolute().top(px(64.)).right(px(24.)).w(px(320.))
-                .occlude().max_h(px(400.)).overflow_y_scroll().p(px(16.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.raised).shadow_md()
-                .flex().flex_col().gap(px(12.))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))
-                .child(calendar_title(gpui::StyledText::new(entry.event.title.clone())).font_weight(FontWeight::SEMIBOLD))
-                .child(div().flex().items_center().gap(px(6.))
-                    .when(entry.event.all_day, |d| d.child(icon("icons/sun.svg", t.ink2, 16.)))
-                    .child(mono(event_time(&entry.event), t.ink2)))
-                .children(entry.event.location.clone().map(|location| div().child(location)))
-                .child(mono(entry.calendar.clone(), t.ink2))
-                .children(entry.event.join_url.clone().and_then(|url| Some((lagom_core::google::join_host(&url)?, url))).map(|(host, url)|
-                    button(&t, "Join", None).child(format!("· {host}")).on_click(move |_, _, cx| cx.open_url(&url))))
-                .children(entry.event.html_link.clone().filter(|s| lagom_core::google::safe_calendar_url(s)).map(|url|
-                    icon_button(&t, "Open in Google Calendar", "icons/external.svg", "Open in Google Calendar").on_click(move |_, _, cx| cx.open_url(&url))))
-                .child(icon_button(&t, "Close", "icons/close.svg", "Close event · Esc").on_click(cx.listener(|this, _, _, cx| { this.week.detail = None; cx.notify(); }))));
-        }
         page = page.child(self.new_event_sheet(cx));
         page
     }
@@ -606,7 +605,7 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.week.detail.is_some()));
         assert!(cx.debug_bounds("event-detail").is_some());
         assert!(cx.debug_bounds("Join").is_some());
-        for path in ["camera", "sun", "previous", "next", "external", "close"] {
+        for path in ["camera", "previous", "next", "external", "close"] {
             assert_eq!(cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap().size, gpui::size(px(16.), px(16.)));
         }
         assert!(cx.debug_bounds("Open in Google Calendar").is_some());
@@ -626,12 +625,63 @@ mod tests {
         assert!(view.read_with(cx, |v, _| (0..7).all(|i| !synced_day(v.week.start + chrono::Duration::days(i), &v.week.windows))));
     }
     #[test]
-    fn all_day_detail_uses_inclusive_end_date() {
-        let day = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+    fn detail_time_line_says_time_then_localized_date() {
+        use chrono::Locale;
+        let day = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        let when = |e: &CalendarEvent| event_when(e, &chrono::Utc, today, Locale::en_US);
+        let mut e = entry(day, 840, 960, false).event;
+        assert_eq!(when(&e), "14:00–16:00  Sun, 22 Nov");
+        e.end_utc = e.start_utc + 10 * 60 * 60;
+        assert_eq!(when(&e), "Sun, 22 Nov 14:00 – Mon, 23 Nov 00:00");
+        let e = entry(day, 0, 1440, false).event;
+        assert_eq!(when(&e), "Sun, 22 Nov 00:00 – Mon, 23 Nov 00:00", "a timed full day keeps both dates");
         let mut e = entry(day, 0, 1440, true).event;
-        assert_eq!(event_time(&e), "All day · 2026-11-09");
-        e.end = "2026-11-12".into();
-        assert_eq!(event_time(&e), "All day · 2026-11-09 – 2026-11-11");
+        assert_eq!(when(&e), "All day  Sun, 22 Nov");
+        e.end = "2026-11-25".into();
+        assert_eq!(when(&e), "All day  Sun, 22 Nov – Tue, 24 Nov");
+        assert_eq!(event_when(&e, &chrono::Utc, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(), Locale::en_US), "All day  Sun, 22 Nov 2026 – Tue, 24 Nov 2026");
+        assert_eq!(event_when(&entry(day, 840, 960, false).event, &chrono::Utc, today, Locale::sv_SE), "14:00–16:00  sön, 22 nov");
+    }
+
+    #[gpui::test]
+    fn event_opens_in_the_panel_and_closing_restores_the_panel_state(cx: &mut TestAppContext) {
+        cx.update(|cx| super::super::bind_keys(cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+        cx.simulate_resize(gpui::size(px(1440.), px(1000.)));
+        let day = chrono::Local::now().date_naive().weekday().num_days_from_monday() as usize;
+        let block = format!("week-event-{day}-2").leak();
+        // Demo events never link to Google; this one does, so the panel shows its action.
+        view.update(cx, |v, _| v.week.days[day][2].event.html_link = Some("https://www.google.com/calendar/event?eid=fixture".into()));
+        for shown in [false, true] {
+            view.update(cx, |v, cx| { v.week.panel = Some(shown); cx.notify(); });
+            cx.run_until_parked();
+            let at = cx.debug_bounds(block).unwrap().center();
+            cx.simulate_click(at, Default::default());
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                let entry = v.week.detail.clone().unwrap();
+                assert_eq!(entry.event.title, "Design review");
+                assert!(v.event_selected(&v.week.days[day][2]) && !v.event_selected(&v.week.days[day][1]));
+            });
+            let (panel, title) = (cx.debug_bounds("event-detail").unwrap(), cx.debug_bounds("event-title").unwrap());
+            assert!(panel.contains(&title.center()) && panel.left() > cx.debug_bounds(block).unwrap().right());
+            for selector in ["event-when", "event-location", "Join", "Open in Google Calendar", "Close"] {
+                assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+            }
+            if shown {
+                let at = cx.debug_bounds("Close").unwrap().center();
+                cx.simulate_click(at, Default::default());
+            } else {
+                cx.simulate_keystrokes("escape");
+            }
+            assert_eq!(view.read_with(cx, |v, _| (v.week.detail.is_none(), v.week.panel)), (true, Some(shown)));
+        }
+        // The panel button hides an open event with the panel, whatever it showed before.
+        for shown in [false, true] {
+            view.update(cx, |v, cx| { v.week.panel = Some(shown); v.week.detail = Some(v.week.days[day][2].clone()); v.toggle_calendar_panel(cx); });
+            assert_eq!(view.read_with(cx, |v, _| (v.week.detail.is_none(), v.week.panel)), (true, Some(false)));
+        }
     }
 
     #[gpui::test]
