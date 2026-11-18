@@ -113,8 +113,8 @@ async fn retry(reject_smtp: bool) {
     assert!(matches!(store.pending(&id), Err(Error::NotFound)));
     assert_eq!(submissions.lock().unwrap().len(), if reject_smtp { 2 } else { 1 });
     for raw in submissions.lock().unwrap().iter() {
-        // lettre adds the CRLF before the DATA terminator even when the message ends in CRLF.
-        assert_eq!(raw.as_bytes(), [pending.raw.as_slice(), b"\r\n"].concat());
+        // Since lettre 0.11.24 the DATA terminator reuses the message's final CRLF, so the server sees the raw message.
+        assert_eq!(raw.as_bytes(), pending.raw.as_slice());
     }
     assert_eq!(copies.lock().unwrap().len(), if reject_smtp { 1 } else { 2 });
     for raw in copies.lock().unwrap().iter() { assert_eq!(raw, &pending.raw); }
