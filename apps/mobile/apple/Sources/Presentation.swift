@@ -10,7 +10,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .today: "Today"
         case .mail: "Mail"
         case .calendar: "Calendar"
-        case .todo: "Todo"
+        case .todo: "To-do"
         case .settings: "Settings"
         }
     }

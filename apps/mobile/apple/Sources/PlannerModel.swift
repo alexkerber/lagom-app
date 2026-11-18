@@ -29,6 +29,10 @@ final class PlannerModel {
         counts.filter { account == nil || $0.account == account }.reduce(0) { $0 + $1.later }
     }
     var defaultList: Int64? { lists.first(where: \.isDefault)?.id ?? lists.first?.id }
+    /// Open tasks in one list, the count beside its heading.
+    func openCount(list: Int64) -> Int { todos[list]?.filter { !$0.done }.count ?? 0 }
+    /// Lists are loaded and none has an open task: To-do shows its clear-day sentence.
+    var allClear: Bool { !lists.isEmpty && lists.allSatisfy { todos[$0.id]?.contains { !$0.done } == false } }
 
     func reload() async {
         await reloadMail()
