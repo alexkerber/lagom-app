@@ -267,12 +267,14 @@ struct TodoView: View {
     @State private var newList = false
     @State private var listName = ""
     @State private var showDone: Set<Int64> = []
+    @Environment(\.railInset) private var railInset
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PageTitle(title: "Todo") {
                 Menu {
-                    Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
+                    // On the Duo, New task is in the right column.
+                    if railInset == 0 { Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty) }
                     Button("New list") { listName = ""; newList = true }
                 } label: { Icon("plus") }
                     .menuStyle(.button).buttonStyle(IconButtonStyle())
@@ -320,6 +322,10 @@ struct TodoView: View {
             .refreshable { await planner.reloadTodos() }
         }
         .background(Theme.background)
+        // The Duo column: New task at the top, as New message in Mail; the tab bar holds the bottom.
+        .railColumn(top: {
+            RailButton(title: "New task", icon: "plus", primary: true) { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
+        }, bottom: { EmptyView() })
         .sheet(item: Binding(get: { adding.map(ListID.init) }, set: { adding = $0?.id })) { list in
             NewTaskView(planner: planner, list: list.id, due: nil).duoRail()
         }
@@ -396,71 +402,15 @@ struct NewTaskView: View {
     }
 }
 
-/// Cached events by day under the desktop's month title; each day headed as the desktop week's columns.
-/// iPad shows the desktop's week grid instead.
+/// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo (Alex 2026-11-17).
 struct CalendarView: View {
     let planner: PlannerModel
     let model: MailModel
     @Environment(\.horizontalSizeClass) private var width
-    private let words = DateWords()
 
     var body: some View {
-        // A landscape Pro Max is regular width too; only iPad gets the grid.
-        if width == .regular && UIDevice.current.userInterfaceIdiom == .pad { WeekGrid(planner: planner, model: model) } else { list }
-    }
-
-    private var list: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Text(Date.now, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
-                Text(Date.now, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
-            }
-            .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
-            .frame(minHeight: 44).modifier(PagePadding()).padding(.top, 8)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(grouped(planner.agenda, by: \.day)) { day in
-                        DayHeader(title: day.title).padding(.top, 14).padding(.bottom, 2)
-                        ForEach(Array(day.items.enumerated()), id: \.offset) { _, event in
-                            EventRow(event: event, accent: accountAccent(model.accounts, event.account))
-                        }
-                    }
-                }
-                .modifier(PagePadding()).padding(.bottom, 16)
-            }
-            .refreshable { await planner.reloadAgenda() }
-            .overlay {
-                if planner.agenda.isEmpty {
-                    if planner.calendarConnected {
-                        EmptyState(icon: "calendar", title: "Nothing scheduled", detail: "No events in the next two weeks.")
-                    } else {
-                        EmptyState(icon: "calendar", title: "Calendar needs a Google account",
-                                   detail: "lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar.")
-                    }
-                }
-            }
-        }
-        .background(Theme.background)
-    }
-}
-
-/// "Mon 9" as the desktop week's column heads, today's number in a filled accent circle.
-private struct DayHeader: View {
-    let title: String
-
-    var body: some View {
-        let day = DateWords().day(title) ?? .now
-        let today = Calendar.current.isDateInToday(day)
-        HStack(spacing: 8) {
-            Text(day, format: .dateTime.weekday(.abbreviated)).lagomFont(.base).foregroundStyle(Theme.secondary)
-            Text(day, format: .dateTime.day()).lagomFont(.subject)
-                .foregroundStyle(today ? Theme.accentInk : Theme.ink)
-                .frame(minWidth: 38, minHeight: 38)
-                .background(today ? Theme.accent : .clear, in: Circle())
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(DateWords().dayTitle(title))
-        .accessibilityAddTraits(.isHeader)
+        // A landscape Pro Max is regular width too; only iPad gets the whole week.
+        WeekGrid(planner: planner, model: model, oneDay: !(width == .regular && UIDevice.current.userInterfaceIdiom == .pad))
     }
 }
 
@@ -468,6 +418,9 @@ private struct DayHeader: View {
 private struct WeekGrid: View {
     let planner: PlannerModel
     let model: MailModel
+    let oneDay: Bool
+    @State private var selected = Calendar.current.startOfDay(for: .now)
+    @Environment(\.railInset) private var railInset
     private static let hour: CGFloat = 60
     private static let gutter: CGFloat = 48
     private let calendar = Calendar.current
@@ -475,19 +428,23 @@ private struct WeekGrid: View {
     @State private var allDayHeight: CGFloat = 0
 
     var body: some View {
-        let days = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: planner.weekStart) }
+        let week = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: planner.weekStart) }
+        let days = oneDay ? [selected] : week
         let byDay = Dictionary(grouping: planner.week, by: \.day)
         let words = DateWords()
         VStack(alignment: .leading, spacing: 8) {
             header
+            if oneDay { strip(week) }
             if !planner.calendarConnected && planner.week.isEmpty {
                 EmptyState(icon: "calendar", title: "Calendar needs a Google account",
                            detail: "lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar.")
                     .frame(maxHeight: .infinity)
             } else {
-                HStack(spacing: 0) {
-                    Color.clear.frame(width: Self.gutter, height: 1)
-                    ForEach(days, id: \.self) { WeekDayHead(day: $0).frame(maxWidth: .infinity, alignment: .leading) }
+                if !oneDay {
+                    HStack(spacing: 0) {
+                        Color.clear.frame(width: Self.gutter, height: 1)
+                        ForEach(days, id: \.self) { WeekDayHead(day: $0).frame(maxWidth: .infinity, alignment: .leading) }
+                    }
                 }
                 let allDay = days.map { day in (byDay[words.coreDay(day)] ?? []).filter(\.allDay) }
                 if allDay.contains(where: { !$0.isEmpty }) {
@@ -509,24 +466,63 @@ private struct WeekGrid: View {
                 grid(days: days, byDay: byDay)
             }
         }
-        .padding(.horizontal, 24).padding(.top, 8)
+        .padding(.horizontal, oneDay ? 16 : 24).padding(.top, 8)
         .background(Theme.background)
         .task { await planner.reloadWeek() }
+        // A new week opens on today when it holds today, else on its Monday.
+        .onChange(of: planner.weekStart, initial: true) { _, start in
+            selected = calendar.isDate(PlannerModel.monday(.now), inSameDayAs: start) ? calendar.startOfDay(for: .now) : start
+        }
+        .railColumn(top: {
+            if oneDay {
+                VStack(spacing: 8) {
+                    RailButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
+                    RailButton(title: "Today", icon: "calendar") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }
+                    RailButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+                }
+            }
+        }, bottom: { EmptyView() })
+    }
+
+    /// The week as seven tappable days, Spark's strip: the chosen day in the accent circle, today in the accent.
+    private func strip(_ week: [Date]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(week, id: \.self) { day in
+                let chosen = calendar.isDate(day, inSameDayAs: selected)
+                let today = calendar.isDateInToday(day)
+                Button { selected = day } label: {
+                    VStack(spacing: 4) {
+                        Text(day, format: .dateTime.weekday(.narrow)).lagomFont(.small).foregroundStyle(Theme.secondary)
+                        Text(day, format: .dateTime.day()).lagomFont(.title).monospacedDigit()
+                            .foregroundStyle(chosen ? Theme.accentInk : today ? Theme.accent : Theme.ink)
+                            .frame(width: 40, height: 40)
+                            .background(chosen ? Theme.accent : .clear, in: Circle())
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
+                .accessibilityAddTraits(chosen ? [.isSelected, .isButton] : .isButton)
+            }
+        }
     }
 
     private var header: some View {
         // The month a week belongs to is its Thursday's, as ISO weeks count.
         let thursday = calendar.date(byAdding: .day, value: 3, to: planner.weekStart) ?? planner.weekStart
+        let month = oneDay ? selected : thursday
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(thursday, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
-                Text(thursday, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
+                Text(month, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
+                Text(month, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
             }
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
-            IconButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
-            Button("Today") { Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
-            IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+            if !(oneDay && railInset > 0) {
+                IconButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
+                Button("Today") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
+                IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+            }
         }
         .frame(minHeight: 44)
     }
@@ -557,7 +553,7 @@ private struct WeekGrid: View {
                 .overlay(alignment: .topLeading) { NowLine24(days: days, hour: Self.hour, gutter: Self.gutter).padding(.top, 12) }
         }
         .scrollPosition($position)
-        .task(id: "\(planner.weekStart) \(first)") { position.scrollTo(y: CGFloat(first) * Self.hour) }
+        .task(id: "\(planner.weekStart) \(first) \(oneDay ? selected : planner.weekStart)") { position.scrollTo(y: CGFloat(first) * Self.hour) }
         .refreshable { await planner.reloadAgenda() }
     }
 
