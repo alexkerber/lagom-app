@@ -91,7 +91,8 @@ internal val AppSection.icon: Int get() = when (this) {
     Row(modifier.padding(bottom = 8.dp).semantics(mergeDescendants = true) { heading() }, verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.size(8.dp).background(dot, CircleShape))
-        Text(title, color = lagom.ink, style = MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
+        // The count keeps its room when a long name ellipsizes.
+        Text(title, Modifier.weight(1f, fill = false), color = lagom.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
         if (open > 0) Text("$open", Modifier.semantics { contentDescription = "$open open" }, color = lagom.ink2,
             fontFamily = LabelFace, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.labelSmall)
     }
@@ -185,7 +186,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     if (events.isNotEmpty() && nowIndex == events.size) NowLine(now)
                 }
                 Column {
-                    MonoLabel("To do", Modifier.padding(bottom = 8.dp))
+                    MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
                     val tasks = planner.today?.tasks.orEmpty()
                     if (tasks.isEmpty()) Quiet("Nothing due today.")
                     tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { planner.toggle(todo) } } }
