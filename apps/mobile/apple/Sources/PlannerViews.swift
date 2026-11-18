@@ -676,6 +676,7 @@ private struct NowLine24: View {
                     Rectangle().fill(Theme.now).frame(height: 1.5).padding(.leading, gutter).offset(y: y)
                     Circle().fill(Theme.now).frame(width: 7, height: 7).offset(x: gutter + CGFloat(today) * column - 3, y: y - 2.75)
                     Text(context.date, format: .dateTime.hour().minute()).lagomFont(.small).monospacedDigit().foregroundStyle(Theme.accentInk)
+                        .lineLimit(1).minimumScaleFactor(0.6) // "3:53 PM" must fit the gutter on one line
                         .frame(width: gutter - 4).background(Theme.now, in: RoundedRectangle(cornerRadius: 4)).offset(y: y - 9)
                 }
                 .allowsHitTesting(false)
