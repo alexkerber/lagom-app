@@ -1,23 +1,29 @@
 lagom (LAH-gom) is Swedish for not too much, not too little. Just right.
 
-lagom is an email app that only does email. It has one job: to get you back to an empty inbox.
+lagom mail gets you to an empty inbox, then gets out of the way. Your mail, what is due today and your lists, in one calm app on iPhone, iPad and Mac.
 
-THREE BUTTONS
-Done, Reply and Later. Done archives the message. Later brings it back when you have time. The list says how many are left, so you know when you are done.
+THREE ANSWERS
+Every message gets one: Done, Reply or Later. Done clears it. Later brings it back when you have time. The list says how many are left, so you know when you are finished. On iPhone, swipe right for Done and left for Later.
+
+TODAY
+Your day in one sentence: how much is unread, what is due and what is next. Tap a number to go there.
 
 ONE INBOX
-Read all your accounts in one list, or one account at a time. Inbox, Later, Done, Sent, Drafts and Trash are always close. Search finds mail in every account.
+All your accounts in one list, or one at a time. Later, Done, Sent, Drafts, Trash and your own folders are always close. Search finds mail in every account. Move a message to a folder, and undo if you change your mind.
 
 WRITING
-Reply, Reply all and Forward. Write in plain text or Markdown. Drafts save as you type. Undo send gives you a moment to change your mind.
+Reply, Reply all and Forward. Plain text or Markdown. Drafts save as you type, signatures are per account, and Undo send gives you a moment to take it back.
 
-YOUR DAY
-Today shows unread mail and what is next. Todo keeps simple lists on your phone.
+TODO
+Simple lists that live on your device. Add a task from a message, and it remembers where it came from.
 
 PRIVATE BY DEFAULT
-Your mail stays on your phone and your mail server. lagom has no account, no tracking and no ads. Remote images in mail are blocked until you load them. Passwords stay in the iOS Keychain.
+Your mail goes from your device to your own mail server and nowhere else. lagom has no account, no tracking, no ads and no AI inside. Remote images stay off until you load them, so senders cannot see when you read. Passwords stay in the Keychain.
 
 WORKS WITH YOUR MAIL
-Any IMAP and SMTP account. Gmail and iCloud work with an app-specific password.
+Any IMAP account. Type your address and lagom finds the settings. Gmail and iCloud work with an app-specific password.
 
-iPhone and iPad. Light and dark. Open source under the MIT licence. Made in Sweden.
+MADE FOR EACH SCREEN
+A sidebar on iPad and Mac, tabs on iPhone, light and dark. On Mac: keyboard first, with a command palette for everything.
+
+Open source under the MIT licence. Made in Sweden.

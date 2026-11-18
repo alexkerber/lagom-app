@@ -5,11 +5,11 @@ of fastlane `deliver`, so a later upload script can read them as they are. Paste
 
 | File                         | Limit | Now  |
 | ---------------------------- | ----- | ---- |
-| `en-US/name.txt`             | 30    | 5    |
+| `en-US/name.txt`             | 30    | 10   |
 | `en-US/subtitle.txt`         | 30    | 26   |
-| `en-US/promotional_text.txt` | 170   | 129  |
-| `en-US/description.txt`      | 4000  | 1143 |
-| `en-US/keywords.txt`         | 100   | 97   |
+| `en-US/promotional_text.txt` | 170   | 157  |
+| `en-US/description.txt`      | 4000  | 1680 |
+| `en-US/keywords.txt`         | 100   | 96   |
 | `en-US/support_url.txt`      | URL   |      |
 | `en-US/privacy_url.txt`      | URL   |      |
 | `en-US/marketing_url.txt`    | URL   |      |
@@ -55,24 +55,23 @@ Apple counts data as collected when it leaves the device to the developer or a p
 
 ## Screenshots: shot list
 
-App Store Connect needs one iPhone set and one iPad set. It scales them down for smaller devices.
+Glow style (Alex 2026-11-18): the app icon's gradient, a white Hauora caption and a 3D device from burk
+(`~/Developer/burken/film/mockup.py`). `compose/compose.py` renders each slide at the store size.
 
-| Set         | Device                  | Portrait size (px) |
-| ----------- | ----------------------- | ------------------ |
-| iPhone 6.9" | iPhone 16 Pro Max class | 1320 × 2868        |
-| iPad 13"    | iPad Pro 13" (M4) class | 2064 × 2752        |
+| Set         | Size (px)   | Device in the slide           |
+| ----------- | ----------- | ----------------------------- |
+| iPhone 6.9" | 1320 × 2868 | iPhone Pro model              |
+| iPad 13"    | 2064 × 2752 | iPad Pro model                |
+| Mac         | 2880 × 1800 | MacBook model, window on glow |
 
-Use the demo store (`-LagomDemo` launch argument, debug builds) so no real mail shows. Take each shot in
-light mode. Add one dark shot at the end of each set. No captions on the image, or one short line at most.
+Capture from the demo store (`-LagomDemo`, debug builds; `-LagomDemoOpen` opens the first message) at a
+daytime hour, with the status bar at the real time so the now line and the clock agree.
 
-1. **Inbox.** Unified Inbox with a few unread rows and the "N left" count. Caption: "Get to an empty inbox."
-2. **Reading.** One message open with Done, Reply and Later in reach. Caption: "Done, Reply, Later."
-3. **Later.** The Later list with a few messages. Caption: "Later, when you have time."
-4. **Writing.** A reply in Markdown, with Cc. Caption: "Write in plain text or Markdown."
-5. **Today.** Unread count, tasks and what is next. Caption: "Your day, on one page."
-6. **Dark.** The inbox in dark mode. Caption: "Light and dark."
-
-On iPad, show the sidebar and the list and the message side by side in shots 1, 2 and 6.
+1. **Mail.** "Done, Reply or Later." / "Every message gets one answer."
+2. **Today.** "Your day in one sentence." / "Unread mail, events and tasks at a glance."
+3. **Calendar.** "Your week at a glance." / "Your calendar, next to your mail."
+4. **Todo.** "Lists that stay simple." / "Turn a message into a task."
+5. **Dark mail.** "Calm, day and night." / "Private by default. No tracking, no ads."
 
 ## Review notes (per release)
 
