@@ -7,6 +7,7 @@ slides.json is a list of {"name", "size": [w, h], "caption", "sub"?, "image", "s
 "scale"? (share of the canvas height the image may take, default 0.74), "bleed"? (share that runs off the bottom)}. Image paths are absolute or relative
 to slides.json. Fonts come from site/fonts, so the captions match lagommail.app.
 """
+import html as markup
 import json
 import pathlib
 import subprocess
@@ -30,10 +31,12 @@ def page(slide, base):
     bg, ink, ink2 = STYLES[slide.get("style", "calm")]
     image = pathlib.Path(slide["image"])
     image = image if image.is_absolute() else base / image
+    if not image.is_file():
+        sys.exit(f"missing image for {slide['name']}: {image}")
     unit = min(w, h) / 100  # type scales with the short side, so phone, tablet and Mac read alike
     scale = slide.get("scale", 0.74)
     bleed = slide.get("bleed", 0)  # share of the canvas height the device runs off the bottom edge
-    sub = f'<p class="sub">{slide["sub"]}</p>' if slide.get("sub") else ""
+    sub = f'<p class="sub">{markup.escape(slide["sub"])}</p>' if slide.get("sub") else ""
     # "frame": a plain drawn device for screens without a 3D model (Android); the value is the bezel in px.
     bezel = slide.get("frame", 0)
     frame = (f"border: {bezel}px solid #101012; border-radius: {bezel * 4.2}px; box-shadow: 0 {unit * 3}px {unit * 8}px rgba(20,20,60,.35);"
@@ -48,7 +51,7 @@ h1 {{ font-weight: 800; font-size: {unit * 8.4}px; line-height: 1.04; letter-spa
 .sub {{ font-weight: 500; font-size: {unit * 3.6}px; line-height: 1.3; color: {ink2}; text-align: center; margin: {unit * 2.4}px {unit * 8}px 0; }}
 .shot {{ flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; min-height: 0; }}
 .shot img {{ max-width: 94%; max-height: {h * scale}px; object-fit: contain; display: block; margin-bottom: {-h * bleed}px; }}
-</style></head><body><h1>{slide["caption"]}</h1>{sub}<div class="shot"><img style="{frame}" src="{image.as_uri()}"></div></body></html>"""
+</style></head><body><h1>{markup.escape(slide["caption"])}</h1>{sub}<div class="shot"><img style="{frame}" src="{image.as_uri()}"></div></body></html>"""
 
 
 def main():

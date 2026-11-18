@@ -5,11 +5,11 @@ of fastlane `deliver`, so a later upload script can read them as they are. Paste
 
 | File                         | Limit | Now  |
 | ---------------------------- | ----- | ---- |
-| `en-US/name.txt`             | 30    | 5    |
+| `en-US/name.txt`             | 30    | 10   |
 | `en-US/subtitle.txt`         | 30    | 26   |
-| `en-US/promotional_text.txt` | 170   | 129  |
-| `en-US/description.txt`      | 4000  | 1143 |
-| `en-US/keywords.txt`         | 100   | 97   |
+| `en-US/promotional_text.txt` | 170   | 157  |
+| `en-US/description.txt`      | 4000  | 1680 |
+| `en-US/keywords.txt`         | 100   | 96   |
 | `en-US/support_url.txt`      | URL   |      |
 | `en-US/privacy_url.txt`      | URL   |      |
 | `en-US/marketing_url.txt`    | URL   |      |
