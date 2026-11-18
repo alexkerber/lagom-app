@@ -122,6 +122,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] Android Today, Todo and the phone Calendar list with the page bar — #125 (2026-11-14).
   - [x] next gaps from the table: Android tablet Calendar week grid; create a folder on mobile — #133 (2026-11-14).
   - [x] Android in lagom's look: desktop colour tokens and line icons, one accent, a fixed top bar, onboarding (Welcome, account, notifications), skeleton rows and inbox zero, debug-only demo mode (#143, 2026-11-15). Screenshots on the Pixel 9a; a hand test with a real account not done.
+  - [x] Android To-do identity pass (Alex 2026-11-18), `ui/todo-android`: the label "To-do", list headings with an account-accent dot, the Hauora name and a mono open count, and "Nothing to do. A clear day." when no task is open. JVM test for the open count; screenshots on the lagom_phone and lagom_tablet emulators, light and dark. Not verified: TalkBack reading of the heading. The mail subject line on rows waits for the FFI `mail_subject` field (#181).
 - [x] conversation view on iOS and Android (2026-11-13).
 - [x] background refresh and new-mail notifications on iOS and Android (2026-11-13).
 - [ ] iOS background refresh while locked needs a file-protection and Keychain decision (Alex).

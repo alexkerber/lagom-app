@@ -122,6 +122,9 @@ internal object MotionTokens {
 internal val LocalLagomColors = staticCompositionLocalOf { LightColors }
 internal val lagom: LagomColors @Composable @ReadOnlyComposable get() = LocalLagomColors.current
 
+/** The three accents in turn, as desktop `account_accent`: account marks and To-do list dots. */
+@Composable @ReadOnlyComposable internal fun accountAccent(index: Int): Color = listOf(lagom.accent, lagom.done, lagom.later)[index % 3]
+
 /** Every bar on every page is this tall, so moving between pages never shifts the title. */
 internal val BarHeight = 56.dp
 

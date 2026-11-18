@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -85,9 +86,24 @@ internal val AppSection.icon: Int get() = when (this) {
     }
 }
 
-/** Schedule, To do, Mail, a task list's name. */
-@Composable private fun Heading(title: String, modifier: Modifier = Modifier) =
-    Text(title, modifier.padding(bottom = 8.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+/** A task list's heading, "● Work  4": its dot, its name and the tasks still to do. */
+@Composable private fun ListHeading(title: String, dot: Color, open: Int, modifier: Modifier = Modifier) {
+    Row(modifier.padding(bottom = 8.dp).semantics(mergeDescendants = true) { heading() }, verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.size(8.dp).background(dot, CircleShape))
+        Text(title, color = lagom.ink, style = MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
+        if (open > 0) Text("$open", Modifier.semantics { contentDescription = "$open open" }, color = lagom.ink2,
+            fontFamily = LabelFace, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** Today's display sentence, also To-do's "A clear day.". */
+@Composable private fun DisplaySentence(text: AnnotatedString, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign: TextAlign? = null) {
+    val wide = LocalConfiguration.current.screenWidthDp >= 600
+    Text(text, modifier.semantics { heading() }, color = color, fontFamily = DisplayFace, textAlign = textAlign,
+        fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, letterSpacing = DisplayTracking.em, lineHeight = if (wide) 50.sp else 36.sp)
+}
 
 /** Small Geist Mono capitals, the site's labels: Today's date and section titles. */
 @Composable internal fun MonoLabel(text: String, modifier: Modifier = Modifier) =
@@ -96,7 +112,6 @@ internal val AppSection.icon: Int get() = when (this) {
 
 /** The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page. */
 @Composable private fun TodaySentence(planner: PlannerModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
-    val wide = LocalConfiguration.current.screenWidthDp >= 600
     val ink = MaterialTheme.colorScheme.onSurface
     val greeting = when (LocalTime.now().hour) { in 0..11 -> "Good morning."; in 12..17 -> "Good afternoon."; else -> "Good evening." }
     fun count(n: Int, one: String, many: String, none: String) = when (n) { 0 -> none; 1 -> "1 $one"; else -> "$n $many" }
@@ -114,8 +129,7 @@ internal val AppSection.icon: Int get() = when (this) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         MonoLabel(localDate(LocalDate.now(), "EEEEdMMMM"))
-        Text(text, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = DisplayFace,
-            fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, letterSpacing = DisplayTracking.em, lineHeight = if (wide) 50.sp else 36.sp)
+        DisplaySentence(text)
     }
 }
 
@@ -271,7 +285,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     var showDone by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
-        PageTitle("Todo") {
+        PageTitle(AppSection.TODO.title) {
             Box {
                 LagomIconButton("Add", R.drawable.ic_plus) { menu = true }
                 DropdownMenu(menu, { menu = false }) {
@@ -283,10 +297,16 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         Refreshable(planner, { planner.reloadTodos() }, Modifier.weight(1f)) {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                 if (planner.lists.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_todo, "No lists", Modifier.fillParentMaxSize(), "Add a list to start.") }
-                planner.lists.forEach { list ->
+                // The lists and their add rows stay below, so adding is still one tap away.
+                else if (planner.lists.all { planner.openCount(it.id) == 0 }) item(key = "clear") {
+                    DisplaySentence(AnnotatedString("Nothing to do.\nA clear day."), Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                        color = lagom.ink, textAlign = TextAlign.Center)
+                }
+                planner.lists.forEachIndexed { index, list ->
                     val all = planner.todos[list.id].orEmpty()
                     val done = all.filter { it.done }
-                    item(key = "list-${list.id}") { Heading(list.name, Modifier.padding(top = 16.dp, bottom = 4.dp)) }
+                    // shortcut: the dot follows list order, so it moves when lists are added or removed; store a colour if people ask to choose one.
+                    item(key = "list-${list.id}") { ListHeading(list.name, accountAccent(index), planner.openCount(list.id), Modifier.padding(top = 16.dp, bottom = 4.dp)) }
                     items(all.filter { !it.done }, key = { it.id }) { DeletableTodoRow(planner, it, words) }
                     item(key = "add-${list.id}") { AddRow("Add task") { adding = list.id } }
                     if (done.isNotEmpty()) {
