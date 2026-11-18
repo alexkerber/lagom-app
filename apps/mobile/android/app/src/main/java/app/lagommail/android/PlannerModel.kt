@@ -16,7 +16,7 @@ import java.util.Date
 import java.util.Locale
 
 /** The four top-level pages, as on desktop and iOS. The name is what the app restores at the next start. */
-internal enum class AppSection(val title: String) { TODAY("Today"), MAIL("Mail"), CALENDAR("Calendar"), TODO("Todo") }
+internal enum class AppSection(val title: String) { TODAY("Today"), MAIL("Mail"), CALENDAR("Calendar"), TODO("To-do") }
 
 /** A localized date from an ICU skeleton such as "EEEEdMMMM", in the order and words of the device's language. */
 internal fun localDate(date: LocalDate, skeleton: String): String =
@@ -77,6 +77,8 @@ internal class PlannerModel : ViewModel() {
 
     val unreadCount: Int get() = today?.unreadCount?.toInt() ?: 0
     val defaultList: Long? get() = (lists.firstOrNull { it.isDefault } ?: lists.firstOrNull())?.id
+    /** A list's tasks still to do, for its heading. */
+    fun openCount(list: Long): Int = todos[list].orEmpty().count { !it.done }
 
     fun perform(action: suspend () -> Unit) = viewModelScope.launch {
         try { action() } catch (e: CancellationException) { throw e }
