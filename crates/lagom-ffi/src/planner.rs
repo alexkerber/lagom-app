@@ -79,6 +79,10 @@ impl LagomCore {
     pub async fn delete_todo(&self, id: i64) -> Result<()> {
         self.run(move |s| s.delete_task(id)).await
     }
+    /// The stored message a task was made from, newest copy first; nil once it is no longer stored here.
+    pub async fn todo_mail(&self, id: i64) -> Result<Option<i64>> {
+        self.run(move |s| s.task_mail(id)).await
+    }
     /// Cached events for `days` local days from `start_day`, all-day events first within each day.
     pub async fn agenda(&self, start_day: String, days: u32) -> Result<Vec<AgendaItem>> {
         self.run(move |s| {
@@ -238,6 +242,10 @@ mod tests {
         let lists = core.todo_lists().await.unwrap();
         let from_mail = core.todos(lists[0].id, false).await.unwrap().into_iter().find(|t| t.from_mail).expect("a demo task from mail");
         assert_eq!(from_mail.mail_subject.as_deref(), Some("Board meeting moved to Thursday"));
+        let mail = core.todo_mail(from_mail.id).await.unwrap().expect("the demo mail is stored");
+        assert_eq!(core.conversation(mail).await.unwrap().iter().find(|m| m.row.id == mail).map(|m| m.row.subject.clone()).as_deref(), Some("Board meeting moved to Thursday"));
+        let plain = core.todos(lists[0].id, false).await.unwrap().into_iter().find(|t| !t.from_mail).unwrap();
+        assert_eq!(core.todo_mail(plain.id).await.unwrap(), None, "a task not from mail has no message");
         assert!(core.todos(lists[0].id, false).await.unwrap().iter().filter(|t| !t.from_mail).all(|t| t.mail_subject.is_none()));
         let agenda = core.agenda(today.day.clone(), 7).await.unwrap();
         assert_eq!(agenda.iter().filter(|e| e.day == today.day).count(), 4);

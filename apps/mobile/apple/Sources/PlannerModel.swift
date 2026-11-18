@@ -31,6 +31,15 @@ final class PlannerModel {
     var defaultList: Int64? { lists.first(where: \.isDefault)?.id ?? lists.first?.id }
     /// Open tasks in one list, the count beside its heading.
     func openCount(list: Int64) -> Int { todos[list]?.filter { !$0.done }.count ?? 0 }
+    /// The stored message a task came from; nil, with the reason shown, when it is gone.
+    func mail(for todo: Todo) async -> Int64? {
+        guard let core else { return nil }
+        do {
+            if let id = try await core.todoMail(id: todo.id) { return id }
+            error = "The linked mail is no longer available."
+        } catch { self.error = error.localizedDescription }
+        return nil
+    }
     /// Lists are loaded and none has an open task: To-do shows its clear-day sentence.
     var allClear: Bool { !lists.isEmpty && lists.allSatisfy { todos[$0.id]?.contains { !$0.done } == false } }
 
