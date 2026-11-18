@@ -1116,7 +1116,7 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo {
         check(!rejectPlanner) { "Fixture task refused" }
         addedTodos += Triple(list, title, dueDate)
-        return Todo((tasks.maxOfOrNull { it.id } ?: 0) + 1, list, title, dueDate, false, false).also { tasks += it }
+        return Todo((tasks.maxOfOrNull { it.id } ?: 0) + 1, list, title, dueDate, false, false, null).also { tasks += it }
     }
     override suspend fun addTodoList(name: String): TodoList =
         TodoList((todoLists.maxOf { it.id }) + 1, name, false).also { todoLists += it }
