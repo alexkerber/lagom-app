@@ -4,7 +4,7 @@
     python3 compose.py slides.json OUT_DIR
 
 slides.json is a list of {"name", "size": [w, h], "caption", "sub"?, "image", "style": "calm"|"glow"|"night",
-"scale"? (share of the canvas height the image may take, default 0.74)}. Image paths are absolute or relative
+"scale"? (share of the canvas height the image may take, default 0.74), "bleed"? (share that runs off the bottom)}. Image paths are absolute or relative
 to slides.json. Fonts come from site/fonts, so the captions match lagommail.app.
 """
 import json
@@ -32,7 +32,12 @@ def page(slide, base):
     image = image if image.is_absolute() else base / image
     unit = min(w, h) / 100  # type scales with the short side, so phone, tablet and Mac read alike
     scale = slide.get("scale", 0.74)
+    bleed = slide.get("bleed", 0)  # share of the canvas height the device runs off the bottom edge
     sub = f'<p class="sub">{slide["sub"]}</p>' if slide.get("sub") else ""
+    # "frame": a plain drawn device for screens without a 3D model (Android); the value is the bezel in px.
+    bezel = slide.get("frame", 0)
+    frame = (f"border: {bezel}px solid #101012; border-radius: {bezel * 4.2}px; box-shadow: 0 {unit * 3}px {unit * 8}px rgba(20,20,60,.35);"
+             f" max-height: {h * scale - 2 * bezel}px; max-width: calc(94% - {2 * bezel}px);") if bezel else ""
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
 @font-face {{ font-family: Hauora; font-weight: 800; src: url("{(FONTS / 'hauora-sans-800.woff2').as_uri()}"); }}
 @font-face {{ font-family: Hauora; font-weight: 500; src: url("{(FONTS / 'hauora-sans-500.woff2').as_uri()}"); }}
@@ -42,8 +47,8 @@ h1 {{ font-weight: 800; font-size: {unit * 8.4}px; line-height: 1.04; letter-spa
      margin: {h * 0.06}px {unit * 7}px 0; max-width: {w * 0.86}px; }}
 .sub {{ font-weight: 500; font-size: {unit * 3.6}px; line-height: 1.3; color: {ink2}; text-align: center; margin: {unit * 2.4}px {unit * 8}px 0; }}
 .shot {{ flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; min-height: 0; }}
-.shot img {{ max-width: 94%; max-height: {h * scale}px; object-fit: contain; display: block; }}
-</style></head><body><h1>{slide["caption"]}</h1>{sub}<div class="shot"><img src="{image.as_uri()}"></div></body></html>"""
+.shot img {{ max-width: 94%; max-height: {h * scale}px; object-fit: contain; display: block; margin-bottom: {-h * bleed}px; }}
+</style></head><body><h1>{slide["caption"]}</h1>{sub}<div class="shot"><img style="{frame}" src="{image.as_uri()}"></div></body></html>"""
 
 
 def main():
@@ -56,9 +61,18 @@ def main():
             html = pathlib.Path(tmp) / f'{slide["name"]}.html'
             html.write_text(page(slide, spec.parent))
             png = out / f'{slide["name"]}.png'
-            subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1",
-                            "--allow-file-access-from-files", f"--window-size={w},{h}", f"--screenshot={png}", html.as_uri()],
-                           check=True, capture_output=True, timeout=120)
+            png.unlink(missing_ok=True)
+            for attempt in range(3):  # headless Chrome now and then hangs after the shot; try again
+                try:
+                    subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1",
+                                    "--allow-file-access-from-files", f"--user-data-dir={tmp}/chrome-{slide['name']}", f"--window-size={w},{h}", f"--screenshot={png}", html.as_uri()],
+                                   capture_output=True, timeout=60)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            # Headless Chrome can exit 2 at shutdown after writing the shot; the file is the result.
+            if not png.exists() or png.stat().st_size == 0:
+                sys.exit(f"no screenshot for {slide['name']}")
             print(png)
 
 

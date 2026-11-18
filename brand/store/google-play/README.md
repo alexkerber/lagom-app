@@ -67,3 +67,14 @@ shot per device. Status bar clean: full battery, no notifications, time 09:41.
 
 Play needs 2 to 8 phone screenshots, and tablet screenshots for the tablet listing. Sides between
 320 and 3840 px, no side more than twice the other. PNG or JPEG without transparency.
+
+## Screenshots
+
+Same five slides and captions as the App Store set (see `../app-store/README.md`), in the glow style.
+Android has no 3D model, so `compose.py` draws a plain frame (`"frame"`) around the emulator shot.
+
+| Set              | Size (px)   | Source                                   |
+| ---------------- | ----------- | ---------------------------------------- |
+| Phone            | 1080 × 1920 | `lagom_phone` AVD (Pixel 7, 1080 × 2400) |
+| 7" and 10" tablet | 2560 × 1600 | `lagom_tablet` AVD (Pixel Tablet)        |
+| Feature graphic  | 1024 × 500  | `../play-feature-1024x500.png`           |
