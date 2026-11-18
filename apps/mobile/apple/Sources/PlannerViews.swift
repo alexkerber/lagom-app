@@ -252,9 +252,10 @@ struct TodoRow: View {
                             Icon("mail", size: 14)
                             Text(subject).lagomFont(.small).lineLimit(1).truncationMode(.tail)
                         }
-                        .foregroundStyle(Theme.secondary).contentShape(Rectangle())
+                        // A 44 pt tall target without a taller row, as the completion circle.
+                        .foregroundStyle(Theme.secondary).padding(.vertical, 15).contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).padding(.vertical, -15)
                     .accessibilityLabel("Open mail: \(subject)")
                 }
             }
