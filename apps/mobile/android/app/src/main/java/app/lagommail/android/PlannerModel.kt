@@ -69,7 +69,7 @@ internal class PlannerModel : ViewModel() {
     var todos by mutableStateOf<Map<Long, List<Todo>>>(emptyMap()); private set
     var agenda by mutableStateOf<List<AgendaItem>>(emptyList()); private set
     var calendarConnected by mutableStateOf(false); private set
-    /** Tablet Calendar's week, as iPad: its Monday and that week's events. */
+    /** Calendar's week: its Monday and that week's events. */
     // shortcut: a time zone change keeps the old Monday until Today is tapped, as on iOS.
     var weekStart by mutableStateOf(monday(LocalDate.now())); private set
     var week by mutableStateOf<List<AgendaItem>>(emptyList()); private set
@@ -121,7 +121,7 @@ internal class PlannerModel : ViewModel() {
             calendarConnected = connected
             this.agenda = agenda
         }
-        // As iOS: the start's reload also fills the tablet week, which may have asked before the store opened.
+        // As iOS: the start's reload also fills the week, which may have asked before the store opened.
         reloadWeek()
     }
 
@@ -178,6 +178,10 @@ internal class PlannerModel : ViewModel() {
         fun monday(day: LocalDate): LocalDate = day.minusDays(day.dayOfWeek.value - 1L)
     }
 }
+
+/** A new week opens on today when it contains today, otherwise on its first day. */
+internal fun calendarDay(weekStart: LocalDate, today: LocalDate): LocalDate =
+    if (today >= weekStart && today < weekStart.plusDays(7)) today else weekStart
 
 /** A timed event placed on the week grid, desktop `week::layout`: minutes from midnight, and its lane among overlaps. */
 internal data class WeekBlock(val index: Int, val start: Double, val end: Double, val lane: Int = 0, val lanes: Int = 1)

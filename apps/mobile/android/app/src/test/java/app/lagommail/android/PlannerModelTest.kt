@@ -113,6 +113,18 @@ class PlannerModelTest {
         assertEquals(thisWeek, planner.weekStart)
     }
 
+    @Test fun newWeekSelectsTodayWhenContainedOtherwiseItsFirstDay() {
+        val start = LocalDate.of(2026, 11, 16)
+        for (offset in 0L..6L) {
+            val today = start.plusDays(offset)
+            assertEquals(today, calendarDay(start, today))
+        }
+        assertEquals(start, calendarDay(start, start.minusDays(1)))
+        assertEquals(start, calendarDay(start, start.plusDays(7)))
+        val yearEnd = LocalDate.of(2026, 12, 28)
+        assertEquals(LocalDate.of(2027, 1, 1), calendarDay(yearEnd, LocalDate.of(2027, 1, 1)))
+    }
+
     @Test fun weekBlocksShareOverlapsInLanesAsOnDesktop() {
         val day = LocalDate.of(2026, 11, 10)
         val midnight = day.atStartOfDay(ZoneOffset.UTC).toEpochSecond()
