@@ -452,6 +452,8 @@ final class MailModel {
         message = nil
         rows = []
         await reload()
+        // Store screenshots: `-LagomDemoOpen` opens the newest message of the demo store (DEBUG only, as the demo).
+        if Storage.demo, ProcessInfo.processInfo.arguments.contains("-LagomDemoOpen"), !Task.isCancelled { selectedID = rows.first?.id }
         guard !Task.isCancelled, core != nil, let target = notificationTarget,
               target.account == accountID, mailbox == .inbox, folder == nil, searchText.isEmpty else { return }
         notificationTarget = nil
