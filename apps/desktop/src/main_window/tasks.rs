@@ -426,8 +426,8 @@ impl MainWindow {
         let done = task.done_at.is_some();
         let selected = self.today.focused && self.today.selected == Some(id);
         // A task made from mail says its subject on a second line, which opens the mail.
-        let subject = task.mail_message_id.as_ref().map(|_| task.mail_subject.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "Open mail".into()));
-        let height = if subject.is_some() { 52. } else { 40. };
+        let subject = task.mail_subject.clone().filter(|s| task.mail_message_id.is_some() && !s.is_empty());
+        let (height, subject_missing) = if subject.is_some() { (52., false) } else { (40., true) };
         let row = pressable(div().id(("task", id as usize)), &t, selected).group("task-row")
             .debug_selector(move || format!("task-{id}")).flex().flex_shrink_0().items_center().gap(px(10.))
             .h(px(height)).px(px(8.)).rounded(px(radius::CONTROL)).when(selected, |d| d.bg(t.sel))
@@ -454,6 +454,9 @@ impl MainWindow {
                     .child(icon("icons/mail.svg", t.ink2, 12.)).child(div().flex_1().min_w(px(0.)).one_line().child(subject.clone()))
                     .tooltip(move |_, cx| cx.new(|_| Tip(t, format!("Open mail: {subject}").into())).into())
                     .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); })))))
+            .when(task.mail_message_id.is_some() && subject_missing, |d| d.child(icon_button(&t, "task-mail", "icons/mail.svg", "Open mail")
+                .debug_selector(move || format!("task-mail-{id}"))
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
             .when_some(task.due.as_deref().and_then(|due| due_label(due, &self.today.day, *DATE_LOCALE)),
                 |d, (label, overdue)| d.child(due_chip(label, overdue, &t)))
             .when(matches!(self.page, Page::Todo), |d| d.child(icon_button(&t, "task-menu", "icons/more.svg", "Task actions · ⌥Enter")
@@ -770,6 +773,23 @@ mod tests {
             assert_eq!(view.read_with(cx, |v, _| v.visible_tasks().iter().map(|t| t.id).collect::<Vec<_>>()), [4, 1, 2]);
             assert!(cx.debug_bounds("due-Yesterday").is_some());
             assert!(cx.debug_bounds("due-Today").is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn mail_rows_without_a_subject_keep_the_mail_button(cx: &mut TestAppContext) {
+        for subject in [None, Some(String::new())] {
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                let mut v = MainWindow::with_screen(true, "todo", window, cx);
+                v.today.day = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let demo = Today::demo(&mut v.inbox.mail);
+                (v.today.lists, v.today.default, v.today.tasks) = (demo.lists, demo.default, demo.tasks);
+                v.today.tasks[0].mail_subject = subject.clone();
+                v
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("task-mail-1").unwrap().size, gpui::size(px(28.), px(28.)));
+            assert_eq!(cx.debug_bounds("task-1").unwrap().size.height, px(40.));
         }
     }
 
