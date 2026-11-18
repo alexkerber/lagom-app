@@ -317,7 +317,7 @@ internal fun Mailbox.label(): String = when (this) {
 @Composable private fun accountMark(model: MailModel, account: String): Color? {
     if (model.accounts.size < 2) return null
     val index = model.accounts.indexOfFirst { it.id == account }.coerceAtLeast(0)
-    return listOf(lagom.accent, lagom.done, lagom.later)[index % 3]
+    return accountAccent(index)
 }
 
 /** A list's group, "Outbox needs attention". */
