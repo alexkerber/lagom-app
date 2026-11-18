@@ -98,7 +98,7 @@ struct TodayView: View {
 
     private var tasks: some View {
         VStack(alignment: .leading, spacing: 0) {
-            MonoLabel(text: "To do").padding(.bottom, 8)
+            MonoLabel(text: "To-do").padding(.bottom, 8)
             let tasks = planner.today?.tasks ?? []
             if tasks.isEmpty { quiet("Nothing due today.", icon: "todo").padding(.bottom, 6) }
             ForEach(tasks, id: \.id) { todo in
@@ -224,7 +224,7 @@ struct EventRow: View {
     }
 }
 
-/// A task, desktop `task_row`: a completion circle, its title, a mail mark, and the due chip.
+/// A task, desktop `task_row`: a completion circle, its title over the source mail's subject, and the due chip.
 struct TodoRow: View {
     let todo: Todo
     let toggle: () -> Void
@@ -240,10 +240,21 @@ struct TodoRow: View {
             }
             .buttonStyle(.plain).padding(.horizontal, -11)
             .accessibilityLabel(todo.done ? "Mark as not done" : "Mark as done")
-            Text(todo.title).lagomFont(.base)
-                .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if todo.fromMail {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(todo.title).lagomFont(.base)
+                    .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
+                if let subject = todo.mailSubject {
+                    // shortcut: passive, as mobile has no message id for a task; make it open the mail when the FFI carries one.
+                    HStack(spacing: 4) {
+                        Icon("mail", size: 14)
+                        Text(subject).lagomFont(.small).lineLimit(1).truncationMode(.tail)
+                    }
+                    .foregroundStyle(Theme.secondary)
+                    .accessibilityElement(children: .ignore).accessibilityLabel("From mail: \(subject)")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if todo.fromMail, todo.mailSubject == nil {
                 Icon("mail", label: "From mail").foregroundStyle(Theme.secondary)
             }
             if !todo.done, let due = todo.due.flatMap(words.due) {
@@ -260,7 +271,7 @@ struct TodoRow: View {
     }
 }
 
-/// Local task lists, as on the desktop's Todo page.
+/// Local task lists, as on the desktop's To-do page.
 struct TodoView: View {
     let planner: PlannerModel
     @State private var adding: Int64?
@@ -268,10 +279,12 @@ struct TodoView: View {
     @State private var listName = ""
     @State private var showDone: Set<Int64> = []
     @Environment(\.railInset) private var railInset
+    @Environment(\.horizontalSizeClass) private var width
+    @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "Todo") {
+            PageTitle(title: "To-do") {
                 Menu {
                     // On the Duo, New task is in the right column.
                     if railInset == 0 { Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty) }
@@ -283,11 +296,20 @@ struct TodoView: View {
             }
             .modifier(PagePadding()).padding(.top, 8)
             List {
-                ForEach(planner.lists, id: \.id) { list in
+                if planner.allClear {
+                    Text("Nothing to do. A clear day.")
+                        .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
+                        .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
+                        .foregroundStyle(Theme.ink).multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity).padding(.vertical, 48)
+                        .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
+                }
+                ForEach(Array(planner.lists.enumerated()), id: \.element.id) { index, list in
                     let all = planner.todos[list.id] ?? []
                     let done = all.filter(\.done)
                     Group {
-                        Heading(title: list.name).padding(.top, 16).padding(.bottom, 4)
+                        ListHeading(name: list.name, color: Theme.account(index), open: planner.openCount(list: list.id))
+                            .padding(.top, 16).padding(.bottom, 4)
                         ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
                         AddRow(title: "Add task") { adding = list.id }
                         if !done.isEmpty {
@@ -347,6 +369,27 @@ struct TodoView: View {
 }
 
 private struct ListID: Identifiable { let id: Int64 }
+
+/// A list's heading on To-do: `● Work  4`.
+// shortcut: the dot colour follows list order; store a colour per list if people ask to choose one.
+private struct ListHeading: View {
+    let name: String
+    let color: Color
+    let open: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).foregroundStyle(Theme.ink)
+            if open > 0 {
+                Text(String(open)).font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .footnote)).foregroundStyle(Theme.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(open > 0 ? "\(name), \(open) open" : name)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
 
 struct NewTaskView: View {
     let planner: PlannerModel

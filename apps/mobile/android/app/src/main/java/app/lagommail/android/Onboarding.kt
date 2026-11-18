@@ -93,7 +93,7 @@ private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
     }) {
         AppIcon(88.dp)
         Text("lagom", Modifier.padding(top = 24.dp).semantics { heading() }, style = MaterialTheme.typography.displaySmall)
-        Text("Mail, calendar and todo. Just right.", Modifier.padding(top = 8.dp), color = lagom.ink2,
+        Text("Mail, calendar and to-do. Just right.", Modifier.padding(top = 8.dp), color = lagom.ink2,
             style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
     }
 }

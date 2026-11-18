@@ -46,6 +46,8 @@ class PlannerModelTest {
         planner.toggle(milk)
         assertEquals("completed tasks stay in the list, after open ones", listOf("Bread" to false, "Milk" to true),
             planner.todos.getValue(2).map { it.title to it.done })
+        assertEquals("the heading counts only open tasks", 1, planner.openCount(2))
+        assertEquals(0, planner.openCount(1))
         planner.toggle(planner.todos.getValue(2).last())
         assertFalse(planner.todos.getValue(2).first { it.title == "Milk" }.done)
         planner.delete(planner.todos.getValue(2).first { it.title == "Bread" })
