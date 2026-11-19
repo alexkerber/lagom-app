@@ -17,6 +17,10 @@ extension Theme {
     static let later = color(0x94640A, 0xF5C22E)
     static let danger = color(0xC62828, 0xF87171)
     static let sidebar = color(0xF3F2EF, 0x2A2A2A)
+    static let skyTop = color(0x3F78C0, 0x0E2344)
+    static let skyMid = color(0xF4BCB0, 0x2A2638)
+    static let skyBottom = color(0xFFEBC2, 0x1E1E1E)
+    static let skyInk = color(0xFFFFFF, 0xF2F2EE)
 
     enum Radius {
         static let key: CGFloat = 4

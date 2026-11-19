@@ -45,6 +45,8 @@ import androidx.compose.ui.unit.sp
     val done: Color, val later: Color, val danger: Color,
     /** The desktop sidebar's glass, as a solid fill: the page bar. */
     val sidebar: Color,
+    /** The first-run sky from the app icon, top to bottom; `skyInk` is text on `skyTop`. */
+    val skyTop: Color, val skyMid: Color, val skyBottom: Color, val skyInk: Color,
 )
 
 // BEGIN GENERATED TOKENS (scripts/tokens.py)
@@ -64,6 +66,10 @@ internal val LightColors = LagomColors(
     later = Color(0xFF94640A),
     danger = Color(0xFFC62828),
     sidebar = Color(0xFFF3F2EF),
+    skyTop = Color(0xFF3F78C0),
+    skyMid = Color(0xFFF4BCB0),
+    skyBottom = Color(0xFFFFEBC2),
+    skyInk = Color(0xFFFFFFFF),
 )
 
 internal val DarkColors = LagomColors(
@@ -82,6 +88,10 @@ internal val DarkColors = LagomColors(
     later = Color(0xFFF5C22E),
     danger = Color(0xFFF87171),
     sidebar = Color(0xFF2A2A2A),
+    skyTop = Color(0xFF0E2344),
+    skyMid = Color(0xFF2A2638),
+    skyBottom = Color(0xFF1E1E1E),
+    skyInk = Color(0xFFF2F2EE),
 )
 
 internal object TextSize {

@@ -22,6 +22,8 @@ MOBILE_COLORS = {
     "accent_ink": ("accentInk", "accentInk"), "done": ("done", "done"),
     "later": ("later", "later"), "danger": ("danger", "danger"),
     "sidebar": ("sidebar", "sidebar"),
+    "sky_top": ("skyTop", "skyTop"), "sky_mid": ("skyMid", "skyMid"),
+    "sky_bottom": ("skyBottom", "skyBottom"), "sky_ink": ("skyInk", "skyInk"),
 }
 MOBILE_SIZES = ("small", "snippet", "base", "body", "title", "subject")
 

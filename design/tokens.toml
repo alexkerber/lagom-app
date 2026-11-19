@@ -14,6 +14,11 @@ done = 0x1E6B4E
 later = 0x94640A
 danger = 0xC62828
 sidebar = 0xF3F2EF
+# The first-run sky, from the app icon: blue, peach, warm light. sky_ink is text on sky_top (4.5:1).
+sky_top = 0x3F78C0
+sky_mid = 0xF4BCB0
+sky_bottom = 0xFFEBC2
+sky_ink = 0xFFFFFF
 press_alpha = 0.12
 
 [colors.dark]
@@ -30,6 +35,11 @@ done = 0x4CC38A
 later = 0xF5C22E
 danger = 0xF87171
 sidebar = 0x2A2A2A
+# The dark icon's night sky, settling into bg.
+sky_top = 0x0E2344
+sky_mid = 0x2A2638
+sky_bottom = 0x1E1E1E
+sky_ink = 0xF2F2EE
 press_alpha = 0.14
 
 # Accessible macOS system accent fills; desktop selection still follows the OS.
