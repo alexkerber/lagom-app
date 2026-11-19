@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -62,9 +63,9 @@ private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
     // The sky's top and height and the bottom of the step's heading, in the window, so the blue reaches past the white words.
     var skyTop by remember { mutableFloatStateOf(0f) }
     var skyHeight by remember { mutableFloatStateOf(0f) }
-    var headBottom by remember { mutableFloatStateOf(0f) }
+    var headBottom by remember { mutableFloatStateOf(Float.NaN) }
     val margin = with(LocalDensity.current) { 24.dp.toPx() }
-    val band by animateFloatAsState(if (skyHeight > 0 && headBottom > 0) ((headBottom + margin - skyTop) / skyHeight).coerceIn(0.2f, 0.85f) else 0.4f,
+    val band by animateFloatAsState(if (skyHeight > 0 && !headBottom.isNaN()) ((headBottom + margin - skyTop) / skyHeight).coerceIn(0.2f, 0.95f) else 0.4f,
         tween(250, easing = EaseOut), label = "sky")
     val c = lagom
     Box(Modifier.fillMaxSize()
@@ -78,7 +79,7 @@ private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
             (fadeIn(tween(250, easing = EaseOut)) + slideInHorizontally(move) { if (forward) it / 8 else -it / 8 }) togetherWith
                 (fadeOut(tween(150, easing = EaseOut)) + slideOutHorizontally(move) { if (forward) -it / 8 else it / 8 })
         }) { shown ->
-            val head = Modifier.onGloballyPositioned { if (shown == step) headBottom = it.boundsInWindow().bottom }
+            val head = Modifier.onGloballyPositioned { if (shown == step) headBottom = it.positionInWindow().y + it.size.height }
             when (shown) {
                 Step.WELCOME -> Welcome(model, head) { choosing = true }
                 Step.CHOOSE -> ChooseAccount(model, providers, head) { choosing = false }
@@ -184,10 +185,14 @@ private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
                 }
             }
             MonoLabel("Other mail", Modifier.padding(top = 22.dp, bottom = 14.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Four across; two across from 1.3× font scale, so no name breaks inside a word.
+            val columns = if (LocalDensity.current.fontScale >= 1.3f) 2 else 4
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 listOf("iCloud" to R.drawable.ic_cloud, "Fastmail" to R.drawable.ic_inbox, "Yahoo" to R.drawable.ic_mail,
-                    "Other (IMAP)" to R.drawable.ic_settings).forEach { (name, icon) ->
-                    Tile(name, icon, Modifier.weight(1f)) { model.accountForm = AccountForm() }
+                    "Other (IMAP)" to R.drawable.ic_settings).chunked(columns).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { (name, icon) -> Tile(name, icon, Modifier.weight(1f)) { model.accountForm = AccountForm() } }
+                    }
                 }
             }
             Row(Modifier.padding(top = 22.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(6.dp),

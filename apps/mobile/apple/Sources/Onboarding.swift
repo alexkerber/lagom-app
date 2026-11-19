@@ -10,6 +10,7 @@ struct OnboardingView: View {
     let notNow: () -> Void
     @Environment(\.webAuthenticationSession) private var browser
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var choosing = Storage.introChoose
     @State private var other = false
     @State private var connecting = false
@@ -17,15 +18,16 @@ struct OnboardingView: View {
     @State private var height: CGFloat = 0
     /// The sky's frame and the bottom of the step's heading, both global, so the blue reaches past the white words.
     @State private var sky = CGRect.zero
-    @State private var headBottom: CGFloat = 0
+    @State private var headBottom = CGFloat.nan
 
     private enum Step { case welcome, choose, notifications }
     private var step: Step { notifications ? .notifications : choosing ? .choose : .welcome }
 
     /// Where the solid blue ends, as a fraction of the sky: 24 pt under the heading.
     private var band: CGFloat {
-        guard sky.height > 0, headBottom > 0 else { return 0.4 }
-        return min(max((headBottom + 24 - sky.minY) / sky.height, 0.2), 0.85)
+        guard sky.height > 0, !headBottom.isNaN else { return 0.4 }
+        // Up to 0.95: under the largest text the white words must never reach the peach.
+        return min(max((headBottom + 24 - sky.minY) / sky.height, 0.2), 0.95)
     }
 
     var body: some View {
@@ -141,7 +143,8 @@ struct OnboardingView: View {
                 }
             }
             MonoLabel(text: "Other mail").padding(.top, 22).padding(.bottom, 14)
-            HStack(alignment: .top, spacing: 8) {
+            // Four across; two across from xxxLarge text, so no name breaks inside a word.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: typeSize >= .xxxLarge ? 2 : 4), spacing: 16) {
                 tile("iCloud", icon: "cloud")
                 tile("Fastmail", icon: "inbox")
                 tile("Yahoo", icon: "mail")
@@ -173,8 +176,9 @@ struct OnboardingView: View {
     private func tile(_ title: String, icon: String) -> some View {
         Button { other = true } label: {
             VStack(spacing: 8) {
+                // Padding, not a fixed frame: the tile grows with the icon under large text.
                 Icon(icon, size: 24).foregroundStyle(Theme.accent)
-                    .frame(width: 56, height: 56)
+                    .padding(16)
                     .background(Theme.subtle, in: .rect(cornerRadius: Theme.Radius.panel, style: .continuous))
                 Text(title).lagomFont(.small, .medium).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
