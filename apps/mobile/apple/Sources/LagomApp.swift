@@ -47,6 +47,7 @@ struct LagomApp: App {
                 Button("OK") { model.error = nil; planner.error = nil }
             } message: { Text(model.error ?? planner.error ?? "") }
             .tint(Theme.accent)
+            .preferredColorScheme(Self.debugScheme)
             .task(id: phase) {
                 guard phase == .active else { return }
                 // The store opens first: a slow notification-settings answer must never hold back the mail.
@@ -68,6 +69,20 @@ struct LagomApp: App {
                 }
             }
         }
+    }
+
+    /// DEBUG `-LagomTheme dark|light` forces an appearance for screenshots without touching the device's setting,
+    /// as Android's `lagomTheme` extra does; otherwise the system decides.
+    private static var debugScheme: ColorScheme? {
+        #if DEBUG
+        switch UserDefaults.standard.string(forKey: "LagomTheme") {
+        case "dark": .dark
+        case "light": .light
+        default: nil
+        }
+        #else
+        nil
+        #endif
     }
 
     private func readNotifications() async {

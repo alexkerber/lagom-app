@@ -1,14 +1,19 @@
 package app.lagommail.android
 
 import androidx.activity.compose.BackHandler
+import androidx.annotation.DrawableRes
 import androidx.compose.animation.*
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -16,20 +21,25 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import app.lagommail.core.SignInProvider
 import app.lagommail.core.signInAvailable
 
 /** The first run, the same on iOS: Welcome, then the kind of account, then its form; once an account is in, one
- *  notifications step. Steps that do not apply are skipped. */
+ *  notifications step. Steps that do not apply are skipped. Copy matches iOS word for word. */
 private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
 
 @Composable internal fun Onboarding(model: MailModel, askNotifications: Boolean, demo: Boolean, answer: (allow: Boolean) -> Unit) {
@@ -71,74 +81,115 @@ private enum class Step { WELCOME, CHOOSE, FORM, NOTIFICATIONS }
     }
 }
 
-/** A step's page: content centred a little above the middle, its buttons at the foot. Under a bar the content starts at
- *  the top, as a form does. */
+/** A step's page: content centred in a 440 dp column (392 inside its margins) and scrolling under large text, its buttons at the foot. On a tablet
+ *  the column stops at 800 dp, so the buttons stay near the content. */
 @Composable private fun StepPage(top: (@Composable () -> Unit)? = null, buttons: @Composable ColumnScope.() -> Unit, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxSize().systemBarsPadding()) {
         top?.invoke()
-        Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp).padding(top = if (top != null) 40.dp else 0.dp, bottom = 32.dp),
-            verticalArrangement = if (top != null) Arrangement.Top else Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally, content = content)
-        Column(Modifier.fillMaxWidth().widthIn(max = 480.dp).align(Alignment.CenterHorizontally).padding(horizontal = 24.dp).padding(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp), content = buttons)
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Column(Modifier.fillMaxWidth().heightIn(max = 800.dp).fillMaxHeight()) {
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(horizontal = 24.dp, vertical = 24.dp),
+                        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Column(Modifier.widthIn(max = 392.dp), horizontalAlignment = Alignment.CenterHorizontally, content = content)
+                    }
+                }
+                Column(Modifier.widthIn(max = 440.dp).fillMaxWidth().align(Alignment.CenterHorizontally).padding(horizontal = 24.dp).padding(bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp), content = buttons)
+            }
+        }
     }
 }
 
+/** The site's display line: Hauora Bold with its tight tracking, growing with the font scale. */
+@Composable private fun DisplayTitle(text: String, size: TextUnit, modifier: Modifier = Modifier) =
+    Text(text, modifier.semantics { heading() }, fontFamily = DisplayFace, fontWeight = FontWeight.Bold, fontSize = size,
+        letterSpacing = DisplayTracking.em, lineHeight = size * 1.1f, textAlign = TextAlign.Center)
+
+@Composable private fun Lead(text: String, modifier: Modifier = Modifier, size: TextUnit = TextSize.body) =
+    Text(text, modifier, color = lagom.ink2, fontSize = size, lineHeight = size * Leading, textAlign = TextAlign.Center)
+
+/** The step's one way on: a house button across the column, 50 dp tall. */
+@Composable private fun WideButton(text: String, @DrawableRes icon: Int, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) =
+    HouseButton(text, icon, Modifier.fillMaxWidth().heightIn(min = 50.dp), primary = primary, enabled = enabled, onClick = onClick)
+
 @Composable private fun Welcome(model: MailModel, addAccount: () -> Unit) {
     StepPage(buttons = {
-        HouseButton("Add account", R.drawable.ic_account_add, Modifier.fillMaxWidth().height(48.dp), primary = true, enabled = model.core != null, onClick = addAccount)
+        WideButton("Add account", R.drawable.ic_account_add, primary = true, enabled = model.core != null, onClick = addAccount)
         // The store could not open: the only way on is to try again.
-        if (model.core == null && !model.loading) HouseButton("Try again", modifier = Modifier.fillMaxWidth().height(48.dp)) {
-            model.perform { model.setForeground(true) }
-        }
+        if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync) { model.perform { model.setForeground(true) } }
     }) {
         AppIcon(88.dp)
-        Text("lagom", Modifier.padding(top = 24.dp).semantics { heading() }, style = MaterialTheme.typography.displaySmall)
-        Text("Mail, calendar and to-do. Just right.", Modifier.padding(top = 8.dp), color = lagom.ink2,
-            style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+        DisplayTitle("lagom mail", 40.sp, Modifier.padding(top = 24.dp))
+        Lead("Calm email for a clear day.", Modifier.padding(top = 6.dp), TextSize.title)
+        Column(Modifier.fillMaxWidth().padding(top = 40.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Point(R.drawable.ic_done, "Done, Reply or Later", "Each message gets one answer. The list says how many are left.")
+            Point(R.drawable.ic_sun, "Today in one sentence", "What is unread, what is due and what is next.")
+            Point(R.drawable.ic_access, "Private by default", "No tracking and no ads. Your mail goes only to your own server.")
+        }
+    }
+}
+
+/** One reason to stay: a line icon in a quiet tile, a short title and one sentence. TalkBack reads it as one item. */
+@Composable private fun Point(@DrawableRes icon: Int, title: String, detail: String) {
+    val c = lagom
+    Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        Box(Modifier.clip(RoundedCornerShape(Radius.control)).background(c.subtle).padding(10.dp)) { LagomIcon(icon, tint = c.accent, size = 20.dp) }
+        Column(Modifier.weight(1f).padding(top = 1.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(detail, color = c.ink2, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 
 @Composable private fun ChooseAccount(model: MailModel, providers: List<Pair<SignInProvider, String>>, back: () -> Unit) {
     val context = LocalContext.current
     StepPage(top = {
-        TopBar(start = 4.dp) {
-            LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = back)
-            BarTitle("Add account")
-        }
+        TopBar(start = 4.dp) { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = back) }
     }, buttons = {}) {
-        Text("Choose your mail", Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall)
-        Text("Google and Microsoft sign in in the browser. Anything else uses its mail server.", Modifier.padding(top = 6.dp, bottom = 24.dp),
-            color = lagom.ink2, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
-        Column(Modifier.widthIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        DisplayTitle("Choose your mail", 30.sp)
+        Lead("lagom connects straight to your mail server, with nothing in between.", Modifier.padding(top = 8.dp))
+        Column(Modifier.fillMaxWidth().padding(top = 32.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             providers.forEach { (provider, name) ->
-                Choice(name, R.drawable.ic_external) { model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) } }
+                val logo = if (provider == SignInProvider.GOOGLE) R.drawable.logo_google else R.drawable.logo_microsoft
+                Choice("Continue with $name", Color.White, { Image(painterResource(logo), null, Modifier.size(18.dp)) }) {
+                    model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) }
+                }
             }
-            Choice("Other (IMAP)", R.drawable.ic_mail) { model.accountForm = AccountForm() }
+            Choice("iCloud, Fastmail and other (IMAP)", lagom.subtle, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }) { model.accountForm = AccountForm() }
+        }
+        Row(Modifier.padding(top = 24.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            LagomIcon(R.drawable.ic_access, size = 14.dp)
+            Text("Passwords stay on this device.", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
-/** One account kind: a filled row as tall as a list row, its icon, the name and a chevron. */
-@Composable private fun Choice(title: String, icon: Int, onClick: () -> Unit) {
+/** One account kind, as desktop's "Continue with" buttons: the mark in a round tile, the name and a chevron. Google asks for
+ *  its "G" on white, so provider marks sit on white in dark mode too. */
+@Composable private fun Choice(title: String, tile: Color, mark: @Composable () -> Unit, onClick: () -> Unit) {
     val c = lagom
-    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(Radius.panel)).background(c.subtle)
-        .clickable(role = Role.Button, onClick = onClick).padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        LagomIcon(icon, size = 20.dp)
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-        LagomIcon(R.drawable.ic_chevron_right, size = 16.dp)
+    val shape = RoundedCornerShape(Radius.panel)
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(shape).background(c.bg).border(1.dp, c.line, shape)
+        .clickable(role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        Box(Modifier.size(34.dp).clip(CircleShape).background(tile).border(1.dp, c.line, CircleShape), contentAlignment = Alignment.Center) { mark() }
+        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge.copy(fontSize = TextSize.body, lineHeight = TextSize.body * Leading,
+            fontWeight = FontWeight.Medium))
+        LagomIcon(R.drawable.ic_chevron_right, size = 14.dp)
     }
 }
 
 @Composable private fun Notifications(answer: (Boolean) -> Unit) {
     StepPage(buttons = {
-        HouseButton("Allow", modifier = Modifier.fillMaxWidth().height(48.dp), primary = true) { answer(true) }
-        HouseButton("Not now", modifier = Modifier.fillMaxWidth().height(48.dp)) { answer(false) }
+        WideButton("Allow", R.drawable.ic_done, primary = true) { answer(true) }
+        WideButton("Not now", R.drawable.ic_close) { answer(false) }
     }) {
-        LagomIcon(R.drawable.ic_inbox, size = 32.dp)
-        Text("New mail, when it arrives", Modifier.padding(top = 16.dp).semantics { heading() }, style = MaterialTheme.typography.headlineSmall,
-            textAlign = TextAlign.Center)
-        Text("lagom tells you about new mail in your Inbox. Nothing else.", Modifier.padding(top = 6.dp), color = lagom.ink2,
-            style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+        Box(Modifier.clip(RoundedCornerShape(Radius.card)).background(lagom.subtle).padding(22.dp)) {
+            LagomIcon(R.drawable.ic_inbox, tint = lagom.accent, size = 30.dp)
+        }
+        DisplayTitle("New mail, when it arrives", 30.sp, Modifier.padding(top = 24.dp))
+        Lead("lagom tells you about new mail in your Inbox. Nothing else.", Modifier.padding(top = 8.dp))
     }
 }
