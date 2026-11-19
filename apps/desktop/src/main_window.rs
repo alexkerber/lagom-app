@@ -554,6 +554,12 @@ impl MainWindow {
         match screen {
             "home" => this.show_section(0, window, cx),
             "calendar" => this.show_section(2, window, cx),
+            // An event open in the side panel, for screenshots.
+            "calendar-event" if demo => {
+                this.show_section(2, window, cx);
+                this.reload_week(cx);
+                this.week.detail = this.week.days.iter().flatten().find(|e| e.event.join_url.is_some()).cloned();
+            }
             "calendar-month" => {
                 this.show_section(2, window, cx);
                 this.calendar_date(this.week.anchor, week::View::Month, cx);

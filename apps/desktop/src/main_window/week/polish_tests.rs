@@ -237,20 +237,21 @@ fn review_panel_and_detail_titles_have_full_width(cx: &mut TestAppContext) {
         v.week.panel = Some(true);
         v.week.days = vec![vec![]; 7];
         v.week.guests = vec!["Planning team".into()];
+        cx.notify();
+    });
+    let titles = |cx: &mut gpui::VisualTestContext| {
+        TITLE_LAYOUTS.with(|layouts| *layouts.borrow_mut() = Some(vec![]));
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        TITLE_LAYOUTS.with(|layouts| layouts.borrow_mut().take().unwrap().iter().map(gpui::TextLayout::text).collect::<Vec<_>>())
+    };
+    cx.run_until_parked();
+    let month = view.read_with(cx, |v, _| v.week.mini_month.format("%B %Y").to_string());
+    assert_eq!(titles(cx), [month, "Planning team".into()]);
+    view.update(cx, |v, cx| {
         let mut entry = super::tests::entry(v.week.start, 0, 1440, true);
         entry.event.title = "Planning day".into();
         v.week.detail = Some(entry);
         cx.notify();
     });
-    cx.run_until_parked();
-    TITLE_LAYOUTS.with(|layouts| *layouts.borrow_mut() = Some(vec![]));
-    cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-    TITLE_LAYOUTS.with(|layouts| {
-        let text: Vec<_> = layouts.borrow_mut().take().unwrap().iter().map(gpui::TextLayout::text).collect();
-        assert_eq!(text.len(), 3);
-        assert!(text.contains(&"Planning day".into()), "{text:?}");
-        assert!(text.contains(&"Planning team".into()), "{text:?}");
-        let month = view.read_with(cx, |v, _| v.week.mini_month.format("%B %Y").to_string());
-        assert!(text.contains(&month), "{text:?}");
-    });
+    assert_eq!(titles(cx), ["Fixture calendar"], "an open event replaces the panel's month and guests");
 }

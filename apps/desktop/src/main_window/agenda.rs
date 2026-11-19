@@ -127,7 +127,7 @@ pub(super) fn demo_events(day: chrono::NaiveDate) -> Vec<lagom_core::calendar::A
             event: lagom_core::calendar::Event {
                 remote_id: format!("demo-{hour}"), title: title.into(), start: if hour == 0 { day.to_string() } else { start.to_rfc3339() }, end: if hour == 0 { day.succ_opt().unwrap().to_string() } else { end.to_rfc3339() },
                 start_utc: start.timestamp(), end_utc: end.timestamp(), all_day: hour == 0,
-                location: None, join_url: (hour == 11).then(|| "https://meet.example.test/demo".into()), html_link: None,
+                location: (hour == 11).then(|| "Studio, 2nd floor".into()), join_url: (hour == 11).then(|| "https://meet.example.test/demo".into()), html_link: None,
             },
         })
     }).collect()

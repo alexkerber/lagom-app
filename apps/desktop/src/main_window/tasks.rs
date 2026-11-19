@@ -3,7 +3,7 @@ use gpui::Focusable;
 use lagom_core::store::Store;
 use lagom_core::tasks::{Task as LocalTask, TaskList};
 
-static DATE_LOCALE: std::sync::LazyLock<chrono::Locale> = std::sync::LazyLock::new(|| {
+pub(super) static DATE_LOCALE: std::sync::LazyLock<chrono::Locale> = std::sync::LazyLock::new(|| {
     // shortcut: unsupported locale tags use English; expand matching when language preferences are added.
     sys_locale::get_locale().and_then(|locale| locale.replace('-', "_").parse().ok()).unwrap_or(chrono::Locale::en_US)
 });
