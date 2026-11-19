@@ -45,7 +45,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       # Pull requests never get the signing keys, even from branches in this repository.
       # The .p12 holds the development and the distribution identity: automatic signing archives
-      # with the first and exports with the second.
+      # with the first and exports with the second. Without it, an Admin API key lets Xcode use
+      # cloud-managed certificates instead.
       - name: Signing keychain and App Store Connect key
         id: signing
         if: github.event_name != 'pull_request'
@@ -56,20 +57,22 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          if [[ -z $P12 || -z $ASC_KEY || -z $ASC_KEY_ID || -z $ASC_ISSUER ]]; then
-            echo '::warning::No iOS signing secrets: the archive is unsigned and nothing goes to TestFlight.'
+          if [[ -z $ASC_KEY || -z $ASC_KEY_ID || -z $ASC_ISSUER ]]; then
+            echo '::warning::No App Store Connect key: the archive is unsigned and nothing goes to TestFlight.'
             exit 0
           fi
-          keychain=$RUNNER_TEMP/lagom-ios.keychain-db
-          keychain_password=$(uuidgen)
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
-          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/signing.p12"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain-db
+          if [[ -n $P12 ]]; then
+            keychain=$RUNNER_TEMP/lagom-ios.keychain-db
+            keychain_password=$(uuidgen)
+            security create-keychain -p "$keychain_password" "$keychain"
+            security set-keychain-settings -lut 21600 "$keychain"
+            security unlock-keychain -p "$keychain_password" "$keychain"
+            printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+            security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+            rm "$RUNNER_TEMP/signing.p12"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+            security list-keychains -d user -s "$keychain" login.keychain-db
+          fi
           printf '%s\n' "$ASC_KEY" > "$RUNNER_TEMP/asc.p8"
           {
             echo "LAGOM_ASC_KEY=$RUNNER_TEMP/asc.p8"
