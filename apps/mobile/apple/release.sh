@@ -27,6 +27,11 @@ xcodegen generate --spec project.yml
 # shortcut: two archives in the same minute share a number and App Store Connect rejects the second; use a counter if that starts to happen.
 number=$(date -u +%Y%m%d%H%M)
 versions=(MARKETING_VERSION="${version%%-*}" CURRENT_PROJECT_VERSION="$number")
+# Sign-in client IDs from the environment (CI) override Local.xcconfig; without either, only IMAP shows.
+for id in LAGOM_GOOGLE_IOS_CLIENT_ID LAGOM_MICROSOFT_IOS_CLIENT_ID; do
+  if [ -n "${!id:-}" ]; then versions+=("$id=${!id}")
+  elif ! grep -qs "^$id *= *[^ ]" Local.xcconfig; then echo "warning: no $id, so that sign-in is off in this build" >&2; fi
+done
 
 if [ "$mode" = --unsigned ]; then
   xcodebuild -project Lagom.xcodeproj -scheme Lagom -configuration Release \
