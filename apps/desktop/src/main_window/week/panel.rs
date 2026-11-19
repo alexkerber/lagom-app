@@ -72,7 +72,47 @@ impl MainWindow {
         cx.notify();
     }
 
+    pub(super) fn event_accent(&self, entry: &AgendaEvent) -> Rgba {
+        self.account_accent(self.live.as_ref().and_then(|l| l.accounts.iter().position(|a| a.id == entry.account)).unwrap_or(0))
+    }
+
+    pub(super) fn event_selected(&self, entry: &AgendaEvent) -> bool {
+        self.week.detail.as_ref().is_some_and(|d| d.account == entry.account && d.calendar_id == entry.calendar_id && d.event.remote_id == entry.event.remote_id)
+    }
+
+    fn close_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.week.detail = None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// An open event in the side panel, Spark-style: only the fields the event has.
+    // shortcut: read-only; editing an event here comes in a later step.
+    fn event_panel(&self, entry: &AgendaEvent, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.theme;
+        let event = &entry.event;
+        let section = || div().pt(px(12.)).border_t_1().border_color(t.line).flex().flex_col().gap(px(8.));
+        let when = event_when(event, &chrono::Local, chrono::Local::now().date_naive(), *super::super::tasks::DATE_LOCALE);
+        div().id("calendar-panel").debug_selector(|| "event-detail".into()).w(px(224.)).flex_shrink_0().min_h(px(0.))
+            .overflow_y_scroll().pl(px(16.)).border_l_1().border_color(t.line).flex().flex_col().gap(px(12.))
+            .child(div().flex().items_center().gap(px(6.))
+                .child(icon_button(&t, "Close", "icons/close.svg", "Close event · Esc").on_click(cx.listener(|this, _, window, cx| this.close_event(window, cx))))
+                .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(self.event_accent(entry)))
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col().text_color(t.ink2).text_size(px(size::SMALL))
+                    .child(calendar_title(gpui::StyledText::new(entry.calendar.clone()))))
+                .children(event.html_link.clone().filter(|s| lagom_core::google::safe_calendar_url(s)).map(|url|
+                    icon_button(&t, "Open in Google Calendar", "icons/external.svg", "Open in Google Calendar").on_click(move |_, _, cx| cx.open_url(&url)))))
+            .child(div().debug_selector(|| "event-title".into()).font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE)).child(event.title.clone()))
+            .child(mono(when, t.ink2).debug_selector(|| "event-when".into()))
+            .children(event.location.clone().map(|location| section().debug_selector(|| "event-location".into()).child(location)))
+            .children(event.join_url.clone().and_then(|url| Some((lagom_core::google::join_host(&url)?, url))).map(|(host, url)|
+                section().child(div().flex().items_center().gap(px(8.))
+                    .child(button(&t, "Join", Some(t.accent)).on_click(move |_, _, cx| cx.open_url(&url)))
+                    .child(mono(host, t.ink2)))))
+    }
+
     pub(super) fn calendar_panel(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        if let Some(entry) = &self.week.detail { return self.event_panel(entry, cx); }
         let t = self.theme;
         let today = chrono::Local::now().date_naive();
         let month = self.week.mini_month;
@@ -153,12 +193,13 @@ impl MainWindow {
 
     pub(super) fn calendar_event_line(&self, entry: &AgendaEvent, day: usize, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
-        let index = self.live.as_ref().and_then(|l| l.accounts.iter().position(|a| a.id == entry.account)).unwrap_or(0);
+        let selected = self.event_selected(entry);
         let entry = entry.clone();
-        pressable(div().id(("week-event", day * 100_000 + ix)), &t, false)
+        pressable(div().id(("week-event", day * 100_000 + ix)), &t, selected)
             .debug_selector(move || format!("week-event-{day}-{ix}"))
             .w_full().flex().items_center().gap(px(5.)).min_h(px(22.)).min_w(px(0.)).px(px(4.)).rounded(px(radius::KEY))
-            .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(self.account_accent(index)))
+            .when(selected, |d| d.bg(t.sel))
+            .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(self.event_accent(&entry)))
             .child(div().flex_1().min_w(px(0.)).flex().flex_col()
                 .child(calendar_title(gpui::StyledText::new(entry.event.title.clone())).text_size(px(size::SMALL))))
             .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.week.detail = Some(entry.clone()); window.focus(&this.focus); cx.notify(); }))

@@ -3,7 +3,7 @@ use gpui::Focusable;
 use lagom_core::store::Store;
 use lagom_core::tasks::{Task as LocalTask, TaskList};
 
-static DATE_LOCALE: std::sync::LazyLock<chrono::Locale> = std::sync::LazyLock::new(|| {
+pub(super) static DATE_LOCALE: std::sync::LazyLock<chrono::Locale> = std::sync::LazyLock::new(|| {
     // shortcut: unsupported locale tags use English; expand matching when language preferences are added.
     sys_locale::get_locale().and_then(|locale| locale.replace('-', "_").parse().ok()).unwrap_or(chrono::Locale::en_US)
 });
@@ -425,9 +425,12 @@ impl MainWindow {
         let id = task.id;
         let done = task.done_at.is_some();
         let selected = self.today.focused && self.today.selected == Some(id);
+        // A task made from mail says its subject on a second line, which opens the mail.
+        let subject = task.mail_subject.clone().filter(|s| task.mail_message_id.is_some() && !s.is_empty());
+        let (height, subject_missing) = if subject.is_some() { (52., false) } else { (40., true) };
         let row = pressable(div().id(("task", id as usize)), &t, selected).group("task-row")
             .debug_selector(move || format!("task-{id}")).flex().flex_shrink_0().items_center().gap(px(10.))
-            .h(px(40.)).px(px(8.)).rounded(px(radius::CONTROL)).when(selected, |d| d.bg(t.sel))
+            .h(px(height)).px(px(8.)).rounded(px(radius::CONTROL)).when(selected, |d| d.bg(t.sel))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.today.selected = Some(id); this.today.focused = true;
                 if this.today.editor.is_none() { window.focus(&this.focus); } cx.notify();
@@ -440,10 +443,18 @@ impl MainWindow {
                 .when(done, |d| d.child(icon("icons/done.svg", t.ink2, 16.)))
                 .tooltip(move |_, cx| cx.new(|_| Tip(t, "Complete task · Space".into())).into())
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.complete_task(id, cx); })))
-            .child(div().debug_selector(move || format!("task-title-{id}")).flex_1().min_w(px(0.)).map(|d| match self.task_input(Edit::Rename(id)) {
-                Some(input) => d.child(input), None => d.one_line().when(done, |d| d.text_color(t.ink2).line_through()).child(task.title.clone()),
-            }))
-            .when(task.mail_message_id.is_some(), |d| d.child(icon_button(&t, "task-mail", "icons/mail.svg", "Open mail")
+            // A block, not a flex column: a column sizes one-line text to its shortest word (see home_view).
+            .child(div().flex_1().min_w(px(0.))
+                .child(div().debug_selector(move || format!("task-title-{id}")).min_w(px(0.)).map(|d| match self.task_input(Edit::Rename(id)) {
+                    Some(input) => d.child(input), None => d.one_line().when(done, |d| d.text_color(t.ink2).line_through()).child(task.title.clone()),
+                }))
+                .when_some(subject, |d, subject| d.child(div().id("task-mail").debug_selector(move || format!("task-mail-{id}"))
+                    .mt(px(2.)).w_full().flex().items_center().gap(px(4.)).cursor_pointer().hover(|s| s.opacity(0.7))
+                    .text_size(px(size::SMALL)).text_color(t.ink2)
+                    .child(icon("icons/mail.svg", t.ink2, 12.)).child(div().flex_1().min_w(px(0.)).one_line().child(subject.clone()))
+                    .tooltip(move |_, cx| cx.new(|_| Tip(t, format!("Open mail: {subject}").into())).into())
+                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); })))))
+            .when(task.mail_message_id.is_some() && subject_missing, |d| d.child(icon_button(&t, "task-mail", "icons/mail.svg", "Open mail")
                 .debug_selector(move || format!("task-mail-{id}"))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_task_mail(id, cx); }))))
             .when_some(task.due.as_deref().and_then(|due| due_label(due, &self.today.day, *DATE_LOCALE)),
@@ -452,7 +463,7 @@ impl MainWindow {
                 .debug_selector(move || format!("task-menu-{id}")).opacity(if selected { 1. } else { 0.2 }).group_hover("task-row", |s| s.opacity(1.))
                 .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_task_menu(TaskMenu::Task(id), window, cx); }))));
         if leaving {
-            row.with_animation(("task-complete", id as usize), Animation::new(MOTION), |row, delta| row.opacity(1. - ease_out_quint()(delta)).h(px(40. * (1. - spring(delta)).max(0.))).overflow_hidden()).into_any_element()
+            row.with_animation(("task-complete", id as usize), Animation::new(MOTION), move |row, delta| row.opacity(1. - ease_out_quint()(delta)).h(px(height * (1. - spring(delta)).max(0.))).overflow_hidden()).into_any_element()
         } else {
             let bounds = self.today.bounds.clone();
             // Record the nested row's bounds so keyboard selection scrolls only when it leaves the viewport.
@@ -478,7 +489,7 @@ impl MainWindow {
             (due.is_none(), due, t.position, t.id)
         });
         div().debug_selector(|| "home-tasks".into()).min_w(px(0.)).flex().flex_col().gap(px(4.))
-            .child(home::heading(&t, "To do").mb(px(8.)))
+            .child(home::heading(&t, "To-do").mb(px(8.)))
             .when(tasks.is_empty() && self.today.leaving.is_empty(), |d| d.child(div().text_color(t.ink2).py(px(4.)).child("Nothing to do today")))
             .children(tasks.into_iter().map(|task| self.task_row(task, self.today.leaving.iter().any(|t| t.id == task.id), cx)))
             .child(self.add_task_row(self.today.default, true, cx))
@@ -588,13 +599,24 @@ impl MainWindow {
                 .child(icon("icons/todo.svg", t.ink2, 32.))
                 .child(div().debug_selector(|| "No lists yet".into()).text_color(t.ink2).child("No lists yet"));
         }
-        for list in &self.today.lists {
+        if !self.today.lists.is_empty() && self.today.lists.iter().all(|list| open_count(&self.today.tasks, list.id) == 0) {
+            groups = groups.child(div().debug_selector(|| "todo-clear".into()).py(px(48.)).text_center()
+                .font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::HERO)).tracking(crate::theme::face::DISPLAY_TRACKING)
+                .line_height(relative(1.05)).child("Nothing to do. A clear day."));
+        }
+        for (ix, list) in self.today.lists.iter().enumerate() {
             let id = list.id;
+            let open = open_count(&self.today.tasks, id);
+            // shortcut: the dot colour follows list order; store a colour per list if people ask to choose one.
             let mut group = div().id(("task-list", id as usize)).debug_selector(move || format!("task-list-{id}"))
                 .flex().flex_col().gap(px(4.)).flex_shrink_0()
                 .child(div().flex().items_center().gap(px(8.))
-                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).map(|d| match self.task_input(Edit::RenameList(id)) {
-                        Some(input) => d.child(input), None => d.child(list.name.clone()),
+                    .child(div().debug_selector(move || format!("list-dot-{id}")).size(px(8.)).flex_shrink_0().rounded_full().bg(self.account_accent(ix)))
+                    .child(div().flex_1().min_w(px(0.)).flex().items_baseline().gap(px(8.)).map(|d| match self.task_input(Edit::RenameList(id)) {
+                        Some(input) => d.child(div().flex_1().child(input)),
+                        None => d.child(div().font_family(font::DISPLAY).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(list.name.clone()))
+                            .when(open > 0, |d| d.child(div().debug_selector(move || format!("list-count-{id}"))
+                                .font_family(font::MONO).text_size(px(size::SMALL)).text_color(t.ink2).child(open.to_string()))),
                     }))
                     .child(icon_button(&t, "list-menu", "icons/more.svg", "List actions")
                         .debug_selector(move || format!("list-menu-{id}"))
@@ -627,7 +649,7 @@ impl MainWindow {
         }
         div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
             .child(div().flex().items_center().justify_between()
-                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE)).child("Todo"))
+                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE)).child("To-do"))
                 .child(icon_button(&t, "new-list", "icons/plus.svg", "New list")
                     .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx)))))
             .children(self.task_input(Edit::AddList).map(|input| div().child(input)))
@@ -659,6 +681,11 @@ impl MainWindow {
             .children(self.task_menu(cx))
     }
 
+}
+
+/// Open tasks in a list, for its heading.
+fn open_count(tasks: &[LocalTask], list: i64) -> usize {
+    tasks.iter().filter(|task| task.list == list && task.done_at.is_none()).count()
 }
 
 fn due_label(due: &str, day: &str, locale: chrono::Locale) -> Option<(String, bool)> {
@@ -747,6 +774,40 @@ mod tests {
             assert!(cx.debug_bounds("due-Yesterday").is_some());
             assert!(cx.debug_bounds("due-Today").is_some());
         }
+    }
+
+    #[gpui::test]
+    fn mail_rows_without_a_subject_keep_the_mail_button(cx: &mut TestAppContext) {
+        for subject in [None, Some(String::new())] {
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                let mut v = MainWindow::with_screen(true, "todo", window, cx);
+                v.today.day = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let demo = Today::demo(&mut v.inbox.mail);
+                (v.today.lists, v.today.default, v.today.tasks) = (demo.lists, demo.default, demo.tasks);
+                v.today.tasks[0].mail_subject = subject.clone();
+                v
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("task-mail-1").unwrap().size, gpui::size(px(28.), px(28.)));
+            assert_eq!(cx.debug_bounds("task-1").unwrap().size.height, px(40.));
+        }
+    }
+
+    #[gpui::test]
+    fn todo_headings_count_open_tasks_and_clear_day_needs_every_list_empty(cx: &mut TestAppContext) {
+        let mut tasks = Today::demo(&mut []).tasks;
+        assert_eq!((open_count(&tasks, 1), open_count(&tasks, 2), open_count(&tasks, 3)), (2, 2, 0));
+        tasks[0].done_at = Some(1);
+        assert_eq!(open_count(&tasks, 1), 1);
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "todo", window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("list-count-1").is_some() && cx.debug_bounds("list-dot-2").is_some());
+        assert!(cx.debug_bounds("todo-clear").is_none());
+        view.update(cx, |v, cx| { for task in &mut v.today.tasks { task.done_at = Some(1); } cx.notify(); });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        // debug_bounds keeps earlier frames, so the hidden count is checked on the model.
+        assert_eq!(view.read_with(cx, |v, _| v.today.lists.iter().map(|l| open_count(&v.today.tasks, l.id)).sum::<usize>()), 0);
+        assert!(cx.debug_bounds("todo-clear").is_some() && cx.debug_bounds("add-task-1").is_some());
     }
 
     #[test]
@@ -1014,7 +1075,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn review_mail_button_follows_task_title_and_opens_mail_on_both_pages(cx: &mut TestAppContext) {
+    fn review_mail_subject_sits_under_task_title_and_opens_mail_on_both_pages(cx: &mut TestAppContext) {
         for dark in [false, true] {
             for screen in ["home", "todo"] {
                 let (view, cx) = cx.add_window_view(|window, cx| {
@@ -1026,8 +1087,7 @@ mod tests {
                 let title = cx.debug_bounds("task-title-1").unwrap();
                 let mail = cx.debug_bounds("task-mail-1").unwrap();
                 let due = cx.debug_bounds("due-Today").unwrap();
-                assert!(title.right() <= mail.left() && mail.right() <= due.left());
-                assert_eq!(mail.size, gpui::size(px(28.), px(28.)));
+                assert!(title.bottom() <= mail.top() && title.left() == mail.left() && mail.right() <= due.left());
                 assert!(cx.debug_bounds("task-mail-2").is_none());
                 cx.simulate_click(mail.center(), Default::default());
                 view.read_with(cx, |v, _| {

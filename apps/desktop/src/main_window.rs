@@ -219,7 +219,7 @@ const SECTIONS: [(&str, &str); 4] = [
     ("Today", "icons/home.svg"),
     ("Mail", "icons/mail.svg"),
     ("Calendar", "icons/calendar.svg"),
-    ("Todo", "icons/todo.svg"),
+    ("To-do", "icons/todo.svg"),
 ];
 
 /// What fills the main panel.
@@ -554,6 +554,12 @@ impl MainWindow {
         match screen {
             "home" => this.show_section(0, window, cx),
             "calendar" => this.show_section(2, window, cx),
+            // An event open in the side panel, for screenshots.
+            "calendar-event" if demo => {
+                this.show_section(2, window, cx);
+                this.reload_week(cx);
+                this.week.detail = this.week.days.iter().flatten().find(|e| e.event.join_url.is_some()).cloned();
+            }
             "calendar-month" => {
                 this.show_section(2, window, cx);
                 this.calendar_date(this.week.anchor, week::View::Month, cx);
@@ -1752,7 +1758,7 @@ impl MainWindow {
                             // Alex 2026-11-15: a quiet number, as on every other row; no filled pill.
                             .when(ix == 1 && unread > 0, |d| d.child(roll(
                                 mono(unread.to_string(), t.ink2).debug_selector(|| "mail-unread-badge".into()), format!("mail-{unread}"))))
-                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "Todo · ⌘4"][ix].into())).into())
+                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "To-do · ⌘4"][ix].into())).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     })))
                 .when(show_mail, |d| d.child(div().id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
@@ -2583,7 +2589,7 @@ impl Render for MainWindow {
             Page::Mail => self.list_title(),
             Page::Drafts => "Drafts".into(),
             Page::Home => "Today".into(),
-            Page::Todo => "Todo".into(),
+            Page::Todo => "To-do".into(),
             Page::Calendar => "Calendar".into(),
             Page::Settings(_) => "Settings".into(),
             Page::AddAccount(_) => "Add Account".into(),

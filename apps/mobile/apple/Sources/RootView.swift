@@ -119,7 +119,7 @@ struct RootView: View {
         case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 })
         case .mail: MailView(model: model, planner: planner, addAccount: $addAccount, removing: $removing)
         case .calendar: CalendarView(planner: planner, model: model)
-        case .todo: TodoView(planner: planner)
+        case .todo: TodoView(planner: planner, openMail: openMail)
         case .settings: SettingsView(model: model, addAccount: $addAccount, removing: $removing)
         }
     }

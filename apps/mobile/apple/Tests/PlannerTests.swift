@@ -147,6 +147,8 @@ final class PresentationTests: XCTestCase {
         TodaySummary(day: "2026-11-10", events: [], tasks: tasks.filter { !$0.done }, unreadCount: 3, unread: [])
     }
     override func mailCounts() async throws -> [MailCounts] { counts }
+    var mail: [Int64: Int64] = [:]
+    override func todoMail(id: Int64) async throws -> Int64? { mail[id] }
     override func agenda(startDay: String, days: UInt32) async throws -> [AgendaItem] { [] }
     override func calendarConnected() async throws -> Bool { false }
 }
@@ -191,5 +193,20 @@ extension PresentationTests {
         XCTAssertEqual(planner.today?.tasks.count, 0)
         await planner.toggle(Todo(id: 99, list: 1, title: "Gone", due: nil, done: false, fromMail: false, mailSubject: nil))
         XCTAssertNotNil(planner.error, "a refused toggle is reported")
+    }
+
+    @MainActor func testTaskMailOpensItsMessageOrSaysItIsGone() async {
+        let core = PlannerFixtureCore(noHandle: .init())
+        core.mail = [7: 42]
+        let planner = PlannerModel()
+        planner.core = core
+        let task = Todo(id: 7, list: 1, title: "Reply", due: nil, done: false, fromMail: true, mailSubject: "Hello")
+        let found = await planner.mail(for: task)
+        XCTAssertEqual(found, 42)
+        XCTAssertNil(planner.error)
+        core.mail = [:]
+        let gone = await planner.mail(for: task)
+        XCTAssertNil(gone)
+        XCTAssertEqual(planner.error, "The linked mail is no longer available.")
     }
 }

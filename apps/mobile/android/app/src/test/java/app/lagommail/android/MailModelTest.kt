@@ -1123,6 +1123,7 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> { agendaCalls += startDay to days; return events }
     override suspend fun calendarConnected(): Boolean = connected
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
+    override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
     override suspend fun setTodoDone(id: Long, done: Boolean) {
         check(!rejectPlanner) { "Fixture task refused" }
