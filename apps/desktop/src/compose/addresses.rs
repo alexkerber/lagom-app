@@ -152,6 +152,8 @@ impl Compose {
                 cx.notify();
             }))
             .child(div().id(("recipient-tokens", field)).flex().flex_wrap().items_center().gap(px(4.)).py(px(6.))
+                // The scroll box clips: room for the field's 3 px focus ring, cancelled by the margin.
+                .px(px(4.)).mx(px(-4.))
                 .max_h(px(96.)).overflow_y_scroll().children(tokens)
                 .child(div().flex_1().min_w(px(140.)).child(input)))
             .when(open, |d| d.child(gpui::deferred(div().absolute().top_full().left_0().right_0()
