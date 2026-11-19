@@ -10,9 +10,14 @@ pub struct Todo {
     pub id: i64, pub list: i64, pub title: String,
     /// `YYYY-MM-DD`, or an RFC 3339 instant from a synced provider; the first ten characters are the date.
     pub due: Option<String>, pub done: bool, pub from_mail: bool,
+    /// The source mail's subject, only on a task made from mail.
+    pub mail_subject: Option<String>,
 }
 impl From<Task> for Todo {
-    fn from(t: Task) -> Self { Self { id: t.id, list: t.list, title: t.title, due: t.due, done: t.done_at.is_some(), from_mail: t.mail_message_id.is_some_and(|m| !m.is_empty()) } }
+    fn from(t: Task) -> Self {
+        let from_mail = t.mail_message_id.is_some_and(|m| !m.is_empty());
+        Self { id: t.id, list: t.list, title: t.title, due: t.due, done: t.done_at.is_some(), from_mail, mail_subject: t.mail_subject.filter(|_| from_mail) }
+    }
 }
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct AgendaItem {
@@ -73,6 +78,10 @@ impl LagomCore {
     }
     pub async fn delete_todo(&self, id: i64) -> Result<()> {
         self.run(move |s| s.delete_task(id)).await
+    }
+    /// The stored message a task was made from, newest copy first; nil once it is no longer stored here.
+    pub async fn todo_mail(&self, id: i64) -> Result<Option<i64>> {
+        self.run(move |s| s.task_mail(id)).await
     }
     /// Cached events for `days` local days from `start_day`, all-day events first within each day.
     pub async fn agenda(&self, start_day: String, days: u32) -> Result<Vec<AgendaItem>> {
@@ -148,18 +157,23 @@ pub fn seed_demo(data_dir: String) -> Result<()> {
         s.reset_uidvalidity(inbox, 1)?;
         Ok(inbox)
     }).collect::<lagom_core::Result<Vec<_>>>()?;
+    let mut first_mail = None;
     for (uid, (account, name, address, (days, h, m), subject, snippet, seen, attachment)) in mail.into_iter().enumerate() {
-        s.save_message(&lagom_core::store::Message {
-            summary: MessageSummary { account: accounts[account].id.clone(), folder: folders[account], uid: uid as u32 + 1, date: at(days, h, m),
-                from_name: name.into(), from_address: address.into(), to: accounts[account].email.clone(), subject: subject.into(),
-                snippet: snippet.into(), seen, has_attachments: attachment, message_id: format!("demo{uid}@lagom.example"), ..Default::default() },
-            body_text: format!("{snippet}\n\n{name}"), body_html: None,
-        })?;
+        let summary = MessageSummary { account: accounts[account].id.clone(), folder: folders[account], uid: uid as u32 + 1, date: at(days, h, m),
+            from_name: name.into(), from_address: address.into(), to: accounts[account].email.clone(), subject: subject.into(),
+            snippet: snippet.into(), seen, has_attachments: attachment, message_id: format!("demo{uid}@lagom.example"), ..Default::default() };
+        first_mail.get_or_insert_with(|| summary.clone());
+        s.save_message(&lagom_core::store::Message { summary, body_text: format!("{snippet}\n\n{name}"), body_html: None })?;
     }
     let lists = s.task_lists()?;
     let date = |offset: i64| Some((today + chrono::Duration::days(offset)).to_string());
     for (list, title, due) in [(0, "Prepare for the board meeting", date(0)), (0, "Review the project brief", date(-1)), (1, "Pick up groceries", None), (1, "Book the train home", date(3))] {
         s.add_task(lists[list.min(lists.len() - 1)].id, title, "", due)?;
+    }
+    // A task made from mail keeps the subject as its second line, so it gets its own title.
+    if let Some(mail) = first_mail {
+        let task = s.task_from_mail(lists[0].id, &mail)?;
+        s.rename_task(task.id, "Reply to Ingrid about Thursday")?;
     }
     let event = |id: &str, title: &str, start: i64, minutes: i64, join: Option<&str>| lagom_core::calendar::Event {
         remote_id: id.into(), title: title.into(), start: String::new(), end: String::new(), start_utc: start, end_utc: start + minutes * 60,
@@ -225,6 +239,14 @@ mod tests {
         assert_eq!(today.unread_count, 3);
         assert_eq!(today.unread.len(), 3);
         assert!(today.tasks.iter().any(|t| t.title == "Review the project brief"), "overdue tasks are due today");
+        let lists = core.todo_lists().await.unwrap();
+        let from_mail = core.todos(lists[0].id, false).await.unwrap().into_iter().find(|t| t.from_mail).expect("a demo task from mail");
+        assert_eq!(from_mail.mail_subject.as_deref(), Some("Board meeting moved to Thursday"));
+        let mail = core.todo_mail(from_mail.id).await.unwrap().expect("the demo mail is stored");
+        assert_eq!(core.conversation(mail).await.unwrap().iter().find(|m| m.row.id == mail).map(|m| m.row.subject.clone()).as_deref(), Some("Board meeting moved to Thursday"));
+        let plain = core.todos(lists[0].id, false).await.unwrap().into_iter().find(|t| !t.from_mail).unwrap();
+        assert_eq!(core.todo_mail(plain.id).await.unwrap(), None, "a task not from mail has no message");
+        assert!(core.todos(lists[0].id, false).await.unwrap().iter().filter(|t| !t.from_mail).all(|t| t.mail_subject.is_none()));
         let agenda = core.agenda(today.day.clone(), 7).await.unwrap();
         assert_eq!(agenda.iter().filter(|e| e.day == today.day).count(), 4);
         assert!(agenda.iter().any(|e| e.title == "Train to Göteborg" && e.day != today.day));

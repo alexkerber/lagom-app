@@ -274,7 +274,7 @@ mod tests {
         let (view, cx) = super::super::dispatch::open(cx);
         view.update_in(cx, |v, window, cx| v.show_section(3, window, cx));
         cx.run_until_parked();
-        for path in ["plus", "more", "mail", "settings"] {
+        for path in ["plus", "more", "settings"] {
             let bounds = cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
             assert_eq!(bounds.size, gpui::size(px(16.), px(16.)), "{path}");
         }
@@ -362,7 +362,7 @@ mod tests {
             for active in [false, true] {
                 let mut mail = sidebar_nav(&t, "icons/mail.svg", "Mail", None, active, true, true);
                 assert_eq!(mail.style().background.is_some(), active);
-                for label in ["Today", "Calendar", "Todo"] {
+                for label in ["Today", "Calendar", "To-do"] {
                     let mut row = sidebar_nav(&t, "icons/later.svg", label, None, active, true, true);
                     assert_eq!(row.style().background.is_some(), active);
                 }

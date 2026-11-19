@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -85,9 +87,25 @@ internal val AppSection.icon: Int get() = when (this) {
     }
 }
 
-/** Schedule, To do, Mail, a task list's name. */
-@Composable private fun Heading(title: String, modifier: Modifier = Modifier) =
-    Text(title, modifier.padding(bottom = 8.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+/** A task list's heading, "● Work  4": its dot, its name and the tasks still to do. */
+@Composable private fun ListHeading(title: String, dot: Color, open: Int, modifier: Modifier = Modifier) {
+    Row(modifier.padding(bottom = 8.dp).semantics(mergeDescendants = true) { heading() }, verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.size(8.dp).background(dot, CircleShape))
+        // The count keeps its room when a long name ellipsizes.
+        Text(title, Modifier.weight(1f, fill = false), color = lagom.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
+        if (open > 0) Text("$open", Modifier.semantics { contentDescription = "$open open" }, color = lagom.ink2,
+            fontFamily = LabelFace, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** Today's display sentence, also To-do's "A clear day.". */
+@Composable private fun DisplaySentence(text: AnnotatedString, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign: TextAlign? = null) {
+    val wide = LocalConfiguration.current.screenWidthDp >= 600
+    Text(text, modifier.semantics { heading() }, color = color, fontFamily = DisplayFace, textAlign = textAlign,
+        fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, letterSpacing = DisplayTracking.em, lineHeight = if (wide) 50.sp else 36.sp)
+}
 
 /** Small Geist Mono capitals, the site's labels: Today's date and section titles. */
 @Composable internal fun MonoLabel(text: String, modifier: Modifier = Modifier) =
@@ -96,7 +114,6 @@ internal val AppSection.icon: Int get() = when (this) {
 
 /** The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page. */
 @Composable private fun TodaySentence(planner: PlannerModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
-    val wide = LocalConfiguration.current.screenWidthDp >= 600
     val ink = MaterialTheme.colorScheme.onSurface
     val greeting = when (LocalTime.now().hour) { in 0..11 -> "Good morning."; in 12..17 -> "Good afternoon."; else -> "Good evening." }
     fun count(n: Int, one: String, many: String, none: String) = when (n) { 0 -> none; 1 -> "1 $one"; else -> "$n $many" }
@@ -114,8 +131,7 @@ internal val AppSection.icon: Int get() = when (this) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         MonoLabel(localDate(LocalDate.now(), "EEEEdMMMM"))
-        Text(text, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = DisplayFace,
-            fontWeight = FontWeight.Bold, fontSize = if (wide) 48.sp else 34.sp, letterSpacing = DisplayTracking.em, lineHeight = if (wide) 50.sp else 36.sp)
+        DisplaySentence(text)
     }
 }
 
@@ -171,7 +187,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     if (events.isNotEmpty() && nowIndex == events.size) NowLine(now)
                 }
                 Column {
-                    MonoLabel("To do", Modifier.padding(bottom = 8.dp))
+                    MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
                     val tasks = planner.today?.tasks.orEmpty()
                     if (tasks.isEmpty()) Quiet("Nothing due today.")
                     tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { planner.toggle(todo) } } }
@@ -271,7 +287,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     var showDone by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
-        PageTitle("Todo") {
+        PageTitle(AppSection.TODO.title) {
             Box {
                 LagomIconButton("Add", R.drawable.ic_plus) { menu = true }
                 DropdownMenu(menu, { menu = false }) {
@@ -283,10 +299,16 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         Refreshable(planner, { planner.reloadTodos() }, Modifier.weight(1f)) {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                 if (planner.lists.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_todo, "No lists", Modifier.fillParentMaxSize(), "Add a list to start.") }
-                planner.lists.forEach { list ->
+                // The lists and their add rows stay below, so adding is still one tap away.
+                else if (planner.lists.all { planner.openCount(it.id) == 0 }) item(key = "clear") {
+                    DisplaySentence(AnnotatedString("Nothing to do.\nA clear day."), Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                        color = lagom.ink, textAlign = TextAlign.Center)
+                }
+                planner.lists.forEachIndexed { index, list ->
                     val all = planner.todos[list.id].orEmpty()
                     val done = all.filter { it.done }
-                    item(key = "list-${list.id}") { Heading(list.name, Modifier.padding(top = 16.dp, bottom = 4.dp)) }
+                    // shortcut: the dot follows list order, so it moves when lists are added or removed; store a colour if people ask to choose one.
+                    item(key = "list-${list.id}") { ListHeading(list.name, accountAccent(index), planner.openCount(list.id), Modifier.padding(top = 16.dp, bottom = 4.dp)) }
                     items(all.filter { !it.done }, key = { it.id }) { DeletableTodoRow(planner, it, words) }
                     item(key = "add-${list.id}") { AddRow("Add task") { adding = list.id } }
                     if (done.isNotEmpty()) {
@@ -406,47 +428,9 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     }
 }
 
-/** Cached events by day under the month title, as iOS's phone Calendar. A tablet gets iPad's week grid instead. */
+/** A week strip over one day on phones; tablets keep the full week, as on iOS. */
 @Composable internal fun CalendarScreen(planner: PlannerModel, grid: Boolean = false) {
-    if (grid) return WeekGrid(planner)
-    val now = nowSeconds()
-    val today = LocalDate.now()
-    val words = DateWords()
-    Column(Modifier.fillMaxSize()) {
-        TopBar(Modifier.statusBarsPadding().semantics(mergeDescendants = true) { heading() }) {
-            Text(localDate(today, "MMMM"), style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
-            Text(localDate(today, "yyyy"), Modifier.padding(start = 2.dp), style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Normal),
-                color = lagom.ink2)
-        }
-        Refreshable(planner, { planner.reloadAgenda() }, Modifier.weight(1f)) {
-            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                if (planner.agenda.isEmpty()) item(key = "empty") {
-                    if (planner.calendarConnected) EmptyState(R.drawable.ic_calendar, "Nothing scheduled", Modifier.fillParentMaxSize(), "No events in the next two weeks.")
-                    else EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillParentMaxSize(), CalendarNeedsGoogle)
-                }
-                // Core lists events by day, so grouping keeps the days in order.
-                planner.agenda.groupBy { it.day }.forEach { (day, events) ->
-                    item(key = "day-$day") { DayHeader(day, words) }
-                    items(events) { EventRow(planner, it, now) }
-                }
-            }
-        }
-    }
-}
-
-/** "Mon 9" as the desktop week's column heads, today's number in a filled accent circle. */
-@Composable private fun DayHeader(value: String, words: DateWords) {
-    val day = words.day(value) ?: return
-    val today = day == LocalDate.now()
-    val colors = MaterialTheme.colorScheme
-    Row(Modifier.padding(top = 14.dp, bottom = 2.dp).clearAndSetSemantics { contentDescription = words.dayTitle(value); heading() },
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(localDate(day, "EEE"), color = colors.onSurfaceVariant)
-        Box(Modifier.sizeIn(minWidth = 38.dp, minHeight = 38.dp).background(if (today) colors.primary else Color.Transparent, CircleShape),
-            contentAlignment = Alignment.Center) {
-            Text(day.dayOfMonth.toString(), style = MaterialTheme.typography.titleMedium, color = if (today) colors.onPrimary else colors.onSurface)
-        }
-    }
+    WeekGrid(planner, oneDay = !grid)
 }
 
 private const val CalendarNeedsGoogle =
@@ -456,16 +440,22 @@ private val HourHeight = 60.dp
 private val Gutter = 48.dp
 
 /** iPad's week, desktop `week::week_view`: day columns on an hour grid, all-day events above, the now line across. */
-@Composable private fun WeekGrid(planner: PlannerModel) {
-    val days = (0L until 7L).map { planner.weekStart.plusDays(it) }
+@Composable private fun WeekGrid(planner: PlannerModel, oneDay: Boolean) {
+    var selected by remember(planner.weekStart) { mutableStateOf(calendarDay(planner.weekStart, LocalDate.now())) }
+    val week = (0L until 7L).map { planner.weekStart.plusDays(it) }
+    val days = if (oneDay) listOf(selected) else week
     val byDay = planner.week.groupBy { it.day }
     var shown by remember { mutableStateOf<AgendaItem?>(null) }
-    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
-        WeekHeader(planner)
+    Column(Modifier.fillMaxSize().padding(horizontal = if (oneDay) 16.dp else 24.dp)) {
+        WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3)) {
+            selected = LocalDate.now()
+            planner.perform { planner.showWeek(0) }
+        }
+        if (oneDay) WeekStrip(week, selected) { selected = it }
         if (!planner.calendarConnected && planner.week.isEmpty()) {
             EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(), CalendarNeedsGoogle)
         } else {
-            Row(Modifier.padding(top = 8.dp)) {
+            if (!oneDay) Row(Modifier.padding(top = 8.dp)) {
                 Spacer(Modifier.width(Gutter))
                 days.forEach { WeekDayHead(it, Modifier.weight(1f)) }
             }
@@ -487,19 +477,40 @@ private val Gutter = 48.dp
     shown?.let { EventDetails(planner, it) { shown = null } }
 }
 
-/** The month of the week's Thursday, as ISO weeks count, and the week buttons. */
-@Composable private fun WeekHeader(planner: PlannerModel) {
-    val thursday = planner.weekStart.plusDays(3)
+/** The selected day's month on phones, the week's Thursday on tablets, and the week buttons. */
+@Composable private fun WeekHeader(planner: PlannerModel, month: LocalDate, onToday: () -> Unit) {
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(localDate(thursday, "MMMM"), style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
-            Text(localDate(thursday, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.weight(1f).semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(localDate(month, "MMMM"), Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
+            Text(localDate(month, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Spacer(Modifier.weight(1f))
         LagomIconButton("Previous week", R.drawable.ic_chevron_left) { planner.perform { planner.showWeek(-1) } }
-        HouseButton("Today") { planner.perform { planner.showWeek(0) } }
+        HouseButton("Today", onClick = onToday)
         LagomIconButton("Next week", R.drawable.ic_chevron_right) { planner.perform { planner.showWeek(1) } }
+    }
+}
+
+/** Seven tappable days: the selection is filled, today otherwise stays in the accent. */
+@Composable private fun WeekStrip(week: List<LocalDate>, selected: LocalDate, onSelect: (LocalDate) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val today = LocalDate.now()
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        week.forEach { day ->
+            val chosen = day == selected
+            Column(Modifier.weight(1f).heightIn(min = 48.dp)
+                .selectable(chosen, role = Role.Button) { onSelect(day) }
+                .semantics { contentDescription = localDate(day, "EEEEdMMMM") },
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(localDate(day, "EEEEE"), Modifier.clearAndSetSemantics {}, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+                Box(Modifier.size(40.dp).background(if (chosen) colors.primary else Color.Transparent, CircleShape).clearAndSetSemantics {},
+                    contentAlignment = Alignment.Center) {
+                    Text(day.dayOfMonth.toString(), style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+                        color = if (chosen) colors.onPrimary else if (day == today) colors.primary else colors.onSurface)
+                }
+            }
+        }
     }
 }
 
@@ -519,13 +530,14 @@ private val Gutter = 48.dp
     }
 }
 
-/** The hours with each day's timed events; opens at the week's first event, or 08:00 on an empty week. */
+/** Opens at the first event, the current hour on an empty today, or otherwise 08:00. */
 @Composable private fun HourGrid(days: List<LocalDate>, byDay: Map<String, List<AgendaItem>>, onShow: (AgendaItem) -> Unit) {
     val blocks = days.map { weekBlocks(byDay[it.toString()].orEmpty(), it) }
-    val first = blocks.flatten().minOfOrNull { it.start }?.let { maxOf(0, (it / 60).toInt() - 1) } ?: 8
+    val first = blocks.flatten().minOfOrNull { it.start }?.let { maxOf(0, (it / 60).toInt() - 1) }
+        ?: if (days.singleOrNull() == LocalDate.now()) LocalTime.now().hour else 8
     val scroll = rememberScrollState()
     val hour = with(LocalDensity.current) { HourHeight.roundToPx() }
-    LaunchedEffect(days.first(), first) { scroll.scrollTo(first * hour) }
+    LaunchedEffect(days, first) { scroll.scrollTo(first * hour) }
     val colors = MaterialTheme.colorScheme
     Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(top = 12.dp)) {
         Row {

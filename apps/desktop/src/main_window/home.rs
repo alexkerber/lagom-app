@@ -485,7 +485,7 @@ mod tests {
         cx.update(|cx| bind_keys(cx));
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Home)));
-        assert_eq!(SECTIONS.map(|s| s.0), ["Today", "Mail", "Calendar", "Todo"]);
+        assert_eq!(SECTIONS.map(|s| s.0), ["Today", "Mail", "Calendar", "To-do"]);
         let paths: HashSet<_> = SECTIONS.iter().map(|s| s.1).chain(["icons/inbox.svg", "icons/later.svg", "icons/sent.svg", "icons/done.svg", "icons/trash.svg"]).collect();
         assert_eq!(paths.len(), 9);
         cx.run_until_parked();

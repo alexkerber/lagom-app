@@ -119,7 +119,7 @@ final class PresentationTests: XCTestCase {
 
     func testDueTasksCountOnlyTodayAndEarlier() {
         // Today's list also shows a few undated and future tasks; the sentence counts only the due ones, as desktop.
-        func todo(_ due: String?) -> Todo { Todo(id: 1, list: 1, title: "t", due: due, done: false, fromMail: false) }
+        func todo(_ due: String?) -> Todo { Todo(id: 1, list: 1, title: "t", due: due, done: false, fromMail: false, mailSubject: nil) }
         let tasks = [todo("2026-11-16"), todo("2026-11-17T09:00:00Z"), todo("2026-11-18"), todo(nil)]
         XCTAssertEqual(dueCount(tasks, day: "2026-11-17"), 2)
     }
@@ -135,7 +135,7 @@ final class PresentationTests: XCTestCase {
     override func todos(list: Int64, includeDone: Bool) async throws -> [Todo] { tasks.filter { $0.list == list } }
     override func addTodo(list: Int64, title: String, dueDate: String?) async throws -> Todo {
         added.append((list, title, dueDate))
-        let todo = Todo(id: Int64(tasks.count + 1), list: list, title: title, due: dueDate, done: false, fromMail: false)
+        let todo = Todo(id: Int64(tasks.count + 1), list: list, title: title, due: dueDate, done: false, fromMail: false, mailSubject: nil)
         tasks.append(todo)
         return todo
     }
@@ -147,6 +147,8 @@ final class PresentationTests: XCTestCase {
         TodaySummary(day: "2026-11-10", events: [], tasks: tasks.filter { !$0.done }, unreadCount: 3, unread: [])
     }
     override func mailCounts() async throws -> [MailCounts] { counts }
+    var mail: [Int64: Int64] = [:]
+    override func todoMail(id: Int64) async throws -> Int64? { mail[id] }
     override func agenda(startDay: String, days: UInt32) async throws -> [AgendaItem] { [] }
     override func calendarConnected() async throws -> Bool { false }
 }
@@ -178,14 +180,33 @@ extension PresentationTests {
 
     @MainActor func testPlannerTogglesThroughCoreAndReloads() async {
         let core = PlannerFixtureCore(noHandle: .init())
-        core.tasks = [Todo(id: 7, list: 1, title: "Call", due: nil, done: false, fromMail: false)]
+        core.tasks = [Todo(id: 7, list: 1, title: "Call", due: nil, done: false, fromMail: false, mailSubject: nil)]
         let planner = PlannerModel()
         planner.core = core
         await planner.reloadTodos()
+        XCTAssertEqual(planner.openCount(list: 1), 1)
+        XCTAssertFalse(planner.allClear)
         await planner.toggle(planner.todos[1]![0])
         XCTAssertEqual(planner.todos[1]?.first?.done, true)
+        XCTAssertEqual(planner.openCount(list: 1), 0, "a done task leaves the heading count")
+        XCTAssertTrue(planner.allClear, "no open task in any list")
         XCTAssertEqual(planner.today?.tasks.count, 0)
-        await planner.toggle(Todo(id: 99, list: 1, title: "Gone", due: nil, done: false, fromMail: false))
+        await planner.toggle(Todo(id: 99, list: 1, title: "Gone", due: nil, done: false, fromMail: false, mailSubject: nil))
         XCTAssertNotNil(planner.error, "a refused toggle is reported")
+    }
+
+    @MainActor func testTaskMailOpensItsMessageOrSaysItIsGone() async {
+        let core = PlannerFixtureCore(noHandle: .init())
+        core.mail = [7: 42]
+        let planner = PlannerModel()
+        planner.core = core
+        let task = Todo(id: 7, list: 1, title: "Reply", due: nil, done: false, fromMail: true, mailSubject: "Hello")
+        let found = await planner.mail(for: task)
+        XCTAssertEqual(found, 42)
+        XCTAssertNil(planner.error)
+        core.mail = [:]
+        let gone = await planner.mail(for: task)
+        XCTAssertNil(gone)
+        XCTAssertEqual(planner.error, "The linked mail is no longer available.")
     }
 }

@@ -96,7 +96,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Today", crate::main_window::ShowHome),
                 MenuItem::action("Mail", crate::main_window::ShowMail),
                 MenuItem::action("Calendar", crate::main_window::ShowCalendar),
-                MenuItem::action("Todo", crate::main_window::ShowTodo),
+                MenuItem::action("To-do", crate::main_window::ShowTodo),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", crate::main_window::ToggleSidebar),
                 MenuItem::separator(),

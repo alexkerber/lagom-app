@@ -1116,13 +1116,14 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun addTodo(list: Long, title: String, dueDate: String?): Todo {
         check(!rejectPlanner) { "Fixture task refused" }
         addedTodos += Triple(list, title, dueDate)
-        return Todo((tasks.maxOfOrNull { it.id } ?: 0) + 1, list, title, dueDate, false, false).also { tasks += it }
+        return Todo((tasks.maxOfOrNull { it.id } ?: 0) + 1, list, title, dueDate, false, false, null).also { tasks += it }
     }
     override suspend fun addTodoList(name: String): TodoList =
         TodoList((todoLists.maxOf { it.id }) + 1, name, false).also { todoLists += it }
     override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> { agendaCalls += startDay to days; return events }
     override suspend fun calendarConnected(): Boolean = connected
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
+    override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
     override suspend fun setTodoDone(id: Long, done: Boolean) {
         check(!rejectPlanner) { "Fixture task refused" }
