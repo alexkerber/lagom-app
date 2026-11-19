@@ -15,7 +15,7 @@ One inbox for all your accounts, or one account at a time. Later, Done, Sent, Dr
 
 Write in plain text or Markdown. Drafts save as you type, signatures are per account, and Undo send gives you a moment to take it back.
 
-Todo keeps simple lists on your phone. Add a task from a message, and it remembers where it came from.
+To-do keeps simple lists on your phone. Add a task from a message, and it remembers where it came from.
 
 Your mail goes from your phone to your own mail server and nowhere else. lagom has no account of its own, no ads, no tracking and no AI features. Remote images stay off until you tap "Load remote images", so senders cannot see when you read. Your password is encrypted with the Android Keystore.
 
