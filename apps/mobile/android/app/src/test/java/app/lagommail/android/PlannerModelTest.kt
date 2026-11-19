@@ -46,6 +46,8 @@ class PlannerModelTest {
         planner.toggle(milk)
         assertEquals("completed tasks stay in the list, after open ones", listOf("Bread" to false, "Milk" to true),
             planner.todos.getValue(2).map { it.title to it.done })
+        assertEquals("the heading counts only open tasks", 1, planner.openCount(2))
+        assertEquals(0, planner.openCount(1))
         planner.toggle(planner.todos.getValue(2).last())
         assertFalse(planner.todos.getValue(2).first { it.title == "Milk" }.done)
         planner.delete(planner.todos.getValue(2).first { it.title == "Bread" })
@@ -111,6 +113,18 @@ class PlannerModelTest {
         assertEquals(thisWeek.plusWeeks(1).toString() to 7u, core.agendaCalls.last())
         planner.showWeek(-2); planner.showWeek(0)
         assertEquals(thisWeek, planner.weekStart)
+    }
+
+    @Test fun newWeekSelectsTodayWhenContainedOtherwiseItsFirstDay() {
+        val start = LocalDate.of(2026, 11, 16)
+        for (offset in 0L..6L) {
+            val today = start.plusDays(offset)
+            assertEquals(today, calendarDay(start, today))
+        }
+        assertEquals(start, calendarDay(start, start.minusDays(1)))
+        assertEquals(start, calendarDay(start, start.plusDays(7)))
+        val yearEnd = LocalDate.of(2026, 12, 28)
+        assertEquals(LocalDate.of(2027, 1, 1), calendarDay(yearEnd, LocalDate.of(2027, 1, 1)))
     }
 
     @Test fun weekBlocksShareOverlapsInLanesAsOnDesktop() {
