@@ -82,6 +82,8 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           SIGNED: ${{ steps.signing.outputs.signed }}
           REF_TYPE: ${{ github.ref_type }}
+          LAGOM_GOOGLE_IOS_CLIENT_ID: ${{ vars.LAGOM_GOOGLE_IOS_CLIENT_ID }}
+          LAGOM_MICROSOFT_IOS_CLIENT_ID: ${{ vars.LAGOM_MICROSOFT_CLIENT_ID }}
         run: |
           if [[ $SIGNED != 1 ]]; then mode=--unsigned
           elif [[ $REF_TYPE == tag ]]; then mode=--upload

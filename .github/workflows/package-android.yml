@@ -76,6 +76,9 @@ jobs:
           LAGOM_ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.LAGOM_ANDROID_KEY_ALIAS || '' }}
           LAGOM_ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.LAGOM_ANDROID_KEY_PASSWORD || '' }}
           VERSION: ${{ steps.version.outputs.version }}
+          # Public client IDs (repository variables, not secrets); empty hides that sign-in button.
+          LAGOM_GOOGLE_ANDROID_CLIENT_ID: ${{ vars.LAGOM_GOOGLE_ANDROID_CLIENT_ID }}
+          LAGOM_MICROSOFT_ANDROID_CLIENT_ID: ${{ vars.LAGOM_MICROSOFT_CLIENT_ID }}
         run: |
           ./gradlew :app:bundleRelease :app:assembleRelease
           mkdir -p "$RUNNER_TEMP/out"
