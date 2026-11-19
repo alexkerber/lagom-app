@@ -103,6 +103,17 @@ impl LagomCore {
             Ok(false)
         }).await
     }
+    /// Google accounts without calendar access, for "Show your Google Calendar". Empty when no account can add it.
+    pub async fn calendar_access_needed(&self) -> Result<Vec<MailAccount>> {
+        self.run(|s| {
+            let mut needed = Vec::new();
+            for a in s.accounts()? {
+                if a.auth == lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google)
+                    && !lagom_core::oauth::calendar_allowed(&s.account_scopes(&a.id)?) { needed.push(a.into()); }
+            }
+            Ok(needed)
+        }).await
+    }
     /// The calm Today page: today's events, due tasks (core's selection), and the newest unread Inbox mail.
     pub async fn today(&self, unread_limit: u32) -> Result<TodaySummary> {
         self.run(move |s| {
@@ -129,7 +140,12 @@ impl LagomCore {
 /// password, so sync fails; the app skips sync in demo mode.
 /// shortcut: shipped in release builds but only called from the DEBUG `-LagomDemo` launch argument; gate behind a cargo feature if the binary size matters.
 #[uniffi::export]
-pub fn seed_demo(data_dir: String) -> Result<()> {
+pub fn seed_demo(data_dir: String) -> Result<()> { seed(data_dir, None) }
+/// The same fixtures without a fetched calendar, for screenshots of Calendar's empty states: with `google`,
+/// the first account is a Google account that has mail access only; otherwise every account has a password.
+#[uniffi::export]
+pub fn seed_demo_without_calendar(data_dir: String, google: bool) -> Result<()> { seed(data_dir, Some(google)) }
+fn seed(data_dir: String, without_calendar: Option<bool>) -> Result<()> {
     std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
     let mut s = Store::open(std::path::Path::new(&data_dir).join("lagom.sqlite3"))?;
     if !s.accounts()?.is_empty() { return Ok(()); }
@@ -140,7 +156,10 @@ pub fn seed_demo(data_dir: String) -> Result<()> {
     for (name, email) in [("Personal", "you@home.example"), ("Work", "you@work.example")] {
         let mut a = Account::new(email.into(), server("imap.example", email), server("smtp.example", email))?;
         a.display_name = name.into();
-        s.save_account(&a)?;
+        if without_calendar == Some(true) && accounts.is_empty() {
+            a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            s.save_authorized_account(&a, "https://mail.google.com/ openid email profile")?;
+        } else { s.save_account(&a)?; }
         accounts.push(a);
     }
     let mail = [
@@ -183,6 +202,7 @@ pub fn seed_demo(data_dir: String) -> Result<()> {
     let events = vec![planning, event("plan", "Plan the day", at(0, 9, 0), 30, None),
         event("review", "Design review", at(0, 11, 0), 60, Some("https://meet.example/review")), event("focus", "Focus time", at(0, 14, 0), 45, None),
         event("lunch", "Lunch with Maja", at(-2, 12, 0), 60, None), event("train", "Train to Göteborg", at(-4, 7, 10), 175, None)];
+    if without_calendar.is_some() { return Ok(()); }
     let calendar = lagom_core::calendar::Calendar { remote_id: "primary".into(), name: "Personal".into(), color: None, shown: true, writable: false };
     Ok(s.replace_calendar_window(&accounts[0].id, at(7, 0, 0), at(-30, 0, 0), &[(calendar, events)])?)
 }
@@ -254,6 +274,47 @@ mod tests {
         assert!(core.agenda("today".into(), 1).await.is_err());
         let counts = core.mail_counts().await.unwrap();
         assert_eq!(counts.iter().map(|c| c.inbox).sum::<u64>(), 7);
+    }
+
+    #[tokio::test]
+    async fn only_google_accounts_without_calendar_scopes_are_offered_access() {
+        let (_dir, core) = open();
+        let (google, granted) = {
+            let s = core.stores.local.lock().unwrap();
+            let server = ServerConfig { host: "127.0.0.1".into(), port: 1, username: "p@example.test".into(), security: Security::Plain };
+            s.save_account(&Account::new("p@example.test".into(), server.clone(), server).unwrap()).unwrap();
+            let accounts = ["mail@gmail.com", "both@gmail.com"].map(|email| {
+                let (imap, smtp) = lagom_core::presets::servers(email).unwrap();
+                let mut a = Account::new(email.into(), imap, smtp).unwrap();
+                a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+                a
+            });
+            s.save_authorized_account(&accounts[0], "https://mail.google.com/ openid email profile").unwrap();
+            s.save_authorized_account(&accounts[1], &format!("https://mail.google.com/ {}", lagom_core::oauth::GOOGLE_CALENDAR_SCOPES)).unwrap();
+            let [google, granted] = accounts;
+            (google, granted)
+        };
+        let offered = core.calendar_access_needed().await.unwrap();
+        assert_eq!(offered.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [google.id.as_str()]);
+        let password = core.accounts().await.unwrap().into_iter().find(|a| a.email == "p@example.test").unwrap();
+        assert!(core.begin_calendar_access(password.id).is_err(), "a password account has no Google grant");
+        assert!(core.begin_calendar_access("missing".into()).is_err());
+        // Google took the grant back: access is offered again and mail keeps its scope.
+        core.stores.local.lock().unwrap().drop_calendar_scopes(&granted.id).unwrap();
+        assert_eq!(core.calendar_access_needed().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn demo_without_calendar_offers_google_access_or_nothing() {
+        for google in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path: String = dir.path().to_string_lossy().into();
+            seed_demo_without_calendar(path.clone(), google).unwrap();
+            let core = LagomCore::open(path).unwrap();
+            assert!(!core.calendar_connected().await.unwrap());
+            assert_eq!(core.calendar_access_needed().await.unwrap().len(), usize::from(google));
+            assert!(!core.today(3).await.unwrap().tasks.is_empty(), "the rest of the fixtures stay");
+        }
     }
 
     #[tokio::test]

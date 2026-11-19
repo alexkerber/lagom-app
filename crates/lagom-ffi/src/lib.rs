@@ -359,8 +359,20 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
         }
     }
     if let Some(session) = session { let _ = network(session.logout()); }
+    sync_google(stores, a);
     if let Some(error) = first { return Err(error); }
     match error { Some(error) => Err(error), None => Ok(()) }
+}
+/// Calendar and Google Tasks, on their own connection as on desktop, after mail.
+// shortcut: a failure only reaches the log and never fails the mail sync; show a calendar sync state, as desktop does, if people miss it.
+fn sync_google(stores: &Stores, a: &Account) {
+    if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return; }
+    let result = Store::open(&stores.path).and_then(|mut store| {
+        let calendar = network(lagom_core::google::sync_calendar(&store, a, now()));
+        if !lagom_core::oauth::tasks_allowed(&store.account_scopes(&a.id)?) { return calendar; }
+        calendar.and(network(lagom_core::google::sync_tasks(&mut store, a)))
+    });
+    if let Err(error) = result { eprintln!("lagom: Google Calendar or Tasks sync failed: {error:?}"); }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -437,6 +449,14 @@ impl LagomCore {
         *self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
         Ok(start)
     }
+    /// Starts the browser sign-in that adds Google Calendar and Tasks to a Google account. `finish_sign_in` ends it.
+    pub fn begin_calendar_access(&self, account_id: String) -> Result<SignInStart> {
+        let a = account(&self.stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &account_id)?;
+        let (url, pending) = lagom_core::oauth::begin_calendar_access(&a)?;
+        let start = SignInStart { url, callback_scheme: pending.scheme() };
+        *self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+        Ok(start)
+    }
     /// `callback_url` is the redirect the browser handed back. Only the pending sign-in's own redirect
     /// (its URI and state) is taken; anything else is refused and leaves the sign-in pending.
     // shortcut: adds new accounts only. When a refresh token expires the user removes the account and
@@ -450,9 +470,18 @@ impl LagomCore {
                 other => { *slot = other; return Err(failure("Sign-in was interrupted. Try again.")); }
             }
         };
+        let grant = pending.account().map(|a| a.id.clone());
         self.run_network(move |s| network(async {
             let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
             let account = signed.account;
+            if let Some(id) = grant {
+                // The grant replaced this account's refresh token. Keep the scopes Google granted this time.
+                return match s.set_account_scopes(&id, &signed.scopes) {
+                    // Removed while the browser was open: its new secret must not stay behind.
+                    Err(lagom_core::Error::NotFound) => { let _ = account.delete_password(); Err(lagom_core::Error::NotFound) }
+                    other => other.map(|()| account.into()),
+                };
+            }
             let saved = s.accounts().and_then(|all| {
                 if all.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
                     return Err(lagom_core::Error::Invalid("This account is already in lagom."));

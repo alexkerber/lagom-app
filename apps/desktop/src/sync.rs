@@ -853,8 +853,7 @@ impl Worker {
             Ok(_) => return,
             Err(error) => { self.calendar_synced(account, Err(error)); return; }
         }
-        let now = now();
-        let (start, end) = (now - 7 * 86400, now + 60 * 86400);
+        let (start, end) = lagom_core::google::calendar_window(now());
         let owned = account.clone();
         self.start_calendar(account.clone(), start, end, async move { lagom_core::google::fetch_calendar(&owned, start, end).await });
     }
@@ -888,11 +887,7 @@ impl Worker {
 
     fn calendar_synced(&mut self, account: &Account, result: lagom_core::Result<()>) {
         if matches!(result, Err(Error::CalendarConsent)) {
-            let cleared = self.store.account_scopes(&account.id).and_then(|scopes| {
-                let scopes = scopes.split_whitespace().filter(|s| !s.starts_with("https://www.googleapis.com/auth/calendar")).collect::<Vec<_>>().join(" ");
-                self.store.set_account_scopes(&account.id, &scopes)
-            });
-            if let Err(e) = cleared {
+            if let Err(e) = self.store.drop_calendar_scopes(&account.id) {
                 self.emit(Event::CalendarSync(account.id.clone(), SyncState::Failed(shown(&e))));
                 return;
             }

@@ -480,7 +480,7 @@ fn mobile_redirect_needs_our_uri_and_the_pending_state() {
         (Provider::Google, "com.googleusercontent.apps.123-abc:/oauth2redirect"),
         (Provider::Microsoft, "msauth.com.example.app://auth"),
     ] {
-        let (url, pending) = begin_with(provider, mobile_config("https://provider.example"), redirect.into()).unwrap();
+        let (url, pending) = begin_with(provider, mobile_config("https://provider.example"), redirect.into(), None).unwrap();
         let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
         assert_eq!(params["redirect_uri"], redirect);
         assert_eq!(params["response_type"], "code");
@@ -528,6 +528,7 @@ async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
         Provider::Google,
         mobile_config(&format!("http://{}", listener.local_addr().unwrap())),
         redirect.into(),
+        None,
     )
     .unwrap();
     let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
@@ -552,4 +553,45 @@ async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
     assert_eq!(signed.scopes, "https://mail.google.com/ openid email profile");
     assert_eq!(&*signed.account.password().unwrap(), "mobile-refresh");
     signed.account.delete_password().unwrap();
+}
+
+#[tokio::test]
+async fn mobile_calendar_grant_needs_google_hints_the_account_and_keeps_its_identity() {
+    memory();
+    let (imap, smtp) = Provider::Google.servers("grant@example.com");
+    let password = Account::new("grant@example.com".into(), imap.clone(), smtp.clone()).unwrap();
+    assert!(begin_calendar_access(&password).is_err(), "a password account has no Google grant");
+    let mut account = Account::new("grant@example.com".into(), imap, smtp).unwrap();
+    account.auth = Auth::OAuth(Provider::Google);
+    account.set_password("mail-only-refresh").unwrap();
+    let redirect = "com.googleusercontent.apps.123-abc:/oauth2redirect";
+    for (email, ok) in [("other@example.com", false), ("grant@example.com", true)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = mobile_config(&format!("http://{}", listener.local_addr().unwrap()));
+        config.scope = format!("{} {GOOGLE_CALENDAR_SCOPES}", config.scope);
+        let (url, pending) = begin_with(Provider::Google, config, redirect.into(), Some(account.clone())).unwrap();
+        assert_eq!(pending.account().map(|a| a.id.as_str()), Some(account.id.as_str()));
+        let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
+        assert_eq!(params["login_hint"], "grant@example.com");
+        assert!(calendar_allowed(&params["scope"]) && has_scope(&params["scope"], "https://mail.google.com/"));
+        let callback = format!("{redirect}?state={}&code=grant-code", params["state"]);
+        let id_token = jwt(&format!(r#"{{"email":"{email}"}}"#));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _, _) = request(socket).await;
+            let body = serde_json::json!({"access_token":"grant-access", "token_type":"Bearer", "expires_in":3600, "refresh_token":"grant-refresh", "id_token":id_token}).to_string();
+            respond(&mut socket, "200 OK", &body).await;
+        });
+        let result = finish(pending, &callback).await;
+        server.await.unwrap();
+        assert_eq!(result.is_ok(), ok, "{email}");
+        if let Ok(signed) = result {
+            assert_eq!(signed.account.id, account.id);
+            assert!(calendar_allowed(&signed.scopes));
+            assert_eq!(&*account.password().unwrap(), "grant-refresh");
+        } else {
+            assert_eq!(&*account.password().unwrap(), "mail-only-refresh", "another account never replaces the secret");
+        }
+    }
+    account.delete_password().unwrap();
 }

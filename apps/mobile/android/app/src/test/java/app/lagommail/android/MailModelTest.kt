@@ -1122,6 +1122,8 @@ internal class FakeCore : LagomCoreInterface {
         TodoList((todoLists.maxOf { it.id }) + 1, name, false).also { todoLists += it }
     override suspend fun agenda(startDay: String, days: UInt): List<AgendaItem> { agendaCalls += startDay to days; return events }
     override suspend fun calendarConnected(): Boolean = connected
+    var calendarAccess: List<MailAccount> = emptyList()
+    override suspend fun calendarAccessNeeded(): List<MailAccount> = calendarAccess
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
     override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
@@ -1324,6 +1326,7 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
     override fun beginSignIn(provider: SignInProvider) = error("unused fixture operation")
+    override fun beginCalendarAccess(accountId: String) = error("unused fixture operation")
     var redirects = listOf<String>()
     override suspend fun finishSignIn(callbackUrl: String): MailAccount {
         check(callbackUrl.endsWith("state=pending")) { "Sign-in was interrupted. Try again." }
