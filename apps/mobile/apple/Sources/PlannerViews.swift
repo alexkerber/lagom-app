@@ -102,7 +102,8 @@ struct TodayView: View {
             let tasks = planner.today?.tasks ?? []
             if tasks.isEmpty { quiet("Nothing due today.", icon: "todo").padding(.bottom, 6) }
             ForEach(tasks, id: \.id) { todo in
-                TodoRow(todo: todo) { Task { await planner.toggle(todo) } }
+                TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
+                        openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
             }
             AddRow(title: "New task") { newTask = true }.disabled(planner.lists.isEmpty)
         }
@@ -228,6 +229,8 @@ struct EventRow: View {
 struct TodoRow: View {
     let todo: Todo
     let toggle: () -> Void
+    /// Opens the source mail; the subject line is its button.
+    let openMail: () -> Void
     var words = DateWords()
 
     var body: some View {
@@ -244,13 +247,16 @@ struct TodoRow: View {
                 Text(todo.title).lagomFont(.base)
                     .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
                 if let subject = todo.mailSubject {
-                    // shortcut: passive, as mobile has no message id for a task; make it open the mail when the FFI carries one.
-                    HStack(spacing: 4) {
-                        Icon("mail", size: 14)
-                        Text(subject).lagomFont(.small).lineLimit(1).truncationMode(.tail)
+                    Button(action: openMail) {
+                        HStack(spacing: 4) {
+                            Icon("mail", size: 14)
+                            Text(subject).lagomFont(.small).lineLimit(1).truncationMode(.tail)
+                        }
+                        // A 44 pt tall target without a taller row, as the completion circle.
+                        .foregroundStyle(Theme.secondary).padding(.vertical, 15).contentShape(Rectangle())
                     }
-                    .foregroundStyle(Theme.secondary)
-                    .accessibilityElement(children: .ignore).accessibilityLabel("From mail: \(subject)")
+                    .buttonStyle(.plain).padding(.vertical, -15)
+                    .accessibilityLabel("Open mail: \(subject)")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -274,6 +280,7 @@ struct TodoRow: View {
 /// Local task lists, as on the desktop's To-do page.
 struct TodoView: View {
     let planner: PlannerModel
+    let openMail: (Int64?) -> Void
     @State private var adding: Int64?
     @State private var newList = false
     @State private var listName = ""
@@ -359,7 +366,8 @@ struct TodoView: View {
     }
 
     private func row(_ todo: Todo) -> some View {
-        TodoRow(todo: todo) { Task { await planner.toggle(todo) } }
+        TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
+                openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
             .swipeActions {
                 Button(role: .destructive) { Task { await planner.delete(todo) } } label: { Label("Delete", image: "trash") }
                     .tint(Theme.danger)
