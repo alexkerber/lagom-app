@@ -16,8 +16,10 @@ struct OnboardingView: View {
     @State private var connecting = false
     @State private var error: String?
     @State private var height: CGFloat = 0
-    /// Welcome's group, for its place at 45 % of the free height.
+    /// Welcome's group height, to centre it in the free height.
     @State private var group: CGFloat = 0
+    /// Bottom safe-area inset minus top: Welcome centres on the whole screen, not the safe area.
+    @State private var inset: CGFloat = 0
     /// Welcome's icon starts where the launch screen drew it (96 pt, centred) and travels into place.
     @State private var settled = false
     @State private var root = CGRect.zero
@@ -56,7 +58,7 @@ struct OnboardingView: View {
     }
 
     /// Welcome, as on Mac and Android: one centred group (icon, wordmark, dictionary line, definition, button, caption)
-    /// with its middle a little above the screen's, scrolling under large text. The wordmark is the one heavy element.
+    /// centred on the screen, scrolling under large text. The wordmark is the one heavy element.
     private var welcome: some View {
         ScrollView {
             VStack(spacing: 0) {
@@ -90,11 +92,12 @@ struct OnboardingView: View {
             .multilineTextAlignment(.center)
             .padding(.horizontal, 24).padding(.vertical, 16)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { group = $0 }
-            .padding(.top, max(0, (height - group) * 0.45))
+            .padding(.top, max(0, (height - group + inset) / 2))
             .frame(maxWidth: .infinity, minHeight: height, alignment: .top)
         }
         .scrollBounceBehavior(.basedOnSize)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom - $0.safeAreaInsets.top } action: { inset = $0 }
         .background(Theme.background)
         .transition(.asymmetric(insertion: Motion.slide(.leading, reduceMotion), removal: .opacity))
     }

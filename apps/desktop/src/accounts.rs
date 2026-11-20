@@ -866,9 +866,10 @@ impl Render for AddAccount {
             .text_size(px(size::BASE))
             .child(div().w_full().h(px(32.)).flex().children(nav.map(|b| b.on_click(cx.listener(|this, _, window, cx| this.back(window, cx))))))
             // Welcome centres on the window, title bar included: above the group sit the main window's 36 px welcome
-            // top, this view's 24 px padding and the 32 px nav row (92); below, 8 + 24 + this 60 px pad (92).
+            // top, this view's 24 px padding and the 32 px nav row (92); below, 8 + 24 + this pad. The pad is 70, not 60,
+            // because the icon's clear edge sits above the ink: measured, the ink is then centred to 1 px.
             .child(div().w_full().flex_1().flex().flex_col().items_center().when(centred, |d| d.justify_center())
-                .pb(px(if welcome { 60. } else { 32. }))
+                .pb(px(if welcome { 70. } else { 32. }))
                 .child(div().flex_shrink_0().w_full().max_w(px(if centred { 440. } else { 560. })).when(!centred, |d| d.pt(px(24.))).child(content)))
     }
 }

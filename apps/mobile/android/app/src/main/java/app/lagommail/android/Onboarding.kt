@@ -24,7 +24,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -139,8 +138,8 @@ internal val SplashIcon = 160.dp
 @Composable private fun WideButton(text: String, @DrawableRes icon: Int, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) =
     HouseButton(text, icon, Modifier.fillMaxWidth().heightIn(min = 48.dp), primary = primary, enabled = enabled, onClick = onClick)
 
-/** Welcome, as on Mac and iOS: one centred group (icon, wordmark, dictionary line, definition, button, caption) with its
- *  middle a little above the screen's, scrolling under large text. The wordmark is the one heavy element. */
+/** Welcome, as on Mac and iOS: one centred group (icon, wordmark, dictionary line, definition, button, caption) centred on
+ *  the screen, scrolling under large text. The wordmark is the one heavy element. */
 @Composable private fun Welcome(model: MailModel, settled: Boolean, settle: () -> Unit, addAccount: () -> Unit) {
     val c = lagom
     // The icon starts where the splash drew it (160 dp circle, window centre) and settles into place.
@@ -151,9 +150,8 @@ internal val SplashIcon = 160.dp
     val icon = 96.dp
     BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { centre = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }
         .systemBarsPadding()) {
-        // 45 % of the free height above the group, 55 % below.
         Box(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(horizontal = 24.dp, vertical = 16.dp),
-            contentAlignment = BiasAlignment(0f, -0.1f)) {
+            contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 val measured = centre.isSpecified && mark.isSpecified
                 AppIcon(icon, Modifier.onGloballyPositioned { mark = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }
