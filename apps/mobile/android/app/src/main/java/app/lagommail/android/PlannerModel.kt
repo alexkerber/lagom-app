@@ -79,6 +79,8 @@ internal class PlannerModel : ViewModel() {
     var calendarAccess by mutableStateOf<List<MailAccount>>(emptyList()); private set
     /** A Google account allows calendar access; until its first fetch Calendar waits for the sync. */
     var calendarGranted by mutableStateOf(false); private set
+    /** Google accounts with Calendar but without Google Tasks: To-do offers Tasks again. */
+    var tasksAccess by mutableStateOf<List<MailAccount>>(emptyList()); private set
     /** Calendar's week: its Monday and that week's events. */
     // shortcut: a time zone change keeps the old Monday until Today is tapped, as on iOS.
     var weekStart by mutableStateOf(monday(LocalDate.now())); private set
@@ -120,9 +122,11 @@ internal class PlannerModel : ViewModel() {
         guard {
             val lists = core.todoLists()
             val todos = lists.associate { it.id to core.todos(it.id, true) }
+            val access = core.tasksAccessNeeded()
             if (request != todosRevision) return@guard
             this.lists = lists
             this.todos = todos
+            tasksAccess = access
         }
         reloadMail()
     }
@@ -166,9 +170,26 @@ internal class PlannerModel : ViewModel() {
         val core = core ?: return "lagom is not ready yet."
         try {
             if (demo) core.addDemoEvent(form) else core.createEvent(calendar.account, calendar.calendar, form)
-        } catch (e: CancellationException) { throw e } catch (e: Exception) { return e.mailMessage() }
+        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            // A refused write scope hides New event and offers access again; the dialog keeps the draft.
+            reloadAgenda()
+            return e.mailMessage()
+        }
         reloadAgenda()
         return null
+    }
+
+    /** New event's save, owned here and not by the dialog: a dialog restored after rotation must neither send it
+     *  again nor miss its answer. */
+    var savingEvent by mutableStateOf(false); private set
+    /** The save's answer for the dialog: "" once saved, else core's words; null while none waits. */
+    var eventAnswer by mutableStateOf<String?>(null)
+
+    fun saveEvent(calendar: EventCalendar, form: EventForm) {
+        if (savingEvent) return
+        savingEvent = true
+        eventAnswer = null
+        viewModelScope.launch { try { eventAnswer = createEvent(calendar, form) ?: "" } finally { savingEvent = false } }
     }
 
     /** Returns false, without asking core, for a blank title. */
@@ -176,7 +197,10 @@ internal class PlannerModel : ViewModel() {
         val core = core ?: return false
         val trimmed = title.trim()
         if (trimmed.isEmpty()) return false
-        return guard { core.addTodo(list, trimmed, due?.toString()); reloadTodos() }
+        return try { core.addTodo(list, trimmed, due?.toString()); reloadTodos(); true }
+        catch (e: CancellationException) { throw e }
+        // Named, since the field may already hold the next task.
+        catch (e: Exception) { error = "Could not add “$trimmed”: ${e.mailMessage()}"; false }
     }
 
     /** Saves at once; [settleMillis] keeps the lists as drawn a moment longer, so a tick is seen before its row moves. */

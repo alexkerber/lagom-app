@@ -90,8 +90,8 @@ struct TodayView: View {
                 if nowIndex == events.count { NowLine(now: now) }
             }
             // Also beside another account's calendar: each Google account allows its own.
-            if let account = planner.calendarAccess.first {
-                CalendarAccessButton(planner: planner, model: model, account: account).padding(.top, 4)
+            if !planner.calendarAccess.isEmpty {
+                CalendarAccessButtons(planner: planner, model: model, accounts: planner.calendarAccess).padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -152,19 +152,43 @@ private func quiet(_ text: String, icon: String) -> some View {
     .foregroundStyle(Theme.secondary)
 }
 
-/// Desktop's "Show your Google Calendar": Google asks once, then a sync fills Calendar and Today.
+/// One grant per Google account that needs it. With more than one, each names its address: Google must be
+/// answered with that account, so the first must not stand for all of them.
+struct CalendarAccessButtons: View {
+    let planner: PlannerModel
+    let model: MailModel
+    let accounts: [MailAccount]
+    /// To-do's grant for Google Tasks; Calendar's grant asks for both.
+    var tasks = false
+
+    var body: some View {
+        if !accounts.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(accounts, id: \.id) { account in
+                    CalendarAccessButton(planner: planner, model: model, account: account, icon: tasks ? "todo" : "calendar",
+                                         title: accounts.count == 1 ? (tasks ? "Allow Google Tasks access" : "Show your Google Calendar")
+                                            : "\(tasks ? "Allow Google Tasks" : "Show calendar") · \(account.email)")
+                }
+            }
+        }
+    }
+}
+
+/// Desktop's "Show your Google Calendar": Google asks once, then a sync fills Calendar, Today and To-do.
 private struct CalendarAccessButton: View {
     let planner: PlannerModel
     let model: MailModel
     let account: MailAccount
+    let icon: String
+    let title: String
     @Environment(\.webAuthenticationSession) private var browser
     @State private var connecting = false
 
     var body: some View {
         Button { Task { await allow() } } label: {
             HStack(spacing: 6) {
-                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) } else { Icon("calendar").foregroundStyle(Theme.accentFillInk) }
-                Text(connecting ? "Connecting…" : "Show your Google Calendar").lineLimit(1)
+                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) } else { Icon(icon).foregroundStyle(Theme.accentFillInk) }
+                Text(connecting ? "Connecting…" : title).lineLimit(1).truncationMode(.middle)
             }
         }
         .buttonStyle(HouseButtonStyle(primary: true))
@@ -174,10 +198,10 @@ private struct CalendarAccessButton: View {
     private func allow() async {
         defer { connecting = false }
         do {
-            // The button stays busy until the sync has fetched the calendar.
+            // The button stays busy until the sync has fetched the calendar and tasks.
             guard try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true }) else { return }
             await model.sync()
-            await planner.reloadAgenda()
+            await planner.reload()
         } catch { planner.error = error.localizedDescription }
     }
 }
@@ -356,6 +380,7 @@ private enum AddField: Hashable { case task(Int64), list }
 /// above the keyboard. Return adds and keeps the field open for the next task; leaving the field keeps its text.
 struct TodoView: View {
     let planner: PlannerModel
+    let model: MailModel
     let openMail: (Int64?) -> Void
     @State private var showDone: Set<Int64> = []
     /// Rows a swipe just completed or deleted: gone at once, back only if core refuses.
@@ -373,6 +398,11 @@ struct TodoView: View {
         VStack(alignment: .leading, spacing: 0) {
             PageTitle(title: "To-do") { EmptyView() }
                 .pageEdges()
+            // Calendar granted but Google Tasks declined or taken back: as the Mac's To-do, ask here.
+            if !planner.tasksAccess.isEmpty {
+                CalendarAccessButtons(planner: planner, model: model, accounts: planner.tasksAccess, tasks: true)
+                    .padding(.bottom, 8).pageEdges(top: false)
+            }
             List {
                 if planner.allClear { clearDay.plainRow() }
                 ForEach(Array(planner.lists.enumerated()), id: \.element.id) { index, list in
@@ -542,7 +572,7 @@ struct TodoView: View {
         }
         let text = title, due = due
         title = ""
-        Task { await planner.add(title: text, list: list, due: due) }
+        add(text, list: list, due: due)
         // Return gives up focus; taking it back in the same turn keeps the keyboard up.
         focus = .task(list)
     }
@@ -551,15 +581,23 @@ struct TodoView: View {
     private func commit() {
         let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
         switch adding {
-        case .task(let list)? where !text.isEmpty:
-            let due = due
-            Task { await planner.add(title: text, list: list, due: due) }
+        case .task(let list)? where !text.isEmpty: add(text, list: list, due: due)
         case .list? where !text.isEmpty: Task { await planner.addList(name: text) }
         default: break
         }
         title = ""
         adding = nil
         due = nil
+    }
+
+    /// A task core refused comes back into its field, unless that field already holds the next one or its list is
+    /// gone; the alert names it either way.
+    private func add(_ text: String, list: Int64, due: Date?) {
+        Task {
+            guard !(await planner.add(title: text, list: list, due: due)), title.isEmpty,
+                  adding == nil || adding == .task(list), planner.lists.contains(where: { $0.id == list }) else { return }
+            (adding, title, self.due) = (.task(list), text, due)
+        }
     }
 
     private func row(_ todo: Todo) -> some View {
@@ -672,7 +710,8 @@ struct NewEventView: View {
     @State private var end: Date
     @State private var allDay = false
     @State private var meet = false
-    /// The chosen calendar; nil is the first.
+    /// The calendar shown when the sheet opened, or the one picked since. Kept by identity: a sync may reorder the
+    /// list, and Save must not move the event to whichever calendar is first by then.
     @State private var choice: EventCalendar?
     @State private var guests = ""
     @State private var details = ""
@@ -686,6 +725,7 @@ struct NewEventView: View {
         let times = PlannerModel.newEventTimes(day: day)
         _start = State(initialValue: times.start)
         _end = State(initialValue: times.end)
+        _choice = State(initialValue: planner.eventCalendars.first)
     }
 
     var body: some View {
@@ -701,10 +741,13 @@ struct NewEventView: View {
                     FieldRow(label: allDay ? "Last day" : "End date", labelWidth: 84) { picker(allDay ? "Last day" : "End date", $end, .date) }
                     if !allDay { FieldRow(label: "End", labelWidth: 84) { picker("End", $end, .hourAndMinute) } }
                     toggle("All day", icon: "sun", $allDay)
-                    if calendars.count > 1 {
+                    // A calendar that left the list (a sync) asks for a choice instead of picking another one.
+                    let current = target
+                    if calendars.count > 1 || current == nil {
                         FieldRow(label: "Calendar", labelWidth: 84) {
-                            Picker("Calendar", selection: Binding(get: { choice ?? calendars[0] }, set: { choice = $0 })) {
-                                ForEach(calendars, id: \.self) { Text($0.label).tag($0) }
+                            Picker("Calendar", selection: Binding(get: { current }, set: { choice = $0 })) {
+                                if current == nil { Text("Choose a calendar").tag(EventCalendar?.none) }
+                                ForEach(calendars, id: \.self) { Text($0.label).tag(Optional($0)) }
                             }
                             .labelsHidden().tint(Theme.ink)
                         }
@@ -752,6 +795,11 @@ struct NewEventView: View {
         .presentationDetents([.large])
     }
 
+    /// The chosen calendar as the list has it now: by account and calendar, so a rename keeps it.
+    private var target: EventCalendar? {
+        planner.eventCalendars.first { $0.account == choice?.account && $0.calendar == choice?.calendar }
+    }
+
     private func picker(_ label: String, _ value: Binding<Date>, _ parts: DatePickerComponents) -> some View {
         DatePicker(label, selection: value, displayedComponents: parts).labelsHidden().accessibilityLabel(label)
     }
@@ -771,9 +819,8 @@ struct NewEventView: View {
 
     private func save() {
         guard !saving else { return }
-        // By identity, not position: a sync may reload the list while the sheet is open.
-        guard let target = choice.map({ planner.eventCalendars.contains($0) ? $0 : nil }) ?? planner.eventCalendars.first else {
-            error = "choose a writable calendar"
+        guard let target else {
+            error = "Choose a calendar"
             return
         }
         saving = true
@@ -823,8 +870,9 @@ private struct WeekGrid: View {
             header
             if oneDay { strip(week) }
             if !planner.calendarConnected && planner.week.isEmpty, let account = planner.calendarAccess.first {
-                EmptyState(icon: "calendar", title: "Calendar is not connected", detail: "Google asks once for access to \(account.email).") {
-                    CalendarAccessButton(planner: planner, model: model, account: account)
+                EmptyState(icon: "calendar", title: "Calendar is not connected",
+                           detail: planner.calendarAccess.count == 1 ? "Google asks once for access to \(account.email)." : "Google asks once for each account.") {
+                    CalendarAccessButtons(planner: planner, model: model, accounts: planner.calendarAccess)
                 }
                 .frame(maxHeight: .infinity)
             } else if !planner.calendarConnected && planner.week.isEmpty && planner.calendarGranted {
@@ -835,8 +883,8 @@ private struct WeekGrid: View {
                            detail: "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
                     .frame(maxHeight: .infinity)
             } else {
-                if let account = planner.calendarAccess.first {
-                    CalendarAccessButton(planner: planner, model: model, account: account)
+                if !planner.calendarAccess.isEmpty {
+                    CalendarAccessButtons(planner: planner, model: model, accounts: planner.calendarAccess)
                 }
                 if !oneDay {
                     HStack(spacing: 0) {

@@ -77,7 +77,7 @@ class PlannerModelTest {
         planner.add("Keep", 1, null)
         core.rejectPlanner = true
         assertFalse(planner.add("Refused", 1, null))
-        assertEquals("Fixture task refused", planner.error)
+        assertEquals("the alert names a refused task", "Could not add “Refused”: Fixture task refused", planner.error)
         planner.error = null
         planner.toggle(planner.todos.getValue(1).single())
         assertEquals("Fixture task refused", planner.error)
@@ -234,5 +234,33 @@ class OpenInboxTest {
         assertEquals(listOf("Demo calendar"), demo.eventCalendars.map { it.label })
         assertNull(demo.createEvent(demo.eventCalendars[0], form))
         assertEquals(1, core.demoEvents.size); assertEquals(1, core.createdEvents.size)
+    }
+
+    @Test fun aSaveInFlightIsSentOnceAndItsAnswerWaitsForTheDialog() = runTest(dispatcher) {
+        val core = FakeCore().apply { connected = true; calendars = listOf(EventCalendar("acct", "primary", "Personal · you@gmail.com")) }
+        val planner = PlannerModel().apply { this.core = core }; planner.reload()
+        val start = LocalDate.of(2026, 11, 20).atTime(9, 0)
+        val form = eventForm("Lunch", start, start.plusHours(1), allDay = false, guests = "a@b.example", description = "", meet = false)
+        val gate = CompletableDeferred<Unit>(); core.eventGate = gate
+        planner.saveEvent(planner.eventCalendars[0], form); runCurrent()
+        assertTrue(planner.savingEvent)
+        // A dialog restored after rotation reads the model's flag; a second Save sends nothing.
+        planner.saveEvent(planner.eventCalendars[0], form); runCurrent()
+        gate.complete(Unit); advanceUntilIdle()
+        assertEquals(1, core.createdEvents.size)
+        assertFalse(planner.savingEvent)
+        assertEquals("saved", "", planner.eventAnswer)
+        core.eventGate = null; core.rejectEvent = "End must be later than start"
+        planner.saveEvent(planner.eventCalendars[0], form); advanceUntilIdle()
+        assertEquals("End must be later than start", planner.eventAnswer)
+    }
+
+    @Test fun toDoOffersTasksAccessForAccountsWithCalendarOnly() = runTest(dispatcher) {
+        val account = MailAccount("g", "you@gmail.com", "Fixture")
+        val core = FakeCore().apply { tasksAccess = listOf(account) }
+        val planner = PlannerModel().apply { this.core = core }; planner.reloadTodos()
+        assertEquals(listOf(account), planner.tasksAccess)
+        core.tasksAccess = emptyList(); planner.reloadTodos()
+        assertTrue(planner.tasksAccess.isEmpty())
     }
 }

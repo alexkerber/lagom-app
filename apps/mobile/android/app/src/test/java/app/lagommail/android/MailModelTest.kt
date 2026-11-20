@@ -1151,12 +1151,17 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun calendarAccessNeeded(): List<MailAccount> = calendarAccess
     var granted = false
     override suspend fun calendarGranted(): Boolean = granted
+    var tasksAccess: List<MailAccount> = emptyList()
+    override suspend fun tasksAccessNeeded(): List<MailAccount> = tasksAccess
     var calendars = emptyList<EventCalendar>()
     override suspend fun eventCalendars(): List<EventCalendar> = calendars
     val createdEvents = mutableListOf<Triple<String, String, EventForm>>()
     val demoEvents = mutableListOf<EventForm>()
     var rejectEvent: String? = null
+    /** Holds every createEvent call until completed. */
+    var eventGate: CompletableDeferred<Unit>? = null
     override suspend fun createEvent(accountId: String, calendar: String, form: EventForm) {
+        eventGate?.await()
         rejectEvent?.let { throw MailException.Failed(it) }
         createdEvents += Triple(accountId, calendar, form)
     }
