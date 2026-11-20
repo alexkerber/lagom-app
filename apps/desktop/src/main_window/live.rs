@@ -719,6 +719,11 @@ impl MainWindow {
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
             self.reload(cx);
         }
+        // The store has no account left, the last one removed in Settings: back to Welcome, as on iOS and Android.
+        // A failed removal keeps the account in the store, and Settings stays.
+        if matches!(self.page, Page::Settings(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty()) {
+            self.add_account(window, cx);
+        }
         if let Some(target) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.notification_target.take()) {
             self.open_notification(target, window, cx);
         }
@@ -1619,6 +1624,7 @@ impl MainWindow {
         self.reading_thread = None;
         self.close_popouts(None, cx);
         self.clear_motion();
+        // Welcome follows once the worker confirms the last removal (`on_events`).
         self.set_page(Page::Settings(None), cx);
         cx.notify();
     }
@@ -1901,6 +1907,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let store = Rc::new(Store::open(dir.join("mail.sqlite3")).unwrap());
+        // With an account: an empty store opens on Welcome instead.
+        let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
+        store.save_account(&Account::new("me@lagom.test".into(), config.clone(), config).unwrap()).unwrap();
         let (bridge, _rx) = Bridge::detached();
         cx.update(|cx| cx.set_global(Mail {
             store, bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: Task::ready(()),
@@ -1945,6 +1954,54 @@ mod tests {
         cx.update(|cx| cx.remove_global::<Mail>());
         for entry in std::fs::read_dir(&dir).unwrap() { std::fs::remove_file(entry.unwrap().path()).unwrap(); }
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_no_account_opens_welcome_at_launch_and_after_the_last_removal(cx: &mut TestAppContext) {
+        let welcome = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            cx.debug_bounds("welcome-add").is_some()
+        };
+        // A normal launch on an empty store.
+        let dir = std::env::temp_dir().join(format!("lagom-first-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Rc::new(Store::open(dir.join("mail.sqlite3")).unwrap());
+        let (bridge, _rx) = Bridge::detached();
+        cx.update(|cx| cx.set_global(Mail { store, bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: Task::ready(()) }));
+        {
+            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(false, "", window, cx));
+            assert!(view.read_with(cx, |v, _| matches!(v.page, Page::AddAccount(_))));
+            assert!(welcome(cx));
+            view.update_in(cx, |_, window, _| window.remove_window());
+        }
+        cx.update(|cx| cx.remove_global::<Mail>());
+        std::fs::remove_dir_all(dir).unwrap();
+        // Removing one of two accounts stays in Settings; removing the last opens Welcome.
+        let (view, cx, _rx) = window(cx);
+        let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "other@lagom.test".into() };
+        let other = Account::new("other@lagom.test".into(), config.clone(), config).unwrap();
+        let ids = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            live.store.save_account(&other).unwrap();
+            v.reload(cx);
+            v.live.as_ref().unwrap().accounts.iter().map(|a| a.id.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(ids.len(), 2);
+        view.update_in(cx, |v, window, cx| v.remove_account(ids[0].clone(), window, cx));
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        // The worker is detached here: the store plays its part. A failed removal keeps the account and Settings.
+        view.update_in(cx, |v, window, cx| {
+            v.live.as_ref().unwrap().store.delete_account(&ids[0]).unwrap();
+            v.remove_account(ids[1].clone(), window, cx);
+            v.on_events(vec![Event::Changed], window, cx);
+        });
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None)) && v.live.as_ref().unwrap().accounts.len() == 1));
+        view.update_in(cx, |v, window, cx| {
+            v.live.as_ref().unwrap().store.delete_account(&ids[1]).unwrap();
+            v.on_events(vec![Event::Changed], window, cx);
+        });
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::AddAccount(_))));
+        assert!(welcome(cx));
     }
 
     /// A demo window with a live side whose worker is `rx`: kept alive it never answers,
