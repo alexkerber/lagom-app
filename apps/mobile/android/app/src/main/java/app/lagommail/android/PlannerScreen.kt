@@ -30,6 +30,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -444,7 +445,10 @@ private const val NEW_LIST = Long.MIN_VALUE
     }
     if (picking) {
         // The picker counts in UTC midnights.
-        val state = rememberDatePickerState(initialSelectedDateMillis = (due ?: LocalDate.now().plusDays(1)).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
+        val today = LocalDate.now().atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        // From today on, as on iPhone.
+        val state = rememberDatePickerState(initialSelectedDateMillis = (due ?: LocalDate.now().plusDays(1)).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+            selectableDates = object : SelectableDates { override fun isSelectableDate(utcTimeMillis: Long) = utcTimeMillis >= today })
         DatePickerDialog(onDismissRequest = { picking = false }, confirmButton = {
             TextButton(onClick = {
                 state.selectedDateMillis?.let { dueDay = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate().toEpochDay() }
@@ -519,7 +523,16 @@ private const val NEW_LIST = Long.MIN_VALUE
     val reach = with(LocalDensity.current) { 120.dp.toPx() }
     // The threshold depends on the direction, which only the state knows.
     val holder = remember { arrayOfNulls<SwipeToDismissBoxState>(1) }
-    val state = rememberSwipeToDismissBoxState(positionalThreshold = { total ->
+    val width = remember { floatArrayOf(0f) }
+    val state = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
+        // A quick flick must still cover Mail's distance; the box alone would settle on speed.
+        val stage = holder[0]?.let { swipeStage(it.requireOffset(), width[0], reach, true) }
+        when (value) {
+            SwipeToDismissBoxValue.StartToEnd -> stage == MailAction.Done
+            SwipeToDismissBoxValue.EndToStart -> stage == MailAction.Delete
+            SwipeToDismissBoxValue.Settled -> true
+        }
+    }, positionalThreshold = { total ->
         if (holder[0]?.dismissDirection == SwipeToDismissBoxValue.EndToStart) total * 0.6f else reach
     })
     holder[0] = state
@@ -537,7 +550,7 @@ private const val NEW_LIST = Long.MIN_VALUE
         }
         state.reset()
     }
-    SwipeToDismissBox(state, modifier = modifier, backgroundContent = {
+    SwipeToDismissBox(state, modifier = modifier.onSizeChanged { width[0] = it.width.toFloat() }, backgroundContent = {
         val c = lagom
         val right = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
         val acting = state.targetValue != SwipeToDismissBoxValue.Settled

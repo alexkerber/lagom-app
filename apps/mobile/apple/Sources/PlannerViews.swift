@@ -405,11 +405,11 @@ struct TodoView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if case .task = adding { dueBar }
         }
-        .onChange(of: focus) { _, new in
+        .onChange(of: focus) { old, new in
             // Leaving the field, by a tap elsewhere or the keyboard going down, keeps what was typed. Checked a turn
-            // later: moving to another list's field passes through nil.
-            guard new == nil else { return }
-            Task { @MainActor in if focus == nil, !picking, adding != nil { commit() } }
+            // later, and only for the field that lost focus: moving to another list's field passes through nil.
+            guard new == nil, let old, old == adding else { return }
+            Task { @MainActor in if focus == nil, !picking, adding == old { commit() } }
         }
         .onChange(of: picking) { _, now in if !now, let adding { focus = adding } }
     }
