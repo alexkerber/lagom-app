@@ -168,11 +168,14 @@ struct RowGroup<Item>: Identifiable {
 /// Consecutive rows that share a header, in the order given.
 func grouped<Item>(_ items: [Item], by key: (Item) -> String) -> [RowGroup<Item>] {
     var groups: [RowGroup<Item>] = []
+    // One pass: a count per title, not a scan of the groups so far.
+    var seen: [String: Int] = [:]
     for item in items {
         let title = key(item)
         if groups.last?.title == title { groups[groups.count - 1].items.append(item); continue }
-        let seen = groups.filter { $0.title == title }.count
-        groups.append(RowGroup(title: title, items: [item], id: seen == 0 ? title : "\(title) #\(seen + 1)"))
+        let count = seen[title, default: 0]
+        seen[title] = count + 1
+        groups.append(RowGroup(title: title, items: [item], id: count == 0 ? title : "\(title) #\(count + 1)"))
     }
     return groups
 }

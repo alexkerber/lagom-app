@@ -240,6 +240,8 @@ final class MailModel {
     var folders: [MailFolder] = []
     private(set) var emptyingTrash = false
     var searchText = ""
+    /// The query the search runs: blank text searches nothing and lists the mailbox.
+    var searchQuery: String { searchText.trimmingCharacters(in: .whitespacesAndNewlines) }
     var remoteImagesIDs: Set<Int64> = []
     var messages: [MailMessage] = []
     var expandedIDs: Set<Int64> = []
@@ -344,7 +346,7 @@ final class MailModel {
         let draftsOnly = mailbox == .drafts && folder == nil
         let mailbox = mailbox.mailbox
         let folder = folder?.id
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = searchQuery
         do {
             let due = try await core.nextSnooze()
             let accounts = try await core.accounts()
@@ -896,6 +898,14 @@ final class MailModel {
         endingCompose = true
         composeDraft = nil
         endingCompose = false
+    }
+
+    /// The core's words for the removal question: they name the drafts and sends only this device has. If the count
+    /// fails, the words still warn; the demo has no store.
+    func removalNote(_ account: MailAccount) async -> String {
+        guard let core else { return "Your mail stays with your provider." }
+        return (try? await core.removalNote(accountId: account.id))
+            ?? "Your mail stays with your provider. Removing the account also deletes its drafts and unsent messages in lagom."
     }
 
     func remove(_ account: MailAccount) async {

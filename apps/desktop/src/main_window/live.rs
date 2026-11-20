@@ -1573,7 +1573,12 @@ impl MainWindow {
         // The pressed button leaves the screen; the window keeps the keys.
         window.focus(&self.focus);
         self.confirm_remove_account = id.is_some();
-        if let Some(id) = id { self.set_page(Page::Settings(Some(id)), cx); }
+        if let Some(id) = id {
+            // The demo has no store; a failed count still warns.
+            self.remove_note = self.live.as_ref().map_or_else(|| Ok("Your mail stays with your provider.".into()), |live| live.store.removal_note(&id))
+                .unwrap_or_else(|_| "Your mail stays with your provider. Removing the account also deletes its drafts and unsent messages in lagom.".into());
+            self.set_page(Page::Settings(Some(id)), cx);
+        }
         cx.notify();
     }
 
@@ -2933,6 +2938,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| { window.focus(&v.names[&id].read(cx).focus_handle(cx)); v.confirm_remove(Some(id.clone()), window, cx) });
         assert!(cx.update(|window, cx| view.read(cx).focus.is_focused(window)), "the pressed button leaves; the window keeps the keys");
         assert!(view.read_with(cx, |v, _| v.confirm_remove_account && matches!(&v.page, Page::Settings(Some(open)) if *open == id)));
+        assert_eq!(view.read_with(cx, |v, _| v.remove_note.clone()), "Your mail stays with your provider.", "the store's words, none lost here");
         view.update_in(cx, |v, window, cx| v.confirm_remove(None, window, cx));
         assert!(view.read_with(cx, |v, _| !v.confirm_remove_account && matches!(&v.page, Page::Settings(Some(_)))));
         cx.simulate_keystrokes("escape");

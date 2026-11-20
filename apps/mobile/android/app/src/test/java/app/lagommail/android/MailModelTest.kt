@@ -683,15 +683,25 @@ class MailModelTest {
     @Test fun unreadFilterKeepsUnfilteredPagingOffsetsAndLoadMoreAvailable() = runTest(dispatcher) {
         val core = FakeCore().apply { mail = (1L..150L).map { row(it, unread = it > 100).copy(subject = "Match") } }
         val model = model(core); model.start()
-        model.changeSearch("Match"); model.unreadOnly = true
+        model.unreadOnly = true
         assertTrue(model.visibleRows.isEmpty())
         assertTrue(model.hasMore)
         model.reload(more = true)
-        assertEquals(Triple(null, "Match", 100u), core.searchCalls.last())
         assertEquals((101L..150L).toList(), model.visibleRows.map { it.id })
         assertFalse(model.hasMore)
         model.unreadOnly = false
         assertEquals(core.mail, model.visibleRows)
+    }
+    @Test fun searchShowsReadMatchesUnderTheUnreadFilterAndRestoresItAfter() = runTest(dispatcher) {
+        val core = FakeCore().apply { mail = listOf(row(1, unread = false).copy(subject = "Invoice"), row(2, unread = true)) }
+        val model = model(core); model.start(); model.unreadOnly = true
+        assertEquals(listOf(2L), model.visibleRows.map { it.id })
+        model.changeSearch("Invoice")
+        assertEquals(listOf(1L), model.visibleRows.map { it.id })
+        model.changeSearch(" ")
+        assertEquals(listOf(2L), model.visibleRows.map { it.id })
+        model.changeSearch("")
+        assertEquals(listOf(2L), model.visibleRows.map { it.id })
     }
     @Test fun staleSearchErrorsAreIgnoredButCurrentErrorsAreReported() = runTest(dispatcher) {
         val core = FakeCore()
@@ -1334,6 +1344,7 @@ internal class FakeCore : LagomCoreInterface {
         return ids.map(::change)
     }
     override suspend fun removeAccount(id: String) { mail = mail.filterNot { it.account == id } }
+    override suspend fun removalNote(accountId: String) = "Your mail stays with your provider."
     override suspend fun retrySend(id: String) = Unit
     val unsubscribed = mutableListOf<Long>()
     override suspend fun unsubscribe(messageId: Long) {

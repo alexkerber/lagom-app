@@ -138,8 +138,10 @@ internal class MailModel(
     var emptyingTrash by mutableStateOf(false); private set
     var searchText by mutableStateOf(""); private set
     var unreadOnly by mutableStateOf(false)
-    // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes.
-    val visibleRows: List<MailRow> get() = if (unreadOnly && !(mailbox == Mailbox.TRASH && folder == null)) rows.filter { it.unread } else rows
+    // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes. A search replaces the
+    // filter, so it finds read mail too; the filter comes back with the mailbox. Same on iOS.
+    val visibleRows: List<MailRow> get() =
+        if (unreadOnly && !(mailbox == Mailbox.TRASH && folder == null) && searchText.isBlank()) rows.filter { it.unread } else rows
     var selectedId by mutableStateOf<Long?>(null); private set
     var message by mutableStateOf<MailMessage?>(null); private set
     var messages by mutableStateOf<List<MailMessage>>(emptyList()); private set
@@ -498,7 +500,9 @@ internal class MailModel(
     private suspend fun change(id: Long, conversation: Boolean, text: String, run: suspend (LagomCoreInterface, List<Long>) -> List<MailChange>) {
         val core = core ?: return
         if (working) return
-        val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds ?: listOf(id) else listOf(id)
+        // A conversation opened outside the loaded rows (from a notification) takes its loaded messages.
+        val ids = if (conversation) rows.firstOrNull { id in it.messageIds }?.messageIds
+            ?: messages.map { it.row.id }.takeIf { id in it } ?: listOf(id) else listOf(id)
         actingId = id
         try {
             val changes = if (demo) {
@@ -578,6 +582,14 @@ internal class MailModel(
             core.unsubscribe(id)
             unsubscribedIds += id
         } finally { unsubscribingId = null }
+    }
+    /** The core's words for the removal question: they name the drafts and sends only this device has. If the count
+     *  fails, the words still warn. */
+    suspend fun removalNote(account: MailAccount): String {
+        val core = core ?: return "Your mail stays with your provider."
+        return try { core.removalNote(account.id) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { "Your mail stays with your provider. Removing the account also deletes its drafts and unsent messages in lagom." }
     }
     suspend fun remove(account: MailAccount) {
         core?.removeAccount(account.id)

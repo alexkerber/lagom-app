@@ -419,8 +419,9 @@ struct MailView: View {
     }
 
     private var inbox: some View {
-        // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes.
-        let unreadOnly = unreadOnly && !(model.mailbox == .trash && model.folder == nil)
+        // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes. A search replaces
+        // the filter, so it finds read mail too; the filter comes back with the mailbox.
+        let unreadOnly = unreadOnly && !(model.mailbox == .trash && model.folder == nil) && model.searchQuery.isEmpty
         let rows = (unreadOnly ? model.rows.filter(\.unread) : model.rows)
             .filter { !leaving.contains($0.id) && !$0.messageIds.contains(where: leaving.contains) }
         let ids = rows.map(\.id)
@@ -473,7 +474,7 @@ struct MailView: View {
                         // Until the first sync lands, quiet placeholder rows stand in, not inbox zero (desktop #141).
                         LoadingRows()
                     } else if model.rows.isEmpty && model.failures.isEmpty {
-                        if !model.searchText.isEmpty {
+                        if !model.searchQuery.isEmpty {
                             EmptyState(icon: "search", title: "No results", detail: "Nothing in your mail matches.")
                         } else if model.folder != nil {
                             EmptyState(icon: "inbox", title: "No mail here", detail: "Pull to refresh your mail.")
@@ -614,7 +615,8 @@ extension MailView {
         Button { Task { await model.prepareCompose(id: id, kind: .forward) } } label: { Label("Forward", image: "forward") }
         Button { moving = (row.account, id) } label: { Label("Move", image: "move") }
         if model.mailbox != .trash { Button { act(.delete, id: id) } label: { Label("Delete", image: "trash") } }
-        Button { Task { await model.setRead(id: id, read: row.unread) } } label: {
+        // The row's flag, so the row's members: on the Duo rail it is the grouped list row, not only the selected message.
+        Button { Task { await model.setRead(row: row) } } label: {
             Label(row.unread ? "Mark read" : "Mark unread", image: row.unread ? "read" : "unread")
         }
     }

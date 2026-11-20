@@ -347,6 +347,8 @@ pub struct MainWindow {
     names: HashMap<String, Entity<TextInput>>,
     /// The open account's Remove waits for a yes.
     confirm_remove_account: bool,
+    /// That question's second sentence: what removing deletes that the provider does not have.
+    remove_note: String,
     /// macOS: whether lagom opens mailto links, read when Settings opens. `None`: not shown.
     default_mail: Option<bool>,
     /// "Change password" on an email-and-password account's page.
@@ -486,6 +488,7 @@ impl MainWindow {
             signatures: HashMap::new(),
             names: HashMap::new(),
             confirm_remove_account: false,
+            remove_note: String::new(),
             default_mail: None,
             new_password: None,
             mailbox_expanded: [true, false, false],
@@ -2635,6 +2638,7 @@ impl Render for MainWindow {
                     colors: (0..accounts.len()).map(|ix| self.account_accent(ix)).collect(),
                     open: open.as_deref(),
                     confirm: self.confirm_remove_account,
+                    remove_note: &self.remove_note,
                     default_mail: self.default_mail,
                     signing_in,
                     group: self.panes.group_conversations,
