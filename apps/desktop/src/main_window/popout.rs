@@ -12,6 +12,8 @@ pub struct MessageWindow {
     id: usize,
     pub(super) focus: FocusHandle,
     web: html::Web,
+    /// The toolbar's More menu is open.
+    more: bool,
     _main: [Subscription; 2],
 }
 
@@ -52,6 +54,7 @@ impl MessageWindow {
             id,
             focus,
             web: html::Web::default(),
+            more: false,
             _main: [
                 // A move, a store read or a theme change in the main window shows here too.
                 cx.observe(inbox, |_, _, cx| cx.notify()),
@@ -69,6 +72,26 @@ impl MessageWindow {
     /// The reply sheet opens in the main window, which owns drafts and sending.
     fn reply(&mut self, cx: &mut App) {
         self.compose(ComposeKind::Reply, cx);
+    }
+
+    /// The toolbar's More, on this window's message.
+    fn more_action(&mut self, action: polish::MessageAction, cx: &mut Context<Self>) {
+        self.more = matches!(action, polish::MessageAction::Menu);
+        let id = self.id;
+        match action {
+            polish::MessageAction::ReplyAll => self.compose(ComposeKind::ReplyAll, cx),
+            polish::MessageAction::Forward => self.compose(ComposeKind::Forward, cx),
+            polish::MessageAction::Delete => self.act(Move::Delete, cx),
+            polish::MessageAction::Unread => { self.main.update(cx, |main, window, cx| main.toggle_read_on(id, window, cx)).ok(); }
+            polish::MessageAction::Move => {
+                self.main.update(cx, |main, window, cx| {
+                    window.activate_window();
+                    main.message_action(id, polish::MessageAction::Move, window, cx);
+                }).ok();
+            }
+            polish::MessageAction::Menu | polish::MessageAction::Close | polish::MessageAction::Copy => {}
+        }
+        cx.notify();
     }
 
     fn compose(&mut self, kind: ComposeKind, cx: &mut App) {
@@ -94,7 +117,8 @@ impl Render for MessageWindow {
         } else {
             main.inbox.trash.contains(&id)
         };
-        let menu_open = main.message_menu == Some(id);
+        let card_menu = main.message_menu == Some(id);
+        let menu_open = card_menu || self.more;
         self.web.frame(Some((id, &m)), &t, menu_open, window, cx);
         crate::rich::release(window, cx);
         let web = html::supported() && m.html.is_some();
@@ -103,7 +127,7 @@ impl Render for MessageWindow {
             this.update(cx, |this, cx| this.reply(cx)).ok();
         };
         let main_window = self.main;
-        let menu = polish::reading_menu(&t, id, menu_open, move |action, _, cx| {
+        let menu = polish::reading_menu(&t, id, card_menu, move |action, _, cx| {
             main_window.update(cx, |main, window, cx| {
                 if matches!(action, polish::MessageAction::ReplyAll | polish::MessageAction::Forward | polish::MessageAction::Move) { window.activate_window(); }
                 main.message_action(id, *action, window, cx);
@@ -150,11 +174,12 @@ impl Render for MessageWindow {
                     // macOS: the traffic lights sit in the toolbar, as in the main window's sidebar.
                     .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
                     .pr(px(16.))
+                    // Reply, Later, More and Done, as in the main window.
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
-                    .child(icon_button(&t, "reply-all", "icons/reply-all.svg", "Reply all · Shift+R").on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::ReplyAll, cx))))
-                    .child(button(&t, "Forward", None).on_click(cx.listener(|this, _, _, cx| this.compose(ComposeKind::Forward, cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
+                    .child(polish::toolbar_menu(&t, self.more, in_trash, m.unread,
+                        cx.listener(|this, action: &polish::MessageAction, _, cx| this.more_action(*action, cx))))
                     .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.main.update(cx, |main, _, cx| {
@@ -304,7 +329,7 @@ mod icon_tests {
         let mut popup = gpui::VisualTestContext::from_window(popout.into(), cx);
         popup.simulate_resize(gpui::size(px(420.), px(500.)));
         popup.run_until_parked();
-        let bounds: Vec<_> = ["Reply", "reply-all", "Forward", "Later", "Done"].into_iter().map(|label| popup.debug_bounds(label).unwrap()).collect();
+        let bounds: Vec<_> = ["Reply", "Later", "More", "Done"].into_iter().map(|label| popup.debug_bounds(label).unwrap()).collect();
         for (i, a) in bounds.iter().enumerate() {
             assert!(a.left() >= px(0.) && a.right() <= px(420.), "action {i} must fit");
             for b in bounds.iter().skip(i + 1) { assert!(!a.intersects(b), "toolbar actions must not overlap"); }

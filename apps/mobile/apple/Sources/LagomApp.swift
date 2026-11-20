@@ -107,8 +107,6 @@ struct MailView: View {
     @Binding var removing: MailAccount?
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
-    @State private var laterChoices: [LaterChoice] = []
-    @State private var laterID: Int64?
     @State private var retrying: SendFailure?
     @State private var signing: MailAccount?
     @State private var naming: MailAccount?
@@ -195,15 +193,6 @@ struct MailView: View {
             }
             .animation(Motion.move(reduceMotion), value: model.notice)
         }
-        .confirmationDialog("Later", isPresented: Binding(get: { laterID != nil }, set: { if !$0 { laterID = nil } })) {
-            ForEach(laterChoices, id: \.label) { choice in
-                Button(choice.label) {
-                    guard let id = laterID else { return }
-                    laterID = nil
-                    act(.later, id: id, until: choice.untilUnix)
-                }
-            }
-        }
         .sensoryFeedback(.impact(weight: .light), trigger: acted)
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
@@ -253,7 +242,7 @@ struct MailView: View {
     }
 
     /// The Duo's right column: New message over the list; with a message open, Back, Reply,
-    /// Reply all, Forward and More at the top, Delete and Done at the bottom.
+    /// Later and More at the top, Done at the bottom.
     private func railButton(_ title: String, icon: String, primary: Bool = false, selected: Bool = false, action: @escaping () -> Void) -> some View {
         RailButton(title: title, icon: icon, primary: primary, selected: selected, action: action)
     }
@@ -267,18 +256,13 @@ struct MailView: View {
                 railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
                 RailGroup {
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
-                railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
-                railButton("Forward", icon: "forward") { Task { await model.prepareCompose(id: id, kind: .forward) } }
-                Menu {
-                    Button("Later") { laterChoices = model.core?.laterChoices() ?? []; laterID = id }
-                    if let row { Button("Move to") { moving = (row.account, id) } }
-                    if let row {
-                        Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: id, read: row.unread) } }
+                railButton("Later", icon: "later") { act(.later, id: id) }.contextMenu { laterTimes(id: id) }
+                if let row {
+                    Menu { moreItems(row, id: id) } label: {
+                        Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
                     }
-                } label: {
-                    Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
+                    .foregroundStyle(Theme.ink)
                 }
-                .foregroundStyle(Theme.ink)
                 }
             }
             .disabled(model.working || model.preparingCompose)
@@ -294,11 +278,8 @@ struct MailView: View {
 
     @ViewBuilder private var railBottom: some View {
         if let id = model.selectedID {
-            VStack(spacing: 8) {
-                if model.mailbox != .trash { railButton("Delete", icon: "trash") { act(.delete, id: id) } }
-                railButton("Done", icon: "done", primary: true) { act(.done, id: id) }
-            }
-            .disabled(model.working)
+            railButton("Done", icon: "done", primary: true) { act(.done, id: id) }
+                .disabled(model.working)
         }
     }
 
@@ -541,7 +522,7 @@ struct MailView: View {
         return account.displayName
     }
 
-    /// The desktop reading pane's toolbar over the message: Later, Delete, Mark read, and Done filled.
+    /// The reading pane's toolbar over the message: Reply, Later, More, and Done filled, as on every platform.
     private var detail: some View {
         Group { reading }
             // The message fades in over its preview instead of popping in.
@@ -592,30 +573,40 @@ struct MailView: View {
 }
 
 extension MailView {
-    /// Back when the message is pushed, Later, Delete, Mark read on iPad, then Done filled at the end.
+    /// Back when the message is pushed, then Reply, Later and More, and Done filled at the end: the same set and
+    /// order as Mac and Android. Later is one tap (tomorrow, as desktop's L); a long press offers the other times.
     func actions(_ message: MailMessage, iconOnly: Bool) -> some View {
         let id = model.selectedID ?? message.row.id
         return HStack(spacing: 8) {
             if !split {
                 IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)
             }
-            HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) {
-                laterChoices = model.core?.laterChoices() ?? []; laterID = id
-            }
-            if model.mailbox != .trash {
-                HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { act(.delete, id: id) }
-            }
-            HouseButton(title: "Move to", icon: "move", iconOnly: iconOnly) {
-                moving = (message.row.account, id)
-            }
-            if regular {
-                HouseButton(title: message.row.unread ? "Mark read" : "Mark unread", icon: message.row.unread ? "read" : "unread",
-                            iconOnly: iconOnly) {
-                    Task { await model.setRead(id: id, read: message.row.unread) }
-                }
-            }
+            HouseButton(title: "Reply", icon: "reply", iconOnly: iconOnly) { Task { await model.prepareCompose(id: id, kind: .reply) } }
+                .disabled(model.preparingCompose)
+            HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) { act(.later, id: id) }
+                .contextMenu { laterTimes(id: id) }
+            Menu { moreItems(message.row, id: id) } label: { ButtonLabel(title: "More", icon: "more", iconOnly: true) }
+                .menuStyle(.button).buttonStyle(HouseButtonStyle())
             Spacer(minLength: 0)
             HouseButton(title: "Done", icon: "done", primary: true) { act(.done, id: id) }
+        }
+    }
+
+    /// The overflow, in the same order on every platform: Reply all, Forward, Move, Delete, Mark unread.
+    @ViewBuilder func moreItems(_ row: MailRow, id: Int64) -> some View {
+        Button { Task { await model.prepareCompose(id: id, kind: .replyAll) } } label: { Label("Reply all", image: "reply-all") }
+        Button { Task { await model.prepareCompose(id: id, kind: .forward) } } label: { Label("Forward", image: "forward") }
+        Button { moving = (row.account, id) } label: { Label("Move", image: "move") }
+        if model.mailbox != .trash { Button { act(.delete, id: id) } label: { Label("Delete", image: "trash") } }
+        Button { Task { await model.setRead(id: id, read: row.unread) } } label: {
+            Label(row.unread ? "Mark read" : "Mark unread", image: row.unread ? "read" : "unread")
+        }
+    }
+
+    /// Later's other times, behind a long press.
+    @ViewBuilder func laterTimes(id: Int64) -> some View {
+        ForEach(model.core?.laterChoices() ?? [], id: \.label) { choice in
+            Button(choice.label) { act(.later, id: id, until: choice.untilUnix) }
         }
     }
 }

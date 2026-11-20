@@ -55,12 +55,19 @@ impl MainWindow {
     /// An account-wide count: read on the background executor, the old count shows meanwhile.
     pub(super) fn reload_unread(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &self.live else {
-            self.today.unread = self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count();
+            let unread: Vec<usize> = self.inbox.items.iter().copied().filter(|&id| self.inbox.mail[id].unread).collect();
+            self.today.unread = unread.len();
+            self.today.mail = unread.into_iter().take(TODAY_MAIL).map(|id| self.inbox.mail[id].clone()).collect();
             return;
         };
         let pending: Vec<i64> = self.pending_moves().into_iter().collect();
         let path = live.store.path().to_owned();
-        let read = move || Store::open(path)?.unread_inbox_count(chrono::Local::now().timestamp(), &pending);
+        let read = move || {
+            let (store, now) = (Store::open(path)?, chrono::Local::now().timestamp());
+            // A message on its way out of the Inbox is not counted, so it is not listed either.
+            let mail = store.unread_mail(now, (TODAY_MAIL + pending.len()) as u32)?.into_iter().filter(|m| !pending.contains(&m.id)).take(TODAY_MAIL).collect();
+            Ok((store.unread_inbox_count(now, &pending)?, mail))
+        };
         #[cfg(test)]
         if INLINE_READS.get() { return self.unread_done(read(), cx); }
         let read = cx.background_executor().spawn(async move { read() });
@@ -70,10 +77,11 @@ impl MainWindow {
         }));
     }
 
-    fn unread_done(&mut self, result: lagom_core::Result<usize>, cx: &mut Context<Self>) {
+    fn unread_done(&mut self, result: lagom_core::Result<(usize, Vec<lagom_core::store::MessageSummary>)>, cx: &mut Context<Self>) {
         match result {
-            Ok(count) => {
+            Ok((count, mail)) => {
                 self.today.unread = count;
+                self.today.mail = mail.iter().map(|m| Mail::from_summary(m, chrono::Local::now())).collect();
                 #[cfg(not(test))]
                 {
                     crate::badge::set(count);
@@ -101,7 +109,7 @@ impl MainWindow {
         let gray = |text: &'static str| div().text_color(t.ink2).child(text);
         // Word gaps are margins: a phrase and its punctuation wrap together.
         div().mb(px(48.)).flex().flex_col().gap(px(16.))
-            .child(label(&t, now.format("%A %-d %B").to_string()))
+            .child(label(&t, now.format(TODAY_DATE).to_string()))
             .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::HERO)).tracking(crate::theme::face::DISPLAY_TRACKING)
                 .line_height(relative(1.05)).max_w(px(900.))
                 .child(greeting)
@@ -127,8 +135,45 @@ impl MainWindow {
                     .child(self.today_sentence(now, events, due, cx))
                     .child(div().flex().gap(px(48.)).when(stacked || !schedule, |d| d.flex_col())
                         .when(schedule, |d| d.child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx))))
-                        .child(div().min_w(px(0.)).when(!stacked && schedule, |d| d.flex_1()).child(self.home_tasks(cx))))))
+                        .child(div().min_w(px(0.)).when(!stacked && schedule, |d| d.flex_1()).child(self.home_tasks(cx))))
+                    .child(self.home_mail(cx))))
             .children(self.task_hint(window).map(|hint| div().px(px(48.)).pb(px(16.)).child(hint)))
+    }
+}
+
+/// Today's Mail section lists this many unread messages, as on iOS and Android.
+const TODAY_MAIL: usize = 3;
+/// Today's date line: "Thursday, 19 November", as iOS writes it.
+const TODAY_DATE: &str = "%A, %-d %B";
+
+impl MainWindow {
+    /// Today's short look at unread mail, as on iOS and Android: a dot, the sender and the subject; a row opens it.
+    fn home_mail(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        div().debug_selector(|| "home-mail".into()).mt(px(48.)).min_w(px(0.)).flex().flex_col().gap(px(4.))
+            .child(heading(&t, "Mail").mb(px(8.)))
+            .when(self.today.mail.is_empty(), |d| d.child(div().text_color(t.ink2).py(px(4.)).child("No unread mail in Inbox")))
+            .children(self.today.mail.iter().enumerate().map(|(ix, mail)| {
+                let (from, subject, mail) = (mail.from.clone(), mail.subject.clone(), mail.clone());
+                pressable(div().id(("home-mail", ix)), &t, false).debug_selector(move || format!("home-mail-{ix}"))
+                    .flex().items_center().gap(px(10.)).min_h(px(36.)).px(px(4.)).rounded(px(radius::KEY))
+                    .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(t.accent))
+                    .child(div().flex_shrink_0().max_w(px(240.)).one_line().font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(from))
+                    .child(div().flex_1().min_w(px(0.)).one_line().text_color(t.ink2).child(subject))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // A notification's path: it waits for pending moves, then opens the message in its Inbox.
+                        if let Some(id) = mail.store {
+                            this.open_notification(crate::notifications::Target { account: mail.account.clone(), message: Some(id) }, window, cx);
+                        } else {
+                            this.open_box(None, cx);
+                            let found = this.inbox.items.iter().position(|&id| this.inbox.mail[id].address == mail.address && this.inbox.mail[id].subject == mail.subject);
+                            if let Some(ix) = found {
+                                this.select(|inbox| inbox.select(ix), cx);
+                            }
+                        }
+                        window.focus(&this.focus);
+                    }))
+            }))
     }
 }
 
@@ -395,6 +440,32 @@ mod tests {
             cx.simulate_click(at, Default::default());
             assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Calendar) && v.week.detail.is_some()));
         }
+    }
+
+    #[gpui::test]
+    fn today_mail_lists_newest_unread_below_the_columns_and_opens_it(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
+        cx.run_until_parked();
+        let first = view.read_with(cx, |v, _| {
+            assert!(!v.today.mail.is_empty() && v.today.mail.len() <= TODAY_MAIL);
+            assert!(v.today.mail.iter().all(|m| m.unread));
+            v.today.mail[0].subject.clone()
+        });
+        let mail = cx.debug_bounds("home-mail").unwrap();
+        assert!(cx.debug_bounds("home-tasks").unwrap().bottom() <= mail.top());
+        assert!(cx.debug_bounds("today-agenda").unwrap().bottom() <= mail.top());
+        let at = cx.debug_bounds("home-mail-0").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, _| {
+            assert!(matches!(v.page, Page::Mail) && v.inbox.open.is_none());
+            assert_eq!(v.inbox.current().map(|id| v.inbox.mail[id].subject.clone()), Some(first));
+        });
+    }
+
+    #[test]
+    fn today_date_line_has_the_ios_comma() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        assert_eq!(day.format(TODAY_DATE).to_string(), "Thursday, 19 November");
     }
 
     #[gpui::test]

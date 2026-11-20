@@ -85,7 +85,7 @@ internal val AppSection.icon: Int get() = when (this) {
 @Composable private fun timeStyle() = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
 
 /** The schedule's time column, as wide as its widest label at this font scale: every hour in this
- *  locale's clock ("11:00 AM" or "23:00") and "All day". So every bar lines up. */
+ *  locale's clock ("11:00 AM" or "23:00"). So every bar lines up. */
 @Composable private fun timeColumn(): Dp {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -94,7 +94,7 @@ internal val AppSection.icon: Int get() = when (this) {
     return remember(context, density, style) {
         val format = android.text.format.DateFormat.getTimeFormat(context)
         val hour = java.util.Calendar.getInstance()
-        val labels = (0..23).map { hour.set(java.util.Calendar.HOUR_OF_DAY, it); hour.set(java.util.Calendar.MINUTE, 0); format.format(hour.time) } + "All day"
+        val labels = (0..23).map { hour.set(java.util.Calendar.HOUR_OF_DAY, it); hour.set(java.util.Calendar.MINUTE, 0); format.format(hour.time) }
         with(density) { labels.maxOf { measurer.measure(it, style, maxLines = 1).size.width }.toDp() }
     }
 }
@@ -264,9 +264,14 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         contentDescription = listOfNotNull(if (event.allDay) "All day" else null, title, event.location?.takeIf { it.isNotEmpty() }).joinToString(", ")
         if (!event.allDay) stateDescription = "$start – $end"
     }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(if (event.allDay) "All day" else start, Modifier.width(column).clearAndSetSemantics {},
-            color = colors.onSurfaceVariant, style = timeStyle(), maxLines = 1)
-        Box(Modifier.width(2.dp).height(28.dp).background(colors.primary, RoundedCornerShape(1.dp)))
+        // All day is the sun and a dot, a timed event its time and a bar, as on Mac and iOS.
+        if (event.allDay) {
+            Box(Modifier.width(column), contentAlignment = Alignment.CenterEnd) { LagomIcon(R.drawable.ic_sun, size = 16.dp) }
+            Box(Modifier.size(5.dp).background(colors.primary, CircleShape))
+        } else {
+            Text(start, Modifier.width(column).clearAndSetSemantics {}, color = colors.onSurfaceVariant, style = timeStyle(), maxLines = 1)
+            Box(Modifier.width(2.dp).height(28.dp).background(colors.primary, RoundedCornerShape(1.dp)))
+        }
         Column(Modifier.weight(1f).clearAndSetSemantics {}) {
             Text(title, color = if (past) colors.onSurfaceVariant else colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
             event.location?.takeIf { it.isNotEmpty() }?.let {
@@ -274,8 +279,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
             }
         }
         event.webLink()?.let { link ->
-            TextButton(onClick = { openLink(context, planner, link) },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).semantics { contentDescription = "Join meeting" }) { Text("Join") }
+            LagomIconButton("Join meeting", R.drawable.ic_video) { openLink(context, planner, link) }
         }
     }
 }

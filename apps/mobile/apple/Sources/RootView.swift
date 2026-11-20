@@ -125,7 +125,8 @@ struct RootView: View {
     }
 }
 
-/// The desktop sidebar without the brand (Alex 2026-11-17): Search, the pages, Mail's mailboxes with per-account Inbox, then Accounts.
+/// The desktop sidebar without the brand (Alex 2026-11-17): Search, the pages, Mail's mailboxes with per-account Inbox,
+/// then Accounts; Settings at the foot.
 struct SidebarView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
@@ -140,7 +141,7 @@ struct SidebarView: View {
                 .onChange(of: model.searchText) { _, text in if !text.isEmpty { section = .mail } }
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(AppSection.allCases) { page in
+                    ForEach(AppSection.allCases.filter { $0 != .settings }) { page in
                         SidebarRow(page.title, icon: page.icon, count: page == .mail ? planner.unreadCount : 0, badge: true,
                                    active: section == page, page: true) { section = page }
                     }
@@ -150,6 +151,9 @@ struct SidebarView: View {
                 }
             }
             .scrollIndicators(.hidden)
+            // Settings stays at the foot, under the scrolling list, as on Mac.
+            SidebarRow(AppSection.settings.title, icon: AppSection.settings.icon, active: section == .settings, page: true) { section = .settings }
+                .padding(.bottom, 8)
         }
         .padding(.horizontal, 12).padding(.top, 8)
         .foregroundStyle(Theme.ink)
