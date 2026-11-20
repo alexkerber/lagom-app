@@ -313,6 +313,9 @@ mod tests {
         let offered = core.calendar_access_needed().await.unwrap();
         assert_eq!(offered.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [google.id.as_str()]);
         let password = core.accounts().await.unwrap().into_iter().find(|a| a.email == "p@example.test").unwrap();
+        // Settings names how each account signs in, in the Mac's words.
+        assert_eq!(password.kind, "Email and password");
+        assert!(core.accounts().await.unwrap().iter().any(|a| a.id == google.id && a.kind == "Google account"));
         assert!(core.begin_calendar_access(password.id).is_err(), "a password account has no Google grant");
         assert!(core.begin_calendar_access("missing".into()).is_err());
         // Google took the grant back: access is offered again and mail keeps its scope.

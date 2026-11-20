@@ -3,6 +3,7 @@ package app.lagommail.android
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
+import androidx.annotation.DrawableRes
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import androidx.compose.animation.*
@@ -14,6 +15,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clip
@@ -30,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -59,19 +64,19 @@ import kotlin.math.roundToInt
 
 @Composable internal fun MailScreen(model: MailModel, twoPane: Boolean) {
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
-    var removing by remember { mutableStateOf<MailAccount?>(null) }
-    var signing by remember { mutableStateOf<MailAccount?>(null) }
-    var naming by remember { mutableStateOf<MailAccount?>(null) }
-    var settings by remember { mutableStateOf(false) }
+    var settings by rememberSaveable { mutableStateOf(false) }
+    // A mailto link, a share or a notification (a new draft or an opened message) leaves Settings; Add account comes back to it.
+    LaunchedEffect(model.draft != null, model.selectedId) { if (model.draft != null || model.selectedId != null) settings = false }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
     val rise = with(LocalDensity.current) { 12.dp.roundToPx() }
     Box(Modifier.fillMaxSize()) {
         Box(if (overlay != null || settings) Modifier.clearAndSetSemantics {} else Modifier) {
-            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onName = { naming = it }, onRetry = { retrying = it },
-                onSettings = { settings = true })
+            MailHome(model, twoPane, onRetry = { retrying = it }, onSettings = { settings = true })
         }
+        // Under Compose and Add account, so adding an account from Settings comes back to it.
+        if (settings) Box(if (overlay != null) Modifier.clearAndSetSemantics {} else Modifier) { SettingsScreen(model) { settings = false } }
         AnimatedContent(overlay, Modifier.fillMaxSize(), contentKey = { it?.let { screen -> screen::class } }, label = "screen", transitionSpec = {
             when {
                 // motion.md: compose rises 12 dp into place on the spring and fades in; Undo after Send plays the same arrival.
@@ -89,16 +94,6 @@ import kotlin.math.roundToInt
             }
         }
     }
-    // Settings gives way to Compose and Add account, which the tablet sidebar can open under it.
-    LaunchedEffect(overlay != null) { if (overlay != null) settings = false }
-    if (settings && overlay == null) SettingsScreen { settings = false }
-    removing?.let { account ->
-        AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove account?") }, text = { Text("Remove ${account.email} and its local mail?") },
-            confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove") } },
-            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } })
-    }
-    signing?.let { account -> SignatureDialog(model, account) { signing = null } }
-    naming?.let { account -> NameDialog(model, account) { naming = null } }
     model.newFolder?.let { request -> NewFolderDialog(model, request) }
     retrying?.let { failure ->
         AlertDialog(onDismissRequest = { retrying = null }, title = { Text("Send again?") },
@@ -116,22 +111,24 @@ internal fun Mailbox.label(): String = when (this) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit,
-    onName: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit, onSettings: () -> Unit) {
+@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRetry: (SendFailure) -> Unit, onSettings: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
     Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) {
     Scaffold(containerColor = lagom.bg, topBar = {
-        // The desktop list header: the title and a quiet line open the mailboxes and accounts; New message on the right.
-        TopBar(Modifier.statusBarsPadding(), start = 8.dp) {
-            Box(Modifier.weight(1f)) {
+        // As on iOS (Alex 2026-11-20): the lagom mark, and on the right the title and a quiet line that open the
+        // mailboxes and accounts. The filter, Search and New message follow in the list's own row.
+        TopBar(Modifier.statusBarsPadding(), end = 8.dp) {
+            AppIcon(28.dp)
+            Spacer(Modifier.weight(1f))
+            Box {
                 val title = if (model.showingDrafts) "Drafts" else model.folder?.name ?: model.mailbox.label()
                 val syncing = afterWait(model.syncing)
                 val left = if (!model.showingDrafts && model.mailbox == Mailbox.INBOX && model.folder == null && model.accounts.isNotEmpty())
                     model.counts.filter { model.accountId == null || it.account == model.accountId }.sumOf { it.inbox } else null
                 val status = syncStatus(if (syncing && model.syncing) SyncState.Syncing else model.syncState, left)
                 Column(Modifier.clip(RoundedCornerShape(Radius.control)).clickable(onClickLabel = "Mailboxes and accounts") { menu = true }
-                    .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}) {
+                    .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}, horizontalAlignment = Alignment.End) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
@@ -174,24 +171,18 @@ internal fun Mailbox.label(): String = when (this) {
                             menu = false; model.perform { model.changeScope(account.id, model.mailbox) }
                         })
                     }
-                    DropdownMenuItem(text = { Text("Add account") }, enabled = model.core != null, onClick = { menu = false; model.accountForm = AccountForm() })
-                    model.accounts.forEach { account ->
-                        DropdownMenuItem(text = { Text("Your name for ${account.email}") }, onClick = { menu = false; onName(account) })
-                        DropdownMenuItem(text = { Text("Signature for ${account.email}") }, onClick = { menu = false; onSign(account) })
-                        DropdownMenuItem(text = { Text("Remove ${account.email}") }, onClick = { menu = false; onRemove(account) })
-                    }
+                    // The menu is a phone's sidebar, so Settings closes it as on the Mac; adding, naming, signing and
+                    // removing accounts live there (Alex 2026-11-20).
                     HorizontalDivider()
-                    DropdownMenuItem(text = { Text("Settings") }, onClick = { menu = false; onSettings() })
+                    DropdownMenuItem(text = { Text("Settings") }, leadingIcon = { LagomIcon(R.drawable.ic_settings) },
+                        onClick = { menu = false; onSettings() })
                 }
-            }
-            LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
-                val account = model.accountId ?: model.accounts.first().id
-                model.perform { model.newMessage(account) }
             }
         }
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (model.showingDrafts) {
+                ListBar(model)
                 LazyColumn(Modifier.weight(1f)) {
                     val drafts = model.drafts.filter { model.accountId == null || it.account == model.accountId }
                     if (drafts.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_edit_draft, "No drafts", rowMotion(true).fillParentMaxSize()) }
@@ -250,21 +241,7 @@ internal fun Mailbox.label(): String = when (this) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun Inbox(model: MailModel, onRetry: (SendFailure) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        // Search and the filter sit in one fixed band under the bar, so nothing above the list moves as it loads.
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SearchField(model.searchText, Modifier.weight(1f)) { model.perform { model.changeSearch(it) } }
-            if (model.mailbox == Mailbox.TRASH && model.folder == null) {
-                // In Trash the filter makes way for Empty Trash, as on desktop.
-                var confirm by remember { mutableStateOf(false) }
-                HouseButton(if (model.emptyingTrash) "Emptying…" else "Empty Trash", R.drawable.ic_empty_trash, iconOnly = true,
-                    enabled = model.rows.isNotEmpty() && !model.working) { confirm = true }
-                if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete all permanently?") },
-                    confirmButton = { TextButton(onClick = { confirm = false; model.perform { model.emptyTrash() } },
-                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
-                    dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
-            } else FilterControl(model.unreadOnly) { model.unreadOnly = it }
-        }
+        ListBar(model)
         // A pull shows the indicator at once; a sync the app starts shows it only past 150 ms.
         var pulled by remember { mutableStateOf(false) }
         PullToRefreshBox(isRefreshing = pulled || afterWait(model.syncing), onRefresh = {
@@ -350,8 +327,54 @@ internal fun Mailbox.label(): String = when (this) {
     }
 }
 
-/** The desktop sidebar's Search field: an icon, the text, and Clear once there is some. */
-@Composable private fun SearchField(text: String, modifier: Modifier = Modifier, change: (String) -> Unit) {
+/** The list's row under the bar, as iOS: the filter (Empty Trash in Trash) on the left, Search and New message on the right.
+ *  Search opens into the field in the row's place and stays open while it holds text. Drafts have New message only. */
+@Composable private fun ListBar(model: MailModel) {
+    var searching by remember { mutableStateOf(false) }
+    val drafts = model.showingDrafts
+    // The glyphs on the right end 16 dp in, under the mailbox title: 2 dp here and 14 dp inside a 48 dp button.
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!drafts && (searching || model.searchText.isNotEmpty())) {
+            val focus = remember { FocusRequester() }
+            // False only once the field has had focus and lost it; an empty field then closes, as on iOS.
+            var focused by remember { mutableStateOf<Boolean?>(null) }
+            SearchField(model.searchText, focus, Modifier.weight(1f).onFocusChanged {
+                focused = if (it.hasFocus) true else if (focused == true) false else focused
+            }) { model.perform { model.changeSearch(it) } }
+            // The keyboard rises with the field the button opened, not with a search that is only kept.
+            LaunchedEffect(Unit) { if (searching) focus.requestFocus() }
+            LaunchedEffect(focused, model.searchText) { if (focused == false && model.searchText.isEmpty()) searching = false }
+            // Ink, as on iOS; its text ends on the same 16 dp line as the title above.
+            TextButton(onClick = { searching = false; model.perform { model.changeSearch("") } }, Modifier.heightIn(min = 48.dp).padding(end = 2.dp),
+                colors = ButtonDefaults.textButtonColors(contentColor = lagom.ink)) { Text("Cancel") }
+        } else {
+            // The buttons measure first; the filter takes what is left, so large text cannot push them off.
+            Box(Modifier.weight(1f)) {
+                if (!drafts && model.mailbox == Mailbox.TRASH && model.folder == null) {
+                    // In Trash the filter makes way for Empty Trash, as on desktop.
+                    var confirm by remember { mutableStateOf(false) }
+                    HouseButton(if (model.emptyingTrash) "Emptying…" else "Empty Trash", R.drawable.ic_empty_trash,
+                        enabled = model.rows.isNotEmpty() && !model.working) { confirm = true }
+                    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete all permanently?") },
+                        confirmButton = { TextButton(onClick = { confirm = false; model.perform { model.emptyTrash() } },
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
+                        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
+                } else if (!drafts) FilterControl(model.unreadOnly) { model.unreadOnly = it }
+            }
+            Row {
+                if (!drafts) LagomIconButton("Search", R.drawable.ic_search) { searching = true }
+                LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
+                    val account = model.accountId ?: model.accounts.first().id
+                    model.perform { model.newMessage(account) }
+                }
+            }
+        }
+    }
+}
+
+/** The Search field, which the list's search button opens: an icon, the text, and Clear once there is some. */
+@Composable private fun SearchField(text: String, focus: FocusRequester, modifier: Modifier = Modifier, change: (String) -> Unit) {
     val c = lagom
     // A subtle fill and no outline, as desktop and iOS (Alex 2026-11-15: one look on every platform).
     Row(modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control))
@@ -360,7 +383,7 @@ internal fun Mailbox.label(): String = when (this) {
         Box(Modifier.weight(1f)) {
             val style = MaterialTheme.typography.bodyLarge
             if (text.isEmpty()) Text("Search", Modifier.clearAndSetSemantics {}, color = c.ink2, style = style)
-            BasicTextField(text, change, Modifier.fillMaxWidth().semantics { contentDescription = "Search" }, singleLine = true,
+            BasicTextField(text, change, Modifier.fillMaxWidth().focusRequester(focus).semantics { contentDescription = "Search" }, singleLine = true,
                 textStyle = style.copy(color = c.ink), cursorBrush = SolidColor(c.accent),
                 keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Search))
         }
@@ -709,8 +732,8 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     }
 }
 
-/** The desktop reading pane: a bar with Back, Later, Delete, Move and Done filled; then the subject, the sender with the
- *  message menu, the body, attachments, and Reply. */
+/** The reading pane: a bar with Back, Reply, Later, More and Done filled, the same set and order as Mac and iOS; then the
+ *  subject, the sender with the message menu, the body, attachments, and Reply. */
 @Composable private fun MessageScreen(model: MailModel, message: MailMessage, close: (() -> Unit)?) {
     var plain by remember(message.row.id) { mutableStateOf(false) }
     val context = LocalContext.current
@@ -737,9 +760,14 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding(), start = if (close != null) 4.dp else 12.dp, end = 12.dp) {
             close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) }
+            HouseButton("Reply", R.drawable.ic_reply, iconOnly = true, enabled = !model.working) { model.perform { model.reply(id) } }
             Box {
                 var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
-                HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working) { choices = model.core?.laterChoices().orEmpty() }
+                // One tap is tomorrow, as desktop's L; a long press offers the other times.
+                HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working,
+                    onLongClickLabel = "Choose a time", onLongClick = { choices = model.core?.laterChoices().orEmpty() }) {
+                    model.perform { model.act(MailAction.Later, id, conversation = false) }
+                }
                 DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {
                     choices.forEach { choice ->
                         DropdownMenuItem(text = { Text(choice.label) }, onClick = {
@@ -749,24 +777,38 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                     }
                 }
             }
-            HouseButton("Delete", R.drawable.ic_trash, iconOnly = true, enabled = !model.working) {
-                model.perform { model.act(MailAction.Delete, id, conversation = false) }
-            }
             val targets = model.moveTargets(message.row.account)
             Box {
                 var open by remember { mutableStateOf(false) }
-                HouseButton("Move to", R.drawable.ic_move, iconOnly = true, enabled = !model.working) { open = true }
-                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    targets.forEach { folder ->
-                        DropdownMenuItem(text = { Text(folder.path) }, onClick = {
-                            open = false
-                            model.perform { model.move(id, folder, conversation = false) }
+                var moving by remember { mutableStateOf(false) }
+                HouseButton("More", R.drawable.ic_more, iconOnly = true, enabled = !model.working) { open = true }
+                DropdownMenu(expanded = open || moving, onDismissRequest = { open = false; moving = false }) {
+                    if (moving) {
+                        targets.forEach { folder ->
+                            DropdownMenuItem(text = { Text(folder.path) }, onClick = {
+                                moving = false
+                                model.perform { model.move(id, folder, conversation = false) }
+                            })
+                        }
+                        DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
+                            moving = false
+                            model.newFolder = NewFolder(message.row.account, id, conversation = false)
                         })
+                    } else {
+                        // The same five, in the same order, on every platform.
+                        @Composable fun item(label: String, @DrawableRes icon: Int, run: () -> Unit) =
+                            DropdownMenuItem(text = { Text(label) }, leadingIcon = { LagomIcon(icon) }, onClick = { open = false; run() })
+                        item("Reply all", R.drawable.ic_reply_all) { model.perform { model.reply(id, ComposeKind.REPLY_ALL) } }
+                        item("Forward", R.drawable.ic_forward) { model.perform { model.reply(id, ComposeKind.FORWARD) } }
+                        item("Move", R.drawable.ic_move) { moving = true }
+                        if (model.mailbox != Mailbox.TRASH) item("Delete", R.drawable.ic_trash) {
+                            model.perform { model.act(MailAction.Delete, id, conversation = false) }
+                        }
+                        val unread = message.row.unread
+                        item(if (unread) "Mark read" else "Mark unread", if (unread) R.drawable.ic_read else R.drawable.ic_unread) {
+                            model.perform { model.setRead(id, unread) }
+                        }
                     }
-                    DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
-                        open = false
-                        model.newFolder = NewFolder(message.row.account, id, conversation = false)
-                    })
                 }
             }
             Spacer(Modifier.weight(1f))

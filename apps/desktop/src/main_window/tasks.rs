@@ -50,6 +50,8 @@ pub(super) struct Today {
     pub(super) task_sync: std::collections::HashMap<String, crate::sync::SyncState>,
     pub(super) tasks: Vec<LocalTask>,
     pub(super) unread: usize,
+    /// The newest unread Inbox mail, for Today's Mail section.
+    pub(super) mail: Vec<Mail>,
     completed: HashSet<i64>,
     menu: Option<TaskMenu>,
     menu_focus: Option<FocusHandle>,

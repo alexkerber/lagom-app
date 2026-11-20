@@ -59,6 +59,10 @@ internal class DateWords(
             else -> format(date, "EEEEdMMMM")
         }
     }
+
+    /** The calendar header, desktop's month and quiet year: the year only outside this year, so a phone header stays one line. */
+    fun monthTitle(date: LocalDate): Pair<String, String?> =
+        format(date, "MMMM") to (if (date.year == today.year) null else format(date, "yyyy"))
 }
 
 /** Today, Todo and Calendar, as iOS `PlannerModel`. Core owns the task and event rules; this holds what the pages show. */

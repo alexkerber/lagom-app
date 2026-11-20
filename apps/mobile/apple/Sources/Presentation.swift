@@ -26,6 +26,12 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// Settings' account row, as on the Mac: "Personal · Email and password"; the name only when it is not the address.
+func accountKind(_ account: MailAccount) -> String {
+    let name = account.displayName == account.email ? "" : account.displayName
+    return [name, account.kind].filter { !$0.isEmpty }.joined(separator: " · ")
+}
+
 /// Tasks due today or earlier, as desktop `due_today`: the first ten characters of `due` are its date.
 func dueCount(_ tasks: [Todo], day: String) -> Int {
     tasks.filter { todo in todo.due.map { String($0.prefix(10)) <= day } ?? false }.count
@@ -124,6 +130,11 @@ struct DateWords {
         case 1: return "Tomorrow"
         default: return format(date, "EEEEdMMMM")
         }
+    }
+
+    /// The calendar header, desktop's month and quiet year: the year only outside this year, so a phone header stays one line.
+    func monthTitle(_ date: Date) -> (month: String, year: String?) {
+        (format(date, "MMMM"), calendar.component(.year, from: date) == calendar.component(.year, from: now) ? nil : format(date, "y"))
     }
 
     /// Core days are Gregorian whatever calendar the user reads them in.

@@ -103,26 +103,20 @@ struct LagomApp: App {
 struct MailView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
-    @Binding var addAccount: Bool
-    @Binding var removing: MailAccount?
+    @Binding var settingsOpen: Bool
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
-    @State private var laterChoices: [LaterChoice] = []
-    @State private var laterID: Int64?
     @State private var retrying: SendFailure?
-    @State private var signing: MailAccount?
-    @State private var naming: MailAccount?
-    @State private var newName = ""
     /// The message "Move to" asks a folder for, with its account.
     @State private var moving: (account: String, id: Int64)?
     @State private var newFolder: NewFolderTarget?
     @State private var confirmEmptyTrash = false
-    @State private var settingsOpen = false
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.railInset) private var railInset
+    @Environment(\.pageMargin) private var pageMargin
     /// Rows Done, Later or Delete just took: they leave at once and come back only if the core refuses.
     @State private var leaving: Set<Int64> = []
     /// The row ids the list last drew, to tell a few arriving rows from a whole page loading.
@@ -131,9 +125,13 @@ struct MailView: View {
     @State private var acted = 0
     /// The sync mark turns to "syncing" only once a sync passes `Motion.calm`.
     @State private var syncShown = false
+    /// Search is a button until tapped; the field stays while it holds text.
+    @State private var searching = false
+    @State private var focusOnOpen = false
+    @FocusState private var searchFocused: Bool
 
     private var regular: Bool { width == .regular && height == .regular }
-    /// The iPad sidebar holds Search and Settings; an unfolded Duo is regular too but has no sidebar.
+    /// The iPad sidebar holds Settings; an unfolded Duo is regular too but has no sidebar.
     private var sidebar: Bool { regular && UIDevice.current.userInterfaceIdiom == .pad }
     /// List and reading pane side by side only where both fit; a narrow iPad pushes the message as a phone does.
     private var split: Bool { regular && paneWidth >= 740 }
@@ -195,28 +193,10 @@ struct MailView: View {
             }
             .animation(Motion.move(reduceMotion), value: model.notice)
         }
-        .confirmationDialog("Later", isPresented: Binding(get: { laterID != nil }, set: { if !$0 { laterID = nil } })) {
-            ForEach(laterChoices, id: \.label) { choice in
-                Button(choice.label) {
-                    guard let id = laterID else { return }
-                    laterID = nil
-                    act(.later, id: id, until: choice.untilUnix)
-                }
-            }
-        }
         .sensoryFeedback(.impact(weight: .light), trigger: acted)
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft).duoRail() }
-        .sheet(item: $signing) { account in SignatureView(model: model, account: account).duoRail() }
-        .alert("Your name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
-            TextField("Your name", text: $newName).textContentType(.name)
-            Button("Save") {
-                guard let account = naming else { return }
-                Task { await model.setName(newName, account: account) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("Shown to the people you write to, and in the sidebar.") }
         .confirmationDialog("Move to", isPresented: Binding(get: { moving != nil }, set: { if !$0 { moving = nil } }), presenting: moving) { row in
             ForEach(model.moveTargets(account: row.account), id: \.id) { folder in
                 Button(folder.path) { act(.move(folder), id: row.id) }
@@ -241,7 +221,7 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
-        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing).duoRail() }
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, sheet: true).duoRail() }
     }
 
     private var composeButton: some View {
@@ -253,7 +233,7 @@ struct MailView: View {
     }
 
     /// The Duo's right column: New message over the list; with a message open, Back, Reply,
-    /// Reply all, Forward and More at the top, Delete and Done at the bottom.
+    /// Later and More at the top, Done at the bottom.
     private func railButton(_ title: String, icon: String, primary: Bool = false, selected: Bool = false, action: @escaping () -> Void) -> some View {
         RailButton(title: title, icon: icon, primary: primary, selected: selected, action: action)
     }
@@ -267,18 +247,15 @@ struct MailView: View {
                 railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
                 RailGroup {
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
-                railButton("Reply all", icon: "reply-all") { Task { await model.prepareCompose(id: id, kind: .replyAll) } }
-                railButton("Forward", icon: "forward") { Task { await model.prepareCompose(id: id, kind: .forward) } }
-                Menu {
-                    Button("Later") { laterChoices = model.core?.laterChoices() ?? []; laterID = id }
-                    if let row { Button("Move to") { moving = (row.account, id) } }
-                    if let row {
-                        Button(row.unread ? "Mark read" : "Mark unread") { Task { await model.setRead(id: id, read: row.unread) } }
+                railButton("Later", icon: "later") { act(.later, id: id) }.contextMenu { laterTimes(id: id) }
+                if let row {
+                    Menu { moreItems(row, id: id) } label: {
+                        Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
                     }
-                } label: {
-                    Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
+                    // The same order wherever the menu opens, as on Mac and Android.
+                    .menuOrder(.fixed)
+                    .foregroundStyle(Theme.ink)
                 }
-                .foregroundStyle(Theme.ink)
                 }
             }
             .disabled(model.working || model.preparingCompose)
@@ -294,44 +271,68 @@ struct MailView: View {
 
     @ViewBuilder private var railBottom: some View {
         if let id = model.selectedID {
-            VStack(spacing: 8) {
-                if model.mailbox != .trash { railButton("Delete", icon: "trash") { act(.delete, id: id) } }
-                railButton("Done", icon: "done", primary: true) { act(.done, id: id) }
-            }
-            .disabled(model.working)
+            railButton("Done", icon: "done", primary: true) { act(.done, id: id) }
+                .disabled(model.working)
         }
     }
 
-    /// The desktop list header: title, a sync mark with what is left, the All/Unread filter.
+    /// The list header (Alex 2026-11-20): the lagom mark with the mailbox on the right, then the filter with
+    /// search and New message on the right. The iPad keeps the mailbox at the left, under its sidebar's brandless list.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // When title and actions do not fit on one line (the largest text sizes), the actions go
-            // under the title, so the title never collapses to "…".
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 8) {
-                    mailboxMenu
-                    Spacer(minLength: 4)
-                    headerActions
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if !sidebar {
+                    Image("LaunchIcon").resizable().frame(width: 28, height: 28).accessibilityHidden(true)
+                    Spacer(minLength: 8)
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    mailboxMenu
-                    HStack(spacing: 8) { headerActions }
+                mailboxMenu
+                if sidebar { Spacer(minLength: 0) }
+            }
+            .frame(minHeight: 44)
+            if searchOpen {
+                HStack(spacing: 8) {
+                    SearchField(text: $model.searchText).focused($searchFocused)
+                    Button("Cancel") { model.searchText = ""; searching = false }.frame(minHeight: 44)
+                }
+                // The keyboard rises once, with the field the button opened, not each time a kept search reappears.
+                .onAppear { if focusOnOpen { searchFocused = true; focusOnOpen = false } }
+            } else {
+                // At the largest text sizes the buttons go under the filter, so nothing collapses to "…".
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { listControl; Spacer(minLength: 8); headerButtons }
+                    VStack(alignment: .leading, spacing: 4) { listControl; HStack(spacing: 8) { Spacer(minLength: 0); headerButtons } }
                 }
             }
-            if !sidebar && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
-        .padding(.horizontal, 16).padding(.vertical, 6)
+        .pageEdges().padding(.bottom, 6)
+        .animation(Motion.move(reduceMotion), value: searchOpen)
+        // An empty field closes when it loses focus, or when a jump to the Inbox or a folder clears the search.
+        .onChange(of: searchFocused) { _, focused in if !focused && model.searchText.isEmpty { searching = false } }
+        .onChange(of: model.searchText) { _, text in if text.isEmpty && !searchFocused { searching = false } }
     }
 
-    /// The filter, or Empty Trash in Trash, and the compose button without a rail.
-    @ViewBuilder private var headerActions: some View {
+    /// The filter, or Empty Trash in Trash, as on desktop.
+    @ViewBuilder private var listControl: some View {
         if model.mailbox == .trash && model.folder == nil && !model.accounts.isEmpty {
-            // In Trash the filter makes way for Empty Trash, as on desktop.
-            HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
+            HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash") { confirmEmptyTrash = true }
                 .disabled(model.rows.isEmpty || model.working)
         } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
-        if railInset == 0 { composeButton.padding(.trailing, -6) }
     }
+
+    /// Search, a button that opens the field as on the Mac (Alex 2026-11-20), and New message without a rail.
+    /// iOS 26's minimized `.searchable` draws nothing here: the bar it lives in is hidden for lagom's own header.
+    @ViewBuilder private var headerButtons: some View {
+        HStack(spacing: 0) {
+            if model.mailbox != .drafts {
+                IconButton(title: "Search", icon: "search") { searching = true; focusOnOpen = true }
+            }
+            if railInset == 0 { composeButton }
+        }
+        // The last glyph ends on the mailbox title's right edge (measured on the folded Duo).
+        .padding(.trailing, -14)
+    }
+
+    private var searchOpen: Bool { model.mailbox != .drafts && (searching || !model.searchText.isEmpty) }
 
     /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
     /// also narrows Later, Sent, Done and Trash.
@@ -358,18 +359,13 @@ struct MailView: View {
                 Text("All accounts").tag(String?.none)
                 ForEach(model.accounts, id: \.id) { Text($0.email).tag(Optional($0.id)) }
             }
-            Button("Add account") { addAccount = true }
-            ForEach(model.accounts, id: \.id) { account in
-                Menu(account.email) {
-                    Button("Your name") { newName = account.displayName == account.email ? "" : account.displayName; naming = account }
-                    Button("Signature") { signing = account }
-                    Button("Remove account", role: .destructive) { removing = account }
-                }
+            // The menu is a phone's sidebar, so Settings closes it as on the Mac; accounts and their names,
+            // signatures and removal live there (Alex 2026-11-20).
+            if !sidebar {
+                Section { Button { settingsOpen = true } label: { Label { Text("Settings") } icon: { Image("settings") } } }
             }
-            // Rarely used, so not in the tab bar on a phone (Alex 2026-11-17).
-            if !sidebar { Button("Settings") { settingsOpen = true } }
         } label: {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: sidebar ? .leading : .trailing, spacing: 1) {
                 HStack(spacing: 4) {
                     Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).lineLimit(1)
                     Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
@@ -378,7 +374,7 @@ struct MailView: View {
                 HStack(spacing: 6) {
                     // Synced is the quiet default: the cloud shows only while it syncs or fails.
                     if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
-                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(.leading)
+                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(sidebar ? .leading : .trailing)
                         .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
                 .foregroundStyle(Theme.secondary)
@@ -456,7 +452,7 @@ struct MailView: View {
                             .frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
                 }
-                .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+                .listRowInsets(EdgeInsets(top: 0, leading: pageMargin - 10, bottom: 0, trailing: pageMargin - 10))
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             }
@@ -541,7 +537,7 @@ struct MailView: View {
         return account.displayName
     }
 
-    /// The desktop reading pane's toolbar over the message: Later, Delete, Mark read, and Done filled.
+    /// The reading pane's toolbar over the message: Reply, Later, More, and Done filled, as on every platform.
     private var detail: some View {
         Group { reading }
             // The message fades in over its preview instead of popping in.
@@ -592,30 +588,44 @@ struct MailView: View {
 }
 
 extension MailView {
-    /// Back when the message is pushed, Later, Delete, Mark read on iPad, then Done filled at the end.
+    /// Back when the message is pushed, then Reply, Later and More, and Done filled at the end: the same set and
+    /// order as Mac and Android. Later is one tap (tomorrow, as desktop's L); a long press offers the other times.
     func actions(_ message: MailMessage, iconOnly: Bool) -> some View {
         let id = model.selectedID ?? message.row.id
         return HStack(spacing: 8) {
             if !split {
                 IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)
             }
-            HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) {
-                laterChoices = model.core?.laterChoices() ?? []; laterID = id
-            }
-            if model.mailbox != .trash {
-                HouseButton(title: "Delete", icon: "trash", iconOnly: iconOnly) { act(.delete, id: id) }
-            }
-            HouseButton(title: "Move to", icon: "move", iconOnly: iconOnly) {
-                moving = (message.row.account, id)
-            }
-            if regular {
-                HouseButton(title: message.row.unread ? "Mark read" : "Mark unread", icon: message.row.unread ? "read" : "unread",
-                            iconOnly: iconOnly) {
-                    Task { await model.setRead(id: id, read: message.row.unread) }
-                }
-            }
+            HouseButton(title: "Reply", icon: "reply", iconOnly: iconOnly) { Task { await model.prepareCompose(id: id, kind: .reply) } }
+                .disabled(model.preparingCompose)
+            HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) { act(.later, id: id) }
+                .contextMenu { laterTimes(id: id) }
+            Menu { moreItems(message.row, id: id) } label: { ButtonLabel(title: "More", icon: "more", iconOnly: true) }
+                .menuStyle(.button).menuOrder(.fixed).buttonStyle(HouseButtonStyle())
             Spacer(minLength: 0)
             HouseButton(title: "Done", icon: "done", primary: true) { act(.done, id: id) }
+        }
+    }
+
+    /// The overflow, in the same order on every platform: Reply all, Forward, Move, Delete, Mark unread.
+    @ViewBuilder func moreItems(_ row: MailRow, id: Int64) -> some View {
+        Button { Task { await model.prepareCompose(id: id, kind: .replyAll) } } label: { Label("Reply all", image: "reply-all") }
+        Button { Task { await model.prepareCompose(id: id, kind: .forward) } } label: { Label("Forward", image: "forward") }
+        Button { moving = (row.account, id) } label: { Label("Move", image: "move") }
+        if model.mailbox != .trash { Button { act(.delete, id: id) } label: { Label("Delete", image: "trash") } }
+        Button { Task { await model.setRead(id: id, read: row.unread) } } label: {
+            Label(row.unread ? "Mark read" : "Mark unread", image: row.unread ? "read" : "unread")
+        }
+    }
+
+    /// Later's other times, behind a long press.
+    @ViewBuilder func laterTimes(id: Int64) -> some View {
+        // The menu is built ahead of the press, so read the time again when the item fires.
+        ForEach(Array((model.core?.laterChoices() ?? []).enumerated()), id: \.offset) { ix, choice in
+            Button(choice.label) {
+                let choices = model.core?.laterChoices() ?? []
+                act(.later, id: id, until: choices.indices.contains(ix) ? choices[ix].untilUnix : choice.untilUnix)
+            }
         }
     }
 }

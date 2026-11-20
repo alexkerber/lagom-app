@@ -9,6 +9,13 @@ final class PresentationTests: XCTestCase {
     }
     private func at(_ words: DateWords, _ day: String, _ hour: Double = 9.7) -> Date { words.day(day)!.addingTimeInterval(hour * 3600) }
 
+    func testAccountRowsSayNameThenKindAsOnTheMac() {
+        XCTAssertEqual(accountKind(MailAccount(id: "a", email: "me@home.test", displayName: "Personal", kind: "Email and password")),
+                       "Personal · Email and password")
+        XCTAssertEqual(accountKind(MailAccount(id: "a", email: "me@home.test", displayName: "me@home.test", kind: "Google account")), "Google account")
+        XCTAssertEqual(accountKind(MailAccount(id: "a", email: "me@home.test", displayName: "Personal")), "Personal")
+    }
+
     func testListTimeFollowsTheDesktopDateColumn() {
         let w = words(now: "2026-11-10")
         XCTAssertEqual(w.listTime(at(w, "2026-11-10", 9.7)), "09:42")
@@ -41,6 +48,15 @@ final class PresentationTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: icons.appendingPathComponent(set).appendingPathComponent(name)),
                            try Data(contentsOf: desktop.appendingPathComponent(name)), name)
         }
+    }
+
+    func testMonthTitleShowsTheYearOnlyOutsideThisYear() {
+        let w = words(now: "2026-11-20")
+        XCTAssertEqual(w.monthTitle(at(w, "2026-11-02")).month, "November")
+        XCTAssertNil(w.monthTitle(at(w, "2026-11-02")).year)
+        XCTAssertEqual(w.monthTitle(at(w, "2027-01-04")).month, "January")
+        XCTAssertEqual(w.monthTitle(at(w, "2027-01-04")).year, "2027")
+        XCTAssertEqual(w.monthTitle(at(w, "2025-12-29")).year, "2025")
     }
 
     func testDateGroupsStopAtTheStartOfTheWeek() {
