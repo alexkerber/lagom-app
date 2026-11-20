@@ -52,25 +52,55 @@ branches. Not verified on `main` when this page was written.
 
 ## macOS
 
-Workflow: `.github/workflows/package-macos.yml`. Script: `scripts/package-macos.sh`.
+Workflow: `.github/workflows/package-macos.yml`. Scripts: `scripts/package-macos.sh` builds the
+app, `scripts/sign-macos.sh` signs it and makes the dmg.
 
 - The dmg holds one universal app (Apple Silicon and Intel), built with `lipo`. Minimum macOS 13.
 - Tags `v*`: build, sign with the Developer ID, notarize, staple and upload to the draft release.
 - Pull requests that change packaging: build an ad-hoc signed dmg as a workflow artifact. Pull
   requests never get the signing secrets.
-- `workflow_dispatch` on a branch: as a tag, but the version is `0.0.0-dev.<sha>` and nothing goes to
-  a release.
+- `workflow_dispatch` on `main`: as a tag, but the version is `0.0.0-dev.<sha>` and nothing goes to
+  a release. On any other branch it builds only the ad-hoc dmg: a branch never signs, so it cannot
+  get a notarized dmg with its own Sparkle key file.
 - Without the signing secrets the workflow still builds an ad-hoc signed dmg and warns. Gatekeeper
-  blocks that dmg on other Macs. Use it only for tests.
+  blocks that dmg on other Macs. Use it only for tests. A tag then attaches nothing to the release.
 - No entitlements file. The app is not sandboxed, and the hardened runtime allows the network,
   keychain, notifications and WKWebView.
 
-Local release from a Mac with the Developer ID in the login keychain:
+CI jobs. No job that runs cargo, a build script or code from an artifact gets a release credential:
+
+| Job       | Runs                                                                                                                                       | Secrets                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `meta`    | Sets the version. Checks whether the signing secrets exist (not their values).                                                             | None                                                |
+| `build`   | cargo, `LAGOM_BUILD_ONLY=1 scripts/package-macos.sh`. Uploads the unsigned app as a tar, and an ad-hoc dmg.                                | `LAGOM_OAUTH_ENV` (client IDs that ship in the app) |
+| `sign`    | A fresh runner, a sparse checkout of this commit, `scripts/sign-macos.sh`. No cargo, nothing from the artifact runs. Not on pull requests. | `MACOS_CERTIFICATE_*`, `APPLE_NOTARY_*`             |
+| `sparkle` | A fresh runner. Checks the dmg hash from `sign`, then `scripts/sparkle-item.sh`. Tags only.                                                | `SPARKLE_ED_PRIVATE_KEY`                            |
+| `release` | Signed tags only. Downloads the named artifacts, checks their hashes, attaches them to the draft.                                           | `GITHUB_TOKEN` with `contents: write`               |
+
+Threat model. A compromised dependency can run code in `build`, through its build script. Before
+this split it could use the unlocked Developer ID and read the notary key. With Sparkle, a Developer
+ID-signed dmg with a new EdDSA key can pass Sparkle's key-change path, so that identity could
+authorize updates. Now `build` has no credential. `sign` checks that the app is the dmg build of
+this version with this commit's Sparkle key. It cannot prove that the code in the app is benign:
+the isolation keeps the keys away from the build, but `sign` still signs what `build` made. The
+rust cache that `build` saves feeds only later `build` jobs, which hold no credential. Not run with
+the real secrets yet (2026-11-20); the first tag run is the test.
+
+Open decision: the isolation holds for this workflow file only. Anyone who can push a branch, a
+same-repository pull request or a `v*` tag can edit the workflow and read the repository secrets.
+To close that, move the signing and Sparkle secrets to a GitHub environment that only `v*` tags may
+use, add `environment:` to `sign` and `sparkle`, and limit who can create `v*` tags. That needs
+the repository settings.
+
+Local release from a Mac with the Developer ID in the login keychain. One command builds and signs:
 
 ```sh
 rustup target add aarch64-apple-darwin x86_64-apple-darwin   # once
 scripts/package-macos.sh 1.2.3                                # writes target/macos/lagom-1.2.3.dmg
 ```
+
+The same in two steps, as CI does: `LAGOM_BUILD_ONLY=1 scripts/package-macos.sh 1.2.3`, then
+`scripts/sign-macos.sh 1.2.3`.
 
 `LAGOM_SIGN_IDENTITY=-` signs ad hoc and skips notarization. `LAGOM_NOTARIZE=0` signs but skips
 notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGOM_NOTARY_KEY`,
@@ -107,7 +137,7 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
    ```
 
 5. Delete the local .p12 and .p8 copies, or keep them only in a password manager.
-6. Run the workflow once with `workflow_dispatch` and check that the log shows `Authority=Developer ID Application`
+6. Run the workflow once with `workflow_dispatch` on `main` and check that the log shows `Authority=Developer ID Application`
    and an accepted notarization.
 
 ### Automatic updates on macOS
@@ -131,14 +161,13 @@ checksum in `scripts/sparkle.sh`). The App Store build has no Sparkle: the store
   other path is for a key change: the new dmg and app carry the same Developer ID team. It always
   rejects an app with a broken code signature.
 - `scripts/package-macos.sh` embeds `Sparkle.framework` in `Contents/Frameworks` without its XPC
-  services (they serve sandboxed apps only). It signs Autoupdate, Updater.app, the framework and then
-  the app with the Developer ID and the hardened runtime.
+  services (they serve sandboxed apps only). `scripts/sign-macos.sh` signs Autoupdate, Updater.app,
+  the framework and then the app with the Developer ID and the hardened runtime.
 - `scripts/sparkle-item.sh <version>` signs a notarized dmg and writes its `<item>`. The local release
   script runs it with the Keychain key. CI runs it only for tags, in its own job on a fresh runner
   that runs no cargo, so build scripts of dependencies never see the private key.
-- Not covered yet: the Developer ID keychain is unlocked in the job that runs cargo. Sparkle
-  accepts a dmg signed by the same team as a key change, so that identity also authorizes updates.
-  Moving codesign and notarization to their own job closes this.
+- Sparkle accepts a dmg signed by the same Developer ID team as a key change, so that identity also
+  authorizes updates. CI keeps it in the `sign` job, away from cargo (see "CI jobs" above).
 - Without `apps/desktop/macos/sparkle-ed-public-key` the dmg has no Sparkle, and CI warns.
 - An ad-hoc signed dmg (pull requests, `LAGOM_SIGN_IDENTITY=-`) contains Sparkle, but the hardened
   runtime refuses to load it, so that build has no updater. Measured 2026-11-20; Developer ID
@@ -361,7 +390,7 @@ Human steps (once):
 5. Fill in the store listing, Data safety, content rating and target audience from
    `brand/store/google-play/`. Icon `brand/store/play-icon-512.png`, feature graphic
    `brand/store/play-feature-1024x500.png`. Take the screenshots from the shot list there.
-6. Run the workflow once with `workflow_dispatch` and check that the log shows the certificate from
+6. Run the workflow once with `workflow_dispatch` on `main` and check that the log shows the certificate from
    `apksigner verify --print-certs`.
 
 ## OAuth providers (all platforms)

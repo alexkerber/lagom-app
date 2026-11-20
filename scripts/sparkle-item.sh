@@ -26,6 +26,13 @@ if [[ $(key CFBundleShortVersionString) != "${version%%-*}" ]]; then
     echo "$dmg does not hold version $version." >&2
     exit 1
 fi
+# These go into the feed as they are, and CI's build job made the app, so check their form.
+build=$(key CFBundleVersion)
+minimum=$(key LSMinimumSystemVersion)
+if [[ ! $build =~ ^[0-9]+$ || ! $minimum =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+    echo "$dmg has a malformed CFBundleVersion or LSMinimumSystemVersion." >&2
+    exit 1
+fi
 if ! key SUPublicEDKey >/dev/null 2>&1; then
     echo "This dmg was built without Sparkle (no SUPublicEDKey), so it gets no appcast item." >&2
     exit 1
@@ -46,9 +53,9 @@ cat > "$item" <<XML
         <item>
             <title>lagom $version</title>
             <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
-            <sparkle:version>$(key CFBundleVersion)</sparkle:version>
+            <sparkle:version>$build</sparkle:version>
             <sparkle:shortVersionString>$version</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>$(key LSMinimumSystemVersion)</sparkle:minimumSystemVersion>
+            <sparkle:minimumSystemVersion>$minimum</sparkle:minimumSystemVersion>
             <sparkle:releaseNotesLink>$release/tag/v$version</sparkle:releaseNotesLink>
             <enclosure url="$release/download/v$version/lagom-$version.dmg" type="application/octet-stream" $signature/>
         </item>

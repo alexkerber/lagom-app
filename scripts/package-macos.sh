@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build a universal (Apple Silicon + Intel) lagom.app, sign it, notarize and staple it, and pack it
 # in a .dmg. Usage: scripts/package-macos.sh [version]   (version without the "v", e.g. 1.2.3)
+# Two phases: this script builds target/macos/lagom.app unsigned, then runs scripts/sign-macos.sh.
+# LAGOM_BUILD_ONLY=1 stops after the build; CI signs on another runner (docs/release.md).
 # Signing: LAGOM_SIGN_IDENTITY (default "Developer ID Application"); "-" signs ad hoc, which also
 # skips notarization. Notarization: an App Store Connect API key (LAGOM_NOTARY_KEY path,
 # LAGOM_NOTARY_KEY_ID, LAGOM_NOTARY_ISSUER) or else the notarytool keychain profile
@@ -17,11 +19,8 @@ if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
     echo "Version must look like 1.2.3 or 1.2.3-beta.1, not '$version'." >&2
     exit 2
 fi
-identity=${LAGOM_SIGN_IDENTITY:-Developer ID Application}
-profile=${LAGOM_NOTARY_PROFILE:-lagom-notary}
 out=target/macos
 app=$out/lagom.app
-dmg=$out/lagom-$version.dmg
 mas=${LAGOM_MAS:-0}
 bundle_id=app.lagommail.desktop
 [[ $mas == 0 ]] || bundle_id=com.alexkerber.lagom
@@ -41,7 +40,6 @@ if [[ $mas == 0 && -s apps/desktop/macos/sparkle-ed-public-key ]]; then
         echo 'apps/desktop/macos/sparkle-ed-public-key is not an EdDSA public key.' >&2
         exit 1
     fi
-    sparkle=$(scripts/sparkle.sh)
     LAGOM_SPARKLE=1
 elif [[ $mas == 0 ]]; then
     echo 'warning: no apps/desktop/macos/sparkle-ed-public-key, so this dmg has no automatic updates (scripts/sparkle-keys.sh)' >&2
@@ -194,50 +192,15 @@ PLIST
     exit 0
 fi
 
-# No entitlements file: the app is not sandboxed, and the hardened runtime allows everything it
-# uses (network, keychain, notifications, WKWebView, which runs in Apple's own processes).
-sign() {
-    if [[ $identity == - ]]; then
-        codesign --force --options runtime --sign - "$@"
-    else
-        codesign --force --options runtime --timestamp --sign "$identity" "$@"
-    fi
-}
 if [[ $LAGOM_SPARKLE == 1 ]]; then
-    # Inside out, as Sparkle documents for signing without Xcode. Its XPC services are for
-    # sandboxed apps only, so they stay out.
+    # Its XPC services are for sandboxed apps only, so they stay out. scripts/sign-macos.sh signs it.
     framework=$app/Contents/Frameworks/Sparkle.framework
     mkdir -p "$app/Contents/Frameworks"
-    ditto "$sparkle/Sparkle.framework" "$framework"
+    ditto "$(scripts/sparkle.sh)/Sparkle.framework" "$framework"
     rm -rf "$framework/XPCServices" "$framework/Versions/B/XPCServices"
-    sign "$framework/Versions/B/Autoupdate"
-    sign "$framework/Versions/B/Updater.app"
-    sign "$framework"
 fi
-sign "$app"
-codesign --verify --strict --deep "$app"
-
-stage=$out/dmg
-mkdir -p "$stage"
-cp -R "$app" "$stage/"
-ln -s /Applications "$stage/Applications"
-hdiutil create -quiet -volname lagom -srcfolder "$stage" -format UDZO "$dmg"
-rm -rf "$stage"
-
-if [[ $identity != - ]]; then
-    codesign --force --timestamp --sign "$identity" "$dmg"
-    if [[ ${LAGOM_NOTARIZE:-1} != 0 ]]; then
-        if [[ -n ${LAGOM_NOTARY_KEY:-} ]]; then
-            xcrun notarytool submit "$dmg" --key "$LAGOM_NOTARY_KEY" \
-                --key-id "$LAGOM_NOTARY_KEY_ID" --issuer "$LAGOM_NOTARY_ISSUER" --wait
-        else
-            xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait
-        fi
-        xcrun stapler staple "$dmg"
-        spctl --assess --type open --context context:primary-signature "$dmg"
-        # A local release signs the update with the Keychain key here. CI signs in its own job on a
-        # fresh runner, so the private key never shares a machine with cargo and build scripts.
-        if [[ $LAGOM_SPARKLE == 1 && -z ${CI:-} ]]; then scripts/sparkle-item.sh "$version" >&2; fi
-    fi
+if [[ ${LAGOM_BUILD_ONLY:-0} != 0 ]]; then
+    echo "$app"
+    exit 0
 fi
-echo "$dmg"
+exec scripts/sign-macos.sh "$version"
