@@ -48,6 +48,7 @@
 
 ## Mail (v1)
 
+- [ ] Mac fixes from the Codex review 2026-11-20 (b.md, d.md), branch `fix/review-mac`: the toolbar More belongs to the message it opened on, so a sync that swaps the selection closes it and its Delete cannot reach another message; a demo Today row clears another account's Inbox filter; an empty store opens on Welcome, and removing the last account returns to it; the search icon, ⌘K and the menu's Command Palette are one action on every page but Welcome.
 - [x] All/Unread filters loaded message rows; multi-select supports Shift+arrows, Shift-click, Cmd-click, Cmd+A and batch actions. Integrated with Google Calendar/Today, Dusk (accent Done last, 140 ms glide) and Settings switches, retaining both branches' regression tests.
 
 - [x] Send Markdown mail (lists, bold/italic, links, headings, quotes, code), compose shortcuts and file insertion, CLI `--body-file` (`feat/markdown-compose`).

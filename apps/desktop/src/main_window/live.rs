@@ -1615,11 +1615,13 @@ impl MainWindow {
         }
         live.accounts.retain(|a| a.id != id);
         live.current = 0;
+        let last = live.accounts.is_empty();
         self.inbox = Inbox::live();
         self.reading_thread = None;
         self.close_popouts(None, cx);
         self.clear_motion();
-        self.set_page(Page::Settings(None), cx);
+        // The last account gone: back to Welcome, as on iOS and Android.
+        if last { self.add_account(window, cx) } else { self.set_page(Page::Settings(None), cx) }
         cx.notify();
     }
 
@@ -1901,6 +1903,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let store = Rc::new(Store::open(dir.join("mail.sqlite3")).unwrap());
+        // With an account: an empty store opens on Welcome instead.
+        let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "me@lagom.test".into() };
+        store.save_account(&Account::new("me@lagom.test".into(), config.clone(), config).unwrap()).unwrap();
         let (bridge, _rx) = Bridge::detached();
         cx.update(|cx| cx.set_global(Mail {
             store, bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: Task::ready(()),
@@ -1945,6 +1950,44 @@ mod tests {
         cx.update(|cx| cx.remove_global::<Mail>());
         for entry in std::fs::read_dir(&dir).unwrap() { std::fs::remove_file(entry.unwrap().path()).unwrap(); }
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[gpui::test]
+    fn review_no_account_opens_welcome_at_launch_and_after_the_last_removal(cx: &mut TestAppContext) {
+        let welcome = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+            cx.debug_bounds("welcome-add").is_some()
+        };
+        // A normal launch on an empty store.
+        let dir = std::env::temp_dir().join(format!("lagom-first-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Rc::new(Store::open(dir.join("mail.sqlite3")).unwrap());
+        let (bridge, _rx) = Bridge::detached();
+        cx.update(|cx| cx.set_global(Mail { store, bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: Task::ready(()) }));
+        {
+            let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(false, "", window, cx));
+            assert!(view.read_with(cx, |v, _| matches!(v.page, Page::AddAccount(_))));
+            assert!(welcome(cx));
+            view.update_in(cx, |_, window, _| window.remove_window());
+        }
+        cx.update(|cx| cx.remove_global::<Mail>());
+        std::fs::remove_dir_all(dir).unwrap();
+        // Removing one of two accounts stays in Settings; removing the last opens Welcome.
+        let (view, cx, _rx) = window(cx);
+        let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "other@lagom.test".into() };
+        let other = Account::new("other@lagom.test".into(), config.clone(), config).unwrap();
+        let ids = view.update(cx, |v, cx| {
+            let live = v.live.as_ref().unwrap();
+            live.store.save_account(&other).unwrap();
+            v.reload(cx);
+            v.live.as_ref().unwrap().accounts.iter().map(|a| a.id.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(ids.len(), 2);
+        view.update_in(cx, |v, window, cx| v.remove_account(ids[0].clone(), window, cx));
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
+        view.update_in(cx, |v, window, cx| v.remove_account(ids[1].clone(), window, cx));
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::AddAccount(_))));
+        assert!(welcome(cx));
     }
 
     /// A demo window with a live side whose worker is `rx`: kept alive it never answers,
