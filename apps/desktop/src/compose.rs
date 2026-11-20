@@ -647,6 +647,11 @@ impl Compose {
     }
 
     #[cfg(test)]
+    pub(crate) fn quote_open(&self) -> bool {
+        self.quote_open
+    }
+
+    #[cfg(test)]
     pub(crate) fn body_text(&self, cx: &gpui::App) -> String {
         self.body.read(cx).text().to_string()
     }
@@ -662,10 +667,11 @@ impl Compose {
     }
 
     /// The quiet "··· Quoted message" row under the editor: opens the quote in place, × removes it.
+    /// Tab reaches both after the body; Enter or Space presses them.
     fn quote_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         div().flex().flex_shrink_0().items_center().gap(px(4.)).h(px(36.)).px(px(20.))
-            .child(pressable(div().id("quote-toggle"), t, false)
+            .child(crate::settings::stop(t, pressable(div().id("quote-toggle"), t, false))
                 .debug_selector(|| "quote-toggle".into())
                 .flex().items_center().gap(px(8.)).h(px(28.)).px(px(8.)).rounded(px(radius::CONTROL))
                 .cursor_pointer()
@@ -673,8 +679,9 @@ impl Compose {
                 .child(div().text_size(px(size::SMALL)).text_color(t.ink2)
                     .child(if self.quote_open { "Hide quoted message" } else { "Quoted message" }))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx))))
-            .child(icon_button(t, "remove-quote", "icons/close.svg", "Remove quoted message")
-                .on_click(cx.listener(|this, _, _, cx| this.remove_quote(cx))))
+            .child(crate::settings::stop(t, icon_button(t, "remove-quote", "icons/close.svg", "Remove quoted message"))
+                // The pressed control goes with the quote: the body takes focus back.
+                .on_click(cx.listener(|this, _, window, cx| { this.remove_quote(cx); this.focus_body(window, cx); })))
     }
 
     /// The quote, read-only, drawn as the reading pane draws mail: the web view (macOS, Windows),
@@ -714,6 +721,9 @@ impl Compose {
             "enter" if crate::shortcuts::submit().matches(k) => self.send(window, cx),
             "backspace" if cmd => self.discard(cx),
             "c" if cmd && shift => self.add_cc(window, cx),
+            // The fields bind Tab themselves; this moves on from the quote's controls.
+            "tab" if shift => window.focus_prev(),
+            "tab" => window.focus_next(),
             _ => return,
         }
         cx.stop_propagation();

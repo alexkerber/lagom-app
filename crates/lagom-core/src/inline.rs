@@ -194,17 +194,23 @@ pub(crate) fn rewrite_with(html: &str, to: impl Fn(&str) -> String) -> String {
 /// `rewrite_with` for a quote: each `cid:` becomes the raster `data:` URI of the bytes `find` gives,
 /// encoded once per cid, until the URIs together pass `MAX_INLINE_BYTES`; the rest become "".
 /// A mail that names one large image a thousand times then cannot grow the quote past the cap.
-pub(crate) fn data_uris(html: &str, find: impl Fn(&str) -> Option<Vec<u8>>) -> String {
+/// Also the Content-IDs that became a URI at least once.
+pub(crate) fn data_uris(html: &str, find: impl Fn(&str) -> Option<Vec<u8>>) -> (String, std::collections::HashSet<String>) {
     use base64::Engine;
     let seen = std::cell::RefCell::new(std::collections::HashMap::<String, String>::new());
+    let embedded = std::cell::RefCell::new(std::collections::HashSet::new());
     let total = std::cell::Cell::new(0usize);
-    rewrite_with(html, |cid| {
-        let uri = seen.borrow_mut().entry(cid.to_owned()).or_insert_with(|| find(cid).and_then(|data| crate::html::image_type(&data)
-            .map(|mime| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)))).unwrap_or_default()).clone();
-        if total.get() + uri.len() > MAX_INLINE_BYTES / 3 * 4 { return String::new(); }
+    let html = rewrite_with(html, |cid| {
+        let mut seen = seen.borrow_mut();
+        let uri = seen.entry(cid.to_owned()).or_insert_with(|| find(cid).and_then(|data| crate::html::image_type(&data)
+            .map(|mime| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)))).unwrap_or_default());
+        // The length first: a reference over the cap costs no copy.
+        if uri.is_empty() || total.get() + uri.len() > MAX_INLINE_BYTES / 3 * 4 { return String::new(); }
         total.set(total.get() + uri.len());
-        uri
-    })
+        embedded.borrow_mut().insert(cid.to_owned());
+        uri.clone()
+    });
+    (html, embedded.into_inner())
 }
 
 /// The part a `cid:` image source names, for a native view that reads `src` as written.
@@ -268,7 +274,8 @@ mod tests {
         let mut png = vec![0x89, b'P', b'N', b'G'];
         png.resize(1024 * 1024, 0);
         let html = "<img src=\"cid:svg\">".to_owned() + &"<img src=\"cid:a\">".repeat(1023);
-        let out = data_uris(&html, |cid| { calls.set(calls.get() + 1); (cid == "a").then(|| png.clone()).or_else(|| Some(b"<svg/>".to_vec())) });
+        let (out, embedded) = data_uris(&html, |cid| { calls.set(calls.get() + 1); (cid == "a").then(|| png.clone()).or_else(|| Some(b"<svg/>".to_vec())) });
+        assert_eq!(embedded, ["a".to_owned()].into(), "only the image that became a URI");
         assert_eq!(calls.get(), 2, "each cid is read and encoded once");
         assert!(out.len() <= MAX_INLINE_BYTES / 3 * 4 + html.len(), "{} bytes", out.len());
         assert!(out.matches("data:image/png;base64,").count() >= 9 && !out.contains("svg"), "the cap leaves the first copies; SVG never draws");

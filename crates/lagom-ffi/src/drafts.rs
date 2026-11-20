@@ -54,7 +54,7 @@ impl LagomCore {
 
     /// Incomplete recipient text is valid in a draft. Validation belongs to enqueue.
     /// `quoted`: the HTML original from `compose_draft` or the saved draft; `None` once removed.
-    #[uniffi::method(default(quoted = None))]
+    /// No default: an omitted argument would read as removed and erase the saved quote.
     pub async fn save_draft(&self, id: String, account_id: String, to: String, cc: String, bcc: String, subject: String,
         body: String, reply_to: Option<i64>, attachments: Vec<SendAttachment>, quoted: Option<QuotedMail>) -> Result<DraftRow> {
         self.run(move |s| {

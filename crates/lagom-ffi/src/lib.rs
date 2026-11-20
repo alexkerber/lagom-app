@@ -786,6 +786,10 @@ impl LagomCore {
         self.compose_draft(id, ComposeKind::Reply).await
     }
     pub async fn compose_draft(&self, id: i64, kind: ComposeKind) -> Result<ReplyDraft> {
+        // The quote is a snapshot: fetch what the reader fetches first, the referenced images or a body
+        // sync left out. A failed fetch still opens the draft, without them.
+        // shortcut: a fetch the reader already runs is not shared; a second session may run. Share it if that shows up.
+        let _ = self.load_inline(id).await;
         let mut draft = self.run(move |s| {
             use lagom_core::compose::{self, Original};
             use chrono::{Local, TimeZone};

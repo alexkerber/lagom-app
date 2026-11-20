@@ -333,6 +333,8 @@ pub struct MainWindow {
     /// The Home unread count read in flight; a newer one replaces (cancels) it.
     unread_read: Option<Task<()>>,
     draft_open: Option<Task<()>>,
+    /// A reply waiting in `draft_open` for this stored message's inline images.
+    inline_wait: Option<(i64, tokio::sync::oneshot::Sender<()>)>,
     // Sheets after Send, in their Undo window: they show a toast and are no longer modal.
     sending: Vec<Entity<Compose>>,
     // The store and the mail worker. `None` in demo mode.
@@ -480,6 +482,7 @@ impl MainWindow {
             draft_read: None,
             unread_read: None,
             draft_open: None,
+            inline_wait: None,
             sending: Vec::new(),
             live,
             demo,
@@ -833,6 +836,22 @@ impl MainWindow {
                             this.draft_open = None;
                             if this.inbox.single() == selected && this.inbox.mail.get(id)
                                 .and_then(|m| m.text.as_ref()).is_some_and(|current| current.same_channel(&text)) {
+                                this.compose_kind(Some(id), kind, window, cx);
+                            }
+                        }).ok();
+                    }));
+                    return;
+                }
+                // The quote is a snapshot: an image still loading would be missing from it for good.
+                if let Some(store) = self.inbox.mail[id].store.filter(|_| self.inbox.mail[id].inline_pending) {
+                    let (done, loaded) = tokio::sync::oneshot::channel();
+                    self.inline_wait = Some((store, done));
+                    let selected = self.inbox.single();
+                    self.draft_open = Some(cx.spawn_in(window, async move |this, cx| {
+                        if loaded.await.is_err() { return; }
+                        this.update_in(cx, |this, window, cx| {
+                            this.draft_open = None;
+                            if this.inbox.single() == selected && this.inbox.mail.get(id).is_some_and(|m| m.store == Some(store)) {
                                 this.compose_kind(Some(id), kind, window, cx);
                             }
                         }).ok();

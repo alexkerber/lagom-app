@@ -946,6 +946,45 @@ async fn inline_loading_fetches_legacy_mail_and_reuses_cache() {
 }
 
 #[tokio::test]
+async fn reply_fetches_inline_images_before_it_quotes() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (dir, core) = fixture();
+        let id = {
+            let mut s = core.stores.local.lock().unwrap();
+            let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
+            mail(&mut s, &a, 1, 1)
+        };
+        let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+        db.execute("UPDATE messages SET body_html='<p>Logo</p><img src=\"cid:logo\">',inline_loaded=0 WHERE id=?1", [id]).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"* OK fixture\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
+                let data = if cmd.starts_with("LOGIN ") { "" }
+                else if cmd == "CAPABILITY" { "* CAPABILITY IMAP4rev1\r\n" }
+                else if cmd == "SELECT \"INBOX\"" { "* 1 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n" }
+                else if cmd == "UID FETCH 1 (UID BODYSTRUCTURE)" {
+                    "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 20 1)(\"IMAGE\" \"PNG\" NIL \"<logo>\" NIL \"BASE64\" 12) \"RELATED\"))\r\n"
+                } else if cmd == "UID FETCH 1 (UID BODY.PEEK[2])" { "* 1 FETCH (UID 1 BODY[2] {12}\r\niVBORw0KGgo=)\r\n" }
+                else if cmd == "LOGOUT" { "* BYE bye\r\n" }
+                else { panic!("unexpected command {cmd}"); };
+                socket.get_mut().write_all(format!("{data}{tag} OK done\r\n").as_bytes()).await.unwrap();
+                if cmd == "LOGOUT" { break; }
+            }
+        });
+        // The image was still loading when Reply was pressed: the quote holds it all the same.
+        let quoted = core.reply_draft(id).await.unwrap().quoted.unwrap();
+        server.await.unwrap();
+        assert!(quoted.html.contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\""), "{}", quoted.html);
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() {
     let (dir, core) = fixture();
     let (a, b, source, other) = {

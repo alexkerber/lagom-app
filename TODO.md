@@ -48,6 +48,7 @@
 
 ## Mail (v1)
 
+- [x] HTML reply fixes from Codex review 2026-11-20 (PR #210, `fix/review-drafts`): HTML-only server drafts, referenced non-image parts, Reply during inline loading, inline cap, FFI `save_draft` quote default, Mac keyboard quote controls, iOS compose scrolling. Rust, gpui, iOS build-for-testing, Swift smoke and Android JVM tests pass. Not verified: iOS layout and focus restore on a device, VoiceOver names on Mac (gpui has no accessibility tree), a deferred-body Reply on mobile, and a reader fetch running alongside Reply's.
 - [x] Mac fixes from the Codex review 2026-11-20 (b.md, d.md), branch `fix/review-mac`: the toolbar More belongs to the message it opened on, so a sync that swaps the selection closes it and its Delete cannot reach another message; a demo Today row clears another account's Inbox filter; an empty store opens on Welcome, and the confirmed removal of the last account returns to it; the search icon, ⌘K and the menu's Command Palette are one action on every page but Welcome. Verified: gpui tests. Not verified: a real sync, a real Keychain failure, the app by hand. Open for Alex: Welcome at launch replaces a saved Today/To-do start page for users without a mail account (⌘1/⌘4 still reach them).
 - [x] All/Unread filters loaded message rows; multi-select supports Shift+arrows, Shift-click, Cmd-click, Cmd+A and batch actions. Integrated with Google Calendar/Today, Dusk (accent Done last, 140 ms glide) and Settings switches, retaining both branches' regression tests.
 

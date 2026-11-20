@@ -607,6 +607,10 @@ impl MainWindow {
                             body.update(cx, |body, cx| body.refresh(&self.inbox.mail[id], cx));
                         }
                     }
+                    // A reply waiting for these images opens now; after an error, without them.
+                    if self.inline_wait.as_ref().is_some_and(|(id, _)| *id == store) {
+                        let _ = self.inline_wait.take().map(|(_, done)| done.send(()));
+                    }
                 }
                 Event::Changed => read = true,
                 Event::NewMail(messages) => new_mail.extend(messages),
@@ -2247,6 +2251,39 @@ mod tests {
         let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx).quoted.map(|q| q.text).unwrap_or_default());
         assert!(quote.ends_with("> Hello & welcome\n> \n> Read the news"), "{quote:?}");
         assert!(!quote.contains("font-size") && !quote.contains("tracking.example.test"));
+    }
+
+    #[gpui::test]
+    fn reply_waits_for_inline_images_still_loading(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            rusqlite::Connection::open(store.path()).unwrap().execute_batch("DROP TRIGGER fixture_synced").unwrap();
+            let summary = incoming(v, 1);
+            let id = summary.id;
+            store.save_message(&lagom_core::store::Message {
+                summary, body_text: "Logo".into(), body_html: Some("<p>Logo</p><img src='cid:logo@test'>".into()),
+            }).unwrap();
+            v.inbox = Inbox::live();
+            v.reload(cx);
+            v.inbox.select(0);
+            v.open_message(v.inbox.single().unwrap(), false, cx);
+            id
+        });
+        cx.run_until_parked();
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
+        cx.simulate_keystrokes("r");
+        assert!(view.read_with(cx, |v, _| v.compose.is_none()), "the reply waits for the images");
+        view.update_in(cx, |v, window, cx| {
+            let db = rusqlite::Connection::open(v.live.as_ref().unwrap().store.path()).unwrap();
+            let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            db.execute("INSERT INTO inline_parts VALUES (?1,'logo@test','image/png',?2)", rusqlite::params![id, png.as_slice()]).unwrap();
+            db.execute("UPDATE messages SET inline_loaded=1 WHERE id=?1", [id]).unwrap();
+            v.on_events(vec![Event::Inline { id, error: None }], window, cx);
+        });
+        cx.run_until_parked();
+        let html = view.read_with(cx, |v, cx| v.compose.as_ref().expect("the reply opens once the images are in").read(cx).outgoing(cx).quoted.unwrap().html);
+        assert!(html.contains("data:image/png;base64,iVBORw0KGgo="), "{html}");
     }
 
     #[gpui::test]
