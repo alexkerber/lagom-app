@@ -195,7 +195,8 @@ private struct AddRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                Icon("plus").frame(width: 22)
+                // The task circles' column, so the plus sits over them and the words over the titles.
+                Icon("plus").frame(width: 21)
                 Text(title).lagomFont(.base)
             }
             .foregroundStyle(Theme.secondary).padding(.horizontal, 8)
@@ -268,20 +269,21 @@ struct TodoRow: View {
     /// Opens the source mail; the subject line is its button.
     let openMail: () -> Void
     var words = DateWords()
+    /// The tick a tap draws at once; the list moves the row a moment later, so the tick is seen.
+    @State private var ticked: Bool?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        let done = ticked ?? todo.done
         HStack(spacing: 10) {
-            Button(action: toggle) {
-                Circle().strokeBorder(Theme.secondary, lineWidth: 1)
-                    .frame(width: 21, height: 21)
-                    .overlay { if todo.done { Icon("done", size: 16).foregroundStyle(Theme.secondary) } }
-                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            Button(action: tap) {
+                CheckCircle(done: done).frame(width: 44, height: 44).contentShape(Rectangle())
             }
             .buttonStyle(.plain).padding(.horizontal, -11)
-            .accessibilityLabel(todo.done ? "Mark as not done" : "Mark as done")
+            .accessibilityLabel(done ? "Mark as not done" : "Mark as done")
             VStack(alignment: .leading, spacing: 2) {
                 Text(todo.title).lagomFont(.base)
-                    .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
+                    .strikethrough(done).foregroundStyle(done ? Theme.secondary : Theme.ink)
                 if let subject = todo.mailSubject {
                     Button(action: openMail) {
                         HStack(spacing: 4) {
@@ -299,122 +301,297 @@ struct TodoRow: View {
             if todo.fromMail, todo.mailSubject == nil {
                 Icon("mail", label: "From mail").foregroundStyle(Theme.secondary)
             }
-            if !todo.done, let due = todo.due.flatMap(words.due) {
-                Text(due.label).lagomFont(.small)
-                    .foregroundStyle(due.overdue ? Theme.danger : Theme.secondary)
-                    .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(due.overdue ? Theme.danger.opacity(0.12) : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.key))
-                    .accessibilityLabel(due.overdue ? "Overdue, due \(due.label)" : "Due \(due.label)")
-            }
+            if !done, let due = todo.due.flatMap(words.due) { DueChip(label: due.label, overdue: due.overdue) }
         }
         .padding(.horizontal, 8)
         .frame(minHeight: 46)
         .accessibilityElement(children: .contain)
+        .sensoryFeedback(.impact(weight: .light), trigger: ticked) { _, new in new == true }
+        .onChange(of: todo.done) { ticked = nil }
+    }
+
+    private func tap() {
+        guard ticked == nil else { return } // one change at a time; the reload clears it
+        withAnimation(Motion.move(reduceMotion)) { ticked = !todo.done }
+        Task {
+            try? await Task.sleep(for: .milliseconds(reduceMotion ? 150 : 280))
+            toggle()
+        }
     }
 }
 
-/// Local task lists, as on the desktop's To-do page.
+/// The completion circle: a hairline ring that fills with Done's pine green and a tick, springing in.
+private struct CheckCircle: View {
+    let done: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(Theme.secondary, lineWidth: 1).opacity(done ? 0 : 1)
+            Circle().fill(Theme.done)
+                .overlay { Icon("done", size: 15).foregroundStyle(Theme.accentInk) }
+                // Under Reduce Motion it only fades.
+                .scaleEffect(done || reduceMotion ? 1 : 0.5)
+                .opacity(done ? 1 : 0)
+        }
+        .frame(width: 21, height: 21)
+    }
+}
+
+/// A due date, desktop's chip: quiet, or red once overdue.
+struct DueChip: View {
+    let label: String
+    var overdue = false
+
+    var body: some View {
+        Text(label).lagomFont(.small)
+            .foregroundStyle(overdue ? Theme.danger : Theme.secondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(overdue ? Theme.danger.opacity(0.12) : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.key))
+            .accessibilityLabel(overdue ? "Overdue, due \(label)" : "Due \(label)")
+    }
+}
+
+/// What the inline field adds: a task to a list, or a new list.
+private enum AddField: Hashable { case task(Int64), list }
+
+/// Local task lists, as on the desktop's To-do page. Adding happens where the eye is (Alex 2026-11-20, "plus
+/// uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips
+/// above the keyboard. Return adds and keeps the field open for the next task; leaving the field keeps its text.
 struct TodoView: View {
     let planner: PlannerModel
     let openMail: (Int64?) -> Void
-    @State private var adding: Int64?
-    @State private var newList = false
-    @State private var listName = ""
     @State private var showDone: Set<Int64> = []
-    @Environment(\.railInset) private var railInset
+    /// Rows a swipe just completed or deleted: gone at once, back only if core refuses.
+    @State private var leaving: Set<Int64> = []
+    @State private var adding: AddField?
+    @State private var title = ""
+    @State private var due: Date?
+    @State private var picking = false
+    @FocusState private var focus: AddField?
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "To-do") {
-                Menu {
-                    // On the Duo, New task is in the right column.
-                    if railInset == 0 { Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty) }
-                    Button("New list") { listName = ""; newList = true }
-                } label: { Icon("plus") }
-                    .menuStyle(.button).buttonStyle(IconButtonStyle())
-                    .accessibilityLabel("Add")
-                    .padding(.trailing, -6)
-            }
-            .modifier(PagePadding()).padding(.top, 8)
+            PageTitle(title: "To-do") { EmptyView() }
+                .modifier(PagePadding()).padding(.top, 8)
             List {
-                if planner.allClear {
-                    Text("Nothing to do. A clear day.")
-                        .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
-                        .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
-                        .foregroundStyle(Theme.ink).multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity).padding(.vertical, 48)
-                        .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
-                }
+                if planner.allClear { clearDay.plainRow() }
                 ForEach(Array(planner.lists.enumerated()), id: \.element.id) { index, list in
-                    let all = planner.todos[list.id] ?? []
-                    let done = all.filter(\.done)
-                    Group {
-                        ListHeading(name: list.name, color: Theme.account(index), open: planner.openCount(list: list.id))
-                            .padding(.top, 16).padding(.bottom, 4)
-                        ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
-                        AddRow(title: "New task") { adding = list.id }
-                        if !done.isEmpty {
-                            let open = showDone.contains(list.id)
-                            Button {
-                                if open { showDone.remove(list.id) } else { showDone.insert(list.id) }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Icon(open ? "chevron" : "chevron-right")
-                                    Text("Completed (\(done.count))").lagomFont(.base)
-                                }
-                                .foregroundStyle(Theme.secondary)
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityValue(open ? "Expanded" : "Collapsed")
-                            if open { ForEach(done, id: \.id) { row($0) } }
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
+                    section(list, index: index)
                 }
+                newList.padding(.top, 16).plainRow()
             }
             .listStyle(.plain)
             .environment(\.defaultMinListRowHeight, 0)
             .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
             .modifier(PagePadding())
+            // Rows close the gap as they leave for Completed; under Reduce Motion they fade.
+            .animation(Motion.move(reduceMotion), value: planner.todos)
             .overlay {
-                if planner.lists.isEmpty { EmptyState(icon: "todo", title: "No lists", detail: "Add a list to start.") }
+                if planner.lists.isEmpty && adding != .list {
+                    EmptyState(icon: "todo", title: "No lists yet", detail: "A list holds what there is to do.") {
+                        HouseButton(title: "New list", icon: "plus") { open(.list) }
+                    }
+                }
             }
             .refreshable { await planner.reloadTodos() }
         }
         .background(Theme.background)
-        // The Duo column: New task at the top, as New message in Mail; the tab bar holds the bottom.
-        .railColumn(top: {
-            RailButton(title: "New task", icon: "plus", primary: true) { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
-        }, bottom: { EmptyView() })
-        .sheet(item: Binding(get: { adding.map(ListID.init) }, set: { adding = $0?.id })) { list in
-            NewTaskView(planner: planner, list: list.id, due: nil).duoRail()
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if case .task = adding { dueBar }
         }
-        .alert("New list", isPresented: $newList) {
-            TextField("Name", text: $listName)
-            Button("Cancel", role: .cancel) {}
-            Button("Add") { Task { await planner.addList(name: listName) } }
+        .onChange(of: focus) { _, new in
+            // Leaving the field, by a tap elsewhere or the keyboard going down, keeps what was typed. Checked a turn
+            // later: moving to another list's field passes through nil.
+            guard new == nil else { return }
+            Task { @MainActor in if focus == nil, !picking, adding != nil { commit() } }
         }
+        .onChange(of: picking) { _, now in if !now, let adding { focus = adding } }
+    }
+
+    private func section(_ list: TodoList, index: Int) -> some View {
+        let all = (planner.todos[list.id] ?? []).filter { !leaving.contains($0.id) }
+        let done = all.filter(\.done)
+        let expanded = showDone.contains(list.id)
+        return Group {
+            ListHeading(name: list.name, color: Theme.account(index), open: all.count - done.count)
+                .padding(.top, index == 0 && !planner.allClear ? 8 : 24).padding(.bottom, 2)
+            ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
+            if adding == .task(list.id) { field(.task(list.id)) } else {
+                AddRow(title: "New task") { open(.task(list.id)) }
+            }
+            if !done.isEmpty {
+                Button {
+                    if expanded { showDone.remove(list.id) } else { showDone.insert(list.id) }
+                } label: {
+                    HStack(spacing: 10) {
+                        Icon(expanded ? "chevron" : "chevron-right", size: 16).frame(width: 21)
+                        Text("Completed (\(done.count))").lagomFont(.base)
+                    }
+                    .foregroundStyle(Theme.secondary).padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                if expanded { ForEach(done, id: \.id) { row($0) } }
+            }
+        }
+        .plainRow()
+    }
+
+    /// The clear day in lagom's voice, as the desktop: the lists and their New task lines stay below.
+    private var clearDay: some View {
+        let size: CGFloat = width == .regular ? 48 : 34
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Nothing to do.\nA clear day.")
+                .font(.custom(Theme.Face.display, size: size, relativeTo: .largeTitle))
+                .tracking(size * typeScale * Theme.Face.displayTracking).lineSpacing(-2)
+                .foregroundStyle(Theme.ink).accessibilityAddTraits(.isHeader)
+            Text("Add a task below when something comes up.").lagomFont(.snippet).foregroundStyle(Theme.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 24).padding(.bottom, 8)
+    }
+
+    @ViewBuilder private var newList: some View {
+        if adding == .list { field(.list) } else if !planner.lists.isEmpty {
+            AddRow(title: "New list") { open(.list) }
+        }
+    }
+
+    /// "New task" (or "New list") as a field in place: the circle (or the list dot) where the row will be.
+    private func field(_ target: AddField) -> some View {
+        HStack(spacing: 10) {
+            Group {
+                if target == .list { Circle().fill(Theme.line).frame(width: 8, height: 8) }
+                else { Circle().strokeBorder(Theme.line, lineWidth: 1).frame(width: 21, height: 21) }
+            }
+            .frame(width: 21)
+            // Vertical, so Return arrives as a newline and the keyboard stays up for the next task.
+            TextField(target == .list ? "List name" : "New task", text: $title, axis: .vertical)
+                .lagomFont(.base, target == .list ? .bold : .regular)
+                .foregroundStyle(Theme.ink).tint(Theme.accent)
+                .focused($focus, equals: target)
+                .submitLabel(target == .list ? .done : .next)
+                .onChange(of: title) { if title.contains(where: \.isNewline) { submit() } }
+                .onAppear { focus = target }
+                .accessibilityLabel(target == .list ? "New list name" : "New task")
+            if target != .list, let due, let chip = DateWords().due(DateWords().coreDay(due)) {
+                DueChip(label: chip.label)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 46)
+    }
+
+    /// Due chips above the keyboard while a task is typed: Today, Tomorrow, or a date.
+    private var dueBar: some View {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+        let other = due.map { $0 != today && $0 != tomorrow } ?? false
+        return HStack(spacing: 8) {
+            chip("Today", on: due == today) { due = due == today ? nil : today }
+            chip("Tomorrow", on: due == tomorrow) { due = due == tomorrow ? nil : tomorrow }
+            chip(other ? DateWords().due(DateWords().coreDay(due!))?.label ?? "Date" : "Date", icon: "calendar", on: other) { picking = true }
+                .popover(isPresented: $picking) {
+                    DatePicker("Due", selection: Binding(get: { due ?? tomorrow }, set: { due = calendar.startOfDay(for: $0); picking = false }),
+                               in: today..., displayedComponents: .date)
+                        .datePickerStyle(.graphical).tint(Theme.accent)
+                        .frame(width: 320).padding(8)
+                        .presentationCompactAdaptation(.popover)
+                }
+            Spacer(minLength: 0)
+            IconButton(title: "Close", icon: "close") { focus = nil }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 4)
+        .background(Theme.background)
+        .overlay(alignment: .top) { Theme.line.frame(height: 1) }
+    }
+
+    private func chip(_ title: String, icon: String? = nil, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon { Icon(icon, size: 16) }
+                Text(title).lagomFont(.small, .medium).lineLimit(1)
+            }
+            .foregroundStyle(on ? Theme.accentFillInk : Theme.ink)
+            .padding(.horizontal, 10).frame(minHeight: 32)
+            .background(on ? Theme.accentFill : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Due \(title)")
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    private func open(_ target: AddField) {
+        commit()
+        adding = target
+        focus = target
+    }
+
+    /// Return: each typed line becomes a task and the field stays for the next; an empty Return closes it.
+    private func submit() {
+        let lines = title.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        title = ""
+        guard case .task(let list)? = adding, !lines.isEmpty else {
+            if adding == .list, let name = lines.first { Task { await planner.addList(name: name) } }
+            close()
+            return
+        }
+        let due = due
+        Task { for line in lines { await planner.add(title: line, list: list, due: due) } }
+    }
+
+    /// Saves what the field holds and closes it.
+    private func commit() {
+        let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch adding {
+        case .task(let list)? where !text.isEmpty:
+            let due = due
+            Task { await planner.add(title: text, list: list, due: due) }
+        case .list? where !text.isEmpty: Task { await planner.addList(name: text) }
+        default: break
+        }
+        title = ""
+        adding = nil
+        due = nil
+    }
+
+    private func close() {
+        adding = nil
+        due = nil
+        focus = nil
     }
 
     private func row(_ todo: Todo) -> some View {
         TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
                 openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
-            .swipeActions {
-                Button(role: .destructive) { Task { await planner.delete(todo) } } label: { Label("Delete", image: "trash") }
-                    .tint(Theme.danger)
-            }
+            // Right is Done (Not done in Completed), a long left is Delete, as in Mail; tasks have no Later.
+            .modifier(StageSwipe(canDelete: true, enabled: true, canLater: false, doneTitle: todo.done ? "Not done" : "Done") { stage in
+                leaving.insert(todo.id)
+                Task {
+                    if stage == .delete { await planner.delete(todo) } else { await planner.toggle(todo) }
+                    leaving.remove(todo.id)
+                }
+            })
             .accessibilityAction(named: "Delete") { Task { await planner.delete(todo) } }
     }
 }
 
-private struct ListID: Identifiable { let id: Int64 }
+private extension View {
+    /// A List row drawn by the page itself: no insets, separator or row background.
+    func plainRow() -> some View {
+        listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
+    }
+}
 
-/// A list's heading on To-do: `● Work  4`.
+/// A list's heading on To-do: `● Work  4`, the dot over the task circles and the name over their titles.
 // shortcut: the dot colour follows list order; store a colour per list if people ask to choose one.
 private struct ListHeading: View {
     let name: String
@@ -422,19 +599,24 @@ private struct ListHeading: View {
     let open: Int
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).foregroundStyle(Theme.ink)
-            if open > 0 {
-                Text(String(open)).font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .footnote)).foregroundStyle(Theme.secondary)
+        HStack(spacing: 10) {
+            Circle().fill(color).frame(width: 8, height: 8).frame(width: 21)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).foregroundStyle(Theme.ink)
+                if open > 0 {
+                    Text(String(open)).font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .footnote)).foregroundStyle(Theme.secondary)
+                }
             }
         }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 36)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(open > 0 ? "\(name), \(open) open" : name)
         .accessibilityAddTraits(.isHeader)
     }
 }
 
+/// Today's New task sheet; To-do adds in place.
 struct NewTaskView: View {
     let planner: PlannerModel
     @State var list: Int64?

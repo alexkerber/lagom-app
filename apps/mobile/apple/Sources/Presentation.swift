@@ -218,13 +218,14 @@ func weekBlocks(_ events: [AgendaItem], day: Date, calendar: Calendar = .current
 
 /// How far a mail row is dragged picks the move, as on desktop: right past `reach` is Done; left past `reach`
 /// is Later, and past 60 % of the row it is Delete where Delete is allowed. Short of `reach` nothing happens.
+/// A task has no Later: its left swipe acts only at Delete's 60 %, the same reach as in Mail.
 enum SwipeStage: Equatable {
     case done, later, delete
 
-    init?(dx: Double, width: Double, reach: Double = 120, canDelete: Bool) {
+    init?(dx: Double, width: Double, reach: Double = 120, canDelete: Bool, canLater: Bool = true) {
         if dx >= reach { self = .done }
         else if canDelete && dx <= -width * 0.6 { self = .delete }
-        else if dx <= -reach { self = .later }
+        else if canLater && dx <= -reach { self = .later }
         else { return nil }
     }
 }
