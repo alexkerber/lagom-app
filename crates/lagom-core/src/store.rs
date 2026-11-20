@@ -218,6 +218,26 @@ impl Store {
         self.db.execute("DELETE FROM accounts WHERE id=?1", [id])?;
         Ok(())
     }
+    /// The removal confirmation's words, the same on every platform. Removing the account also deletes its drafts
+    /// that are not yet on the provider and its outbox (unsent, of unconfirmed delivery, or sent without a Sent copy
+    /// yet), so the words name them when there are any.
+    pub fn removal_note(&self, id: &str) -> Result<String> {
+        let counts: [u32; 4] = self.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM drafts d LEFT JOIN draft_sync s ON s.id=d.id WHERE d.account=?1 AND (s.revision IS NULL OR s.revision<>d.revision)),
+                (SELECT COUNT(*) FROM outbox WHERE account=?1 AND submitted=0 AND state<>'uncertain'),
+                (SELECT COUNT(*) FROM outbox WHERE account=?1 AND submitted=0 AND state='uncertain'),
+                (SELECT COUNT(*) FROM outbox WHERE account=?1 AND submitted=1 AND copied=0)",
+            [id], |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]))?;
+        let words = [("draft", "drafts"), ("unsent message", "unsent messages"),
+            ("message that may not have been sent", "messages that may not have been sent"),
+            ("sent message not yet in Sent", "sent messages not yet in Sent")];
+        let mut lost: Vec<_> = counts.iter().zip(words).filter(|(n, _)| **n > 0)
+            .map(|(n, (one, many))| format!("{n} {}", if *n == 1 { one } else { many })).collect();
+        let kept = "Your mail stays with your provider.";
+        let Some(last) = lost.pop() else { return Ok(kept.into()) };
+        let list = if lost.is_empty() { last } else { format!("{} and {last}", lost.join(", ")) };
+        Ok(format!("{kept} Removing the account also deletes what only lagom has: {list}."))
+    }
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self
             .db
@@ -1475,6 +1495,33 @@ mod mail_tests {
         assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
         let new_id = s.save_message(&mail(&a, kept, 1)).unwrap();
         assert!(new_id > id);
+    }
+    #[test]
+    fn removal_note_names_drafts_and_sends_the_provider_lacks() {
+        use crate::{outbox::Draft, smtp::Outgoing};
+        let (_t, s, a, _) = setup();
+        assert_eq!(s.removal_note(&a.id).unwrap(), "Your mail stays with your provider.");
+        for id in ["one@test", "two@test", "sent@test"] {
+            s.save_draft(&Draft { id: id.into(), account: a.id.clone(), text: "x".into(), ..Default::default() }).unwrap();
+        }
+        // A draft whose revision is on the provider is not lost.
+        s.db.execute("UPDATE draft_sync SET revision=(SELECT revision FROM drafts WHERE id='two@test') WHERE id='two@test'", []).unwrap();
+        s.enqueue(&a, &Outgoing { to: vec!["b@test".into()], text: "x".into(), message_id: Some("sent@test".into()), ..Default::default() }, 0).unwrap();
+        assert_eq!(s.removal_note(&a.id).unwrap(),
+            "Your mail stays with your provider. Removing the account also deletes what only lagom has: 1 draft and 1 unsent message.");
+        s.save_draft(&Draft { id: "two@test".into(), account: a.id.clone(), text: "edited".into(), ..Default::default() }).unwrap();
+        for (id, set) in [("late@test", "state='uncertain'"), ("copy@test", "submitted=1")] {
+            s.enqueue(&a, &Outgoing { to: vec!["b@test".into()], text: "x".into(), message_id: Some(id.into()), ..Default::default() }, 0).unwrap();
+            s.db.execute(&format!("UPDATE outbox SET {set} WHERE id='{id}'"), []).unwrap();
+            // Each kind on its own first, so two swapped labels fail.
+            if id == "late@test" {
+                assert_eq!(s.removal_note(&a.id).unwrap(), "Your mail stays with your provider. Removing the account also deletes what only lagom has: 2 drafts, 1 unsent message and 1 message that may not have been sent.");
+            }
+        }
+        assert_eq!(s.removal_note(&a.id).unwrap(), "Your mail stays with your provider. Removing the account also deletes what only lagom has: \
+            2 drafts, 1 unsent message, 1 message that may not have been sent and 1 sent message not yet in Sent.");
+        s.db.execute("UPDATE outbox SET copied=1,submitted=1", []).unwrap();
+        assert_eq!(s.removal_note(&a.id).unwrap(), "Your mail stays with your provider. Removing the account also deletes what only lagom has: 2 drafts.");
     }
     #[test]
     fn delete_account_cascades_and_find_message() {

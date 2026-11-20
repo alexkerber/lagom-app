@@ -533,6 +533,10 @@ impl LagomCore {
             Ok(())
         }).await
     }
+    /// The removal confirmation's words: what removing the account deletes that the provider does not have.
+    pub async fn removal_note(&self, account_id: String) -> Result<String> {
+        self.run(move |s| s.removal_note(&account_id)).await
+    }
     pub async fn sync(&self, account_id: String) -> Result<()> {
         self.run_sync(move |stores| { let a = account(&stores.folder_lock(), &account_id)?; sync_with_google(stores, &a) }).await
     }

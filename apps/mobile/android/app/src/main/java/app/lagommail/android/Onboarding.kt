@@ -75,7 +75,8 @@ internal val SplashIcon = 160.dp
         else -> Step.WELCOME
     }
     BackHandler(step == Step.CHOOSE) { choosing = false }
-    fun addAccount() { if (providers.isEmpty()) model.accountForm = AccountForm() else choosing = true }
+    // Always the chooser: without OAuth client IDs it still lists iCloud, Fastmail, Yahoo and Other.
+    fun addAccount() { choosing = true }
     // motion.md: forward steps arrive from the end, back from the start; 250 ms ease-out with a fade, no bounce. "Remove
     // animations" in the system settings leaves only the change.
     AnimatedContent(step, Modifier.fillMaxSize(), label = "onboarding", transitionSpec = {

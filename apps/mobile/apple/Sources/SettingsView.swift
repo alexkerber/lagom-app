@@ -208,13 +208,23 @@ private struct Avatar: View {
 struct RemoveAccountDialog: ViewModifier {
     let model: MailModel
     @Binding var removing: MailAccount?
+    /// The words for one account; the question waits for them, so Remove never shows a stale or early note.
+    @State private var note: (account: String, text: String)?
 
     func body(content: Content) -> some View {
         content.confirmationDialog(removing.map { "Remove \($0.email) from lagom?" } ?? "",
-                                   isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                                   isPresented: Binding(get: { removing != nil && note?.account == removing?.id },
+                                                        set: { if !$0 { removing = nil } }),
                                    titleVisibility: .visible, presenting: removing) { account in
             Button("Remove", role: .destructive) { Task { await model.remove(account) }; removing = nil }
             Button("Keep", role: .cancel) { removing = nil }
-        } message: { _ in Text("Your mail stays with your provider.") }
+        } message: { _ in Text(note?.text ?? "") }
+        .task(id: removing?.id) {
+            note = nil
+            guard let removing else { return }
+            let text = await model.removalNote(removing)
+            // A lookup for an account the user left must not land on the next one.
+            if !Task.isCancelled { note = (removing.id, text) }
+        }
     }
 }

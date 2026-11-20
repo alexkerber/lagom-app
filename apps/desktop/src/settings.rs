@@ -25,6 +25,8 @@ pub struct Data<'a> {
     pub open: Option<&'a str>,
     /// Remove waits for a yes on the open account.
     pub confirm: bool,
+    /// The yes's second sentence, from the store: what removing deletes that the provider does not have.
+    pub remove_note: &'a str,
     /// Accounts whose browser sign-in runs now.
     pub signing_in: Vec<String>,
     pub group: bool,
@@ -229,7 +231,7 @@ fn account_page(t: &Theme, d: &Data, ix: usize, cx: &mut Context<MainWindow>) ->
         let yes = id.clone();
         div().flex().flex_col().gap(px(12.))
             .child(div().text_color(t.danger).line_height(relative(1.4))
-                .child(format!("Remove {} from lagom? Your mail stays with your provider.", a.email)))
+                .child(format!("Remove {} from lagom? {}", a.email, d.remove_note)))
             .child(div().flex().gap(px(8.))
                 .child(stop(t, button(t, "Remove", Some(t.danger))).on_click(cx.listener(move |this, _, window, cx| this.remove_account(yes.clone(), window, cx))))
                 .child(stop(t, button(t, "Keep", None)).on_click(cx.listener(|this, _, window, cx| this.confirm_remove(None, window, cx)))))

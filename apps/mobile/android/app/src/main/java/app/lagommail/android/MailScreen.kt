@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import app.lagommail.core.*
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -66,7 +67,11 @@ import kotlin.math.roundToInt
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
     var settings by rememberSaveable { mutableStateOf(false) }
     // A mailto link, a share or a notification (a new draft or an opened message) leaves Settings; Add account comes back to it.
-    LaunchedEffect(model.draft != null, model.selectedId) { if (model.draft != null || model.selectedId != null) settings = false }
+    // Only changes count, as in LagomHome: after a rotation a selection that was already there keeps Settings open.
+    LaunchedEffect(Unit) {
+        snapshotFlow { (model.draft != null) to model.selectedId }.drop(1)
+            .collect { (draft, selected) -> if (draft || selected != null) settings = false }
+    }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
@@ -313,7 +318,7 @@ internal fun Mailbox.label(): String = when (this) {
 /** motion.md "Inbox reaches zero": the inbox icon, one line and one quiet line, fading in. No confetti. */
 @Composable private fun EmptyInbox(model: MailModel, modifier: Modifier) {
     when {
-        model.unreadOnly && model.rows.isNotEmpty() -> EmptyState(R.drawable.ic_read, "No unread mail", modifier)
+        model.unreadOnly && model.searchText.isBlank() && model.rows.isNotEmpty() -> EmptyState(R.drawable.ic_read, "No unread mail", modifier)
         model.searchText.isNotBlank() -> EmptyState(R.drawable.ic_search, "No results", modifier, "Nothing in your mail matches.")
         model.folder != null -> EmptyState(R.drawable.ic_inbox, "No mail here", modifier, "Pull to refresh your mail.")
         // Later and Done fill from your own actions, not a refresh; each mailbox says what lands there. Same words on iOS.
@@ -652,8 +657,14 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
         Surface(Modifier.fillMaxSize().backPreview(back), color = lagom.bg) {
             Column(Modifier.fillMaxSize()) {
                 val one = shown.messages.singleOrNull()
-                // A single message's bar carries its actions; a conversation's carries only the way back.
-                if (one == null) TopBar(Modifier.statusBarsPadding(), start = 4.dp) { close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) } }
+                // A conversation has one bar, over all its messages, as on Mac and iOS: its actions take the grouped row.
+                if (one == null && shown.messages.isNotEmpty()) {
+                    val row = model.rows.firstOrNull { shown.id in it.messageIds }
+                    val unread = row?.unread ?: shown.messages.any { it.row.unread }
+                    MessageBar(model, shown.id, shown.messages.last().row.account, unread, conversation = true, close) {
+                        if (row != null) model.setRead(row) else shown.messages.forEach { model.setRead(it.row.id, unread) }
+                    }
+                } else if (one == null) TopBar(Modifier.statusBarsPadding(), start = 4.dp) { close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) } }
                 Box(Modifier.weight(1f)) {
                     when {
                         one != null -> MessageScreen(model, one, close)
@@ -726,15 +737,80 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                 Text(listTime(view.date), color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
             }
             // shortcut: like desktop, expanded bodies scroll independently; measure HTML for continuous scrolling later.
-            if (expanded) Box(Modifier.height(560.dp)) { MessageScreen(model, message, close = null) }
+            if (expanded) Box(Modifier.height(560.dp)) { MessageScreen(model, message, close = null, bar = false) }
             HorizontalDivider()
+        }
+    }
+}
+
+/** The reading pane's bar: Back, Reply, Later, More and Done filled, the same set and order as Mac and iOS. With
+ *  `conversation`, the actions take every message of the grouped row. */
+@Composable private fun MessageBar(model: MailModel, id: Long, account: String, unread: Boolean, conversation: Boolean,
+    close: (() -> Unit)?, markRead: suspend () -> Unit) {
+    TopBar(Modifier.statusBarsPadding(), start = if (close != null) 4.dp else 12.dp, end = 12.dp) {
+        close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) }
+        HouseButton("Reply", R.drawable.ic_reply, iconOnly = true, enabled = !model.working) { model.perform { model.reply(id) } }
+        Box {
+            var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
+            // One tap is tomorrow, as desktop's L; a long press offers the other times.
+            HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working,
+                onLongClickLabel = "Choose a time", onLongClick = { choices = model.core?.laterChoices().orEmpty() }) {
+                model.perform { model.act(MailAction.Later, id, conversation = conversation) }
+            }
+            DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {
+                choices.forEachIndexed { ix, choice ->
+                    DropdownMenuItem(text = { Text(choice.label) }, onClick = {
+                        choices = emptyList()
+                        // The time at the tap, as on iOS: an evening chosen after it began would be in the past.
+                        val until = model.core?.laterChoices()?.getOrNull(ix)?.untilUnix ?: choice.untilUnix
+                        model.perform { model.act(MailAction.Later, id, conversation = conversation, until = until) }
+                    })
+                }
+            }
+        }
+        val targets = model.moveTargets(account)
+        Box {
+            var open by remember { mutableStateOf(false) }
+            var moving by remember { mutableStateOf(false) }
+            HouseButton("More", R.drawable.ic_more, iconOnly = true, enabled = !model.working) { open = true }
+            DropdownMenu(expanded = open || moving, onDismissRequest = { open = false; moving = false }) {
+                if (moving) {
+                    targets.forEach { folder ->
+                        DropdownMenuItem(text = { Text(folder.path) }, onClick = {
+                            moving = false
+                            model.perform { model.move(id, folder, conversation = conversation) }
+                        })
+                    }
+                    DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
+                        moving = false
+                        model.newFolder = NewFolder(account, id, conversation = conversation)
+                    })
+                } else {
+                    // The same five, in the same order, on every platform.
+                    @Composable fun item(label: String, @DrawableRes icon: Int, run: () -> Unit) =
+                        DropdownMenuItem(text = { Text(label) }, leadingIcon = { LagomIcon(icon) }, onClick = { open = false; run() })
+                    item("Reply all", R.drawable.ic_reply_all) { model.perform { model.reply(id, ComposeKind.REPLY_ALL) } }
+                    item("Forward", R.drawable.ic_forward) { model.perform { model.reply(id, ComposeKind.FORWARD) } }
+                    item("Move", R.drawable.ic_move) { moving = true }
+                    if (model.mailbox != Mailbox.TRASH) item("Delete", R.drawable.ic_trash) {
+                        model.perform { model.act(MailAction.Delete, id, conversation = conversation) }
+                    }
+                    item(if (unread) "Mark read" else "Mark unread", if (unread) R.drawable.ic_read else R.drawable.ic_unread) {
+                        model.perform { markRead() }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        HouseButton("Done", R.drawable.ic_done, primary = true, enabled = !model.working) {
+            model.perform { model.act(MailAction.Done, id, conversation = conversation) }
         }
     }
 }
 
 /** The reading pane: a bar with Back, Reply, Later, More and Done filled, the same set and order as Mac and iOS; then the
  *  subject, the sender with the message menu, the body, attachments, and Reply. */
-@Composable private fun MessageScreen(model: MailModel, message: MailMessage, close: (() -> Unit)?) {
+@Composable private fun MessageScreen(model: MailModel, message: MailMessage, close: (() -> Unit)?, bar: Boolean = true) {
     var plain by remember(message.row.id) { mutableStateOf(false) }
     val context = LocalContext.current
     val c = lagom
@@ -758,64 +834,8 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     }
     val id = message.row.id
     Column(Modifier.fillMaxSize()) {
-        TopBar(Modifier.statusBarsPadding(), start = if (close != null) 4.dp else 12.dp, end = 12.dp) {
-            close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) }
-            HouseButton("Reply", R.drawable.ic_reply, iconOnly = true, enabled = !model.working) { model.perform { model.reply(id) } }
-            Box {
-                var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
-                // One tap is tomorrow, as desktop's L; a long press offers the other times.
-                HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working,
-                    onLongClickLabel = "Choose a time", onLongClick = { choices = model.core?.laterChoices().orEmpty() }) {
-                    model.perform { model.act(MailAction.Later, id, conversation = false) }
-                }
-                DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {
-                    choices.forEach { choice ->
-                        DropdownMenuItem(text = { Text(choice.label) }, onClick = {
-                            choices = emptyList()
-                            model.perform { model.act(MailAction.Later, id, conversation = false, until = choice.untilUnix) }
-                        })
-                    }
-                }
-            }
-            val targets = model.moveTargets(message.row.account)
-            Box {
-                var open by remember { mutableStateOf(false) }
-                var moving by remember { mutableStateOf(false) }
-                HouseButton("More", R.drawable.ic_more, iconOnly = true, enabled = !model.working) { open = true }
-                DropdownMenu(expanded = open || moving, onDismissRequest = { open = false; moving = false }) {
-                    if (moving) {
-                        targets.forEach { folder ->
-                            DropdownMenuItem(text = { Text(folder.path) }, onClick = {
-                                moving = false
-                                model.perform { model.move(id, folder, conversation = false) }
-                            })
-                        }
-                        DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
-                            moving = false
-                            model.newFolder = NewFolder(message.row.account, id, conversation = false)
-                        })
-                    } else {
-                        // The same five, in the same order, on every platform.
-                        @Composable fun item(label: String, @DrawableRes icon: Int, run: () -> Unit) =
-                            DropdownMenuItem(text = { Text(label) }, leadingIcon = { LagomIcon(icon) }, onClick = { open = false; run() })
-                        item("Reply all", R.drawable.ic_reply_all) { model.perform { model.reply(id, ComposeKind.REPLY_ALL) } }
-                        item("Forward", R.drawable.ic_forward) { model.perform { model.reply(id, ComposeKind.FORWARD) } }
-                        item("Move", R.drawable.ic_move) { moving = true }
-                        if (model.mailbox != Mailbox.TRASH) item("Delete", R.drawable.ic_trash) {
-                            model.perform { model.act(MailAction.Delete, id, conversation = false) }
-                        }
-                        val unread = message.row.unread
-                        item(if (unread) "Mark read" else "Mark unread", if (unread) R.drawable.ic_read else R.drawable.ic_unread) {
-                            model.perform { model.setRead(id, unread) }
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            HouseButton("Done", R.drawable.ic_done, primary = true, enabled = !model.working) {
-                model.perform { model.act(MailAction.Done, id, conversation = false) }
-            }
-        }
+        // In a conversation the bar sits once above all messages; each card keeps its own menu.
+        if (bar) MessageBar(model, id, message.row.account, message.row.unread, conversation = false, close) { model.setRead(id, message.row.unread) }
         Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             SelectionContainer {
                 Text(message.row.subject.ifEmpty { "(No subject)" }, Modifier.padding(top = 16.dp).semantics { heading() },
