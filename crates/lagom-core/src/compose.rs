@@ -54,7 +54,7 @@ pub struct Quoted {
 
 /// `inline`: the original's cached inline parts. A `cid:` image without one is left out.
 pub fn quote(m: Original<'_>, html: &str, inline: &[crate::inline::InlinePart], kind: ComposeKind) -> Quoted {
-    let html = crate::inline::data_uris(html, |cid| inline.iter().find(|p| p.cid == cid).map(|p| p.data.clone()));
+    let html = crate::inline::data_uris(html, |cid| inline.iter().find(|p| p.cid == cid).map(|p| p.data.clone())).0;
     let body = crate::html::sanitize(&html);
     let e = crate::html::escape;
     let html = if kind == ComposeKind::Forward {

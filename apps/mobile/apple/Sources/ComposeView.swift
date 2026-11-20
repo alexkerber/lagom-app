@@ -50,6 +50,79 @@ struct ComposeView: View {
 
     var body: some View {
         SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { cancelling = true }) {
+            // An open quote can outgrow a short sheet or the space above the keyboard: then the message scrolls.
+            if quoteOpen && draft.quoted != nil {
+                ScrollView { form(scrolls: true) }.scrollBounceBehavior(.basedOnSize)
+            } else {
+                form(scrolls: false)
+            }
+        } footer: {
+            // On the Duo, Send and Attach sit at the bottom of the right column.
+            if railInset == 0 {
+                HouseButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
+                attachMenu
+            }
+            if sending { CalmProgress(label: "Sending") }
+            Spacer(minLength: 0)
+            if let error {
+                Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).lineLimit(2)
+            } else {
+                let words = draft.body.split(whereSeparator: \.isWhitespace).count
+                Text(words == 1 ? "1 word" : "\(words) words").lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+            }
+        }
+        .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): attach { try await Task.detached { try urls.map(readAttachment) }.value }
+            case .failure(let failure): error = failure.localizedDescription
+            }
+        }
+        .photosPicker(isPresented: $pickingPhotos, selection: $photos, matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
+        .onChange(of: photos) {
+            let items = photos
+            guard !items.isEmpty else { return }
+            photos = []
+            attach {
+                var files: [SendAttachment] = []
+                for item in items {
+                    guard let file = try await item.loadTransferable(type: PickedFile.self) else { throw CocoaError(.fileReadUnknown) }
+                    files.append(file.attachment)
+                }
+                return files
+            }
+        }
+        .onDisappear { model.composeDisappeared(draft) }
+        .confirmationDialog("Save draft?", isPresented: $cancelling, titleVisibility: .visible) {
+            Button("Keep draft") { close(discard: false) }
+            Button("Discard", role: .destructive) { close(discard: true) }
+            Button("Cancel", role: .cancel) { }
+        }
+        .railColumn(top: { EmptyView() }, bottom: {
+            VStack(spacing: 8) {
+                attachMenu.frame(width: 48, height: 48).modifier(RailGlass())
+                RailButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
+            }
+        })
+        .disabled(sending)
+        .interactiveDismissDisabled(sending)
+        .task(id: draft.account) {
+            contactsAccount = nil
+            contactsError = nil
+            guard let core = model.core else { return }
+            let account = draft.account
+            do {
+                try await core.refreshContacts(accountId: account)
+                guard !Task.isCancelled else { return }
+                contactsAccount = account
+            } catch {
+                if !Task.isCancelled { contactsError = "Could not load contacts. Enter an address to continue." }
+            }
+        }
+    }
+
+    /// The header lines, the editor and the quote. `scrolls`: inside a scroll view, where nothing fills the height.
+    @ViewBuilder private func form(scrolls: Bool) -> some View {
+        VStack(spacing: 0) {
             VStack(spacing: 0) {
                 FieldRow(label: "From") {
                     Menu {
@@ -126,72 +199,11 @@ struct ComposeView: View {
                             .padding(.top, 8).padding(.leading, 5).allowsHitTesting(false).accessibilityHidden(true)
                     }
                 }
-                // An open quote shares the sheet; the editor keeps room for a few lines.
-                .frame(minHeight: 120)
+                // In a scrolling sheet the editor keeps a fixed height and scrolls itself, so the caret stays in view.
+                .frame(minHeight: 120, maxHeight: scrolls ? 200 : .infinity)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .accessibilityLabel("Message body")
             if let quoted = draft.quoted { quote(quoted) }
-        } footer: {
-            // On the Duo, Send and Attach sit at the bottom of the right column.
-            if railInset == 0 {
-                HouseButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
-                attachMenu
-            }
-            if sending { CalmProgress(label: "Sending") }
-            Spacer(minLength: 0)
-            if let error {
-                Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).lineLimit(2)
-            } else {
-                let words = draft.body.split(whereSeparator: \.isWhitespace).count
-                Text(words == 1 ? "1 word" : "\(words) words").lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
-            }
-        }
-        .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            switch result {
-            case .success(let urls): attach { try await Task.detached { try urls.map(readAttachment) }.value }
-            case .failure(let failure): error = failure.localizedDescription
-            }
-        }
-        .photosPicker(isPresented: $pickingPhotos, selection: $photos, matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
-        .onChange(of: photos) {
-            let items = photos
-            guard !items.isEmpty else { return }
-            photos = []
-            attach {
-                var files: [SendAttachment] = []
-                for item in items {
-                    guard let file = try await item.loadTransferable(type: PickedFile.self) else { throw CocoaError(.fileReadUnknown) }
-                    files.append(file.attachment)
-                }
-                return files
-            }
-        }
-        .onDisappear { model.composeDisappeared(draft) }
-        .confirmationDialog("Save draft?", isPresented: $cancelling, titleVisibility: .visible) {
-            Button("Keep draft") { close(discard: false) }
-            Button("Discard", role: .destructive) { close(discard: true) }
-            Button("Cancel", role: .cancel) { }
-        }
-        .railColumn(top: { EmptyView() }, bottom: {
-            VStack(spacing: 8) {
-                attachMenu.frame(width: 48, height: 48).modifier(RailGlass())
-                RailButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
-            }
-        })
-        .disabled(sending)
-        .interactiveDismissDisabled(sending)
-        .task(id: draft.account) {
-            contactsAccount = nil
-            contactsError = nil
-            guard let core = model.core else { return }
-            let account = draft.account
-            do {
-                try await core.refreshContacts(accountId: account)
-                guard !Task.isCancelled else { return }
-                contactsAccount = account
-            } catch {
-                if !Task.isCancelled { contactsError = "Could not load contacts. Enter an address to continue." }
-            }
         }
     }
 
@@ -248,7 +260,8 @@ struct ComposeView: View {
             }
             if quoteOpen, let core = model.core {
                 MailHTML(document: mailDocument(html: quoted.html, dark: scheme == .dark, messageId: 0, remote: false), messageID: 0, core: core)
-                    .frame(minHeight: 120, maxHeight: 280)
+                    // The sheet scrolls while the quote is open: the preview keeps its own height.
+                    .frame(height: 280)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
                     .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).stroke(Theme.line))
                     .padding(.bottom, 8)

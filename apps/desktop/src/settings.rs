@@ -77,7 +77,7 @@ fn section(t: &Theme, title: &'static str, note: Option<&'static str>) -> Div {
 
 /// Rows on one raised plate, as in System Settings.
 /// Tab reaches it; Enter or Space presses it.
-fn stop<E: StatefulInteractiveElement>(t: &Theme, el: E) -> E {
+pub(crate) fn stop<E: StatefulInteractiveElement>(t: &Theme, el: E) -> E {
     let ring = t.accent;
     el.focusable().tab_stop(true).focus(move |s| s.border_1().border_color(ring))
 }

@@ -15,19 +15,27 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
     let reply = (in_reply_to.is_some() || !references.is_empty()).then_some((in_reply_to, references));
     // shortcut: foreign HTML becomes text, retain HTML when rich-text editing exists.
     let mut text = parsed.text_bodies().map(|text| text.into_owned()).collect::<Vec<_>>().join("\n");
+    // Without a plain part the text above is the whole HTML converted, the quote included.
+    let html_only = !parsed.text_body().any(|part| matches!(part.kind(), mail_parser::PartKind::Text));
+    let first = |cid: &str| parsed.root().parts().find(|p| p.content_id().is_some_and(|id| crate::inline::content_id(id) == cid));
+    let mut embedded = std::collections::HashSet::new();
     // A quoted HTML original, as `smtp` sends it: its HTML inside the marker, its "> " lines last in the text.
-    let quote = parsed.body_html(0).and_then(|html| {
-        let start = html.find(crate::smtp::QUOTE_OPEN)? + crate::smtp::QUOTE_OPEN.len();
+    let quoted = parsed.body_html(0).and_then(|html| {
+        let open = html.find(crate::smtp::QUOTE_OPEN)?;
+        let start = open + crate::smtp::QUOTE_OPEN.len();
         let end = html.rfind(crate::smtp::QUOTE_CLOSE).filter(|&end| end >= start)?;
-        Some(html[start..end].to_owned())
-    });
-    let cids = quote.as_deref().map(crate::inline::referenced_ids).unwrap_or_default();
-    let quoted_part = |part: &mail_parser::MessagePart<'_>| part.content_id().is_some_and(|id| cids.contains(crate::inline::content_id(id)));
-    let quoted = quote.map(|html| {
-        let html = crate::inline::data_uris(&html, |cid| parsed.root().parts().find(|p| p.content_id().is_some_and(|id| crate::inline::content_id(id) == cid))
-            .map(|p| p.decoded().into_owned()));
+        let (quote, cids) = crate::inline::data_uris(&html[start..end], |cid| first(cid).map(|p| p.decoded().into_owned()));
+        // Only the parts now inside the quote leave the attachments: a referenced PDF stays one.
+        embedded = cids.iter().filter_map(|cid| first(cid).map(|p| p.id())).collect();
         // The server's copy is as untrusted as the original: it is cleaned again before compose shows it.
-        let html = crate::html::sanitize(&html);
+        let html_quote = crate::html::sanitize(&quote);
+        if html_only {
+            // The reply is the HTML before the marker, so removing the quote removes all of it.
+            text = crate::mime::html_to_text(&html[..open]).trim_end().to_owned();
+            let lines = crate::mime::html_to_text(&html_quote);
+            let lines = lines.trim_end().lines().map(|line| format!("> {line}").trim_end().to_owned()).collect::<Vec<_>>().join("\n");
+            return Some(crate::compose::Quoted { text: lines, html: html_quote });
+        }
         let plain = text.replace("\r\n", "\n");
         let plain = plain.trim_end_matches('\n');
         // The "> " lines at the end: the reply above them always ends in an unquoted line or nothing.
@@ -35,14 +43,14 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
         let at = (plain.len() + 1).saturating_sub(start).min(plain.len());
         let quote = plain[at..].to_owned();
         text = plain[..at].strip_suffix(crate::smtp::QUOTE_BREAK).unwrap_or(&plain[..at]).to_owned();
-        crate::compose::Quoted { text: quote, html }
+        Some(crate::compose::Quoted { text: quote, html: html_quote })
     });
     Ok(Draft {
         to: addresses(parsed.to()), cc: addresses(parsed.cc()), bcc: addresses(parsed.bcc()), subject: parsed.subject().unwrap_or_default().into(),
         text,
         reply,
         quoted,
-        attachments: parsed.root().parts().filter(|part| (part.is_attachment() || matches!(part.role(), mail_parser::PartRole::MediaBody)) && !quoted_part(part))
+        attachments: parsed.root().parts().filter(|part| (part.is_attachment() || matches!(part.role(), mail_parser::PartRole::MediaBody)) && !embedded.contains(&part.id()))
             .map(|part| crate::smtp::OutgoingAttachment {
                 filename: part.attachment_name().unwrap_or("attachment").into(),
                 mime_type: part.content_type().map(|ty| ty.subtype().map_or_else(|| ty.ctype().to_string(), |sub| format!("{}/{sub}", ty.ctype())))
@@ -299,6 +307,37 @@ mod tests {
         let hostile = format!("Subject: Re: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>{}<p onclick=\"x()\">Ready</p><iframe src=\"https://evil.example\"></iframe>{}",
             crate::smtp::QUOTE_OPEN, crate::smtp::QUOTE_CLOSE);
         assert_eq!(parse_draft(hostile.as_bytes()).unwrap().quoted.map(|q| q.html).as_deref(), Some("<p>Ready</p>"));
+    }
+
+    #[test]
+    fn foreign_html_drafts_keep_the_quote_apart_and_unembedded_attachments() {
+        let (imap, smtp) = crate::presets::servers("sender@gmail.com").unwrap();
+        let account = crate::account::Account::new("sender@gmail.com".into(), imap, smtp).unwrap();
+        let (open, close) = (crate::smtp::QUOTE_OPEN, crate::smtp::QUOTE_CLOSE);
+        // Another client saved HTML only: the original must leave with the quote.
+        let html_only = format!("Subject: Re: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>Hi</p><br>{open}<div>On x wrote:</div><blockquote>Secret original</blockquote>{close}");
+        let draft = parse_draft(html_only.as_bytes()).unwrap();
+        assert_eq!(draft.text, "Hi");
+        let quoted = draft.quoted.clone().unwrap();
+        assert!(quoted.text.starts_with("> On x wrote:") && quoted.text.ends_with("> Secret original"), "{:?}", quoted.text);
+        let removed = crate::smtp::Outgoing { to: vec!["b@example.com".into()], subject: draft.subject.clone(), text: draft.text.clone(), ..Default::default() };
+        let sent = crate::smtp::compose(&account, &removed).unwrap().formatted();
+        let sent = mail_parser::MessageParser::default().parse(&sent).unwrap();
+        let bodies = sent.text_bodies().chain(sent.html_bodies()).collect::<Vec<_>>();
+        assert!(bodies.iter().any(|b| b.contains("Hi")) && bodies.iter().all(|b| !b.contains("Secret")), "{bodies:?}");
+        let kept = crate::smtp::Outgoing { quoted: Some(quoted), ..removed };
+        let sent = crate::smtp::compose(&account, &kept).unwrap().formatted();
+        let sent = mail_parser::MessageParser::default().parse(&sent).unwrap();
+        assert!(sent.body_text(0).unwrap().contains("> Secret original") && sent.body_html(0).unwrap().contains("Secret original"));
+        // A PDF the quote names by Content-ID is no image: it stays an attachment.
+        let pdf = format!("Subject: Re: x\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+            Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>{open}<img src=\"cid:doc@x\">{close}\r\n--m\r\n\
+            Content-Type: application/pdf; name=a.pdf\r\nContent-Disposition: attachment; filename=a.pdf\r\nContent-ID: <doc@x>\r\n\r\n%PDF-1.4\r\n--m--\r\n");
+        let draft = parse_draft(pdf.as_bytes()).unwrap();
+        assert_eq!(draft.attachments.iter().map(|a| (a.filename.as_str(), a.mime_type.as_str())).collect::<Vec<_>>(), [("a.pdf", "application/pdf")]);
+        assert!(!draft.quoted.as_ref().unwrap().html.contains("data:"));
+        let back = parse_draft(&crate::smtp::compose_draft(&account, &Draft { account: account.id.clone(), ..draft.clone() }, "token").unwrap()).unwrap();
+        assert_eq!(back.attachments, draft.attachments, "reopening keeps it");
     }
 
     #[test]

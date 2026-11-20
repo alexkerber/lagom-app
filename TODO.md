@@ -48,6 +48,7 @@
 
 ## Mail (v1)
 
+- [ ] HTML reply fixes from Codex review 2026-11-20 (PR #210, `fix/review-drafts`): HTML-only server drafts, referenced non-image parts, Reply during inline loading, inline cap, FFI `save_draft` quote default, Mac keyboard quote controls, iOS compose scrolling.
 - [x] All/Unread filters loaded message rows; multi-select supports Shift+arrows, Shift-click, Cmd-click, Cmd+A and batch actions. Integrated with Google Calendar/Today, Dusk (accent Done last, 140 ms glide) and Settings switches, retaining both branches' regression tests.
 
 - [x] Send Markdown mail (lists, bold/italic, links, headings, quotes, code), compose shortcuts and file insertion, CLI `--body-file` (`feat/markdown-compose`).

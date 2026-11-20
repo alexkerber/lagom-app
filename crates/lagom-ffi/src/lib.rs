@@ -775,6 +775,11 @@ impl LagomCore {
         self.compose_draft(id, ComposeKind::Reply).await
     }
     pub async fn compose_draft(&self, id: i64, kind: ComposeKind) -> Result<ReplyDraft> {
+        // The quote is a snapshot: fetch the images an HTML original references first, as the reader does.
+        // A failed fetch still opens the draft, without them.
+        let images = self.run(move |s| Ok(!s.inline_loaded(id)?
+            && s.message(id)?.body_html.is_some_and(|html| !lagom_core::inline::referenced_ids(&html).is_empty()))).await?;
+        if images { let _ = self.load_inline(id).await; }
         let mut draft = self.run(move |s| {
             use lagom_core::compose::{self, Original};
             use chrono::{Local, TimeZone};
