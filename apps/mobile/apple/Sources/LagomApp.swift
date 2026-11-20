@@ -103,6 +103,7 @@ struct LagomApp: App {
 struct MailView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
+    @Binding var settingsOpen: Bool
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
     @State private var laterChoices: [LaterChoice] = []
@@ -112,7 +113,6 @@ struct MailView: View {
     @State private var moving: (account: String, id: Int64)?
     @State private var newFolder: NewFolderTarget?
     @State private var confirmEmptyTrash = false
-    @State private var settingsOpen = false
     // The filter outlives a visit to another page, as on desktop.
     @SceneStorage("lagom.unreadOnly") private var unreadOnly = false
     @State private var paneWidth = CGFloat.infinity
@@ -227,7 +227,6 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
-        .task { if Storage.settingsScreen != nil && !sidebar { settingsOpen = true } }
         .sheet(isPresented: $settingsOpen) { SettingsView(model: model, sheet: true).duoRail() }
     }
 

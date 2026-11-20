@@ -10,6 +10,8 @@ struct RootView: View {
     @Environment(\.verticalSizeClass) private var height
     @State private var addAccount = false
     @State private var removing: MailAccount?
+    /// The phone's Settings sheet; a mailto link or a notification closes it, and Add account inside it.
+    @State private var settingsOpen = Storage.settingsScreen != nil
     /// A message Today asked to open once the Inbox scope has reloaded.
     @State private var pending: Int64?
 
@@ -63,11 +65,7 @@ struct RootView: View {
         }
         .foregroundStyle(Theme.ink)
         .sheet(isPresented: $addAccount) { AddAccountView(model: model).duoRail() }
-        .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
-            if let account = removing {
-                Button("Remove \(account.email)", role: .destructive) { Task { await model.remove(account) }; removing = nil }
-            }
-        }
+        .modifier(RemoveAccountDialog(model: model, removing: $removing))
         // One reload per scope, even when the mailbox and the account change together.
         .task(id: "\(model.mailbox.rawValue)/\(model.folder?.id ?? 0)/\(model.accountID ?? "")/\(model.searchText)/\(model.core == nil)/\(model.notificationRevision)") {
             await model.changeScope()
@@ -81,12 +79,14 @@ struct RootView: View {
         .onOpenURL { url in
             guard url.scheme?.lowercased() == "mailto" else { return }
             addAccount = false
+            settingsOpen = false
             section = .mail
             Task { await model.openMailto(url.absoluteString) }
         }
         .onChange(of: model.notificationRevision, initial: true) { _, _ in
             if model.notificationTarget != nil {
                 addAccount = false
+                settingsOpen = false
                 pending = nil
                 section = .mail
             }
@@ -117,7 +117,7 @@ struct RootView: View {
     @ViewBuilder private func page(_ section: AppSection) -> some View {
         switch section {
         case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 })
-        case .mail: MailView(model: model, planner: planner)
+        case .mail: MailView(model: model, planner: planner, settingsOpen: $settingsOpen)
         case .calendar: CalendarView(planner: planner, model: model)
         case .todo: TodoView(planner: planner, openMail: openMail)
         case .settings: SettingsView(model: model)

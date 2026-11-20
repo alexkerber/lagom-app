@@ -37,6 +37,9 @@ struct SettingsView: View {
         }
         .background(Theme.background)
         .foregroundStyle(Theme.ink)
+        // The two-finger scrub goes back a page first, as a navigation push would.
+        .accessibilityAction(.escape) { if open != nil { open = nil } else if sheet { dismiss() } }
+        .onChange(of: open) { _, _ in AccessibilityNotification.ScreenChanged().post() }
         // A removed account's page closes.
         .onChange(of: model.accounts.map(\.id)) { _, ids in if let id = open, !ids.contains(id) { open = nil } }
         .onChange(of: model.accounts.first?.id, initial: true) { _, id in if Storage.settingsScreen == "account" && open == nil { open = id } }
@@ -50,12 +53,6 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: { Text("Shown to the people you write to, and in the sidebar.") }
-        // The Mac's words: the question names the account, Keep is the way out.
-        .confirmationDialog(removing.map { "Remove \($0.email) from lagom?" } ?? "", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            titleVisibility: .visible, presenting: removing) { account in
-            Button("Remove", role: .destructive) { Task { await model.remove(account) }; removing = nil }
-            Button("Keep", role: .cancel) { removing = nil }
-        } message: { _ in Text("Your mail stays with your provider.") }
     }
 
     @ViewBuilder private var mainPage: some View {
@@ -137,6 +134,7 @@ struct SettingsView: View {
         }
         group(nil, note: nil) {
             row(title: "Remove account", mark: Icon("remove-account").foregroundStyle(Theme.danger), chevron: false, tint: Theme.danger) { removing = account }
+                .modifier(RemoveAccountDialog(model: model, removing: $removing))
         } footer: {
             Text("Removes the account and its saved mail from this \(UIDevice.current.model). Your mail stays with your provider.")
                 .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.top, 8)
@@ -203,5 +201,20 @@ private struct Avatar: View {
             .frame(width: side, height: side)
             .background(color.opacity(0.18), in: .circle)
             .accessibilityHidden(true)
+    }
+}
+
+/// The Mac's words: the question names the account, Keep is the way out. Settings and the iPad sidebar ask the same.
+struct RemoveAccountDialog: ViewModifier {
+    let model: MailModel
+    @Binding var removing: MailAccount?
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(removing.map { "Remove \($0.email) from lagom?" } ?? "",
+                                   isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                                   titleVisibility: .visible, presenting: removing) { account in
+            Button("Remove", role: .destructive) { Task { await model.remove(account) }; removing = nil }
+            Button("Keep", role: .cancel) { removing = nil }
+        } message: { _ in Text("Your mail stays with your provider.") }
     }
 }

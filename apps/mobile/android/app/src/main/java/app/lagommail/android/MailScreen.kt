@@ -30,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -59,7 +60,9 @@ import kotlin.math.roundToInt
 
 @Composable internal fun MailScreen(model: MailModel, twoPane: Boolean) {
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
-    var settings by remember { mutableStateOf(false) }
+    var settings by rememberSaveable { mutableStateOf(false) }
+    // A mailto link, a share or a notification (a new draft or an opened message) leaves Settings; Add account comes back to it.
+    LaunchedEffect(model.draft != null, model.selectedId) { if (model.draft != null || model.selectedId != null) settings = false }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
