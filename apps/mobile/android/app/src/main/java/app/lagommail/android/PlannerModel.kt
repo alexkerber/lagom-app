@@ -170,7 +170,11 @@ internal class PlannerModel : ViewModel() {
         val core = core ?: return "lagom is not ready yet."
         try {
             if (demo) core.addDemoEvent(form) else core.createEvent(calendar.account, calendar.calendar, form)
-        } catch (e: CancellationException) { throw e } catch (e: Exception) { return e.mailMessage() }
+        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            // A refused write scope hides New event and offers access again; the dialog keeps the draft.
+            reloadAgenda()
+            return e.mailMessage()
+        }
         reloadAgenda()
         return null
     }

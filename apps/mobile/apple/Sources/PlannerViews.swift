@@ -742,11 +742,11 @@ struct NewEventView: View {
                     if !allDay { FieldRow(label: "End", labelWidth: 84) { picker("End", $end, .hourAndMinute) } }
                     toggle("All day", icon: "sun", $allDay)
                     // A calendar that left the list (a sync) asks for a choice instead of picking another one.
-                    let gone = choice.map { !calendars.contains($0) } ?? true
-                    if calendars.count > 1 || gone {
+                    let current = target
+                    if calendars.count > 1 || current == nil {
                         FieldRow(label: "Calendar", labelWidth: 84) {
-                            Picker("Calendar", selection: $choice) {
-                                if gone { Text("Choose a calendar").tag(EventCalendar?.none) }
+                            Picker("Calendar", selection: Binding(get: { current }, set: { choice = $0 })) {
+                                if current == nil { Text("Choose a calendar").tag(EventCalendar?.none) }
                                 ForEach(calendars, id: \.self) { Text($0.label).tag(Optional($0)) }
                             }
                             .labelsHidden().tint(Theme.ink)
@@ -795,6 +795,11 @@ struct NewEventView: View {
         .presentationDetents([.large])
     }
 
+    /// The chosen calendar as the list has it now: by account and calendar, so a rename keeps it.
+    private var target: EventCalendar? {
+        planner.eventCalendars.first { $0.account == choice?.account && $0.calendar == choice?.calendar }
+    }
+
     private func picker(_ label: String, _ value: Binding<Date>, _ parts: DatePickerComponents) -> some View {
         DatePicker(label, selection: value, displayedComponents: parts).labelsHidden().accessibilityLabel(label)
     }
@@ -814,7 +819,7 @@ struct NewEventView: View {
 
     private func save() {
         guard !saving else { return }
-        guard let target = choice, planner.eventCalendars.contains(target) else {
+        guard let target else {
             error = "Choose a calendar"
             return
         }

@@ -224,6 +224,8 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     // event must not replace the window without it. After removal in the lock order.
     calendar: Mutex<()>,
     // New events Google confirmed but the cache refused: (account, calendar, event), written again at the next sync.
+    // After calendar in the lock order.
+    // shortcut: kept in memory only, so a restart before that sync loses an event past the fetch window; store it if that happens.
     unsaved_events: Mutex<Vec<(String, String, lagom_core::calendar::Event)>> }
 
 impl LagomCore {
@@ -534,6 +536,7 @@ impl LagomCore {
             let _local = stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             s.delete_account(&id)?;
             stores.contacts.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
+            stores.unsaved_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(account, _, _)| *account != id);
             Ok(())
         }).await
     }

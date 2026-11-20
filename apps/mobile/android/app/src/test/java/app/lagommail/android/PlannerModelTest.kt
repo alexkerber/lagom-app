@@ -238,7 +238,7 @@ class OpenInboxTest {
 
     @Test fun aSaveInFlightIsSentOnceAndItsAnswerWaitsForTheDialog() = runTest(dispatcher) {
         val core = FakeCore().apply { connected = true; calendars = listOf(EventCalendar("acct", "primary", "Personal · you@gmail.com")) }
-        val planner = planner(core); planner.reload()
+        val planner = PlannerModel().apply { this.core = core }; planner.reload()
         val start = LocalDate.of(2026, 11, 20).atTime(9, 0)
         val form = eventForm("Lunch", start, start.plusHours(1), allDay = false, guests = "a@b.example", description = "", meet = false)
         val gate = CompletableDeferred<Unit>(); core.eventGate = gate
@@ -258,7 +258,7 @@ class OpenInboxTest {
     @Test fun toDoOffersTasksAccessForAccountsWithCalendarOnly() = runTest(dispatcher) {
         val account = MailAccount("g", "you@gmail.com", "Fixture")
         val core = FakeCore().apply { tasksAccess = listOf(account) }
-        val planner = planner(core); planner.reloadTodos()
+        val planner = PlannerModel().apply { this.core = core }; planner.reloadTodos()
         assertEquals(listOf(account), planner.tasksAccess)
         core.tasksAccess = emptyList(); planner.reloadTodos()
         assertTrue(planner.tasksAccess.isEmpty())

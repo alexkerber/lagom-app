@@ -58,14 +58,20 @@ final class PlannerModel {
     }
 
     /// Today's summary and the mailbox counts; cheap, so mail changes call it.
+    private var mailLoad = 0
+
     func reloadMail() async {
         guard let core else { return }
+        // Task changes reload it too; only the latest request lands.
+        mailLoad += 1
+        let load = mailLoad
         do {
             let today = try await core.today(unreadLimit: 3)
             let counts = try await core.mailCounts()
+            guard load == mailLoad else { return }
             self.today = today
             self.counts = counts
-        } catch { self.error = error.localizedDescription }
+        } catch { if load == mailLoad { self.error = error.localizedDescription } }
     }
 
     private var todosLoad = 0
@@ -79,14 +85,14 @@ final class PlannerModel {
             let lists = try await core.todoLists()
             var todos: [Int64: [Todo]] = [:]
             for list in lists { todos[list.id] = try await core.todos(list: list.id, includeDone: true) }
-            let today = try await core.today(unreadLimit: 3)
             let tasksAccess = try await core.tasksAccessNeeded()
             guard load == todosLoad else { return }
             self.lists = lists
             self.todos = todos
-            self.today = today
             self.tasksAccess = tasksAccess
         } catch { if load == todosLoad { self.error = error.localizedDescription } }
+        // Today's due tasks follow, as on Android.
+        await reloadMail()
     }
 
     func reloadAgenda() async {
@@ -130,7 +136,11 @@ final class PlannerModel {
         do {
             if Storage.demo { try await core.addDemoEvent(form: form) }
             else { try await core.createEvent(accountId: target.account, calendar: target.calendar, form: form) }
-        } catch { return error.localizedDescription }
+        } catch {
+            // A refused write scope hides New event and offers access again; the sheet keeps the draft.
+            await reloadAgenda()
+            return error.localizedDescription
+        }
         await reloadAgenda()
         return nil
     }
