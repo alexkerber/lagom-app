@@ -72,13 +72,15 @@ internal data class ComposeDraft(
     val bcc: String = "", val showBcc: Boolean = bcc.isNotEmpty(),
     /** The body a new message starts with, the signature: unchanged, it is not worth a draft. */
     val startBody: String = "",
+    /** An HTML original, shown read-only under the editor and sent after the body. Null once removed. */
+    val quoted: QuotedMail? = null,
 ) {
     constructor(reply: ReplyDraft, kind: ComposeKind = ComposeKind.REPLY, email: String = "") : this(
-        reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, id = draftMessageId(email), attachments = reply.attachments,
+        reply.account, reply.to, reply.cc, reply.subject, reply.body, reply.replyTo, id = draftMessageId(email), attachments = reply.attachments, quoted = reply.quoted,
         title = when (kind) { ComposeKind.REPLY -> "Reply"; ComposeKind.REPLY_ALL -> "Reply all"; ComposeKind.FORWARD -> "Forward" })
     constructor(saved: LocalDraft) : this(saved.account, saved.to, saved.cc, saved.subject, saved.body,
         id = saved.id, attachments = saved.attachments, restored = true, isReply = saved.inReplyTo != null || saved.references.isNotEmpty(),
-        title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft", bcc = saved.bcc)
+        title = if (saved.inReplyTo != null || saved.references.isNotEmpty()) "Reply" else "Draft", bcc = saved.bcc, quoted = saved.quoted)
     val hasContent get() = to.isNotEmpty() || cc.isNotEmpty() || bcc.isNotEmpty() || subject.isNotEmpty() || body != startBody || attachments.isNotEmpty()
     val attachmentsTooLarge get() = attachments.sumOf { it.data.size.toLong() } > ATTACHMENT_WARNING_BYTES
 }
@@ -124,6 +126,8 @@ internal class MailModel(
     var core: LagomCoreInterface? = null; private set
     var accounts by mutableStateOf<List<MailAccount>>(emptyList()); private set
     var rows by mutableStateOf<List<MailRow>>(emptyList()); private set
+    /** Debug demo only: the next compose opens its quote, for a screenshot without taps. */
+    var demoQuoteOpen = false
     var failures by mutableStateOf<List<SendFailure>>(emptyList()); private set
     var accountId by mutableStateOf<String?>(null); private set
     var mailbox by mutableStateOf(Mailbox.INBOX); private set
@@ -622,7 +626,7 @@ internal class MailModel(
         withContext(NonCancellable) {
             try {
                 val saved = core.saveDraft(snapshot.id, snapshot.account, snapshot.to, snapshot.cc, snapshot.bcc, snapshot.subject,
-                    snapshot.body, snapshot.replyTo, snapshot.attachments)
+                    snapshot.body, snapshot.replyTo, snapshot.attachments, snapshot.quoted)
                 draftRevision++
                 savedDraftIds = savedDraftIds + saved.id
                 drafts = listOf(saved) + drafts.filterNot { it.id == saved.id }
@@ -650,7 +654,7 @@ internal class MailModel(
                     if (old.body == old.startBody) core.newMailBody(account).let { replacement = replacement.copy(body = it, startBody = it) }
                     if (old.hasContent || old.id in savedDraftIds) {
                         // Save the replacement first so a failed account change cannot lose the original.
-                        val saved = core.saveDraft(replacement.id, account, old.to, old.cc, old.bcc, old.subject, replacement.body, null, old.attachments)
+                        val saved = core.saveDraft(replacement.id, account, old.to, old.cc, old.bcc, old.subject, replacement.body, null, old.attachments, old.quoted)
                         draftRevision++
                         drafts = listOf(saved) + drafts
                         savedDraftIds = savedDraftIds + saved.id

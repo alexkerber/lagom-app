@@ -54,9 +54,7 @@ pub struct Quoted {
 
 /// `inline`: the original's cached inline parts. A `cid:` image without one is left out.
 pub fn quote(m: Original<'_>, html: &str, inline: &[crate::inline::InlinePart], kind: ComposeKind) -> Quoted {
-    use base64::Engine;
-    let html = crate::inline::rewrite_with(html, |cid| inline.iter().find(|p| p.cid == cid).map_or_else(String::new, |p|
-        format!("data:{};base64,{}", p.mime_type, base64::engine::general_purpose::STANDARD.encode(&p.data))));
+    let html = crate::inline::data_uris(html, |cid| inline.iter().find(|p| p.cid == cid).map(|p| p.data.clone()));
     let body = crate::html::sanitize(&html);
     let e = crate::html::escape;
     let html = if kind == ComposeKind::Forward {

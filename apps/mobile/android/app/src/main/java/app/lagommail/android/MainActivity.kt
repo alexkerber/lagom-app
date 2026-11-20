@@ -104,11 +104,11 @@ class LagomApplication : Application() {
 
 /**
  * Debug-only launch extras for screenshots without real accounts, as desktop's `LAGOM_DEMO` and `LAGOM_THEME`:
- * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-granted|calendar-none` and `--es lagomTheme light|dark`. A release build ignores both.
+ * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-granted|calendar-none|compose-quote|compose-quote-open` and `--es lagomTheme light|dark`. A release build ignores both.
  */
 internal data class DebugLaunch(val demo: String? = null, val dark: Boolean? = null)
 internal fun debugLaunch(debug: Boolean, demo: String?, theme: String?): DebugLaunch =
-    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none") },
+    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none", "compose-quote", "compose-quote-open") },
         when (theme) { "light" -> false; "dark" -> true; else -> null })
 
 /** The redirect of a browser sign-in, or null for any other link. The core then checks the exact URI and state. */
@@ -254,6 +254,14 @@ class MainActivity : ComponentActivity() {
                 catch (error: Exception) { model.error = error.message ?: error.mailMessage() }
                 // Clearing the key earlier would cancel this effect mid-read; a newer share has its own run.
                 finally { if (shareIntent == intent) shareIntent = null }
+            }
+            // compose-quote: a reply to the demo's HTML ticket, its quote closed or open.
+            LaunchedEffect(model.rows) {
+                val ticket = model.rows.firstOrNull { it.subject.startsWith("Stockholm C") }
+                if (launch.demo?.startsWith("compose-quote") == true && ticket != null && model.draft == null) {
+                    model.demoQuoteOpen = launch.demo == "compose-quote-open"
+                    model.perform { model.reply(ticket.id) }
+                }
             }
             val size = calculateWindowSizeClass(this)
             LagomTheme(launch.dark ?: isSystemInDarkTheme()) {

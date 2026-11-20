@@ -24,15 +24,15 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
     let cids = quote.as_deref().map(crate::inline::referenced_ids).unwrap_or_default();
     let quoted_part = |part: &mail_parser::MessagePart<'_>| part.content_id().is_some_and(|id| cids.contains(crate::inline::content_id(id)));
     let quoted = quote.map(|html| {
-        use base64::Engine;
-        let html = crate::inline::rewrite_with(&html, |cid| parsed.root().parts().find(|p| p.content_id().is_some_and(|id| crate::inline::content_id(id) == cid))
-            .and_then(|p| { let data = p.decoded(); crate::html::image_type(&data).map(|mime| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data))) })
-            .unwrap_or_default());
+        let html = crate::inline::data_uris(&html, |cid| parsed.root().parts().find(|p| p.content_id().is_some_and(|id| crate::inline::content_id(id) == cid))
+            .map(|p| p.decoded().into_owned()));
+        // The server's copy is as untrusted as the original: it is cleaned again before compose shows it.
+        let html = crate::html::sanitize(&html);
         let plain = text.replace("\r\n", "\n");
         let plain = plain.trim_end_matches('\n');
         // The "> " lines at the end: the reply above them always ends in an unquoted line or nothing.
         let start = plain.lines().rev().take_while(|line| line.starts_with('>')).map(|line| line.len() + 1).sum::<usize>().min(plain.len() + 1);
-        let at = (plain.len() + 1).saturating_sub(start);
+        let at = (plain.len() + 1).saturating_sub(start).min(plain.len());
         let quote = plain[at..].to_owned();
         text = plain[..at].strip_suffix(crate::smtp::QUOTE_BREAK).unwrap_or(&plain[..at]).to_owned();
         crate::compose::Quoted { text: quote, html }
@@ -295,6 +295,10 @@ mod tests {
         let plain = Draft { quoted: None, attachments: vec![], ..draft };
         let back = parse_draft(&crate::smtp::compose_draft(&account, &plain, "token").unwrap()).unwrap();
         assert_eq!((back.text.replace("\r\n", "\n"), back.quoted), (plain.text, None));
+        // A server draft is untrusted: its quote is cleaned again before compose shows it.
+        let hostile = format!("Subject: Re: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>{}<p onclick=\"x()\">Ready</p><iframe src=\"https://evil.example\"></iframe>{}",
+            crate::smtp::QUOTE_OPEN, crate::smtp::QUOTE_CLOSE);
+        assert_eq!(parse_draft(hostile.as_bytes()).unwrap().quoted.map(|q| q.html).as_deref(), Some("<p>Ready</p>"));
     }
 
     #[test]

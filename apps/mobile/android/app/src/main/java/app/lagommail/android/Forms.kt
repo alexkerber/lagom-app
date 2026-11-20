@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -21,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -146,7 +148,28 @@ import kotlinx.coroutines.CancellationException
                 BasicTextField(draft.body, { edit(draft.copy(body = it)) }, Modifier.fillMaxWidth().heightIn(min = 240.dp).semantics { contentDescription = "Message body" },
                     enabled = !model.sending, textStyle = body.copy(color = lagom.ink), cursorBrush = SolidColor(lagom.accent))
             }
+            draft.quoted?.let { quoted ->
+                var open by remember(draft.id) { mutableStateOf(model.demoQuoteOpen) }
+                QuoteRow(open, enabled = !model.sending, toggle = { open = !open }) { open = false; edit(draft.copy(quoted = null)) }
+                // The reading pane's web view and document: the same sanitized HTML and the same blocks on remote content.
+                if (open) Box(Modifier.fillMaxWidth().height(280.dp).padding(bottom = 12.dp).clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, lagom.line, RoundedCornerShape(8.dp)).semantics { contentDescription = "Quoted message" }) {
+                    MailHtml(messageId = 0, html = quoted.html)
+                }
+            }
         }
+    }
+}
+
+/** The quiet "··· Quoted message" row under the editor: it opens the quote in place; × removes it from this message. */
+@Composable private fun QuoteRow(open: Boolean, enabled: Boolean, toggle: () -> Unit, remove: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).heightIn(min = 48.dp).clickable(role = Role.Button, onClickLabel = if (open) "Hide quoted message" else "Show quoted message", onClick = toggle),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("···", color = lagom.ink2, style = MaterialTheme.typography.bodySmall.copy(fontFamily = LabelFace))
+            Text(if (open) "Hide quoted message" else "Quoted message", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
+        }
+        LagomIconButton("Remove quoted message", R.drawable.ic_close, enabled = enabled, onClick = remove)
     }
 }
 

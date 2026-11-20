@@ -213,7 +213,9 @@ const KEEP: &[&str] = &["a", "abbr", "address", "article", "aside", "b", "bdi", 
 const VOID: &[&str] = &["br", "col", "hr", "img", "wbr"];
 /// Dropped with everything inside them.
 const DROP: &[&str] = &["script", "style", "title", "textarea", "select", "iframe", "frameset", "object", "applet", "noscript",
-    "noembed", "noframes", "template", "svg", "math", "xmp", "plaintext", "audio", "video", "canvas", "map", "head"];
+    "noembed", "noframes", "template", "svg", "math", "xmp", "plaintext", "audio", "video", "canvas", "map"];
+/// Deeper elements go and keep their text: WebKit's parser stops nesting there too, and the end-tag scan stays linear.
+const MAX_DEPTH: usize = 512;
 const ATTRS: &[&str] = &["align", "valign", "width", "height", "bgcolor", "color", "face", "size", "border", "cellpadding",
     "cellspacing", "colspan", "rowspan", "dir", "lang", "title", "alt", "start", "type", "reversed", "span", "nowrap", "scope",
     "headers", "abbr", "datetime", "hspace", "vspace", "frame", "rules", "summary", "clear", "noshade", "compact", "open"];
@@ -225,6 +227,8 @@ struct Clean {
     /// Inside a dropped element: its name and how deep.
     skip: Option<(String, usize)>,
     parts: Option<Vec<crate::inline::InlinePart>>,
+    /// The `data:` image sources kept so far, so the quote stays under `MAX_INLINE_BYTES`.
+    data_bytes: usize,
 }
 
 struct CleanSink(std::cell::RefCell<Clean>);
@@ -268,7 +272,7 @@ impl Clean {
         let start = tag.kind == TagKind::StartTag;
         if let Some((skip, depth)) = &mut self.skip {
             if skip == name {
-                if start { *depth += 1 } else { *depth -= 1 }
+                if start && !tag.self_closing { *depth += 1 } else if !start { *depth -= 1 }
                 if *depth == 0 { self.skip = None; }
             }
             return TokenSinkResult::Continue;
@@ -312,6 +316,7 @@ impl Clean {
         }
         // An image with nothing safe to show goes, rather than a broken-image box.
         if name == "img" && !has_src { return TokenSinkResult::Continue; }
+        if !VOID.contains(&name) && self.open.len() >= MAX_DEPTH { return TokenSinkResult::Continue; }
         self.out.push_str(&format!("<{name}{attrs}>"));
         if !VOID.contains(&name) { self.open.push(name.to_owned()); }
         TokenSinkResult::Continue
@@ -321,13 +326,23 @@ impl Clean {
         if src.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
             let data = data_image(src)?;
             let mime = image_type(&data)?;
+            if self.data_bytes + data.len() > crate::inline::MAX_INLINE_BYTES { return None; }
             return Some(match &mut self.parts {
-                Some(parts) => {
-                    let cid = format!("quote{}@lagommail.app", parts.len() + 1);
-                    parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data });
-                    format!("cid:{cid}")
+                // One part per image, however often the quote shows it.
+                Some(parts) => match parts.iter().find(|p| p.data == data) {
+                    Some(part) => format!("cid:{}", part.cid),
+                    None => {
+                        self.data_bytes += data.len();
+                        let cid = format!("quote{}@lagommail.app", parts.len() + 1);
+                        parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data });
+                        format!("cid:{cid}")
+                    }
+                },
+                None => {
+                    self.data_bytes += data.len();
+                    // The sniffed type, never the one the sender wrote.
+                    { use base64::Engine; format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)) }
                 }
-                None => src.to_owned(),
             });
         }
         web_url(src)
@@ -341,7 +356,8 @@ fn web_url(url: &str) -> Option<String> {
 }
 
 /// Inline CSS without script hooks (`expression`, `behavior`, bindings, escapes) or `position`,
-/// which would let the quote paint over the reply in the recipient's mail.
+/// which would let the quote paint over the reply in the recipient's mail. Images in CSS are web
+/// URLs only: a `data:` SVG background would draw what `<img>` refuses.
 fn style(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
     if lower.contains('\\') || ["expression", "javascript:", "vbscript:", "behavior", "-moz-binding", "@import", "/*"].iter().any(|b| lower.contains(b)) {
@@ -349,9 +365,19 @@ fn style(value: &str) -> Option<String> {
     }
     let kept: Vec<_> = value.split(';').filter(|d| d.split_once(':').is_some_and(|(p, _)| {
         let p = p.trim().to_ascii_lowercase();
-        !p.is_empty() && p != "position"
+        !p.is_empty() && p != "position" && css_images_web(d)
     })).map(str::trim).collect();
     (!kept.is_empty()).then(|| kept.join(";"))
+}
+
+/// Every `url(…)` in a declaration is http or https, and it has no other image function.
+fn css_images_web(declaration: &str) -> bool {
+    let lower = declaration.to_ascii_lowercase();
+    !["image-set(", "image(", "cross-fade(", "element("].iter().any(|f| lower.contains(f))
+        && lower.split("url(").skip(1).all(|rest| {
+            let url = rest.trim_start().trim_start_matches(['"', '\'']);
+            url.starts_with("http://") || url.starts_with("https://")
+        })
 }
 
 #[cfg(test)]
@@ -398,6 +424,22 @@ mod tests {
         assert_eq!(out, "<img src=\"cid:quote1@lagommail.app\" alt=\"logo\">");
         assert_eq!((parts.len(), parts[0].mime_type.as_str(), parts[0].data[..4].to_vec()), (1, "image/png", vec![0x89, b'P', b'N', b'G']));
         assert_eq!(sanitize("<img src=\"cid:logo@x\">"), "", "an unresolved inline image goes");
+        let (out, parts) = sanitize_parts(&format!("<img src=\"data:image/png;base64,{png}\">").repeat(3));
+        assert_eq!((parts.len(), out.matches("cid:quote1@lagommail.app").count()), (1, 3), "one part per image, however often it shows");
+        let claimed = sanitize(&format!("<img src=\"data:text/html;base64,{png}\">"));
+        assert!(claimed.contains("data:image/png;base64,"), "the sniffed type, not the claimed one: {claimed}");
+    }
+
+    #[test]
+    fn sanitize_bounds_depth_css_images_and_keeps_bodies_after_an_open_head() {
+        assert_eq!(sanitize("<html><head><meta charset=utf-8><body><p>Hello</p>"), "<p>Hello</p>", "an unclosed head keeps the body");
+        assert_eq!(sanitize("<svg><svg/></svg><p>after</p>"), "<p>after</p>", "a self-closed child ends no skip early or late");
+        let deep = sanitize(&format!("{}x{}", "<div>".repeat(2000), "</b>".repeat(2000)));
+        assert_eq!(deep.matches("<div>").count(), 512);
+        assert_eq!(deep.matches("</div>").count(), 512, "balanced");
+        let css = sanitize(r#"<div style="color:red;background:url(data:image/svg+xml;base64,PHN2Zy8+);background-image:image-set('x.svg' 1x)">a</div><div style="background:url( 'https://img.example/a.png' )">b</div>"#);
+        assert!(css.contains("style=\"color:red\"") && !css.contains("data:") && !css.contains("image-set"), "{css}");
+        assert!(css.contains("https://img.example/a.png"), "{css}");
     }
     use std::borrow::Cow;
 

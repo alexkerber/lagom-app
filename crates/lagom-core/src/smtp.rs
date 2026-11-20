@@ -173,7 +173,8 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
 /// Between the reply and its "> " quote in the plain part.
 pub(crate) const QUOTE_BREAK: &str = "\n\n";
 /// Around the quoted original in the HTML part; drafts find the quote again by it.
-pub(crate) const QUOTE_OPEN: &str = "<div class=\"lagom_quote\">";
+/// Clipped, so no style in the quote can paint over the reply above it in the recipient's mail.
+pub(crate) const QUOTE_OPEN: &str = "<div class=\"lagom_quote\" style=\"overflow:hidden\">";
 pub(crate) const QUOTE_CLOSE: &str = "</div></body></html>";
 
 /// Render only parser-generated markup; images become their labels so mail loads no resources.
@@ -464,6 +465,7 @@ mod tests {
             assert_eq!(parsed.body_text(0).unwrap().replace("\r\n", "\n"), "Thanks\n\n-- \nAlex\n\n> On 2026-11-20, a@example.com wrote:\n> \n> Ready");
             let html = parsed.body_html(0).unwrap().replace("\r\n", "\n");
             assert!(html.contains("<p>Thanks</p>") && html.find("Thanks").unwrap() < html.find(QUOTE_OPEN).unwrap(), "{html}");
+            assert!(QUOTE_OPEN.contains("overflow:hidden"), "no style in the quote paints over the reply");
             assert!(html.contains("<blockquote type=\"cite\"><p>Ready</p><img src=\"cid:quote1@lagommail.app\"></blockquote>"), "{html}");
             assert!(!html.contains("onclick") && !html.contains("iframe") && html.ends_with(QUOTE_CLOSE));
             let image = parsed.parts().find(|p| p.content_id() == Some("quote1@lagommail.app")).unwrap();

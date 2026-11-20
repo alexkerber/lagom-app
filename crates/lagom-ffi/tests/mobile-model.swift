@@ -172,12 +172,12 @@ import Foundation
     var signatures: [String: String] = [:]
     override func newMailBody(accountId: String) async throws -> String { signatures[accountId].map { "\n\n-- \n\($0)" } ?? "" }
     override func saveDraft(id: String, accountId: String, to: String, cc: String, bcc: String, subject: String, body: String,
-                            replyTo: Int64?, attachments: [SendAttachment]) async throws -> DraftRow {
+                            replyTo: Int64?, attachments: [SendAttachment], quoted: QuotedMail?) async throws -> DraftRow {
         saves += 1
         if suspendSave { await withCheckedContinuation { gate = $0 } }
         if fail { throw MailError.Failed(reason: "save refused") }
         let saved = LocalDraft(id: id, account: accountId, to: to, cc: cc, subject: subject, body: body,
-                              inReplyTo: nil, references: [], attachments: attachments, bcc: bcc)
+                              inReplyTo: nil, references: [], attachments: attachments, bcc: bcc, quoted: quoted)
         drafts[id] = saved
         return saved.row
     }
