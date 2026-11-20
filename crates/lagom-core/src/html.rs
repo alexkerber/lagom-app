@@ -216,6 +216,9 @@ const DROP: &[&str] = &["script", "style", "title", "textarea", "select", "ifram
     "noembed", "noframes", "template", "svg", "math", "xmp", "plaintext", "audio", "video", "canvas", "map"];
 /// Deeper elements go and keep their text: WebKit's parser stops nesting there too, and the end-tag scan stays linear.
 const MAX_DEPTH: usize = 512;
+/// Distinct `data:` images a quote keeps: the byte cap alone let 80,000 tiny images cost quadratic work and as many
+/// MIME parts (Codex review 2026-11-20). Newsletters stay well under it.
+const MAX_DATA_IMAGES: usize = 100;
 const ATTRS: &[&str] = &["align", "valign", "width", "height", "bgcolor", "color", "face", "size", "border", "cellpadding",
     "cellspacing", "colspan", "rowspan", "dir", "lang", "title", "alt", "start", "type", "reversed", "span", "nowrap", "scope",
     "headers", "abbr", "datetime", "hspace", "vspace", "frame", "rules", "summary", "clear", "noshade", "compact", "open"];
@@ -229,6 +232,8 @@ struct Clean {
     parts: Option<Vec<crate::inline::InlinePart>>,
     /// The `data:` image sources kept so far, so the quote stays under `MAX_INLINE_BYTES`.
     data_bytes: usize,
+    /// Distinct `data:` images kept so far, at most `MAX_DATA_IMAGES`.
+    data_images: usize,
 }
 
 struct CleanSink(std::cell::RefCell<Clean>);
@@ -326,23 +331,21 @@ impl Clean {
         if src.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
             let data = data_image(src)?;
             let mime = image_type(&data)?;
-            if self.data_bytes + data.len() > crate::inline::MAX_INLINE_BYTES { return None; }
+            // One part per image, however often the quote shows it; at most MAX_DATA_IMAGES, so this scan stays short.
+            if let Some(part) = self.parts.as_ref().and_then(|parts| parts.iter().find(|p| p.data == data)) {
+                return Some(format!("cid:{}", part.cid));
+            }
+            if self.data_images >= MAX_DATA_IMAGES || self.data_bytes + data.len() > crate::inline::MAX_INLINE_BYTES { return None; }
+            self.data_images += 1;
+            self.data_bytes += data.len();
             return Some(match &mut self.parts {
-                // One part per image, however often the quote shows it.
-                Some(parts) => match parts.iter().find(|p| p.data == data) {
-                    Some(part) => format!("cid:{}", part.cid),
-                    None => {
-                        self.data_bytes += data.len();
-                        let cid = format!("quote{}@lagommail.app", parts.len() + 1);
-                        parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data });
-                        format!("cid:{cid}")
-                    }
-                },
-                None => {
-                    self.data_bytes += data.len();
-                    // The sniffed type, never the one the sender wrote.
-                    { use base64::Engine; format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)) }
+                Some(parts) => {
+                    let cid = format!("quote{}@lagommail.app", parts.len() + 1);
+                    parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data });
+                    format!("cid:{cid}")
                 }
+                // The sniffed type, never the one the sender wrote.
+                None => { use base64::Engine; format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)) }
             });
         }
         web_url(src)
@@ -428,6 +431,21 @@ mod tests {
         assert_eq!((parts.len(), out.matches("cid:quote1@lagommail.app").count()), (1, 3), "one part per image, however often it shows");
         let claimed = sanitize(&format!("<img src=\"data:text/html;base64,{png}\">"));
         assert!(claimed.contains("data:image/png;base64,"), "the sniffed type, not the claimed one: {claimed}");
+    }
+
+    #[test]
+    fn many_tiny_data_images_are_capped_in_count() {
+        use base64::Engine;
+        // Codex review 2026-11-20: 80,000 distinct eight-byte "PNG"s, under the byte cap.
+        let html: String = (0u32..80_000).map(|i| {
+            let mut png = b"\x89PNG".to_vec();
+            png.extend_from_slice(&i.to_be_bytes());
+            format!("<img src=\"data:image/png;base64,{}\">", base64::engine::general_purpose::STANDARD.encode(png))
+        }).collect();
+        let (out, parts) = sanitize_parts(&html);
+        assert_eq!((parts.len(), out.matches("<img").count()), (super::MAX_DATA_IMAGES, super::MAX_DATA_IMAGES));
+        assert_eq!(sanitize(&html).matches("<img").count(), super::MAX_DATA_IMAGES, "the preview keeps the same cap");
+        // The cap bounds the work too: each image is compared with at most MAX_DATA_IMAGES kept parts.
     }
 
     #[test]
