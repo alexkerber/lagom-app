@@ -11,7 +11,7 @@ actions!(
     [Quit, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen, OpenRepository, About]
 );
 
-const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
+pub(crate) const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
 
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| {

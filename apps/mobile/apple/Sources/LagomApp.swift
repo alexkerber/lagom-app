@@ -103,16 +103,11 @@ struct LagomApp: App {
 struct MailView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
-    @Binding var addAccount: Bool
-    @Binding var removing: MailAccount?
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
     @State private var laterChoices: [LaterChoice] = []
     @State private var laterID: Int64?
     @State private var retrying: SendFailure?
-    @State private var signing: MailAccount?
-    @State private var naming: MailAccount?
-    @State private var newName = ""
     /// The message "Move to" asks a folder for, with its account.
     @State private var moving: (account: String, id: Int64)?
     @State private var newFolder: NewFolderTarget?
@@ -208,15 +203,6 @@ struct MailView: View {
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft).duoRail() }
-        .sheet(item: $signing) { account in SignatureView(model: model, account: account).duoRail() }
-        .alert("Your name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
-            TextField("Your name", text: $newName).textContentType(.name)
-            Button("Save") {
-                guard let account = naming else { return }
-                Task { await model.setName(newName, account: account) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("Shown to the people you write to, and in the sidebar.") }
         .confirmationDialog("Move to", isPresented: Binding(get: { moving != nil }, set: { if !$0 { moving = nil } }), presenting: moving) { row in
             ForEach(model.moveTargets(account: row.account), id: \.id) { folder in
                 Button(folder.path) { act(.move(folder), id: row.id) }
@@ -241,7 +227,8 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
-        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, accounts: false, addAccount: $addAccount, removing: $removing).duoRail() }
+        .task { if Storage.settingsScreen != nil && !sidebar { settingsOpen = true } }
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, sheet: true).duoRail() }
     }
 
     private var composeButton: some View {
@@ -358,16 +345,11 @@ struct MailView: View {
                 Text("All accounts").tag(String?.none)
                 ForEach(model.accounts, id: \.id) { Text($0.email).tag(Optional($0.id)) }
             }
-            Button("Add account") { addAccount = true }
-            ForEach(model.accounts, id: \.id) { account in
-                Menu(account.email) {
-                    Button("Your name") { newName = account.displayName == account.email ? "" : account.displayName; naming = account }
-                    Button("Signature") { signing = account }
-                    Button("Remove account", role: .destructive) { removing = account }
-                }
+            // The menu is a phone's sidebar, so Settings closes it as on the Mac; accounts and their names,
+            // signatures and removal live there (Alex 2026-11-20).
+            if !sidebar {
+                Section { Button { settingsOpen = true } label: { Label { Text("Settings") } icon: { Image("settings") } } }
             }
-            // Rarely used, so not in the tab bar on a phone (Alex 2026-11-17).
-            if !sidebar { Button("Settings") { settingsOpen = true } }
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {

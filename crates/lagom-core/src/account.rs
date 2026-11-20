@@ -63,6 +63,14 @@ pub enum Auth {
     OAuth(Provider),
 }
 impl Auth {
+    /// How the account signs in, in the words Settings shows on every platform.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Password => "Email and password",
+            Self::OAuth(Provider::Google) => "Google account",
+            Self::OAuth(Provider::Microsoft) => "Microsoft account",
+        }
+    }
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Password => "password",

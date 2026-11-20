@@ -27,6 +27,12 @@ enum AppSection: String, CaseIterable, Identifiable {
 }
 
 /// Tasks due today or earlier, as desktop `due_today`: the first ten characters of `due` are its date.
+/// Settings' account row, as on the Mac: "Personal · Email and password"; the name only when it is not the address.
+func accountKind(_ account: MailAccount) -> String {
+    let name = account.displayName == account.email ? "" : account.displayName
+    return [name, account.kind].filter { !$0.isEmpty }.joined(separator: " · ")
+}
+
 func dueCount(_ tasks: [Todo], day: String) -> Int {
     tasks.filter { todo in todo.due.map { String($0.prefix(10)) <= day } ?? false }.count
 }

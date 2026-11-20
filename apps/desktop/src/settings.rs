@@ -1,5 +1,5 @@
 //! Settings: accounts first, as a list that opens a page per account (name, signature,
-//! sign-in, remove), then general switches and the default task list. Remove asks inside the
+//! sign-in, remove), then general switches, the default task list, About and the keyboard shortcuts. Remove asks inside the
 //! app, not in a system dialog, and deletes the saved password and the local mail; the server
 //! keeps its mail.
 
@@ -52,11 +52,11 @@ pub struct NewPassword {
 
 /// How the account signs in, in the words people use.
 fn sign_in_words(a: &Account) -> (&'static str, &'static str) {
-    match a.auth {
-        Auth::OAuth(Provider::Google) => ("Google account", "Signed in with Google."),
-        Auth::OAuth(Provider::Microsoft) => ("Microsoft account", "Signed in with Microsoft."),
-        Auth::Password => ("Email and password", "Signed in with your email address and password."),
-    }
+    (a.auth.kind(), match a.auth {
+        Auth::OAuth(Provider::Google) => "Signed in with Google.",
+        Auth::OAuth(Provider::Microsoft) => "Signed in with Microsoft.",
+        Auth::Password => "Signed in with your email address and password.",
+    })
 }
 
 /// A round mark with the account's initial in its colour.
@@ -165,8 +165,32 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .child(accounts)
         .child(general)
         .children(lists)
+        // About before the shortcuts: mobile has the same sections, without the last one, and ⌘/ still scrolls to the end.
+        .child(about(t, cx))
         .child(shortcuts(t))
-        // The About equivalent on every platform; macOS also has About lagom in the menu bar.
+}
+
+/// About, with the same rows on every platform; macOS also has About lagom in the menu bar.
+const ABOUT: [(&str, Option<&str>, &str); 4] = [
+    ("Source code", None, crate::menus::REPOSITORY),
+    ("Licence", Some("MIT"), "https://github.com/alexkerber/lagom-app/blob/main/LICENSE"),
+    ("Privacy", None, "https://lagommail.app/privacy.html"),
+    ("Support", None, "https://lagommail.app/support.html"),
+];
+
+fn about(t: &Theme, cx: &mut Context<MainWindow>) -> Div {
+    div().debug_selector(|| "about".into()).flex().flex_col().gap(px(12.))
+        .child(section(t, "About", None))
+        .child(plate(t).children(ABOUT.iter().enumerate().map(|(ix, &(label, value, url))| {
+            stop(t, pressable(div().id(("about", ix)), t, false))
+                .flex().items_center().gap(px(8.)).px(px(14.)).min_h(px(40.))
+                .when(ix > 0, |r| r.border_t_1().border_color(t.line))
+                .cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(url)))
+                .child(div().flex_1().min_w(px(0.)).one_line().child(label))
+                .children(value.map(|v| div().text_color(t.ink2).child(v)))
+                .child(icon("icons/external.svg", t.ink2, 14.))
+        })))
         .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(format!("lagom {}", option_env!("LAGOM_VERSION").unwrap_or("development build"))))
 }
 
