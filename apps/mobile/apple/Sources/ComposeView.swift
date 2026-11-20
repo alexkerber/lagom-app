@@ -17,6 +17,8 @@ struct ComposeView: View {
     @State private var pickingPhotos = false
     @State private var photos: [PhotosPickerItem] = []
     @State private var attaching = false
+    @State private var quoteOpen = Storage.composeScreen == "quote-open"
+    @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.railInset) private var railInset
 
@@ -124,8 +126,11 @@ struct ComposeView: View {
                             .padding(.top, 8).padding(.leading, 5).allowsHitTesting(false).accessibilityHidden(true)
                     }
                 }
+                // An open quote shares the sheet; the editor keeps room for a few lines.
+                .frame(minHeight: 120)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .accessibilityLabel("Message body")
+            if let quoted = draft.quoted { quote(quoted) }
         } footer: {
             // On the Duo, Send and Attach sit at the bottom of the right column.
             if railInset == 0 {
@@ -217,6 +222,41 @@ struct ComposeView: View {
     }
 
     private var from: String { model.accounts.first { $0.id == draft.account }?.email ?? "" }
+
+    /// The HTML original under the editor: a quiet "··· Quoted message" row that opens it in place, read-only,
+    /// in the reading pane's web view and document; × removes it from this message.
+    @ViewBuilder private func quote(_ quoted: QuotedMail) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Button { quoteOpen.toggle() } label: {
+                    HStack(spacing: 8) {
+                        Text("···").font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .caption))
+                        Text(quoteOpen ? "Hide quoted message" : "Quoted message").lagomFont(.small)
+                    }
+                    .foregroundStyle(Theme.secondary)
+                    .padding(.horizontal, 8)
+                    .frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(quoteOpen ? "Hide quoted message" : "Show quoted message")
+                Spacer(minLength: 0)
+                IconButton(title: "Remove quoted message", icon: "close") {
+                    quoteOpen = false
+                    draft.quoted = nil
+                    model.composeDraft = draft
+                }
+            }
+            if quoteOpen, let core = model.core {
+                MailHTML(document: mailDocument(html: quoted.html, dark: scheme == .dark, messageId: 0, remote: false), messageID: 0, core: core)
+                    .frame(minHeight: 120, maxHeight: 280)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control).stroke(Theme.line))
+                    .padding(.bottom, 8)
+                    .accessibilityLabel("Quoted message")
+            }
+        }
+        .padding(.horizontal, 8)
+    }
 
     private func binding(_ field: WritableKeyPath<ComposeDraft, String>) -> Binding<String> {
         Binding(get: { draft[keyPath: field] }, set: { value in

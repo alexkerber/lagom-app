@@ -223,12 +223,12 @@ final class MailModelTests: XCTestCase {
     }
     override func savedReply(id: Int64) async throws -> LocalDraft? { restoredReply }
     override func saveDraft(id: String, accountId: String, to: String, cc: String, bcc: String, subject: String, body: String,
-                            replyTo: Int64?, attachments: [SendAttachment]) async throws -> DraftRow {
+                            replyTo: Int64?, attachments: [SendAttachment], quoted: QuotedMail?) async throws -> DraftRow {
         saveCalls += 1
         if suspendSave { await withCheckedContinuation { saveGate = $0 } }
         if fail { throw MailError.Failed(reason: "fixture failure") }
         let draft = LocalDraft(id: id, account: accountId, to: to, cc: cc, subject: subject, body: body,
-                               inReplyTo: replyTo.map { "<\($0)>" }, references: [], attachments: attachments, bcc: bcc)
+                               inReplyTo: replyTo.map { "<\($0)>" }, references: [], attachments: attachments, bcc: bcc, quoted: quoted)
         saved.removeAll { $0.id == id }
         saved.append(draft)
         return draft.row
@@ -758,6 +758,25 @@ extension MailModelTests {
         await model.openDraft(try XCTUnwrap(core.saved.first).row)
         XCTAssertEqual(model.composeDraft?.body, "latest")
         XCTAssertEqual(model.composeDraft?.subject, "Last edit")
+    }
+
+    @MainActor func testHTMLQuoteStaysOutOfTheBodyAndSurvivesSaveRestoreAndRemoval() async throws {
+        let quote = QuotedMail(text: "> On 2026-11-20, sender@example.test wrote:\n> \n> Ready", html: "<div>On 2026-11-20</div><blockquote type=\"cite\"><p>Ready</p></blockquote>")
+        let core = ComposeFixtureCore(noHandle: .init())
+        core.reply.body = "\n\n-- \nAlex"
+        core.reply.quoted = quote
+        let model = MailModel(); model.core = core
+        model.selectedID = 42
+        await model.prepareCompose(id: 42, kind: .reply)
+        XCTAssertEqual(model.composeDraft?.quoted, quote)
+        XCTAssertFalse(model.composeDraft?.body.contains("> ") ?? true, "the editable body holds no quote")
+        try await model.closeCompose(discard: false)
+        XCTAssertEqual(core.saved.first?.quoted, quote, "saved with the draft")
+        await model.openDraft(try XCTUnwrap(core.saved.first).row)
+        XCTAssertEqual(model.composeDraft?.quoted, quote, "and restored")
+        model.composeDraft?.quoted = nil
+        try await model.closeCompose(discard: false)
+        XCTAssertNil(core.saved.first?.quoted, "removing it is saved too")
     }
 
     @MainActor func testPickedAttachmentsWarnRemoveAutosaveAndRestore() async throws {

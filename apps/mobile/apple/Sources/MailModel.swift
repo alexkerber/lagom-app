@@ -106,6 +106,8 @@ struct ComposeDraft: Identifiable, Equatable {
     var startBody = ""
     var replyTo: Int64?
     var attachments: [SendAttachment] = []
+    /// An HTML original, shown read-only under the editor and sent after the body. Nil once removed.
+    var quoted: QuotedMail?
     var title = "New message"
     var restored = false
     var isReply = false
@@ -123,6 +125,7 @@ struct ComposeDraft: Identifiable, Equatable {
         replyTo = reply.replyTo
         isReply = reply.replyTo != nil
         attachments = reply.attachments
+        quoted = reply.quoted
         switch kind {
         case .reply: title = "Reply"
         case .replyAll: title = "Reply all"
@@ -136,6 +139,7 @@ struct ComposeDraft: Identifiable, Equatable {
         to = saved.to; cc = saved.cc; bcc = saved.bcc; subject = saved.subject; body = saved.body
         showBcc = !bcc.isEmpty
         attachments = saved.attachments
+        quoted = saved.quoted
         restored = true
         isReply = saved.inReplyTo != nil || !saved.references.isEmpty
         title = isReply ? "Reply" : "Draft"
@@ -155,7 +159,7 @@ struct ComposeDraft: Identifiable, Equatable {
 
     func save(using core: LagomCore) async throws -> DraftRow {
         try await core.saveDraft(id: messageID, accountId: account, to: to, cc: cc, bcc: bcc, subject: subject,
-                                 body: body, replyTo: replyTo, attachments: attachments)
+                                 body: body, replyTo: replyTo, attachments: attachments, quoted: quoted)
     }
 
     func enqueue(using core: LagomCore) async throws {
@@ -698,6 +702,15 @@ final class MailModel {
         if Storage.demo { demoHidden.subtract(changes.map(\.id)); await reload(); return }
         do { try await core.undo(changes: changes) } catch { self.error = error.localizedDescription }
         await reload()
+    }
+
+    /// DEBUG `-LagomDemoCompose`: a reply to the demo's HTML ticket, once, after the list that presents the sheet is up.
+    private var demoComposed = false
+    func openDemoCompose() async {
+        guard Storage.composeScreen != nil, !demoComposed, composeDraft == nil, let core,
+              let row = rows.first(where: { $0.subject.hasPrefix("Stockholm C") }) else { return }
+        demoComposed = true
+        composeDraft = (try? await core.composeDraft(id: row.id, kind: .reply)).map { ComposeDraft(reply: $0, kind: .reply) }
     }
 
     func prepareCompose(id: Int64, kind: ComposeKind) async {

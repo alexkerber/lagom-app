@@ -139,6 +139,17 @@ pub struct InlineResource { pub mime_type: String, pub data: Vec<u8> }
 pub struct ReplyDraft {
     pub account: String, pub to: String, pub cc: String, pub subject: String, pub body: String,
     pub reply_to: Option<i64>, pub attachments: Vec<SendAttachment>,
+    /// An HTML original: shown under the editor with `mail_document`, saved and sent with the draft.
+    #[uniffi(default = None)] pub quoted: Option<QuotedMail>,
+}
+/// See `lagom_core::compose::Quoted`. `html` holds no `cid:` images, so it needs no message.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct QuotedMail { pub text: String, pub html: String }
+impl From<lagom_core::compose::Quoted> for QuotedMail {
+    fn from(q: lagom_core::compose::Quoted) -> Self { Self { text: q.text, html: q.html } }
+}
+impl From<QuotedMail> for lagom_core::compose::Quoted {
+    fn from(q: QuotedMail) -> Self { Self { text: q.text, html: q.html } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ComposeKind { Reply, ReplyAll, Forward }
@@ -781,10 +792,18 @@ impl LagomCore {
             let forward = kind == ComposeKind::Forward;
             let subject = if forward { compose::forward_subject(&m.subject) } else { compose::reply_subject(&m.subject) };
             let date = Local.timestamp_opt(m.date, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
-            let body = compose::compose_body(&s.signature(&a.id)?, Some(Original {
-                from: &m.from_name, address: &m.from_address, date: &date, subject: &m.subject, to: &m.to, text: &message.body_text,
-            }), if forward { compose::ComposeKind::Forward } else { compose::ComposeKind::Reply });
-            Ok(ReplyDraft { account: a.id, to, cc, subject, body, reply_to: (!forward).then_some(id), attachments: vec![] })
+            let original = Original { from: &m.from_name, address: &m.from_address, date: &date, subject: &m.subject, to: &m.to, text: &message.body_text };
+            let core_kind = if forward { compose::ComposeKind::Forward } else { compose::ComposeKind::Reply };
+            let signature = s.signature(&a.id)?;
+            // An HTML original stays HTML, out of the editable body; plain text quotes into it as before.
+            let (body, quoted) = match message.body_html.as_deref().filter(|html| !html.trim().is_empty()) {
+                Some(html) => {
+                    let inline = if s.inline_loaded(id)? { s.inline_parts(id)? } else { Vec::new() };
+                    (compose::compose_body(&signature, None, core_kind), Some(compose::quote(original, html, &inline, core_kind).into()))
+                }
+                None => (compose::compose_body(&signature, Some(original), core_kind), None),
+            };
+            Ok(ReplyDraft { account: a.id, to, cc, subject, body, reply_to: (!forward).then_some(id), attachments: vec![], quoted })
         }).await?;
         if kind == ComposeKind::Forward {
             let cached = self.run(move |s| s.cached_forward_attachments(id)).await?;

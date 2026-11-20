@@ -263,6 +263,18 @@ pub fn seed_demo_without_calendar(data_dir: String, state: String) -> Result<()>
     };
     seed(data_dir, Some(scopes))
 }
+/// The demo's HTML mail: a table layout with inline styles, as booking mail is.
+const TICKET_HTML: &str = r##"<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f2ee;font-family:Helvetica,Arial,sans-serif;color:#1d1d1b"><tr><td style="padding:20px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:12px">
+<tr><td style="padding:24px 24px 4px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#8a877f">Your ticket</td></tr>
+<tr><td style="padding:0 24px;font-size:24px;line-height:30px;font-weight:bold">Stockholm C → Göteborg C</td></tr>
+<tr><td style="padding:4px 24px 16px;font-size:15px;color:#4a4a46">Friday 14 November, 07:10–10:05</td></tr>
+<tr><td style="padding:0 24px 20px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e6e4df;font-size:14px;line-height:22px">
+<tr><td style="padding-top:12px;color:#8a877f">Coach</td><td style="padding-top:12px;color:#8a877f">Seat</td><td style="padding-top:12px;color:#8a877f">Carriage</td></tr>
+<tr><td><b>3</b></td><td><b>41</b></td><td><b>Quiet</b></td></tr></table></td></tr>
+<tr><td style="padding:0 24px 24px"><a href="https://tickets.example/booking" style="display:inline-block;background:#2a5bb8;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;font-size:14px">Show booking</a></td></tr>
+</table></td></tr></table>"##;
+
 fn seed(data_dir: String, without_calendar: Option<Option<String>>) -> Result<()> {
     std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
     let mut s = Store::open(std::path::Path::new(&data_dir).join("lagom.sqlite3"))?;
@@ -300,7 +312,9 @@ fn seed(data_dir: String, without_calendar: Option<Option<String>>) -> Result<()
             from_name: name.into(), from_address: address.into(), to: accounts[account].email.clone(), subject: subject.into(),
             snippet: snippet.into(), seen, has_attachments: attachment, message_id: format!("demo{uid}@lagom.example"), ..Default::default() };
         first_mail.get_or_insert_with(|| summary.clone());
-        s.save_message(&lagom_core::store::Message { summary, body_text: format!("{snippet}\n\n{name}"), body_html: None })?;
+        // The ticket is HTML, as such mail is: replies show its quote under the editor.
+        let body_html = (address == "no-reply@tickets.example").then(|| TICKET_HTML.to_owned());
+        s.save_message(&lagom_core::store::Message { summary, body_text: format!("{snippet}\n\n{name}"), body_html })?;
     }
     let lists = s.task_lists()?;
     let date = |offset: i64| Some((today + chrono::Duration::days(offset)).to_string());

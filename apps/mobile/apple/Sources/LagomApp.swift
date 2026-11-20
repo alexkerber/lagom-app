@@ -197,6 +197,7 @@ struct MailView: View {
         .background(Theme.background)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .sheet(item: $model.composeDraft) { draft in ComposeView(model: model, draft: draft).duoRail() }
+        .task(id: model.rows.count) { await model.openDemoCompose() }
         .confirmationDialog("Move to", isPresented: Binding(get: { moving != nil }, set: { if !$0 { moving = nil } }), presenting: moving) { row in
             ForEach(model.moveTargets(account: row.account), id: \.id) { folder in
                 Button(folder.path) { act(.move(folder), id: row.id) }
