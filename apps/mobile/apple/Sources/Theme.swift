@@ -13,6 +13,8 @@ extension Theme {
     static let selectionIcon = color(0x2A5BB8, 0x94ADDC)
     static let accent = color(0x2A5BB8, 0x8AB0F5)
     static let accentInk = color(0xFFFFFF, 0x1E1E1E)
+    static let accentFill = color(0x2A5BB8, 0x2F63CC)
+    static let accentFillInk = color(0xFFFFFF, 0xFFFFFF)
     static let done = color(0x1E6B4E, 0x4CC38A)
     static let later = color(0x94640A, 0xF5C22E)
     static let danger = color(0xC62828, 0xF87171)
@@ -44,6 +46,8 @@ extension TextSize {
         case .body: 16
         case .title: 17
         case .subject: 23
+        case .display: 30
+        case .hero: 56
         }
     }
 }
@@ -91,7 +95,7 @@ enum Motion {
 /// smaller than an iOS point at phone distance, so every size is the desktop's × 1.15 (body 13 → 15),
 /// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.
 enum TextSize {
-    case small, snippet, base, body, title, subject
+    case small, snippet, base, body, title, subject, display, hero
 
     var style: Font.TextStyle {
         switch self {
@@ -100,6 +104,7 @@ enum TextSize {
         case .base, .body: .body
         case .title: .headline
         case .subject: .title2
+        case .display, .hero: .largeTitle
         }
     }
 }

@@ -11,6 +11,15 @@ enum Storage {
         #endif
     }
 
+    /// DEBUG builds launched with `-LagomIntroChoose` open the intro on Choose account, for screenshots without taps.
+    static var introChoose: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-LagomIntroChoose")
+        #else
+        false
+        #endif
+    }
+
     static func directory() throws -> URL {
         if demo {
             // `-LagomDemoCalendar google|granted|none`: Calendar's empty states, for screenshots.

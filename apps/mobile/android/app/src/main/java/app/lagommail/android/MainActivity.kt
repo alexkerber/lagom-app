@@ -266,7 +266,8 @@ class MainActivity : ComponentActivity() {
                 AnimatedContent(stage, Modifier.fillMaxSize().background(lagom.bg), label = "stage",
                     transitionSpec = { fadeIn(tween(250, easing = EaseOut)) togetherWith fadeOut(tween(200, easing = EaseOut)) }) { shown ->
                     when (shown) {
-                        Stage.LOADING -> Box(Modifier.fillMaxSize())
+                        // The splash again (the icon in its 160 dp circle, centred), so opening the store shows no blank frame.
+                        Stage.LOADING -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { AppIcon(SplashIcon, corner = 0.5f) }
                         Stage.ONBOARDING -> Onboarding(model, askNotifications = model.accounts.isNotEmpty(), demo = launch.demo != null) { allow ->
                             if (launch.demo == null) answerNotifications(allow)
                             notificationsAnswered = true

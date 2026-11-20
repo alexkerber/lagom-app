@@ -69,10 +69,10 @@ fn icon_only_button_svg_paints_with_visible_ink(cx: &mut TestAppContext) {
                 let ink = Rc::new(Cell::new(None));
                 let (_, cx) = cx.add_window_view(|_, _| GlyphButton { action, theme, fill, path, ink: ink.clone() });
                 cx.run_until_parked();
-                assert_eq!(ink.get(), Some(if fill.is_some() { theme.accent_ink } else { theme.ink2 }.into()));
+                assert_eq!(ink.get(), Some(if fill.is_some() { theme.accent_fill_ink } else { theme.ink2 }.into()));
                 cx.simulate_event(MouseMoveEvent { position: gpui::point(px(108.), px(108.)), pressed_button: None, modifiers: Default::default() });
                 cx.run_until_parked();
-                assert_eq!(ink.get(), Some(if fill.is_some() { theme.accent_ink } else { theme.ink }.into()), "hover: {path}");
+                assert_eq!(ink.get(), Some(if fill.is_some() { theme.accent_fill_ink } else { theme.ink }.into()), "hover: {path}");
             }
         }
     }

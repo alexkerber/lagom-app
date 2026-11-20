@@ -22,7 +22,7 @@ class Tokens(unittest.TestCase):
     def test_existing_mobile_values_and_platform_spring_units(self):
         for platform in ("ios", "android"):
             sizes = tokens.mobile_sizes(self.data, platform)
-            self.assertEqual([sizes[key] for key in tokens.MOBILE_SIZES], [13, 14, 15, 16, 17, 23])
+            self.assertEqual([sizes[key] for key in tokens.MOBILE_SIZES], [13, 14, 15, 16, 17, 23, 30, 56])
             self.assertEqual(tokens.mobile_colors(self.data, platform, "dark")["sel_icon"], 0x94ADDC)
         self.assertEqual(tokens.mobile_sizes(self.data, "android")["display"], 30)
         rendered = tokens.generated(self.data)

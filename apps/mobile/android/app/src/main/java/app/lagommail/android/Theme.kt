@@ -42,6 +42,8 @@ import androidx.compose.ui.unit.sp
     /** `sel_icon`: the active page icon, lifted halfway to white in dark so it keeps 3:1 on `sel`. */
     val selIcon: Color,
     val accent: Color, val accentInk: Color,
+    /** Primary buttons: solid Swedish blue under white text in both themes. */
+    val accentFill: Color, val accentFillInk: Color,
     val done: Color, val later: Color, val danger: Color,
     /** The desktop sidebar's glass, as a solid fill: the page bar. */
     val sidebar: Color,
@@ -60,6 +62,8 @@ internal val LightColors = LagomColors(
     selIcon = Color(0xFF2A5BB8),
     accent = Color(0xFF2A5BB8),
     accentInk = Color(0xFFFFFFFF),
+    accentFill = Color(0xFF2A5BB8),
+    accentFillInk = Color(0xFFFFFFFF),
     done = Color(0xFF1E6B4E),
     later = Color(0xFF94640A),
     danger = Color(0xFFC62828),
@@ -78,6 +82,8 @@ internal val DarkColors = LagomColors(
     selIcon = Color(0xFF94ADDC),
     accent = Color(0xFF8AB0F5),
     accentInk = Color(0xFF1E1E1E),
+    accentFill = Color(0xFF2F63CC),
+    accentFillInk = Color(0xFFFFFFFF),
     done = Color(0xFF4CC38A),
     later = Color(0xFFF5C22E),
     danger = Color(0xFFF87171),
@@ -92,6 +98,7 @@ internal object TextSize {
     val title = 17.sp
     val subject = 23.sp
     val display = 30.sp
+    val hero = 56.sp
 }
 
 internal val TextFace = FontFamily(Font(R.font.hauora_regular, FontWeight.Normal), Font(R.font.hauora_medium, FontWeight.Medium), Font(R.font.hauora_semibold, FontWeight.SemiBold), Font(R.font.hauora_bold, FontWeight.Bold))
@@ -185,19 +192,21 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
 @Composable internal fun HouseButton(text: String, @DrawableRes icon: Int? = null, modifier: Modifier = Modifier, primary: Boolean = false,
     iconOnly: Boolean = false, enabled: Boolean = true, danger: Boolean = false, onClick: () -> Unit) {
     val c = lagom
-    val ink = when { primary -> c.accentInk; danger -> c.danger; else -> c.ink }
+    val ink = when { primary -> c.accentFillInk; danger -> c.danger; else -> c.ink }
     Box(modifier, contentAlignment = Alignment.Center,
         // A full-width button passes its width on to the drawn shape.
         propagateMinConstraints = true) {
         Row(Modifier.minimumInteractiveComponentSize().heightIn(min = 36.dp).clip(RoundedCornerShape(Radius.control))
+            // Disabled dims fill and label alike. A layer in both states: Modifier.alpha drops its layer at 1f, and that
+            // chain change left the fill undrawn when a disabled button turned enabled (Welcome, emulator-5604, 2026-11-20).
+            .graphicsLayer { alpha = if (enabled) 1f else 0.5f }
             // No outline, as desktop since #168: a quiet fill marks the button.
-            .background(if (primary) c.accent else c.subtle)
+            .background(if (primary) c.accentFill else c.subtle)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { if (iconOnly) contentDescription = text }
-            .alpha(if (enabled) 1f else 0.5f)
             .padding(horizontal = if (iconOnly) 9.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
-            icon?.let { LagomIcon(it, tint = if (primary) c.accentInk else if (danger) c.danger else c.ink2) }
+            icon?.let { LagomIcon(it, tint = if (primary) c.accentFillInk else if (danger) c.danger else c.ink2) }
             if (!iconOnly) Text(text, color = ink, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }

@@ -12,11 +12,11 @@ struct HouseButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .lagomFont(.base, .medium)
-            .foregroundStyle(primary ? Theme.accentInk : Theme.ink)
+            .foregroundStyle(primary ? Theme.accentFillInk : Theme.ink)
             .padding(.horizontal, 12)
             .frame(minHeight: 34)
             // No outline, as desktop since #168: a quiet fill marks the button.
-            .background(primary ? Theme.accent : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .background(primary ? Theme.accentFill : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
             .opacity(configuration.isPressed ? 0.8 : enabled ? 1 : 0.5)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
@@ -47,7 +47,7 @@ struct ButtonLabel: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Icon(icon).foregroundStyle(primary ? Theme.accentInk : Theme.secondary)
+            Icon(icon).foregroundStyle(primary ? Theme.accentFillInk : Theme.secondary)
             if !iconOnly { Text(title).lineLimit(1) }
         }
         .accessibilityElement(children: .ignore)

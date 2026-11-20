@@ -10,6 +10,9 @@ line = 0xE6E6E2
 sel = 0xDCDCDC
 accent = 0x2A5BB8
 accent_ink = 0xFFFFFF
+# Primary buttons: solid Swedish blue under white text in both themes (white on it: 6.4:1 light, 5.6:1 dark).
+accent_fill = 0x2A5BB8
+accent_fill_ink = 0xFFFFFF
 done = 0x1E6B4E
 later = 0x94640A
 danger = 0xC62828
@@ -26,6 +29,8 @@ line = 0x3A3A3A
 sel = 0x464646
 accent = 0x8AB0F5
 accent_ink = 0x1E1E1E
+accent_fill = 0x2F63CC
+accent_fill_ink = 0xFFFFFF
 done = 0x4CC38A
 later = 0xF5C22E
 danger = 0xF87171
@@ -113,6 +118,9 @@ snippet = 14
 base = 15
 body = 16
 title = 17
+# Whole points for the intro's titles and wordmark.
+display = 30
+hero = 56
 
 # SwiftUI's native spring parameterisation; duration remains the shared 280 ms.
 [overrides.ios.spring]
@@ -131,6 +139,7 @@ base = 15
 body = 16
 title = 17
 display = 30
+hero = 56
 
 [overrides.android.type]
 leading = 1.3
