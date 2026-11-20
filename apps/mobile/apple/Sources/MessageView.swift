@@ -94,7 +94,8 @@ struct MessageView: View {
             .buttonStyle(.plain)
             .disabled(model.preparingCompose) }
         }
-        .padding(pad)
+        // The pages' shared edges, so the subject starts on the list header's line.
+        .pageEdges().padding(.bottom, pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Theme.ink)
@@ -229,7 +230,8 @@ struct MessagePreview: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
         }
-        .padding(pad)
+        // The pages' shared edges, so the subject starts on the list header's line.
+        .pageEdges().padding(.bottom, pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Theme.ink)
