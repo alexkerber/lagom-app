@@ -19,6 +19,8 @@ final class PlannerModel {
     var calendarAccess: [MailAccount] = []
     /// A Google account allows calendar access; until its first fetch Calendar waits for the sync.
     var calendarGranted = false
+    /// Writable Google calendars; New event shows only when there is one. The demo has the Mac's "Demo calendar".
+    var eventCalendars: [EventCalendar] = []
     var counts: [MailCounts] = []
     var error: String?
     /// How far ahead Calendar lists cached events.
@@ -83,6 +85,7 @@ final class PlannerModel {
             calendarConnected = try await core.calendarConnected()
             calendarAccess = try await core.calendarAccessNeeded()
             calendarGranted = try await core.calendarGranted()
+            eventCalendars = Storage.demo ? [EventCalendar(account: "", calendar: "demo", label: "Demo calendar")] : try await core.eventCalendars()
             self.agenda = agenda
         } catch { self.error = error.localizedDescription }
         await reloadWeek()
@@ -105,6 +108,39 @@ final class PlannerModel {
         weekStart = weeks == 0 ? Self.monday(Date()) : Calendar.current.date(byAdding: .day, value: 7 * weeks, to: weekStart) ?? weekStart
         week = []
         await reloadWeek()
+    }
+
+    /// Saves a new event; nil on success, else the core's words for the form. Google's copy is cached,
+    /// so the week shows it at once.
+    func createEvent(_ form: EventForm, in target: EventCalendar) async -> String? {
+        guard let core else { return "No calendar is open" }
+        do {
+            if Storage.demo { try await core.addDemoEvent(form: form) }
+            else { try await core.createEvent(accountId: target.account, calendar: target.calendar, form: form) }
+        } catch { return error.localizedDescription }
+        await reloadAgenda()
+        return nil
+    }
+
+    /// Desktop `new_event_default`: on today the next quarter hour (at most 23:45), on another day 09:00; an hour long.
+    nonisolated static func newEventTimes(day: Date, now: Date = .now, calendar: Calendar = .current) -> (start: Date, end: Date) {
+        let midnight = calendar.startOfDay(for: day)
+        let minute: Int
+        if calendar.isDate(day, inSameDayAs: now) {
+            let c = calendar.dateComponents([.hour, .minute], from: now)
+            minute = min(((c.hour ?? 0) * 60 + (c.minute ?? 0) + 14) / 15 * 15, 1425)
+        } else { minute = 9 * 60 }
+        let start = calendar.date(byAdding: .minute, value: minute, to: midnight) ?? midnight
+        return (start, start.addingTimeInterval(3600))
+    }
+
+    /// The form core reads: instants for a timed event, the first and last day for an all-day one.
+    nonisolated static func eventForm(title: String, allDay: Bool, start: Date, end: Date, guests: String, description: String,
+                                      meet: Bool, calendar: Calendar = .current) -> EventForm {
+        let words = DateWords(calendar: calendar)
+        return EventForm(title: title, allDay: allDay, startUnix: Int64(start.timeIntervalSince1970.rounded(.down)),
+                         endUnix: Int64(end.timeIntervalSince1970.rounded(.down)), firstDay: words.coreDay(start), lastDay: words.coreDay(end),
+                         timeZone: calendar.timeZone.identifier, guests: guests, description: description, meet: meet)
     }
 
     nonisolated static func monday(_ date: Date, calendar: Calendar = .current) -> Date {

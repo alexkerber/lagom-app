@@ -296,7 +296,14 @@ struct FieldRow<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
     // Grows with the label's text style, so "Subject" never clips at large Dynamic Type sizes.
-    @ScaledMetric(relativeTo: .footnote) private var labelWidth: CGFloat = 64
+    @ScaledMetric private var labelWidth: CGFloat
+
+    /// `labelWidth` fits the sheet's longest label ("Description" needs 84).
+    init(label: String, labelWidth: CGFloat = 64, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+        _labelWidth = ScaledMetric(wrappedValue: labelWidth, relativeTo: .footnote)
+    }
 
     var body: some View {
         HStack(spacing: 16) {
