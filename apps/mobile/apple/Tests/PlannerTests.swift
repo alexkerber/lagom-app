@@ -43,6 +43,15 @@ final class PresentationTests: XCTestCase {
         }
     }
 
+    func testMonthTitleShowsTheYearOnlyOutsideThisYear() {
+        let w = words(now: "2026-11-20")
+        XCTAssertEqual(w.monthTitle(at(w, "2026-11-02")).month, "November")
+        XCTAssertNil(w.monthTitle(at(w, "2026-11-02")).year)
+        XCTAssertEqual(w.monthTitle(at(w, "2027-01-04")).month, "January")
+        XCTAssertEqual(w.monthTitle(at(w, "2027-01-04")).year, "2027")
+        XCTAssertEqual(w.monthTitle(at(w, "2025-12-29")).year, "2025")
+    }
+
     func testDateGroupsStopAtTheStartOfTheWeek() {
         let w = words(now: "2026-11-12") // Thursday
         XCTAssertEqual(w.group(at(w, "2026-11-12")), "Today")

@@ -123,6 +123,7 @@ struct MailView: View {
     @State private var paneWidth = CGFloat.infinity
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.railInset) private var railInset
+    @Environment(\.pageMargin) private var pageMargin
     /// Rows Done, Later or Delete just took: they leave at once and come back only if the core refuses.
     @State private var leaving: Set<Int64> = []
     /// The row ids the list last drew, to tell a few arriving rows from a whole page loading.
@@ -131,9 +132,12 @@ struct MailView: View {
     @State private var acted = 0
     /// The sync mark turns to "syncing" only once a sync passes `Motion.calm`.
     @State private var syncShown = false
+    /// Search is a button until tapped; the field stays while it holds text.
+    @State private var searching = false
+    @FocusState private var searchFocused: Bool
 
     private var regular: Bool { width == .regular && height == .regular }
-    /// The iPad sidebar holds Search and Settings; an unfolded Duo is regular too but has no sidebar.
+    /// The iPad sidebar holds Settings; an unfolded Duo is regular too but has no sidebar.
     private var sidebar: Bool { regular && UIDevice.current.userInterfaceIdiom == .pad }
     /// List and reading pane side by side only where both fit; a narrow iPad pushes the message as a phone does.
     private var split: Bool { regular && paneWidth >= 740 }
@@ -302,36 +306,60 @@ struct MailView: View {
         }
     }
 
-    /// The desktop list header: title, a sync mark with what is left, the All/Unread filter.
+    /// The list header (Alex 2026-11-20): the lagom mark with the mailbox on the right, then the filter with
+    /// search and New message on the right. The iPad keeps the mailbox at the left, under its sidebar's brandless list.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // When title and actions do not fit on one line (the largest text sizes), the actions go
-            // under the title, so the title never collapses to "…".
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 8) {
-                    mailboxMenu
-                    Spacer(minLength: 4)
-                    headerActions
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if !sidebar {
+                    Image("LaunchIcon").resizable().frame(width: 28, height: 28).accessibilityHidden(true)
+                    Spacer(minLength: 8)
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    mailboxMenu
-                    HStack(spacing: 8) { headerActions }
+                mailboxMenu
+                if sidebar { Spacer(minLength: 0) }
+            }
+            .frame(minHeight: 44)
+            if searchOpen {
+                HStack(spacing: 8) {
+                    SearchField(text: $model.searchText).focused($searchFocused)
+                    Button("Cancel") { model.searchText = ""; searching = false }.frame(minHeight: 44)
+                }
+                // The keyboard rises with the field the button opened, not with a search that is only kept.
+                .onAppear { searchFocused = searching }
+            } else {
+                // At the largest text sizes the buttons go under the filter, so nothing collapses to "…".
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { listControl; Spacer(minLength: 8); headerButtons }
+                    VStack(alignment: .leading, spacing: 4) { listControl; HStack(spacing: 8) { Spacer(minLength: 0); headerButtons } }
                 }
             }
-            if !sidebar && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
-        .padding(.horizontal, 16).padding(.vertical, 6)
+        .pageEdges().padding(.bottom, 6)
+        .animation(Motion.move(reduceMotion), value: searchOpen)
     }
 
-    /// The filter, or Empty Trash in Trash, and the compose button without a rail.
-    @ViewBuilder private var headerActions: some View {
+    /// The filter, or Empty Trash in Trash, as on desktop.
+    @ViewBuilder private var listControl: some View {
         if model.mailbox == .trash && model.folder == nil && !model.accounts.isEmpty {
-            // In Trash the filter makes way for Empty Trash, as on desktop.
-            HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
+            HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash") { confirmEmptyTrash = true }
                 .disabled(model.rows.isEmpty || model.working)
         } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
-        if railInset == 0 { composeButton.padding(.trailing, -6) }
     }
+
+    /// Search, a button that opens the field as on the Mac (Alex 2026-11-20), and New message without a rail.
+    /// iOS 26's minimized `.searchable` draws nothing here: the bar it lives in is hidden for lagom's own header.
+    @ViewBuilder private var headerButtons: some View {
+        HStack(spacing: 0) {
+            if model.mailbox != .drafts {
+                IconButton(title: "Search", icon: "search") { searching = true }
+            }
+            if railInset == 0 { composeButton }
+        }
+        // The last glyph ends on the mailbox title's right edge (measured on the folded Duo).
+        .padding(.trailing, -14)
+    }
+
+    private var searchOpen: Bool { model.mailbox != .drafts && (searching || !model.searchText.isEmpty) }
 
     /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
     /// also narrows Later, Sent, Done and Trash.
@@ -369,7 +397,7 @@ struct MailView: View {
             // Rarely used, so not in the tab bar on a phone (Alex 2026-11-17).
             if !sidebar { Button("Settings") { settingsOpen = true } }
         } label: {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: sidebar ? .leading : .trailing, spacing: 1) {
                 HStack(spacing: 4) {
                     Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).lineLimit(1)
                     Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
@@ -378,7 +406,7 @@ struct MailView: View {
                 HStack(spacing: 6) {
                     // Synced is the quiet default: the cloud shows only while it syncs or fails.
                     if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
-                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(.leading)
+                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(sidebar ? .leading : .trailing)
                         .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
                 .foregroundStyle(Theme.secondary)
@@ -456,7 +484,7 @@ struct MailView: View {
                             .frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
                 }
-                .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+                .listRowInsets(EdgeInsets(top: 0, leading: pageMargin - 10, bottom: 0, trailing: pageMargin - 10))
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             }

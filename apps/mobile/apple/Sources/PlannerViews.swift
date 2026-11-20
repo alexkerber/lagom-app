@@ -1,11 +1,5 @@
 import SwiftUI
 
-/// Page padding: the desktop's 24 on iPad, 16 at phone width.
-private struct PagePadding: ViewModifier {
-    @Environment(\.horizontalSizeClass) private var width
-    func body(content: Content) -> some View { content.padding(.horizontal, width == .regular ? 24 : 16) }
-}
-
 /// The desktop's calm Today page: schedule, what is due, and a short look at unread mail.
 struct TodayView: View {
     let planner: PlannerModel
@@ -29,7 +23,7 @@ struct TodayView: View {
                 }
                 mail
             }
-            .modifier(PagePadding()).padding(.vertical, 16)
+            .pageEdges().padding(.bottom, 16)
         }
         .refreshable { await planner.reload() }
         .background(Theme.background)
@@ -58,7 +52,8 @@ struct TodayView: View {
         line += part(count(planner.today?.events.count ?? 0, "event", "events", "no events"), "calendar") + part(" and ")
         line += part(count(dueCount(planner.today?.tasks ?? [], day: planner.today?.day ?? ""), "task due", "tasks due", "nothing due"), "todo") + part(".")
         return VStack(alignment: .leading, spacing: 12) {
-            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
+            // A 44 pt first row, as every page title, so it shares the row the page edges place.
+            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide))).frame(minHeight: 44)
             Text(line)
                 .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
                 .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
@@ -337,7 +332,7 @@ struct TodoView: View {
                     .accessibilityLabel("Add")
                     .padding(.trailing, -6)
             }
-            .modifier(PagePadding()).padding(.top, 8)
+            .pageEdges()
             List {
                 if planner.allClear {
                     Text("Nothing to do. A clear day.")
@@ -380,7 +375,7 @@ struct TodoView: View {
             .listStyle(.plain)
             .environment(\.defaultMinListRowHeight, 0)
             .scrollContentBackground(.hidden)
-            .modifier(PagePadding())
+            .pageEdges(top: false)
             .overlay {
                 if planner.lists.isEmpty { EmptyState(icon: "todo", title: "No lists", detail: "Add a list to start.") }
             }
@@ -564,7 +559,7 @@ private struct WeekGrid: View {
                 grid(days: days, byDay: byDay)
             }
         }
-        .padding(.horizontal, oneDay ? 16 : 24).padding(.top, 8)
+        .pageEdges()
         .background(Theme.background)
         .task { await planner.reloadWeek() }
         // A new week opens on today when it holds today, else on its Monday.
@@ -609,11 +604,13 @@ private struct WeekGrid: View {
         // The month a week belongs to is its Thursday's, as ISO weeks count.
         let thursday = calendar.date(byAdding: .day, value: 3, to: planner.weekStart) ?? planner.weekStart
         let month = oneDay ? selected : thursday
+        let title = DateWords().monthTitle(month)
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(month, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
-                Text(month, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
+                Text(title.month).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
+                if let year = title.year { Text(year).lagomFont(.subject).foregroundStyle(Theme.secondary) }
             }
+            .lineLimit(1).layoutPriority(1)
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             if !(oneDay && railInset > 0) {

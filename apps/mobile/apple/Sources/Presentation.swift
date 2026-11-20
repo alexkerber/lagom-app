@@ -126,6 +126,11 @@ struct DateWords {
         }
     }
 
+    /// The calendar header, desktop's month and quiet year: the year only outside this year, so a phone header stays one line.
+    func monthTitle(_ date: Date) -> (month: String, year: String?) {
+        (format(date, "MMMM"), calendar.component(.year, from: date) == calendar.component(.year, from: now) ? nil : format(date, "y"))
+    }
+
     /// Core days are Gregorian whatever calendar the user reads them in.
     private var gregorian: Calendar {
         var gregorian = Calendar(identifier: .gregorian)

@@ -62,6 +62,7 @@ struct RootView: View {
             }
         }
         .foregroundStyle(Theme.ink)
+        .readsPageMargin()
         .sheet(isPresented: $addAccount) { AddAccountView(model: model).duoRail() }
         .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             if let account = removing {
@@ -125,7 +126,7 @@ struct RootView: View {
     }
 }
 
-/// The desktop sidebar without the brand (Alex 2026-11-17): Search, the pages, Mail's mailboxes with per-account Inbox, then Accounts.
+/// The desktop sidebar without the brand (Alex 2026-11-17): the pages, Mail's mailboxes with per-account Inbox, then Accounts.
 struct SidebarView: View {
     @Bindable var model: MailModel
     let planner: PlannerModel
@@ -135,9 +136,8 @@ struct SidebarView: View {
     @State private var newFolder: NewFolderTarget?
 
     var body: some View {
+        // Search is a button in Mail's list header, as on the Mac and the iPhone (Alex 2026-11-20).
         VStack(alignment: .leading, spacing: 20) {
-            SearchField(text: $model.searchText)
-                .onChange(of: model.searchText) { _, text in if !text.isEmpty { section = .mail } }
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(AppSection.allCases) { page in
