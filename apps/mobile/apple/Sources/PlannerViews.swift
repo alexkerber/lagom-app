@@ -83,14 +83,20 @@ struct TodayView: View {
         return VStack(alignment: .leading, spacing: 4) {
             MonoLabel(text: "Schedule").padding(.bottom, 8)
             if events.isEmpty {
-                quiet(planner.calendarConnected ? "Nothing scheduled today." : "Your calendar shows here once a Google account is connected. Google sign-in is coming to iPhone and iPad.",
-                      icon: "calendar")
+                quiet(planner.calendarConnected ? "Nothing scheduled today."
+                      : !planner.calendarAccess.isEmpty ? "Google Calendar is not connected."
+                      : planner.calendarGranted ? "Your calendar shows here after the next sync."
+                      : "Add a Google account to see your calendar here.", icon: "calendar")
             } else {
                 ForEach(Array(events.enumerated()), id: \.offset) { index, event in
                     if index == nowIndex { NowLine(now: now) }
                     EventRow(event: event, accent: accountAccent(model.accounts, event.account), now: now)
                 }
                 if nowIndex == events.count { NowLine(now: now) }
+            }
+            // Also beside another account's calendar: each Google account allows its own.
+            if let account = planner.calendarAccess.first {
+                CalendarAccessButton(planner: planner, model: model, account: account).padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -149,6 +155,36 @@ private func quiet(_ text: String, icon: String) -> some View {
         Text(text).lagomFont(.snippet)
     }
     .foregroundStyle(Theme.secondary)
+}
+
+/// Desktop's "Show your Google Calendar": Google asks once, then a sync fills Calendar and Today.
+private struct CalendarAccessButton: View {
+    let planner: PlannerModel
+    let model: MailModel
+    let account: MailAccount
+    @Environment(\.webAuthenticationSession) private var browser
+    @State private var connecting = false
+
+    var body: some View {
+        Button { Task { await allow() } } label: {
+            HStack(spacing: 6) {
+                if connecting { ProgressView().controlSize(.small).tint(Theme.accentInk) } else { Icon("calendar").foregroundStyle(Theme.accentInk) }
+                Text(connecting ? "Connecting…" : "Show your Google Calendar").lineLimit(1)
+            }
+        }
+        .buttonStyle(HouseButtonStyle(primary: true))
+        .disabled(connecting)
+    }
+
+    private func allow() async {
+        defer { connecting = false }
+        do {
+            // The button stays busy until the sync has fetched the calendar.
+            guard try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true }) else { return }
+            await model.sync()
+            await planner.reloadAgenda()
+        } catch { planner.error = error.localizedDescription }
+    }
 }
 
 /// "+ New task", "+ Add task": a quiet line that adds.
@@ -486,11 +522,22 @@ private struct WeekGrid: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             if oneDay { strip(week) }
-            if !planner.calendarConnected && planner.week.isEmpty {
+            if !planner.calendarConnected && planner.week.isEmpty, let account = planner.calendarAccess.first {
+                EmptyState(icon: "calendar", title: "Calendar is not connected", detail: "Google asks once for access to \(account.email).") {
+                    CalendarAccessButton(planner: planner, model: model, account: account)
+                }
+                .frame(maxHeight: .infinity)
+            } else if !planner.calendarConnected && planner.week.isEmpty && planner.calendarGranted {
+                EmptyState(icon: "calendar", title: "Calendar not synced yet", detail: "Your calendar shows here after the next sync.")
+                    .frame(maxHeight: .infinity)
+            } else if !planner.calendarConnected && planner.week.isEmpty {
                 EmptyState(icon: "calendar", title: "Calendar needs a Google account",
-                           detail: "lagom shows your Google Calendar here. Google sign-in is coming to iPhone and iPad; mail accounts with a password have no calendar.")
+                           detail: "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
                     .frame(maxHeight: .infinity)
             } else {
+                if let account = planner.calendarAccess.first {
+                    CalendarAccessButton(planner: planner, model: model, account: account)
+                }
                 if !oneDay {
                     HStack(spacing: 0) {
                         Color.clear.frame(width: Self.gutter, height: 1)

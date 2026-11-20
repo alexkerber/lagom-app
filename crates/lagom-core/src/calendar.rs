@@ -86,6 +86,13 @@ impl Store {
         Ok(())
     }
 
+    /// Google took calendar access back: the app offers it again, and mail keeps working.
+    pub fn drop_calendar_scopes(&self, account: &str) -> Result<()> {
+        let scopes = self.account_scopes(account)?.split_whitespace()
+            .filter(|s| !s.starts_with("https://www.googleapis.com/auth/calendar")).collect::<Vec<_>>().join(" ");
+        self.set_account_scopes(account, &scopes)
+    }
+
     pub fn save_authorized_account(&self, account: &Account, scopes: &str) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         self.save_account(account)?;

@@ -1,7 +1,7 @@
 mod create;
 pub use create::{create_event, create_with, fetch_created, fetch_created_with, CreatedEvent};
 
-use crate::{account::Account, calendar::{Calendar, Event}, oauth, Error, Result};
+use crate::{account::Account, calendar::{Calendar, Event}, oauth, store::Store, Error, Result};
 use serde::Deserialize;
 use std::{collections::HashSet, future::Future, time::Duration};
 use url::Url;
@@ -13,6 +13,28 @@ pub async fn fetch_calendar(account: &Account, start: i64, end: i64) -> Result<V
         "https://www.googleapis.com/calendar/v3/", start, end,
         |rejected| async move { oauth::access_token(account, rejected.as_deref()).await },
     )).await.map_err(|_| Error::Network("calendar sync timed out"))?
+}
+
+/// The cached calendar window around `now`: a week back and sixty days ahead.
+pub fn calendar_window(now: i64) -> (i64, i64) { (now - 7 * 86400, now + 60 * 86400) }
+
+/// Fetches and caches the calendar window of an account that allows calendar access; others are left alone.
+pub async fn sync_calendar(store: &Store, account: &Account, now: i64) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(90), sync_calendar_with(store, &account.id, now,
+        "https://www.googleapis.com/calendar/v3/", |rejected| async move { oauth::access_token(account, rejected.as_deref()).await },
+    )).await.map_err(|_| Error::Network("calendar sync timed out"))?
+}
+
+pub async fn sync_calendar_with<F, Fut>(store: &Store, account: &str, now: i64, base: &str, token: F) -> Result<()>
+where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
+    if !oauth::calendar_allowed(&store.account_scopes(account)?) { return Ok(()); }
+    let (start, end) = calendar_window(now);
+    let result = match fetch_with(base, start, end, token).await {
+        Ok(calendars) => store.replace_calendar_window(account, start, end, &calendars),
+        Err(error) => Err(error),
+    };
+    if matches!(result, Err(Error::CalendarConsent)) { store.drop_calendar_scopes(account)?; }
+    result
 }
 
 #[derive(Deserialize)]

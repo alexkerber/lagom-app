@@ -176,8 +176,13 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                 Column {
                     MonoLabel("Schedule", Modifier.padding(bottom = 8.dp))
                     val events = planner.today?.events.orEmpty()
-                    if (events.isEmpty()) Quiet(if (planner.calendarConnected) "Nothing scheduled today."
-                        else "Your calendar shows here once a Google account is connected. Google Calendar sync is coming to Android.")
+                    val access = planner.calendarAccess.firstOrNull()
+                    if (events.isEmpty()) Quiet(when {
+                        planner.calendarConnected -> "Nothing scheduled today."
+                        access != null -> "Google Calendar is not connected."
+                        planner.calendarGranted -> "Your calendar shows here after the next sync."
+                        else -> "Add a Google account to see your calendar here."
+                    })
                     // The now line sits before the first timed event still to start, as on desktop.
                     val nowIndex = events.indexOfFirst { !it.allDay && it.startUnix > now }.let { if (it < 0) events.size else it }
                     events.forEachIndexed { index, event ->
@@ -185,6 +190,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                         EventRow(planner, event, now)
                     }
                     if (events.isNotEmpty() && nowIndex == events.size) NowLine(now)
+                    // Also beside another account's calendar: each Google account allows its own.
+                    access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
                 }
                 Column {
                     MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
@@ -429,18 +436,28 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 }
 
 /** A week strip over one day on phones; tablets keep the full week, as on iOS. */
-@Composable internal fun CalendarScreen(planner: PlannerModel, grid: Boolean = false) {
-    WeekGrid(planner, oneDay = !grid)
+@Composable internal fun CalendarScreen(planner: PlannerModel, model: MailModel, grid: Boolean = false) {
+    WeekGrid(planner, model, oneDay = !grid)
 }
 
-private const val CalendarNeedsGoogle =
-    "lagom shows your Google Calendar here. Google Calendar sync is coming to Android; mail accounts with a password have no calendar."
+/** Desktop's "Show your Google Calendar": Google asks once in the browser, then the redirect's sync fills Calendar and Today. */
+@Composable private fun CalendarAccessButton(planner: PlannerModel, model: MailModel, account: MailAccount, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    // A second tap while the browser opens would replace the pending sign-in and fail the first redirect.
+    var opening by remember { mutableStateOf(false) }
+    LaunchedEffect(opening) { if (opening) { delay(2_000); opening = false } }
+    HouseButton(if (model.signingIn) "Connecting…" else "Show your Google Calendar", R.drawable.ic_calendar, modifier, primary = true,
+        enabled = !model.signingIn && !opening) {
+        opening = true
+        planner.perform { openSignIn(context, requireNotNull(planner.core).beginCalendarAccess(account.id).url) }
+    }
+}
 
 private val HourHeight = 60.dp
 private val Gutter = 48.dp
 
 /** iPad's week, desktop `week::week_view`: day columns on an hour grid, all-day events above, the now line across. */
-@Composable private fun WeekGrid(planner: PlannerModel, oneDay: Boolean) {
+@Composable private fun WeekGrid(planner: PlannerModel, model: MailModel, oneDay: Boolean) {
     var selected by remember(planner.weekStart) { mutableStateOf(calendarDay(planner.weekStart, LocalDate.now())) }
     val week = (0L until 7L).map { planner.weekStart.plusDays(it) }
     val days = if (oneDay) listOf(selected) else week
@@ -452,9 +469,18 @@ private val Gutter = 48.dp
             planner.perform { planner.showWeek(0) }
         }
         if (oneDay) WeekStrip(week, selected) { selected = it }
-        if (!planner.calendarConnected && planner.week.isEmpty()) {
-            EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(), CalendarNeedsGoogle)
+        val access = planner.calendarAccess.firstOrNull()
+        if (!planner.calendarConnected && planner.week.isEmpty() && access != null) {
+            EmptyState(R.drawable.ic_calendar, "Calendar is not connected", Modifier.fillMaxSize(), "Google asks once for access to ${access.email}.") {
+                CalendarAccessButton(planner, model, access)
+            }
+        } else if (!planner.calendarConnected && planner.week.isEmpty() && planner.calendarGranted) {
+            EmptyState(R.drawable.ic_calendar, "Calendar not synced yet", Modifier.fillMaxSize(), "Your calendar shows here after the next sync.")
+        } else if (!planner.calendarConnected && planner.week.isEmpty()) {
+            EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(),
+                "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
         } else {
+            access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
             if (!oneDay) Row(Modifier.padding(top = 8.dp)) {
                 Spacer(Modifier.width(Gutter))
                 days.forEach { WeekDayHead(it, Modifier.weight(1f)) }

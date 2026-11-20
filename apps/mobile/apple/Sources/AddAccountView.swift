@@ -132,7 +132,17 @@ extension MailModel {
     /// `exchanging` runs once the page has returned, while the core trades its code for tokens.
     func signIn(_ provider: SignInProvider, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
         guard let core else { return false }
-        let start = try core.beginSignIn(provider: provider)
+        return try await authenticate(core.beginSignIn(provider: provider), browser: browser, exchanging: exchanging)
+    }
+
+    /// Adds Google Calendar and Tasks to a Google account on Google's own page; false when the user closed it.
+    func allowCalendar(_ account: String, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
+        guard let core else { return false }
+        return try await authenticate(core.beginCalendarAccess(accountId: account), browser: browser, exchanging: exchanging)
+    }
+
+    private func authenticate(_ start: SignInStart, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
+        guard let core else { return false }
         guard let url = URL(string: start.url) else { return false }
         let redirect: URL
         do {
