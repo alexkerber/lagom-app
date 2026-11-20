@@ -719,6 +719,11 @@ impl MainWindow {
         if read || self.live.as_ref().is_some_and(|l| l.stale) {
             self.reload(cx);
         }
+        // The store has no account left, the last one removed in Settings: back to Welcome, as on iOS and Android.
+        // A failed removal keeps the account in the store, and Settings stays.
+        if matches!(self.page, Page::Settings(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty()) {
+            self.add_account(window, cx);
+        }
         if let Some(target) = self.live.as_mut().filter(|l| l.ops.is_empty()).and_then(|l| l.notification_target.take()) {
             self.open_notification(target, window, cx);
         }
@@ -1615,13 +1620,12 @@ impl MainWindow {
         }
         live.accounts.retain(|a| a.id != id);
         live.current = 0;
-        let last = live.accounts.is_empty();
         self.inbox = Inbox::live();
         self.reading_thread = None;
         self.close_popouts(None, cx);
         self.clear_motion();
-        // The last account gone: back to Welcome, as on iOS and Android.
-        if last { self.add_account(window, cx) } else { self.set_page(Page::Settings(None), cx) }
+        // Welcome follows once the worker confirms the last removal (`on_events`).
+        self.set_page(Page::Settings(None), cx);
         cx.notify();
     }
 
@@ -1985,7 +1989,17 @@ mod tests {
         assert_eq!(ids.len(), 2);
         view.update_in(cx, |v, window, cx| v.remove_account(ids[0].clone(), window, cx));
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None))));
-        view.update_in(cx, |v, window, cx| v.remove_account(ids[1].clone(), window, cx));
+        // The worker is detached here: the store plays its part. A failed removal keeps the account and Settings.
+        view.update_in(cx, |v, window, cx| {
+            v.live.as_ref().unwrap().store.delete_account(&ids[0]).unwrap();
+            v.remove_account(ids[1].clone(), window, cx);
+            v.on_events(vec![Event::Changed], window, cx);
+        });
+        assert!(view.read_with(cx, |v, _| matches!(v.page, Page::Settings(None)) && v.live.as_ref().unwrap().accounts.len() == 1));
+        view.update_in(cx, |v, window, cx| {
+            v.live.as_ref().unwrap().store.delete_account(&ids[1]).unwrap();
+            v.on_events(vec![Event::Changed], window, cx);
+        });
         assert!(view.read_with(cx, |v, _| matches!(v.page, Page::AddAccount(_))));
         assert!(welcome(cx));
     }
