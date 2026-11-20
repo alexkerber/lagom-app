@@ -412,7 +412,7 @@ impl MainWindow {
         if let Some(input) = list.and_then(|id| self.task_input(Edit::Add(id))) { return row.child(div().flex_1().child(input)); }
         pressable(row, &t, false).debug_selector(move || if home { "new-task".into() } else { format!("add-task-{}", list.unwrap_or(0)) })
             .rounded(px(radius::CONTROL)).text_color(t.ink2)
-            .child(icon("icons/plus.svg", t.ink2, 16.)).child(if home { "New task" } else { "Add task" })
+            .child(icon("icons/plus.svg", t.ink2, 16.)).child("New task")
             .tooltip(move |_, cx| cx.new(|_| Tip(t, "New task · T".into())).into())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(list) = list { this.edit_task(Edit::Add(list), window, cx); }

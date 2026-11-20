@@ -459,11 +459,13 @@ struct MailView: View {
                         // Until the first sync lands, quiet placeholder rows stand in, not inbox zero (desktop #141).
                         LoadingRows()
                     } else if model.rows.isEmpty && model.failures.isEmpty {
-                        if model.mailbox == .inbox && model.folder == nil && model.searchText.isEmpty {
-                            // Inbox zero, as on desktop: the inbox icon, one line, no confetti.
-                            EmptyState(icon: "inbox", title: "Nothing left.", detail: "Not too much. Not too little. Just right.")
-                        } else {
+                        if !model.searchText.isEmpty {
+                            EmptyState(icon: "search", title: "No results", detail: "Nothing in your mail matches.")
+                        } else if model.folder != nil {
                             EmptyState(icon: "inbox", title: "No mail here", detail: "Pull to refresh your mail.")
+                        } else {
+                            // Inbox zero, as on desktop: the inbox icon, one line, no confetti. Each other mailbox has its own line.
+                            EmptyState(icon: model.mailbox.icon, title: model.mailbox.empty.title, detail: model.mailbox.empty.detail)
                         }
                     }
                 }

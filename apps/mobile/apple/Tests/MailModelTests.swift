@@ -147,6 +147,14 @@ final class MailModelTests: XCTestCase {
         XCTAssertEqual(MailboxChoice.done.mailbox, .done)
         XCTAssertEqual(MailboxChoice.sent.mailbox, .sent)
     }
+
+    func testMailboxesFollowTheDesktopOrder() {
+        XCTAssertEqual(MailboxChoice.allCases.map(\.rawValue), ["Inbox", "Later", "Sent", "Done", "Drafts", "Trash"])
+        // Only the Inbox speaks of zero; no mailbox asks for a refresh that cannot fill it.
+        XCTAssertEqual(MailboxChoice.inbox.empty.title, "Nothing left.")
+        XCTAssertEqual(MailboxChoice.later.empty.title, "Nothing waiting.")
+        XCTAssertFalse(MailboxChoice.allCases.contains { $0.empty.detail?.contains("refresh") == true })
+    }
 }
 
 @MainActor final class ComposeFixtureCore: LagomCore, @unchecked Sendable {

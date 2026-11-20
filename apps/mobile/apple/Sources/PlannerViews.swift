@@ -354,7 +354,7 @@ struct TodoView: View {
                         ListHeading(name: list.name, color: Theme.account(index), open: planner.openCount(list: list.id))
                             .padding(.top, 16).padding(.bottom, 4)
                         ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
-                        AddRow(title: "Add task") { adding = list.id }
+                        AddRow(title: "New task") { adding = list.id }
                         if !done.isEmpty {
                             let open = showDone.contains(list.id)
                             Button {
