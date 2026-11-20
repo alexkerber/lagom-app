@@ -80,6 +80,8 @@ final class PresentationTests: XCTestCase {
         let groups = grouped(["a1", "a2", "b1", "a3"]) { String($0.prefix(1)) }
         XCTAssertEqual(groups.map(\.title), ["a", "b", "a"])
         XCTAssertEqual(groups.map(\.items), [["a1", "a2"], ["b1"], ["a3"]])
+        // A title that comes back, as in search, still gets an id of its own for ForEach.
+        XCTAssertEqual(groups.map(\.id), ["a", "b", "a #2"])
     }
 
     func testOnlyAFewArrivingOrLeavingRowsAnimate() {

@@ -577,6 +577,8 @@ impl MainWindow {
                 this.inbox.click(4, false, true);
             }
             "later" => this.open_palette("later", window, cx),
+            // The demo Trash is empty: an empty mailbox's own line.
+            "trash" => this.open_kind(Kind::Trash, cx),
             "folders" => {
                 let first = folders::tree(&this.inbox.folders, false).first().map(|r| r.0);
                 this.open_box(first, cx);
@@ -2272,11 +2274,15 @@ impl MainWindow {
             // Nothing to say before the list is known.
             if self.inbox.list().is_empty() && self.list_loading() { return div().flex_1(); }
             let more = self.has_more();
+            // An empty Later, Sent, Done or Trash says what lands there, as on iOS and Android.
+            let mailbox = (!self.inbox.unread_only && self.inbox.list().is_empty()).then(|| self.inbox.open_kind().and_then(Kind::empty)).flatten();
             return div().flex_1().flex().flex_col().gap(px(12.)).items_center().justify_center().text_color(t.ink2)
-                .child(icon("icons/inbox.svg", t.ink2, 32.))
+                .debug_selector(|| "empty-mailbox".into())
+                .child(icon(mailbox.map_or("icons/inbox.svg", |m| m.0), t.ink2, 32.))
                 // Empty pages speak in the display face, as Today does.
-                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE))
-                    .child(match (self.inbox.unread_only, more) { (false, _) => "No messages", (true, true) => "No unread messages in loaded mail", (true, false) => "No unread messages" }))
+                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE)).text_color(t.ink)
+                    .child(match (mailbox, self.inbox.unread_only, more) { (Some(m), _, _) => m.1, (None, false, _) => "No messages", (None, true, true) => "No unread messages in loaded mail", (None, true, false) => "No unread messages" }))
+                .when_some(mailbox, |d, m| d.child(m.2))
                 .when(self.inbox.unread_only && more, |d| d.child(button(t, "Load more", None)
                     .on_click(cx.listener(|this, _, _, cx| this.load_more(cx)))));
         };

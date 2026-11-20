@@ -150,7 +150,8 @@ struct DateWords {
 struct RowGroup<Item>: Identifiable {
     let title: String
     var items: [Item]
-    var id: String { title }
+    /// The title, then "Today #2" for a title that comes back: search lists in match order, not by date.
+    let id: String
 }
 
 /// Consecutive rows that share a header, in the order given.
@@ -158,7 +159,9 @@ func grouped<Item>(_ items: [Item], by key: (Item) -> String) -> [RowGroup<Item>
     var groups: [RowGroup<Item>] = []
     for item in items {
         let title = key(item)
-        if groups.last?.title == title { groups[groups.count - 1].items.append(item) } else { groups.append(RowGroup(title: title, items: [item])) }
+        if groups.last?.title == title { groups[groups.count - 1].items.append(item); continue }
+        let seen = groups.filter { $0.title == title }.count
+        groups.append(RowGroup(title: title, items: [item], id: seen == 0 ? title : "\(title) #\(seen + 1)"))
     }
     return groups
 }
