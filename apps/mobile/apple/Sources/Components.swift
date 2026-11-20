@@ -363,13 +363,17 @@ extension SidebarRow where Leading == AnyView {
 struct StageSwipe: ViewModifier {
     let canDelete: Bool
     let enabled: Bool
+    /// False on a task: right is Done, left is Delete only.
+    var canLater = true
+    /// The right swipe's word; "Not done" on a completed task.
+    var doneTitle = "Done"
     let act: (SwipeStage) -> Void
     @State private var dx: CGFloat = 0
     @State private var width: CGFloat = 1
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        let stage = SwipeStage(dx: dx, width: width, canDelete: canDelete)
+        let stage = SwipeStage(dx: dx, width: width, canDelete: canDelete, canLater: canLater)
         content
             // Opaque, so the colour behind never shows through the text.
             .background(Theme.background)
@@ -381,7 +385,7 @@ struct StageSwipe: ViewModifier {
     }
 
     private func release(_ x: CGFloat) {
-        guard let stage = SwipeStage(dx: x, width: width, canDelete: canDelete) else {
+        guard let stage = SwipeStage(dx: x, width: width, canDelete: canDelete, canLater: canLater) else {
             withAnimation(Motion.move(reduceMotion)) { dx = 0 }
             return
         }
@@ -394,9 +398,9 @@ struct StageSwipe: ViewModifier {
 
     private func backdrop(_ stage: SwipeStage?) -> some View {
         let right = dx > 0
-        let shown = stage ?? (right ? .done : .later)
+        let shown = stage ?? (right ? .done : canLater ? .later : .delete)
         let (fill, icon, title): (Color, String, String) = switch shown {
-        case .done: (Theme.done, "done", "Done")
+        case .done: (Theme.done, "done", doneTitle)
         case .later: (Theme.later, "later", "Later")
         case .delete: (Theme.danger, "trash", "Delete")
         }

@@ -128,9 +128,11 @@ final class PlannerModel {
         }
     }
 
-    func toggle(_ todo: Todo) async {
+    /// Saves at once; `settle` keeps the lists as drawn a moment longer, so a tick is seen before its row moves.
+    func toggle(_ todo: Todo, settle: Duration = .zero) async {
         guard let core else { return }
         do { try await core.setTodoDone(id: todo.id, done: !todo.done) } catch { self.error = error.localizedDescription }
+        if settle > .zero { try? await Task.sleep(for: settle) }
         await reloadTodos()
     }
 

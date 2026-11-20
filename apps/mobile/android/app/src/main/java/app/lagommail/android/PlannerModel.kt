@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.lagommail.core.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
@@ -160,9 +161,11 @@ internal class PlannerModel : ViewModel() {
         return guard { core.addTodo(list, trimmed, due?.toString()); reloadTodos() }
     }
 
-    suspend fun toggle(todo: Todo) {
+    /** Saves at once; [settleMillis] keeps the lists as drawn a moment longer, so a tick is seen before its row moves. */
+    suspend fun toggle(todo: Todo, settleMillis: Long = 0) {
         val core = core ?: return
         guard { core.setTodoDone(todo.id, !todo.done) }
+        delay(settleMillis)
         reloadTodos()
     }
 
