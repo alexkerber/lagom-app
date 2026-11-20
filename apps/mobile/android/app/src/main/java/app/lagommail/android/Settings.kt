@@ -43,8 +43,9 @@ import app.lagommail.core.MailAccount
     // A removed account's page closes: the list shows, and Back leaves Settings.
     BackHandler { if (index >= 0) open = null else close() }
     var removing by remember { mutableStateOf<MailAccount?>(null) }
-    var signing by remember { mutableStateOf<MailAccount?>(null) }
-    var naming by remember { mutableStateOf<MailAccount?>(null) }
+    // The open editor survives rotation by its account's id; its text is saved in the dialog.
+    var signing by rememberSaveable { mutableStateOf<String?>(null) }
+    var naming by rememberSaveable { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf<String?>(null) }
     fun open(intent: Intent) = try { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
         catch (_: ActivityNotFoundException) { failed = "No app on this phone can open this." }
@@ -65,7 +66,7 @@ import app.lagommail.core.MailAccount
             horizontalAlignment = Alignment.CenterHorizontally) {
             // The Mac's 600 dp column, centred on a tablet.
             Column(Modifier.widthIn(max = 600.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(32.dp)) {
-                if (index >= 0) AccountPage(model.accounts[index], accountAccent(index), { naming = it }, { signing = it }, { removing = it })
+                if (index >= 0) AccountPage(model.accounts[index], accountAccent(index), { naming = it.id }, { signing = it.id }, { removing = it })
                 else {
                     Group("Accounts", "The email addresses in lagom. Only you see them.") {
                         model.accounts.forEachIndexed { at, account ->
@@ -97,14 +98,17 @@ import app.lagommail.core.MailAccount
             }
         }
     } }
-    signing?.let { account -> SignatureDialog(model, account) { signing = null } }
-    naming?.let { account -> NameDialog(model, account) { naming = null } }
+    model.accounts.firstOrNull { it.id == signing }?.let { account -> SignatureDialog(model, account) { signing = null } }
+    model.accounts.firstOrNull { it.id == naming }?.let { account -> NameDialog(model, account) { naming = null } }
     // The Mac's words: the question names the account, Keep is the way out.
-    removing?.let { account ->
-        AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove ${account.email} from lagom?") },
-            text = { Text("Your mail stays with your provider.") },
+    // Only on the open account's page: Back while the words load leaves the question behind.
+    removing?.takeIf { it.id == open }?.let { account ->
+        // The question waits for the account's words, so Remove never shows an early note.
+        val note by produceState<String?>(null, account.id) { value = model.removalNote(account) }
+        note?.let { words -> AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove ${account.email} from lagom?") },
+            text = { Text(words) },
             confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove", color = lagom.danger) } },
-            dismissButton = { TextButton(onClick = { removing = null }) { Text("Keep") } })
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("Keep") } }) }
     }
 }
 

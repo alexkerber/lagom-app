@@ -327,9 +327,11 @@ internal class AccountForm {
 
 /** The desktop's per-account signature: added to new mail, replies and forwards. */
 @Composable internal fun SignatureDialog(model: MailModel, account: MailAccount, close: () -> Unit) {
-    var text by remember(account.id) { mutableStateOf<String?>(null) }
+    // Saveable, so an edit not yet saved survives rotation; only a fresh dialog loads the stored signature.
+    var text by rememberSaveable(account.id) { mutableStateOf<String?>(null) }
     var saving by remember(account.id) { mutableStateOf(false) }
     LaunchedEffect(account.id) {
+        if (text != null) return@LaunchedEffect
         try { text = requireNotNull(model.core).signature(account.id) }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (e: Exception) { model.error = e.mailMessage(); close() }
@@ -355,7 +357,7 @@ internal class AccountForm {
 
 /** Desktop's "Your name": shown to the people you write to. An empty name falls back to the address. */
 @Composable internal fun NameDialog(model: MailModel, account: MailAccount, close: () -> Unit) {
-    var text by remember(account.id) { mutableStateOf(if (account.displayName == account.email) "" else account.displayName) }
+    var text by rememberSaveable(account.id) { mutableStateOf(if (account.displayName == account.email) "" else account.displayName) }
     var saving by remember(account.id) { mutableStateOf(false) }
     AlertDialog(onDismissRequest = { if (!saving) close() }, title = { Text("Your name") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

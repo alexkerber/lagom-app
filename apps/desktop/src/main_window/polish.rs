@@ -137,10 +137,13 @@ impl MainWindow {
 
     /// The toolbar's More acts on the selection, as the keys do.
     pub(super) fn toolbar_action(&mut self, action: MessageAction, window: &mut Window, cx: &mut Context<Self>) {
+        // A sync can replace the message More opened on; its actions must not reach the new one.
+        let stale = self.inbox.single() != self.more_on;
         self.message_menu = None;
         match action {
-            MessageAction::Menu => self.message_menu = Some(TOOLBAR_MENU),
+            MessageAction::Menu => (self.message_menu, self.more_on) = (Some(TOOLBAR_MENU), self.inbox.single()),
             MessageAction::Close | MessageAction::Copy => {},
+            _ if stale => {},
             MessageAction::ReplyAll => self.compose_selected(ComposeKind::ReplyAll, window, cx),
             MessageAction::Forward => self.compose_selected(ComposeKind::Forward, window, cx),
             MessageAction::Move => self.open_palette("move ", window, cx),

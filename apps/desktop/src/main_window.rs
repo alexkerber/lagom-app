@@ -349,6 +349,8 @@ pub struct MainWindow {
     names: HashMap<String, Entity<TextInput>>,
     /// The open account's Remove waits for a yes.
     confirm_remove_account: bool,
+    /// That question's second sentence: what removing deletes that the provider does not have.
+    remove_note: String,
     /// macOS: whether lagom opens mailto links, read when Settings opens. `None`: not shown.
     default_mail: Option<bool>,
     /// "Change password" on an email-and-password account's page.
@@ -356,6 +358,8 @@ pub struct MainWindow {
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
     message_menu: Option<usize>,
+    /// The message the toolbar's More opened on: a refresh can put another one under the selection.
+    more_on: Option<usize>,
     // "N more" was clicked, so every folder row shows.
     all_folders: bool,
     confirm_empty_trash: bool,
@@ -489,11 +493,13 @@ impl MainWindow {
             signatures: HashMap::new(),
             names: HashMap::new(),
             confirm_remove_account: false,
+            remove_note: String::new(),
             default_mail: None,
             new_password: None,
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
             message_menu: None,
+            more_on: None,
             all_folders: false,
             confirm_empty_trash: false,
             unsubscribe: None,
@@ -550,7 +556,8 @@ impl MainWindow {
         if this.live.is_some() {
             this.reload(cx);
             this.restore_drafts(window, cx);
-            if screen.starts_with("add-account") {
+            // No account yet: Welcome first, as on iOS and Android.
+            if screen.starts_with("add-account") || this.live.as_ref().is_some_and(|l| l.accounts.is_empty()) {
                 this.add_account(window, cx);
             }
         }
@@ -639,6 +646,11 @@ impl MainWindow {
         }
         this.retint();
         this
+    }
+
+    /// First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
+    fn welcome(&self) -> bool {
+        matches!(self.page, Page::AddAccount(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty())
     }
 
     // Overlays sit inside this key context, so its bindings fire first: hand the key on to them.
@@ -1773,7 +1785,8 @@ impl MainWindow {
             // No tab stop: Tab would leave Compose's field cycle. ⌘K and the menu are the keyboard route.
             .child(div().flex().flex_shrink_0().justify_end().child(
                 icon_button(t, "search", "icons/search.svg", if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" })
-                    .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))))
+                    // The same action as ⌘K and the menu, so all three open it on the same pages.
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx))))
             .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
                 .child(div()
                     .flex()
@@ -2597,7 +2610,7 @@ impl Render for MainWindow {
             self.reveal_row(self.inbox.selected);
         }
         self.prune();
-        if self.message_menu.is_some_and(|id| if id == polish::TOOLBAR_MENU { self.inbox.single().is_none() || !matches!(self.page, Page::Mail) }
+        if self.message_menu.is_some_and(|id| if id == polish::TOOLBAR_MENU { self.inbox.single().is_none() || self.inbox.single() != self.more_on || !matches!(self.page, Page::Mail) }
             else { self.inbox.single() != Some(id) && !self.expanded.contains_key(&id) && !self.popouts.iter().any(|(open, _)| *open == id) }) {
             self.message_menu = None;
         }
@@ -2616,8 +2629,7 @@ impl Render for MainWindow {
         self.web_frame(window, cx);
         self.forget_hidden_images(cx);
         crate::rich::release(window, cx);
-        // First launch: the add-account flow fills the window; there is nothing for a sidebar yet.
-        let welcome = matches!(self.page, Page::AddAccount(_)) && self.live.as_ref().is_some_and(|l| l.accounts.is_empty());
+        let welcome = self.welcome();
         let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
@@ -2654,6 +2666,7 @@ impl Render for MainWindow {
                     colors: (0..accounts.len()).map(|ix| self.account_accent(ix)).collect(),
                     open: open.as_deref(),
                     confirm: self.confirm_remove_account,
+                    remove_note: &self.remove_note,
                     default_mail: self.default_mail,
                     signing_in,
                     group: self.panes.group_conversations,
@@ -2732,7 +2745,8 @@ impl Render for MainWindow {
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
-                if this.palette.is_none() && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.open_palette("", window, cx); }
+                // Welcome hides the sidebar and its search icon; the palette waits for an account.
+                if this.palette.is_none() && !this.welcome() { this.open_palette("", window, cx); }
             }))
             .on_action(cx.listener(|this, _: &OpenMovePalette, window, cx| if !this.overlay_open(cx) { this.open_palette("move ", window, cx) }))
             .on_action(cx.listener(|this, _: &ReplyAll, window, cx| if !this.overlay_open(cx) { this.compose_selected(ComposeKind::ReplyAll, window, cx) }))
@@ -4641,6 +4655,25 @@ mod dispatch {
     }
 
     #[gpui::test]
+    fn search_click_shortcut_and_menu_open_the_palette_on_every_page(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let pages: [fn() -> Page; 4] = [|| Page::Calendar, || Page::Drafts, || Page::Settings(None), || Page::Home];
+        for page in pages {
+            for how in 0..3 {
+                view.update_in(cx, |v, window, cx| { v.palette = None; v.page = page(); window.focus(&v.focus); cx.notify(); });
+                frame(cx);
+                match how {
+                    0 => { let at = cx.debug_bounds("search").unwrap().center(); cx.simulate_click(at, Default::default()) }
+                    1 => cx.simulate_keystrokes("secondary-k"),
+                    // The menu's Command Palette dispatches the action.
+                    _ => cx.dispatch_action(OpenPalette),
+                }
+                assert!(view.read_with(cx, |v, _| v.palette.is_some()), "{how} opens the palette");
+            }
+        }
+    }
+
+    #[gpui::test]
     fn palette_takes_letters_backspace_and_undo(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let n = inbox_len(&view, cx);
@@ -5026,6 +5059,46 @@ mod dispatch {
         view.update(cx, |v, cx| { v.message_menu = Some(polish::TOOLBAR_MENU); cx.notify(); });
         cx.simulate_keystrokes("j");
         assert!(view.read_with(cx, |v, _| v.message_menu.is_none()), "More closes when another message is selected");
+    }
+
+    #[gpui::test]
+    fn toolbar_more_closes_when_a_refresh_replaces_its_message(cx: &mut TestAppContext) {
+        use lagom_core::store::{Folder as F, FolderRole, MessageSummary};
+        let (view, cx) = open(cx);
+        let summary = |id: i64| MessageSummary { id, folder: 1, subject: format!("m{id}"), seen: false, ..Default::default() };
+        let snap = |ids: &[i64]| mail::Snapshot {
+            inbox: ids.iter().map(|&id| summary(id)).collect(),
+            inbox_total: ids.len() as u64,
+            folders: vec![F { id: 1, account: "a".into(), name: "INBOX".into(), delimiter: None, role: FolderRole::Inbox, uidvalidity: None, uidnext: None, last_uid: 0, highest_modseq: None, unread: 0 }],
+            ..Default::default()
+        };
+        view.update(cx, |v, cx| {
+            v.inbox = Inbox::live();
+            v.inbox.apply(snap(&[10, 11, 12]), &HashSet::new(), chrono::Local::now());
+            v.inbox.select(0);
+            cx.notify();
+        });
+        frame(cx);
+        let at = cx.debug_bounds("More").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        frame(cx);
+        assert!(cx.debug_bounds("menu-Delete").is_some());
+        // Sync removes 10; 11 takes its row and the selection.
+        view.update(cx, |v, cx| { v.inbox.apply(snap(&[11, 12]), &HashSet::new(), chrono::Local::now()); cx.notify(); });
+        // A click that lands before the next frame must not delete 11.
+        view.update_in(cx, |v, window, cx| v.toolbar_action(polish::MessageAction::Delete, window, cx));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.inbox.mail[v.inbox.current().unwrap()].store, Some(11));
+            assert!(v.inbox.trash.is_empty() && v.inbox.items.len() == 2, "Delete on a stale More does nothing");
+        });
+        // Opened again on 11, then a refresh: the frame closes it.
+        frame(cx);
+        let at = cx.debug_bounds("More").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(view.read_with(cx, |v, _| v.message_menu == Some(polish::TOOLBAR_MENU)));
+        view.update(cx, |v, cx| { v.inbox.apply(snap(&[12]), &HashSet::new(), chrono::Local::now()); cx.notify(); });
+        frame(cx);
+        assert!(view.read_with(cx, |v, _| v.message_menu.is_none()), "More closes when its message leaves");
     }
 
     #[gpui::test]

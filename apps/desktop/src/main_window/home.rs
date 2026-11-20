@@ -165,6 +165,8 @@ impl MainWindow {
                         if let Some(id) = mail.store {
                             this.open_notification(crate::notifications::Target { account: mail.account.clone(), message: Some(id) }, window, cx);
                         } else {
+                            // Today lists every account; another account's filter would hide the row.
+                            if this.inbox.account_filter.as_ref().is_some_and(|a| *a != mail.account) { this.inbox.account_filter = None; }
                             this.open_box(None, cx);
                             // Demo mail has no store id. Select by list row, which can be a thread or a filtered row.
                             let wanted = this.inbox.items.iter().copied().find(|&id| this.inbox.mail[id].address == mail.address && this.inbox.mail[id].subject == mail.subject);
@@ -448,9 +450,12 @@ mod tests {
     fn today_mail_lists_newest_unread_below_the_columns_and_opens_it(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "home", window, cx));
         cx.run_until_parked();
-        let first = view.read_with(cx, |v, _| {
+        let first = view.update(cx, |v, _| {
             assert!(!v.today.mail.is_empty() && v.today.mail.len() <= TODAY_MAIL);
             assert!(v.today.mail.iter().all(|m| m.unread));
+            // The Inbox filtered to the other account must not keep the row out of reach.
+            let other = mail::demo_accounts().into_iter().find(|a| a.id != v.today.mail[0].account).unwrap().id;
+            v.inbox.account_filter = Some(other);
             v.today.mail[0].subject.clone()
         });
         let mail = cx.debug_bounds("home-mail").unwrap();
