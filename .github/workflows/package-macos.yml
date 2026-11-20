@@ -28,7 +28,7 @@ defaults:
     shell: bash
 
 jobs:
-  # The version, and whether this run signs. It reads no secret value, only whether they exist.
+  # The version, and whether this run signs. It reads no secret.
   meta:
     name: Version and signing
     runs-on: ubuntu-latest
@@ -42,20 +42,13 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
           REF: ${{ github.ref }}
-          SECRETS: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.APPLE_NOTARY_KEY != '' && secrets.APPLE_NOTARY_KEY_ID != '' && secrets.APPLE_NOTARY_ISSUER_ID != '' }}
         run: |
           if [[ $REF_TYPE == tag ]]; then version=${REF_NAME#v}; else version=0.0.0-dev.${SHA:0:7}; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          # Only tags and runs on main sign. Pull requests and other branches never do, so a branch
-          # cannot get a notarized dmg with its own Sparkle key file.
-          if [[ $REF_TYPE != tag && $REF != refs/heads/main ]]; then
-            echo "signed=0" >> "$GITHUB_OUTPUT"
-          elif [[ $SECRETS == true ]]; then
-            echo "signed=1" >> "$GITHUB_OUTPUT"
-          else
-            echo '::warning::No signing secrets: the dmg is signed ad hoc, not notarized, and a tag attaches nothing.'
-            echo "signed=0" >> "$GITHUB_OUTPUT"
-          fi
+          # The signing secrets live in the `release` environment, which admits only v* tags. Other
+          # runs never ask for it, so a dispatch on a branch builds the ad-hoc dmg instead of failing.
+          if [[ $REF == refs/tags/v* ]]; then signed=1; else signed=0; fi
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
 
   # Runs cargo and the build scripts of all dependencies, so it gets no signing secret. It makes
   # the unsigned app for the sign job, and an ad-hoc signed dmg for tests.
@@ -117,11 +110,13 @@ jobs:
 
   # A fresh runner with the Developer ID and the notary key. It runs no cargo and nothing from the
   # artifact: only codesign, hdiutil, notarytool and scripts/sign-macos.sh from this commit.
+  # The secrets live in the `release` environment, which admits only v* tags.
   sign:
     name: Sign and notarize
     needs: [meta, build]
     if: needs.meta.outputs.signed == '1'
     runs-on: macos-latest
+    environment: release
     # The keychain stays unlocked while the job runs; a hung notarization must not keep it for hours.
     timeout-minutes: 60
     outputs:
@@ -171,6 +166,10 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
         run: |
+          if [[ -z $P12 || -z $P12_PASSWORD || -z $NOTARY_KEY || -z $NOTARY_KEY_ID || -z $NOTARY_ISSUER ]]; then
+            echo '::error::The release environment lacks a signing secret (MACOS_CERTIFICATE_*, APPLE_NOTARY_*). Nothing is attached.'
+            exit 1
+          fi
           keychain=$RUNNER_TEMP/lagom-signing.keychain-db
           keychain_password=$(uuidgen)
           security create-keychain -p "$keychain_password" "$keychain"
@@ -213,12 +212,13 @@ jobs:
           if-no-files-found: error
 
   # Its own job on a fresh runner: the EdDSA private key never shares a machine with cargo, the
-  # build scripts of dependencies or a checkout they could have changed. Tags only.
+  # build scripts of dependencies or a checkout they could have changed. v* tags only, through sign.
   sparkle:
     name: Sign the update for Sparkle
     needs: [meta, sign]
     if: github.ref_type == 'tag'
     runs-on: macos-latest
+    environment: release
     outputs:
       item: ${{ steps.item.outputs.item }}
       sha256: ${{ steps.item.outputs.sha256 }}
@@ -264,8 +264,9 @@ jobs:
           path: target/macos/lagom-*.appcast.xml
           if-no-files-found: error
 
-  # Only a signed run ships. Without the signing secrets a tag attaches nothing: the ad-hoc dmg
-  # comes from the build job, so it stays a workflow artifact for tests.
+  # Only a signed run ships. Without the signing secrets sign fails and a tag attaches nothing: the
+  # ad-hoc dmg comes from the build job, so it stays a workflow artifact for tests.
+  # No environment: it holds only GITHUB_TOKEN.
   release:
     name: Attach to the GitHub release
     needs: [meta, sign, sparkle]

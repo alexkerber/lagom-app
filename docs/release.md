@@ -50,6 +50,30 @@ branches. Not verified on `main` when this page was written.
 - Check that a notification appears for new mail.
 - Read `TODO.md` for open items that block the release.
 
+## Release credentials: the `release` environment
+
+Signing and upload secrets live in the GitHub environment `release`, not in the repository secrets.
+
+- The environment's deployment policy admits only tags that match `v*`. A job with
+  `environment: release` on a branch or a pull request stops at the gate and gets no secret.
+- A tag ruleset lets only repository admins create, update or delete `v*` tags. So only an admin
+  starts a run that reaches the secrets.
+- A job that holds a release credential runs no cargo, no rustup, no build script and no code from
+  an artifact. It runs on a fresh GitHub-hosted runner, checks out `github.sha` and checks each
+  artifact against a hash from the job that made it. A compromised Rust dependency then runs code
+  only in jobs without a credential. That job still signs what the build made: the split keeps the
+  keys away from the build, it does not prove the build benign.
+- Environment secrets: `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY`,
+  `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` and `SPARKLE_ED_PRIVATE_KEY` (macOS).
+  `APP_STORE_CONNECT_KEY`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and the optional
+  `IOS_SIGNING_P12` and `IOS_SIGNING_P12_PASSWORD` (iOS).
+- Repository secrets: `LAGOM_OAUTH_ENV` (client IDs that ship in the app, a build input) and the
+  Android `LAGOM_ANDROID_KEYSTORE*` (not moved yet).
+- Store a secret with `gh secret set <NAME> --env release`. After you move one, delete the
+  repository copy with `gh secret delete <NAME>`: a workflow on any branch can read a repository secret.
+- A `workflow_dispatch` on a branch never asks for the environment. It builds without signing.
+- Not verified: a tag run with the environment (written 2026-11-21).
+
 ## macOS
 
 Workflow: `.github/workflows/package-macos.yml`. Scripts: `scripts/package-macos.sh` builds the
@@ -59,23 +83,23 @@ app, `scripts/sign-macos.sh` signs it and makes the dmg.
 - Tags `v*`: build, sign with the Developer ID, notarize, staple and upload to the draft release.
 - Pull requests that change packaging: build an ad-hoc signed dmg as a workflow artifact. Pull
   requests never get the signing secrets.
-- `workflow_dispatch` on `main`: as a tag, but the version is `0.0.0-dev.<sha>` and nothing goes to
-  a release. On any other branch it builds only the ad-hoc dmg: a branch never signs, so it cannot
-  get a notarized dmg with its own Sparkle key file.
-- Without the signing secrets the workflow still builds an ad-hoc signed dmg and warns. Gatekeeper
-  blocks that dmg on other Macs. Use it only for tests. A tag then attaches nothing to the release.
+- `workflow_dispatch` on a branch, `main` included: only the ad-hoc dmg. The signing secrets are in
+  the `release` environment, which admits only `v*` tags. So a branch cannot get a notarized dmg
+  with its own Sparkle key file. `workflow_dispatch` on a `v*` tag runs as a tag push.
+- The ad-hoc dmg is for tests only: Gatekeeper blocks it on other Macs. When the environment lacks a
+  signing secret, a tag run fails in `sign` and attaches nothing to the release.
 - No entitlements file. The app is not sandboxed, and the hardened runtime allows the network,
   keychain, notifications and WKWebView.
 
 CI jobs. No job that runs cargo, a build script or code from an artifact gets a release credential:
 
-| Job       | Runs                                                                                                                                       | Secrets                                             |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
-| `meta`    | Sets the version. Checks whether the signing secrets exist (not their values).                                                             | None                                                |
-| `build`   | cargo, `LAGOM_BUILD_ONLY=1 scripts/package-macos.sh`. Uploads the unsigned app as a tar, and an ad-hoc dmg.                                | `LAGOM_OAUTH_ENV` (client IDs that ship in the app) |
-| `sign`    | A fresh runner, a sparse checkout of this commit, `scripts/sign-macos.sh`. No cargo, nothing from the artifact runs. Not on pull requests. | `MACOS_CERTIFICATE_*`, `APPLE_NOTARY_*`             |
-| `sparkle` | A fresh runner. Checks the dmg hash from `sign`, then `scripts/sparkle-item.sh`. Tags only.                                                | `SPARKLE_ED_PRIVATE_KEY`                            |
-| `release` | Signed tags only. Downloads the named artifacts, checks their hashes, attaches them to the draft.                                           | `GITHUB_TOKEN` with `contents: write`               |
+| Job       | Runs                                                                                                                                                         | Secrets                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `meta`    | Sets the version. Signs only for `v*` tags.                                                                                                                  | None                                                |
+| `build`   | cargo, `LAGOM_BUILD_ONLY=1 scripts/package-macos.sh`. Uploads the unsigned app as a tar, and an ad-hoc dmg.                                                  | `LAGOM_OAUTH_ENV` (client IDs that ship in the app) |
+| `sign`    | `environment: release`. A fresh runner, a sparse checkout of this commit, `scripts/sign-macos.sh`. No cargo, nothing from the artifact runs. `v*` tags only. | `MACOS_CERTIFICATE_*`, `APPLE_NOTARY_*`             |
+| `sparkle` | `environment: release`. A fresh runner. Checks the dmg hash from `sign`, then `scripts/sparkle-item.sh`. `v*` tags only.                                     | `SPARKLE_ED_PRIVATE_KEY`                            |
+| `release` | Signed tags only. No environment. Downloads the named artifacts, checks their hashes, attaches them to the draft.                                            | `GITHUB_TOKEN` with `contents: write`               |
 
 Threat model. A compromised dependency can run code in `build`, through its build script. Before
 this split it could use the unlocked Developer ID and read the notary key. With Sparkle, a Developer
@@ -86,11 +110,9 @@ the isolation keeps the keys away from the build, but `sign` still signs what `b
 rust cache that `build` saves feeds only later `build` jobs, which hold no credential. Not run with
 the real secrets yet (2026-11-20); the first tag run is the test.
 
-Open decision: the isolation holds for this workflow file only. Anyone who can push a branch, a
-same-repository pull request or a `v*` tag can edit the workflow and read the repository secrets.
-To close that, move the signing and Sparkle secrets to a GitHub environment that only `v*` tags may
-use, add `environment:` to `sign` and `sparkle`, and limit who can create `v*` tags. That needs
-the repository settings.
+A branch can edit this workflow, but it cannot read the signing or Sparkle secrets: they are in the
+`release` environment (see [Release credentials](#release-credentials-the-release-environment)).
+Only an admin can push a `v*` tag.
 
 Local release from a Mac with the Developer ID in the login keychain. One command builds and signs:
 
@@ -107,6 +129,9 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 `LAGOM_NOTARY_KEY_ID` and `LAGOM_NOTARY_ISSUER` are set.
 
 ### GitHub secrets for macOS
+
+All except `LAGOM_OAUTH_ENV` are secrets of the `release` environment. `LAGOM_OAUTH_ENV` is a
+repository secret, because the `build` job reads it.
 
 | Secret                       | Content                                                                                                                                            |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -128,17 +153,17 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 4. Store the secrets:
 
    ```sh
-   base64 -i lagom-devid.p12 | gh secret set MACOS_CERTIFICATE_P12
-   gh secret set MACOS_CERTIFICATE_PASSWORD
-   gh secret set APPLE_NOTARY_KEY < AuthKey_XXXXXXXXXX.p8
-   gh secret set APPLE_NOTARY_KEY_ID --body XXXXXXXXXX
-   gh secret set APPLE_NOTARY_ISSUER_ID --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   base64 -i lagom-devid.p12 | gh secret set MACOS_CERTIFICATE_P12 --env release
+   gh secret set MACOS_CERTIFICATE_PASSWORD --env release
+   gh secret set APPLE_NOTARY_KEY --env release < AuthKey_XXXXXXXXXX.p8
+   gh secret set APPLE_NOTARY_KEY_ID --env release --body XXXXXXXXXX
+   gh secret set APPLE_NOTARY_ISSUER_ID --env release --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
    gh secret set LAGOM_OAUTH_ENV < .env.oauth
    ```
 
 5. Delete the local .p12 and .p8 copies, or keep them only in a password manager.
-6. Run the workflow once with `workflow_dispatch` on `main` and check that the log shows `Authority=Developer ID Application`
-   and an accepted notarization.
+6. The first `v*` tag is the test: check that the `sign` log shows `Authority=Developer ID Application`
+   and an accepted notarization. A dispatch on a branch does not sign.
 
 ### Automatic updates on macOS
 
@@ -183,7 +208,8 @@ git add apps/desktop/macos/sparkle-ed-public-key && git commit -m "macOS: Sparkl
 ```
 
 The script makes the key pair in the login Keychain (account `lagom`), or keeps the one there. It
-stores the private key as `SPARKLE_ED_PRIVATE_KEY` through a temp file that only you can read and
+stores the private key as `SPARKLE_ED_PRIVATE_KEY` in the `release` environment
+(`gh secret set --env release`) through a temp file that only you can read and
 that it deletes. It prints and writes only the public key. Back up the private key once in a
 password manager: `target/sparkle/bin/generate_keys --account lagom -x <file>`, then delete the file. Without the key,
 no update reaches the installed apps.
