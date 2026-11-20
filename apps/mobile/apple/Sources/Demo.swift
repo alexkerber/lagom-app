@@ -11,6 +11,15 @@ enum Storage {
         #endif
     }
 
+    /// DEBUG builds launched with `-LagomIntroChoose` open the intro on Choose account, for screenshots without taps.
+    static var introChoose: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-LagomIntroChoose")
+        #else
+        false
+        #endif
+    }
+
     static func directory() throws -> URL {
         if demo {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LagomDemo", isDirectory: true)

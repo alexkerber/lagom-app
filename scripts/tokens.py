@@ -23,7 +23,7 @@ MOBILE_COLORS = {
     "later": ("later", "later"), "danger": ("danger", "danger"),
     "sidebar": ("sidebar", "sidebar"),
 }
-MOBILE_SIZES = ("small", "snippet", "base", "body", "title", "subject")
+MOBILE_SIZES = ("small", "snippet", "base", "body", "title", "subject", "display", "hero")
 
 
 def number(value):
@@ -126,7 +126,7 @@ def kotlin(tokens):
         out += [")", ""]
     out.append("internal object TextSize {")
     sizes = mobile_sizes(tokens, "android")
-    out += [f"    val {key} = {number(sizes[key])}.sp" for key in (*MOBILE_SIZES, "display")]
+    out += [f"    val {key} = {number(sizes[key])}.sp" for key in MOBILE_SIZES]
     display, label, tracking = faces(tokens)
     out += ["}", ""]
     out += [f"internal val {name}Face = FontFamily(Font(R.font.{face[2]}, FontWeight.{face[3]}))" for name, face in (("Display", display), ("Label", label))]

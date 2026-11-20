@@ -108,6 +108,9 @@ snippet = 14
 base = 15
 body = 16
 title = 17
+# Whole points for the intro's titles and wordmark.
+display = 30
+hero = 56
 
 # SwiftUI's native spring parameterisation; duration remains the shared 280 ms.
 [overrides.ios.spring]
@@ -126,6 +129,7 @@ base = 15
 body = 16
 title = 17
 display = 30
+hero = 56
 
 [overrides.android.type]
 leading = 1.3

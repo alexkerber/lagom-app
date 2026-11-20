@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The intro before the app: Welcome, Choose account, then Notifications once an account is in.
-/// Copy matches the Android intro word for word; the voice is the store text's.
+/// The brand of DESIGN_PROMPT.md: paper, ink and one accent; flat, hairlines, small radii; the dictionary entry as hero.
+/// Spacing is on an 8 pt grid. Copy matches the Android intro word for word.
 struct OnboardingView: View {
     let model: MailModel
     /// The account is in; the intro asks for notifications.
@@ -10,14 +11,22 @@ struct OnboardingView: View {
     let notNow: () -> Void
     @Environment(\.webAuthenticationSession) private var browser
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var choosing = false
+    @State private var choosing = Storage.introChoose
     @State private var other = false
     @State private var connecting = false
     @State private var error: String?
     @State private var height: CGFloat = 0
+    /// Welcome's icon starts where the launch screen drew it (96 pt, centred) and settles into place.
+    @State private var settled = false
+    @State private var root = CGRect.zero
+    @State private var mark = CGRect.zero
+    /// Counts primary taps, for one light haptic each.
+    @State private var taps = 0
 
     private enum Step { case welcome, choose, notifications }
     private var step: Step { notifications ? .notifications : choosing ? .choose : .welcome }
+    /// Steps move without bounce: the shared 280 ms, or only a fade under Reduce Motion.
+    private var move: Animation { reduceMotion ? Motion.fade : .smooth(duration: 0.28) }
 
     var body: some View {
         ZStack {
@@ -27,16 +36,24 @@ struct OnboardingView: View {
             case .notifications: page(.notifications)
             }
         }
-        .animation(Motion.move(reduceMotion), value: step)
+        .animation(move, value: step)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { root = $0 }
         .background(Theme.background.ignoresSafeArea())
         .foregroundStyle(Theme.ink)
+        .sensoryFeedback(.impact(weight: .light), trigger: taps)
         // The page changes in place, so VoiceOver starts again at its top.
         .onChange(of: step) { _, _ in AccessibilityNotification.ScreenChanged().post() }
         .sheet(isPresented: $other) { AddAccountView(model: model, providers: false).duoRail() }
+        .task {
+            guard !settled else { return }
+            // One frame for the icon's place to be measured, then it travels; under Reduce Motion it is simply there.
+            try? await Task.sleep(for: .milliseconds(reduceMotion ? 0 : 300))
+            withAnimation(reduceMotion ? Motion.fade : .smooth(duration: 0.45)) { settled = true }
+        }
     }
 
-    /// One step: Back on Choose account, the content centred and scrolling under large text, its buttons at the foot.
+    /// One step: Back on Choose account, the content scrolling under large text, its buttons at the foot.
     /// On iPad the column stops at 800 pt, so the buttons stay near the content.
     private func page(_ step: Step) -> some View {
         VStack(spacing: 0) {
@@ -45,20 +62,21 @@ struct OnboardingView: View {
                     IconButton(title: "Back", icon: "chevron-left") { choosing = false; error = nil }.disabled(connecting)
                 }
             }
-            .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
             VStack(spacing: 0) {
                 ScrollView {
-                    VStack(spacing: 0) { content(step) }
-                        .multilineTextAlignment(.center)
+                    VStack(alignment: .leading, spacing: 0) { content(step) }
+                        .multilineTextAlignment(.leading)
                         .padding(.horizontal, 24).padding(.bottom, 32)
-                        .frame(maxWidth: 440)
-                        .frame(maxWidth: .infinity, minHeight: height)
+                        .frame(maxWidth: 440, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: height, alignment: step == .choose ? .top : .center)
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                 VStack(spacing: 8) { buttons(step) }
                     .padding(.horizontal, 24).padding(.bottom, 16)
                     .frame(maxWidth: 440)
+                    .opacity(step != .welcome || settled ? 1 : 0)
             }
             .frame(maxHeight: 800).frame(maxHeight: .infinity)
         }
@@ -69,32 +87,55 @@ struct OnboardingView: View {
     @ViewBuilder private func content(_ step: Step) -> some View {
         switch step {
         case .welcome:
-            Image("Brand").resizable().frame(width: 88, height: 88)
-                .clipShape(.rect(cornerRadius: 20, style: .continuous))
+            Image("LaunchIcon").resizable().frame(width: 64, height: 64)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { mark = $0 }
+                .scaleEffect(settled ? 1 : 96 / 64)
+                .offset(settled || mark == .zero ? .zero : CGSize(width: root.midX - mark.midX, height: root.midY - mark.midY))
+                .opacity(mark == .zero ? 0 : 1)
                 .accessibilityHidden(true)
-            DisplayTitle(text: "lagom mail", size: 40).padding(.top, 24)
-            Text("Calm email for a clear day.").lagomFont(.title, .regular).foregroundStyle(Theme.secondary).padding(.top, 6)
-            VStack(alignment: .leading, spacing: 20) {
-                point(icon: "done", "Done, Reply or Later", "Each message gets one answer. The list says how many are left.")
-                point(icon: "sun", "Today in one sentence", "What is unread, what is due and what is next.")
-                point(icon: "access", "Private by default", "No tracking and no ads. Your mail goes only to your own server.")
+            // The dictionary entry, as on the site's hero. The wordmark's "l" has a side bearing: pulled back to the icon's edge.
+            VStack(alignment: .leading, spacing: 0) {
+                DisplayTitle(text: "lagom", size: .hero).padding(.leading, -3).padding(.top, 24)
+                (Text("/ˈlɑːɡɔm/").font(.custom(Theme.Face.label, size: TextSize.body.points, relativeTo: .body)).foregroundStyle(Theme.ink)
+                    + Text(" (\"LAH-gom\") ") + Text("adv., adj.").italic() + Text(" Swedish."))
+                    .lagomFont(.body).foregroundStyle(Theme.secondary).padding(.top, 8)
+                    .accessibilityLabel("Pronounced LAH-gom. Adverb, adjective. Swedish.")
+                // One sentence a line, so no width leaves a word alone.
+                DisplayTitle(text: "Not too much.\nNot too little.\nJust right.", size: .display).padding(.top, 24)
+                    .accessibilityLabel("Not too much. Not too little. Just right.")
             }
-            .padding(.top, 40)
+            .opacity(settled ? 1 : 0)
         case .choose:
-            DisplayTitle(text: "Choose your mail", size: 30)
-            Text("lagom connects straight to your mail server, with nothing in between.")
-                .lagomFont(.body).foregroundStyle(Theme.secondary).padding(.top, 8)
-            VStack(spacing: 10) {
-                // Hidden until this build has the provider's client ID, as in Add account.
-                ForEach([(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")], id: \.1) { provider, name, logo in
-                    if signInAvailable(provider: provider) {
-                        choice("Continue with \(name)", mark: Image(logo).resizable().frame(width: 18, height: 18), tile: .white) { Task { await signIn(provider) } }
+            DisplayTitle(text: "Choose your mail", size: .display).padding(.top, 8)
+            let providers = [(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")]
+                .filter { signInAvailable(provider: $0.0) }
+            Group {
+                if !providers.isEmpty {
+                    // Hidden until this build has the provider's client ID, as in Add account. Google asks for its full
+                    // button text and its "G" on white.
+                    rows {
+                        ForEach(Array(providers.enumerated()), id: \.offset) { index, item in
+                            if index > 0 { hairline }
+                            row("Continue with \(item.1)", mark: Image(item.2).resizable().frame(width: 16, height: 16)
+                                .frame(width: 32, height: 32).background(.white, in: .circle)
+                                .overlay { Circle().strokeBorder(Theme.line) }) { Task { await signIn(item.0) } }
+                        }
                     }
+                    .padding(.top, 24)
                 }
-                choice("iCloud, Fastmail and other (IMAP)", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary), tile: Theme.subtle) { other = true }
+                MonoLabel(text: "Other mail").padding(.top, 32).padding(.bottom, 8)
+                // The address decides the servers, so every mail app opens the same form.
+                rows {
+                    row("iCloud", mark: Icon("cloud", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                    hairline
+                    row("Fastmail", mark: Icon("inbox", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                    hairline
+                    row("Yahoo", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                    hairline
+                    row("Other (IMAP)", mark: Icon("settings", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                }
             }
             .disabled(connecting)
-            .padding(.top, 32)
             if connecting {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -104,69 +145,63 @@ struct OnboardingView: View {
                 .padding(.top, 16)
             }
             if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(.top, 16) }
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Icon("access", size: 14)
                 Text("Passwords stay on this device.")
             }
             .lagomFont(.small).foregroundStyle(Theme.secondary)
-            .padding(.top, 24)
+            .accessibilityElement(children: .combine)
+            .padding(.top, 16)
         case .notifications:
-            Icon("inbox", size: 30).foregroundStyle(Theme.accent)
-                .padding(22).background(Theme.subtle, in: .rect(cornerRadius: Theme.Radius.card, style: .continuous))
-            DisplayTitle(text: "New mail, when it arrives", size: 30).padding(.top, 24)
-            Text("lagom tells you about new mail in your Inbox. Nothing else.")
+            Icon("inbox", size: 32).foregroundStyle(Theme.accent)
+            DisplayTitle(text: "Notifications", size: .display).padding(.top, 24)
+            Text("lagom tells you when new mail arrives in your Inbox. Nothing else.")
                 .lagomFont(.body).foregroundStyle(Theme.secondary).padding(.top, 8)
         }
     }
 
     @ViewBuilder private func buttons(_ step: Step) -> some View {
         switch step {
-        case .welcome: wide("Add account", icon: "account-add", primary: true) { choosing = true }
+        case .welcome:
+            wide("Add account", icon: "account-add", primary: true) { taps += 1; choosing = true }
+            Text("No tracking. No lagom server between you and your mail.")
+                .lagomFont(.small).foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
         case .choose: EmptyView()
         case .notifications:
-            wide("Allow", icon: "done", primary: true, action: allow)
+            wide("Allow", icon: "done", primary: true) { taps += 1; allow() }
             wide("Not now", icon: "close", action: notNow)
         }
     }
 
-    /// A house button across the column, 50 pt tall: the step's one way on.
+    /// A house button across the column, 48 pt tall: the step's one way on.
     private func wide(_ title: String, icon: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) { ButtonLabel(title: title, icon: icon, primary: primary).frame(maxWidth: .infinity, minHeight: 50) }
+        Button(action: action) { ButtonLabel(title: title, icon: icon, primary: primary).frame(maxWidth: .infinity, minHeight: 48) }
             .buttonStyle(HouseButtonStyle(primary: primary))
     }
 
-    /// One reason to stay: a line icon in a quiet tile, a short title and one sentence.
-    private func point(icon: String, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Icon(icon, size: 20).foregroundStyle(Theme.accent)
-                .padding(10).background(Theme.subtle, in: .rect(cornerRadius: Theme.Radius.control, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).lagomFont(.base, .semibold)
-                Text(detail).lagomFont(.snippet).foregroundStyle(Theme.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.top, 1)
-        }
-        .multilineTextAlignment(.leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
+    /// A list of rows in one hairline frame, like a shopping list.
+    private func rows(@ViewBuilder _ content: () -> some View) -> some View {
+        VStack(spacing: 0) { content() }
+            .overlay { RoundedRectangle(cornerRadius: Theme.Radius.control).strokeBorder(Theme.line) }
+            .clipShape(.rect(cornerRadius: Theme.Radius.control))
     }
 
-    /// One account kind, as desktop's "Continue with" buttons: the mark in a round tile, the name and a chevron.
-    /// Google asks for its "G" on white, so provider marks sit on white in dark mode too.
-    private func choice(_ title: String, mark: some View, tile: Color, action: @escaping () -> Void) -> some View {
+    /// Between rows, from the text's edge: 16 inset + 32 mark + 16 gap.
+    private var hairline: some View { Rectangle().fill(Theme.line).frame(height: 1).padding(.leading, 64) }
+
+    /// One account kind: its mark, the name and a chevron.
+    private func row(_ title: String, mark: some View, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 14) {
-                mark.frame(width: 34, height: 34).background(tile, in: .circle).overlay { Circle().strokeBorder(Theme.line) }.accessibilityHidden(true)
-                Text(title).lagomFont(.body, .medium).multilineTextAlignment(.leading)
+            HStack(spacing: 16) {
+                mark.frame(width: 32).accessibilityHidden(true)
+                Text(title).lagomFont(.body, .medium)
                 Spacer(minLength: 8)
                 Icon("chevron-right", size: 14).foregroundStyle(Theme.secondary)
             }
-            .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 56)
-            .background(Theme.background, in: .rect(cornerRadius: Theme.Radius.panel, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous).strokeBorder(Theme.line) }
-            .contentShape(.rect(cornerRadius: Theme.Radius.panel))
+            .padding(.horizontal, 16).padding(.vertical, 8).frame(maxWidth: .infinity, minHeight: 56)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(RowStyle())
     }
 
     private func signIn(_ provider: SignInProvider) async {
@@ -179,15 +214,27 @@ struct OnboardingView: View {
     }
 }
 
-/// The site's display line: Hauora Bold with its tight tracking, growing with Dynamic Type.
+/// A list row: flat, the subtle fill only while pressed.
+private struct RowStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(Theme.ink)
+            .background(configuration.isPressed ? Theme.subtle : .clear)
+            .opacity(enabled ? 1 : 0.5)
+    }
+}
+
+/// The site's display face: Hauora Bold with its tight tracking, growing with Dynamic Type.
 private struct DisplayTitle: View {
     let text: String
-    let size: CGFloat
+    let size: TextSize
     @ScaledMetric(relativeTo: .largeTitle) private var scale: CGFloat = 1
 
     var body: some View {
-        Text(text).font(.custom(Theme.Face.display, size: size, relativeTo: .largeTitle))
-            .tracking(size * scale * Theme.Face.displayTracking)
+        Text(text).font(.custom(Theme.Face.display, size: size.points, relativeTo: .largeTitle))
+            .tracking(size.points * scale * Theme.Face.displayTracking)
             .accessibilityAddTraits(.isHeader)
     }
 }

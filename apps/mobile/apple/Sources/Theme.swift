@@ -43,6 +43,8 @@ extension TextSize {
         case .body: 16
         case .title: 17
         case .subject: 23
+        case .display: 30
+        case .hero: 56
         }
     }
 }
@@ -90,7 +92,7 @@ enum Motion {
 /// smaller than an iOS point at phone distance, so every size is the desktop's × 1.15 (body 13 → 15),
 /// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.
 enum TextSize {
-    case small, snippet, base, body, title, subject
+    case small, snippet, base, body, title, subject, display, hero
 
     var style: Font.TextStyle {
         switch self {
@@ -99,6 +101,7 @@ enum TextSize {
         case .base, .body: .body
         case .title: .headline
         case .subject: .title2
+        case .display, .hero: .largeTitle
         }
     }
 }

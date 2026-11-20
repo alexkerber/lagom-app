@@ -92,6 +92,7 @@ internal object TextSize {
     val title = 17.sp
     val subject = 23.sp
     val display = 30.sp
+    val hero = 56.sp
 }
 
 internal val DisplayFace = FontFamily(Font(R.font.hauora_bold, FontWeight.Bold))

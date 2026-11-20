@@ -23,7 +23,9 @@ struct LagomApp: App {
         WindowGroup {
             ZStack {
                 switch stage {
-                case .loading: Theme.background.ignoresSafeArea()
+                // The launch screen again (LaunchIcon, centred in the safe area), so opening the store shows no blank frame.
+                case .loading: Image("LaunchIcon").accessibilityHidden(true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.background.ignoresSafeArea())
                 case .intro, .notifications:
                     OnboardingView(model: model, notifications: stage == .notifications, allow: {
                         // The system asks over this step; the inbox follows its answer. No prompt shown, the step stays.
