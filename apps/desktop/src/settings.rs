@@ -170,9 +170,12 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .child(shortcuts(t))
 }
 
+/// The source repository: About here, and the macOS Help menu.
+pub(crate) const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
+
 /// About, with the same rows on every platform; macOS also has About lagom in the menu bar.
 const ABOUT: [(&str, Option<&str>, &str); 4] = [
-    ("Source code", None, crate::menus::REPOSITORY),
+    ("Source code", None, REPOSITORY),
     ("Licence", Some("MIT"), "https://github.com/alexkerber/lagom-app/blob/main/LICENSE"),
     ("Privacy", None, "https://lagommail.app/privacy.html"),
     ("Support", None, "https://lagommail.app/support.html"),
