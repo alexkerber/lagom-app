@@ -593,7 +593,7 @@ impl AddAccount {
                 .border_1()
                 .border_color(gpui::transparent_black())
                 .on_click(cx.listener(|this, _, window, cx| this.welcome_done(window, cx))))
-            .child(div().mt(px(8.)).text_size(px(size::SNIPPET)).text_color(t.ink2).child("No tracking. No lagom server between you and your mail."))
+            .child(div().mt(px(8.)).text_size(px(size::SNIPPET)).text_color(t.ink2).child("No tracking. No lagom servers."))
     }
 
     /// "Choose your mail", as on iOS and Android: rows in hairline frames, like a shopping list.

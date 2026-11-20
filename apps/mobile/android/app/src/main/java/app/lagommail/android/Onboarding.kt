@@ -148,7 +148,7 @@ internal val SplashIcon = 160.dp
             WideButton("Add account", R.drawable.ic_account_add, primary = true, enabled = model.core != null, onClick = addAccount)
             // The store could not open: the only way on is to try again.
             if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync) { model.perform { model.setForeground(true) } }
-            Text("No tracking. No lagom server between you and your mail.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
+            Text("No tracking. No lagom servers.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
         }
     }) {
         val measured = centre.isSpecified && mark.isSpecified

@@ -164,7 +164,7 @@ struct OnboardingView: View {
         switch step {
         case .welcome:
             wide("Add account", icon: "account-add", primary: true) { taps += 1; choosing = true }
-            Text("No tracking. No lagom server between you and your mail.")
+            Text("No tracking. No lagom servers.")
                 .lagomFont(.small).foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
         case .choose: EmptyView()
         case .notifications:
