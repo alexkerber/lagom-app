@@ -261,6 +261,8 @@ struct MailView: View {
                     Menu { moreItems(row, id: id) } label: {
                         Icon("more", label: "More").frame(width: 48, height: 48).contentShape(Circle())
                     }
+                    // The same order wherever the menu opens, as on Mac and Android.
+                    .menuOrder(.fixed)
                     .foregroundStyle(Theme.ink)
                 }
                 }
@@ -586,7 +588,7 @@ extension MailView {
             HouseButton(title: "Later", icon: "later", iconOnly: iconOnly) { act(.later, id: id) }
                 .contextMenu { laterTimes(id: id) }
             Menu { moreItems(message.row, id: id) } label: { ButtonLabel(title: "More", icon: "more", iconOnly: true) }
-                .menuStyle(.button).buttonStyle(HouseButtonStyle())
+                .menuStyle(.button).menuOrder(.fixed).buttonStyle(HouseButtonStyle())
             Spacer(minLength: 0)
             HouseButton(title: "Done", icon: "done", primary: true) { act(.done, id: id) }
         }
