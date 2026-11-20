@@ -213,13 +213,16 @@ internal class MailModel(
     fun finishSignIn(redirect: String) = perform {
         val form = accountForm
         form?.connecting = true
+        signingIn = true
         try {
             requireNotNull(core).finishSignIn(redirect)
             if (accountForm === form) accountForm = null
             reload()
             sync()
-        } finally { form?.connecting = false }
+        } finally { form?.connecting = false; signingIn = false }
     }
+    /** From the browser's redirect until the sync after it ends: Calendar's grant button shows its progress. */
+    var signingIn by mutableStateOf(false); private set
     fun perform(action: suspend () -> Unit) = viewModelScope.launch {
         try { action() } catch (e: CancellationException) { throw e }
         catch (e: Exception) { error = e.mailMessage() }

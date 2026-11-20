@@ -128,6 +128,35 @@ async fn calendar_missing_from_complete_list_hides_agenda_but_keeps_cached_event
     assert!(requests[4].contains("users/me/calendarList?"));
 }
 
+#[tokio::test]
+async fn calendar_sync_caches_the_window_only_with_access_and_a_refusal_drops_calendar_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("sync.db")).unwrap();
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    let mail = "https://mail.google.com/ openid email profile";
+    store.save_authorized_account(&account, mail).unwrap();
+    let token = |_| std::future::ready(Ok(Zeroizing::new("fixture".into())));
+    // Mail only: no request at all, so a closed port is enough.
+    sync_calendar_with(&store, &account.id, 1794000000, "http://127.0.0.1:1/", token).await.unwrap();
+    assert_eq!(store.calendar_window(&account.id).unwrap(), None);
+    let granted = format!("{mail} {}", oauth::GOOGLE_CALENDAR_SCOPES);
+    store.set_account_scopes(&account.id, &granted).unwrap();
+    let (url, fetched) = server(vec![("200 OK", LIST), ("200 OK", EMPTY), ("200 OK", EVENTS), ("200 OK", EMPTY)]).await;
+    let now = 1794000000;
+    sync_calendar_with(&store, &account.id, now, &url, token).await.unwrap();
+    assert_eq!(store.calendar_window(&account.id).unwrap(), Some(calendar_window(now)));
+    assert_eq!(calendar_window(now), (now - 7 * 86400, now + 60 * 86400));
+    assert_eq!(store.today_events("2026-11-09", 0, i64::MAX).unwrap().len(), 2);
+    fetched.await.unwrap();
+    let (url, refused) = server(vec![("403 Forbidden", r#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#)]).await;
+    assert!(matches!(sync_calendar_with(&store, &account.id, now, &url, token).await, Err(Error::CalendarConsent)));
+    let scopes = store.account_scopes(&account.id).unwrap();
+    assert!(!oauth::calendar_allowed(&scopes) && oauth::tasks_allowed(&scopes) && oauth::has_scope(&scopes, "https://mail.google.com/"), "{scopes}");
+    assert_eq!(store.today_events("2026-11-09", 0, i64::MAX).unwrap().len(), 2, "a refusal keeps the cached events");
+    refused.await.unwrap();
+}
+
 #[test]
 fn invalid_dates_and_unsafe_meeting_urls_are_rejected() {
     for value in ["2026-02-30", "2026-13-01", "2026-11-09x", "2026-1-09"] {

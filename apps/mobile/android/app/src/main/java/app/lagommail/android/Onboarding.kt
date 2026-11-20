@@ -169,11 +169,11 @@ internal val SplashIcon = 160.dp
                         append("/ˈlɑːɡɔm/ ")
                         withStyle(SpanStyle(color = c.ink2)) { append("adv., adj. Swedish.") }
                     }, Modifier.padding(top = 8.dp).clearAndSetSemantics { contentDescription = "Pronounced LAH-gom. Adverb, adjective. Swedish." },
-                        color = c.ink, fontFamily = DisplayFace, fontWeight = FontWeight.Medium, fontSize = 15.sp, textAlign = TextAlign.Center)
+                        color = c.ink, fontFamily = TextFace, fontWeight = FontWeight.Normal, fontSize = 15.sp, textAlign = TextAlign.Center)
                     // One line where it fits; else one sentence a line, so no width leaves a word alone.
                     var stacked by remember { mutableStateOf(false) }
                     Text(if (stacked) "Not too much.\nNot too little.\nJust right." else "Not too much. Not too little. Just right.",
-                        Modifier.padding(top = 20.dp), color = c.ink, fontFamily = DisplayFace, fontWeight = FontWeight.Medium, fontSize = 17.sp,
+                        Modifier.padding(top = 20.dp), color = c.ink, fontFamily = TextFace, fontWeight = FontWeight.Normal, fontSize = 17.sp,
                         lineHeight = 17.sp * Leading, textAlign = TextAlign.Center, softWrap = stacked,
                         onTextLayout = { if (!stacked && it.hasVisualOverflow) stacked = true })
                     Column(Modifier.padding(top = 32.dp).width(280.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -57,11 +57,15 @@ internal fun List<MailCounts>.sidebarCount(box: Mailbox, account: String? = null
                     count = model.counts.sidebarCount(Mailbox.LATER).takeIf { it > 0uL }?.toString()) {
                     model.perform { model.changeScope(null, Mailbox.LATER) }
                 }
+                // The rest of `MailboxOrder`: Sent, Done, Drafts, Trash.
+                listOf(Mailbox.SENT to R.drawable.ic_sent, Mailbox.DONE to R.drawable.ic_done).forEach { (box, icon) ->
+                    SidebarRow(box.label(), icon, active = active(box), enabled = enabled) { model.perform { model.changeScope(null, box) } }
+                }
                 SidebarRow("Drafts", R.drawable.ic_edit_draft, active = model.showingDrafts, enabled = enabled) {
                     model.perform { model.showDrafts() }
                 }
-                listOf(Mailbox.SENT to R.drawable.ic_sent, Mailbox.DONE to R.drawable.ic_done, Mailbox.TRASH to R.drawable.ic_trash).forEach { (box, icon) ->
-                    SidebarRow(box.label(), icon, active = active(box), enabled = enabled) { model.perform { model.changeScope(null, box) } }
+                SidebarRow("Trash", R.drawable.ic_trash, active = active(Mailbox.TRASH), enabled = enabled) {
+                    model.perform { model.changeScope(null, Mailbox.TRASH) }
                 }
                 if (model.accounts.isNotEmpty()) {
                     SidebarHeading("Folders")

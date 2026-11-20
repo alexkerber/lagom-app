@@ -108,6 +108,9 @@ import kotlin.math.roundToInt
     }
 }
 
+/** The mailboxes in the order of every lagom app, desktop's first; null is Drafts, which core keeps apart. */
+internal val MailboxOrder: List<Mailbox?> = listOf(Mailbox.INBOX, Mailbox.LATER, Mailbox.SENT, Mailbox.DONE, null, Mailbox.TRASH)
+
 internal fun Mailbox.label(): String = when (this) {
     Mailbox.INBOX -> "Inbox"; Mailbox.LATER -> "Later"; Mailbox.DONE -> "Done"; Mailbox.SENT -> "Sent"; Mailbox.TRASH -> "Trash"
 }
@@ -143,14 +146,11 @@ internal fun Mailbox.label(): String = when (this) {
                     }
                 }
                 DropdownMenu(menu, { menu = false }) {
-                    Mailbox.entries.forEach { box ->
-                        DropdownMenuItem(text = { Text(box.label()) }, onClick = {
-                            menu = false; model.perform { model.changeScope(model.accountId, box) }
+                    MailboxOrder.forEach { box ->
+                        DropdownMenuItem(text = { Text(box?.label() ?: "Drafts") }, onClick = {
+                            menu = false; model.perform { if (box == null) model.showDrafts() else model.changeScope(model.accountId, box) }
                         })
                     }
-                    DropdownMenuItem(text = { Text("Drafts") }, onClick = {
-                        menu = false; model.perform { model.showDrafts() }
-                    })
                     // Desktop's folder group: the server's own folders, with the account when there are several.
                     val folders = model.folders.filter { model.accountId == null || it.account == model.accountId }
                     val owners = model.accounts.filter { model.accountId == null || it.id == model.accountId }
@@ -276,6 +276,7 @@ internal fun Mailbox.label(): String = when (this) {
             val shownIds = remember { ArrayList<Long>() }
             val animate = remember(ids) { smallChange(shownIds, ids).also { shownIds.clear(); shownIds.addAll(ids) } }
             val list = rememberLazyListState()
+            val dates = mailDates()
             val atTop by remember(list) { derivedStateOf { list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0 } }
             LazyColumn(Modifier.fillMaxSize(), state = list) {
                 // motion.md: at the top, new mail grows in where it can be seen; scrolled down, the first row on screen stays put.
@@ -293,14 +294,21 @@ internal fun Mailbox.label(): String = when (this) {
                         Text(failure.message, color = lagom.danger, style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                items(rows, key = { it.id }) { row ->
-                    Box(rowMotion(animate)) {
-                        MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, model.moveTargets(row.account), accountMark(model, row.account),
-                            onSelect = { model.perform { model.select(row.id) } },
-                            onAction = { model.perform { model.act(it, row.id) } },
-                            onRead = { model.perform { model.setRead(row) } },
-                            onMove = { folder -> model.perform { model.move(row.id, folder) } },
-                            onNewFolder = { model.newFolder = NewFolder(row.account, row.id) })
+                // Search lists in match order, so a group can come back; a repeat keys on its first row.
+                val titles = HashSet<String>()
+                grouped(rows) { dates.group(RowPresentation(it).date) }.forEach { (title, groupRows) ->
+                    item(key = if (titles.add(title)) "group-$title" else "group-$title-${groupRows.first().id}") {
+                        GroupHeader(title, rowMotion(animate))
+                    }
+                    items(groupRows, key = { it.id }) { row ->
+                        Box(rowMotion(animate)) {
+                            MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, model.moveTargets(row.account), accountMark(model, row.account),
+                                onSelect = { model.perform { model.select(row.id) } },
+                                onAction = { model.perform { model.act(it, row.id) } },
+                                onRead = { model.perform { model.setRead(row) } },
+                                onMove = { folder -> model.perform { model.move(row.id, folder) } },
+                                onNewFolder = { model.newFolder = NewFolder(row.account, row.id) })
+                        }
                     }
                 }
                 if (model.hasMore) item(key = "more") {
@@ -330,9 +338,15 @@ internal fun Mailbox.label(): String = when (this) {
     when {
         model.unreadOnly && model.rows.isNotEmpty() -> EmptyState(R.drawable.ic_read, "No unread mail", modifier)
         model.searchText.isNotBlank() -> EmptyState(R.drawable.ic_search, "No results", modifier, "Nothing in your mail matches.")
-        model.mailbox == Mailbox.INBOX && model.folder == null ->
-            EmptyState(R.drawable.ic_inbox, "Nothing left.", modifier, "Not too much. Not too little. Just right.")
-        else -> EmptyState(R.drawable.ic_inbox, "No mail here", modifier, "Pull to refresh your mail.")
+        model.folder != null -> EmptyState(R.drawable.ic_inbox, "No mail here", modifier, "Pull to refresh your mail.")
+        // Later and Done fill from your own actions, not a refresh; each mailbox says what lands there. Same words on iOS.
+        else -> when (model.mailbox) {
+            Mailbox.INBOX -> EmptyState(R.drawable.ic_inbox, "Nothing left.", modifier, "Not too much. Not too little. Just right.")
+            Mailbox.LATER -> EmptyState(R.drawable.ic_later, "Nothing waiting.", modifier, "Mail you put off waits here.")
+            Mailbox.SENT -> EmptyState(R.drawable.ic_sent, "Nothing sent.", modifier, "Mail you send lands here.")
+            Mailbox.DONE -> EmptyState(R.drawable.ic_done, "Nothing done yet.", modifier, "Mail you mark Done lands here.")
+            Mailbox.TRASH -> EmptyState(R.drawable.ic_trash, "Trash is empty.", modifier, "Deleted mail lands here.")
+        }
     }
 }
 
@@ -377,15 +391,69 @@ internal fun Mailbox.label(): String = when (this) {
 private fun LazyItemScope.rowMotion(animate: Boolean): Modifier =
     if (animate) Modifier.animateItem(fadeInSpec = Fade, placementSpec = landing(IntOffset.VisibilityThreshold), fadeOutSpec = Fade) else Modifier
 
-/** The list's time, desktop `mail::when`: the clock today, the weekday this week, then the date. */
-@Composable private fun listTime(date: java.time.Instant): String {
-    val day = date.atZone(ZoneId.systemDefault()).toLocalDate()
-    val days = java.time.temporal.ChronoUnit.DAYS.between(day, java.time.LocalDate.now())
-    return when {
-        days == 0L -> android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date.from(date))
-        days in 1..6 -> localDate(day, "EEE")
-        else -> localDate(day, if (day.year == java.time.LocalDate.now().year) "dMMM" else "dMMMyy")
+/** The list's time in the user's 12- or 24-hour setting, desktop `mail::when`. */
+@Composable private fun listTime(date: java.time.Instant): String = mailDates().listTime(date)
+
+@Composable private fun mailDates(): MailDates {
+    val clock = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
+    return MailDates({ clock.format(java.util.Date.from(it)) })
+}
+
+/** Mail dates, desktop `mail::when`, `mail::date_group` and `mail::reading_date`, as iOS `DateWords`.
+ * `clock` formats a time of day; `format` takes an ICU skeleton. */
+internal class MailDates(
+    private val clock: (java.time.Instant) -> String,
+    private val today: java.time.LocalDate = java.time.LocalDate.now(),
+    private val zone: ZoneId = ZoneId.systemDefault(),
+    private val format: (java.time.LocalDate, String) -> String = ::localDate,
+) {
+    private fun day(date: java.time.Instant) = date.atZone(zone).toLocalDate()
+    private fun daysAgo(day: java.time.LocalDate) = java.time.temporal.ChronoUnit.DAYS.between(day, today)
+
+    /** The list's time: the clock today, "Yesterday", a weekday this week, "3 Nov" this year, else "Nov 2024". */
+    fun listTime(date: java.time.Instant): String {
+        val day = day(date)
+        val days = daysAgo(day)
+        return when {
+            days <= 0L -> clock(date)
+            days == 1L -> "Yesterday"
+            days <= 6L -> format(day, "EEE")
+            else -> format(day, if (day.year == today.year) "dMMM" else "MMMyyyy")
+        }
     }
+
+    /** The reading pane's date: "Today 09:42", "Fri 09:42", "3 Nov, 09:42". A future date, from a skewed sender clock, shows as a date. */
+    fun readingDate(date: java.time.Instant): String {
+        val day = day(date)
+        val time = clock(date)
+        return when (daysAgo(day)) {
+            0L -> "Today $time"
+            in 1L..6L -> "${listTime(date)} $time"
+            else -> "${format(day, if (day.year == today.year) "dMMM" else "dMMMyyyy")}, $time"
+        }
+    }
+
+    /** The list's group headers: Today, Yesterday, earlier weekdays of this week, then Earlier. */
+    fun group(date: java.time.Instant): String {
+        val day = day(date)
+        val days = daysAgo(day)
+        return when {
+            days <= 0L -> "Today"
+            days == 1L -> "Yesterday"
+            days < today.dayOfWeek.value -> format(day, "EEEE") // dayOfWeek is 1 on Monday
+            else -> "Earlier"
+        }
+    }
+}
+
+/** Runs of neighbouring items with the same key, in list order, as iOS `grouped`. */
+internal fun <T> grouped(items: List<T>, key: (T) -> String): List<Pair<String, List<T>>> {
+    val groups = mutableListOf<Pair<String, MutableList<T>>>()
+    for (item in items) {
+        val title = key(item)
+        if (groups.lastOrNull()?.first == title) groups.last().second.add(item) else groups.add(title to mutableListOf(item))
+    }
+    return groups
 }
 
 internal fun swipeStage(dx: Float, rowWidth: Float, reach: Float, canDelete: Boolean): MailAction? = when {
@@ -774,9 +842,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                 Text(sender, fontWeight = FontWeight.SemiBold, maxLines = 2)
                 Text(row.senderAddress, color = c.ink2, style = MaterialTheme.typography.bodySmall)
                 val date = RowPresentation(row).date
-                Text("${localDate(date.atZone(ZoneId.systemDefault()).toLocalDate(), "EEEEdMMMMyyyy")}, " +
-                    android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date.from(date)),
-                    color = c.ink2, style = MaterialTheme.typography.bodySmall)
+                Text(mailDates().readingDate(date), color = c.ink2, style = MaterialTheme.typography.bodySmall)
             }
         }
         Box {

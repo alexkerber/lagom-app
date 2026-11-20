@@ -1835,3 +1835,17 @@ async fn create_folder_checks_the_name_as_desktop_and_creates_it_on_the_server()
         assert!(core.folders(Some(a.id.clone())).await.unwrap().contains(&created), "the new folder lists with the others");
     }).await.unwrap();
 }
+
+#[test]
+fn a_calendar_grant_keeps_the_granted_scopes_and_a_removed_account_loses_its_new_secret() {
+    let (_dir, core) = fixture();
+    let s = core.stores.local.lock().unwrap();
+    let a = fixture_account(&s, "grant@gmail.com", 1);
+    let granted = format!("https://mail.google.com/ {}", lagom_core::oauth::GOOGLE_CALENDAR_SCOPES);
+    assert_eq!(save_grant(&s, &a.id, a.clone(), &granted).unwrap().id, a.id);
+    assert_eq!(s.account_scopes(&a.id).unwrap(), granted);
+    assert_eq!(&*a.password().unwrap(), "fixture", "the saved account keeps its secret");
+    s.delete_account(&a.id).unwrap();
+    assert!(matches!(save_grant(&s, &a.id, a.clone(), &granted), Err(lagom_core::Error::NotFound)));
+    assert!(a.password().is_err(), "no secret stays behind for a removed account");
+}

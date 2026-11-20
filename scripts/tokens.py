@@ -88,7 +88,8 @@ def rust(tokens):
         out += [f"    pub const {key.upper()}: f32 = {float(value)};" for key, value in values.items()]
         out.append("}")
     display, label, _ = faces(tokens)
-    out += ["", "pub mod face {", f'    pub const DISPLAY: &str = "{display[0]}";', f'    pub const LABEL: &str = "{label[0]}";',
+    text = tokens["type"]["faces"]["text"]
+    out += ["", "pub mod face {", f'    pub const TEXT: &str = "{text}";', f'    pub const DISPLAY: &str = "{display[0]}";', f'    pub const LABEL: &str = "{label[0]}";',
             "    /// Thousandths of an em.", f"    pub const DISPLAY_TRACKING: i16 = {tokens['type']['faces']['display_tracking']};", "}"]
     out += ["", f"pub const LEADING: f32 = {tokens['type']['leading']};",
             f"pub const READING_LEADING: f32 = {tokens['type']['reading_leading']};",
@@ -106,7 +107,8 @@ def swift(tokens):
     out += ["", "    enum Radius {"]
     out += [f"        static let {key}: CGFloat = {number(value)}" for key, value in tokens["radii"].items()]
     display, label, tracking = faces(tokens)
-    out += ["    }", "", "    /// PostScript names of the bundled faces; tracking in ems.", "    enum Face {",
+    out += ["    }", "", "    /// The text family (SwiftUI picks the weight), PostScript names of the other faces; tracking in ems.",
+            "    enum Face {", f'        static let text = "{tokens["type"]["faces"]["text"]}"',
             f'        static let display = "{display[1]}"', f'        static let label = "{label[1]}"',
             f"        static let displayTracking: CGFloat = {number(tracking)}", "    }"]
     out += ["}", "", "extension TextSize {", "    var points: CGFloat {", "        switch self {"]
@@ -133,6 +135,9 @@ def kotlin(tokens):
     out += [f"    val {key} = {number(sizes[key])}.sp" for key in MOBILE_SIZES]
     display, label, tracking = faces(tokens)
     out += ["}", ""]
+    f = tokens["type"]["faces"]
+    weights = ", ".join(f"Font(R.font.{f['text'].lower().replace(' ', '_')}_{w.lower()}, FontWeight.{'Normal' if w == 'Regular' else w})" for w in f["text_weights"])
+    out.append(f"internal val TextFace = FontFamily({weights})")
     out += [f"internal val {name}Face = FontFamily(Font(R.font.{face[2]}, FontWeight.{face[3]}))" for name, face in (("Display", display), ("Label", label))]
     out += [f"internal const val DisplayTracking = {number(tracking)}f", "", "internal object Radius {"]
     out += [f"    val {key} = {number(value)}.dp" for key, value in tokens["radii"].items()]

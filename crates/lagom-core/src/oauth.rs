@@ -244,8 +244,11 @@ pub struct Pending {
     redirect: String,
     state: String,
     verifier: Zeroizing<String>,
+    existing: Option<Account>,
 }
 impl Pending {
+    /// The account a calendar grant adds access to; `None` for a new sign-in.
+    pub fn account(&self) -> Option<&Account> { self.existing.as_ref() }
     /// The URL scheme the system browser session hands back to the app.
     pub fn scheme(&self) -> String {
         self.redirect.split(':').next().unwrap_or_default().to_ascii_lowercase()
@@ -283,17 +286,26 @@ pub fn mobile_available(provider: Provider) -> bool {
 /// The authorization URL for the system browser, and the state to keep until its redirect arrives.
 pub fn begin(provider: Provider) -> Result<(String, Pending)> {
     let (config, redirect) = mobile_config(provider)?;
-    begin_with(provider, config, redirect)
+    begin_with(provider, config, redirect, None)
 }
-fn begin_with(provider: Provider, config: Config, redirect: String) -> Result<(String, Pending)> {
-    let pending = Pending { provider, config, redirect, state: random(), verifier: Zeroizing::new(random()) };
-    let url = authorize_url(provider, &pending.config, &pending.redirect, &pending.state, &pending.verifier, None)?;
+/// As desktop's calendar consent: the same Google account signs in again for mail, Calendar and Tasks.
+/// `finish` replaces its refresh token only when the same email address comes back.
+pub fn begin_calendar_access(account: &Account) -> Result<(String, Pending)> {
+    if account.auth != Auth::OAuth(Provider::Google) { return Err(Error::Invalid("Google calendar requires a Google account")); }
+    let (mut config, redirect) = mobile_config(Provider::Google)?;
+    config.scope.push(' ');
+    config.scope.push_str(GOOGLE_CALENDAR_SCOPES);
+    begin_with(Provider::Google, config, redirect, Some(account.clone()))
+}
+fn begin_with(provider: Provider, config: Config, redirect: String, existing: Option<Account>) -> Result<(String, Pending)> {
+    let pending = Pending { provider, config, redirect, state: random(), verifier: Zeroizing::new(random()), existing };
+    let url = authorize_url(provider, &pending.config, &pending.redirect, &pending.state, &pending.verifier, pending.existing.as_ref().map(|a| a.email.as_str()))?;
     Ok((url, pending))
 }
 /// Exchanges the redirect's code and stores the refresh token. Consumes the sign-in: a code is single use.
 pub async fn finish(pending: Pending, callback: &str) -> Result<SignedIn> {
     let code = pending.code(callback)?;
-    redeem(pending.provider, &pending.config, None, &pending.redirect, &code, &pending.verifier).await
+    redeem(pending.provider, &pending.config, pending.existing.as_ref(), &pending.redirect, &code, &pending.verifier).await
 }
 
 async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token: &mut Token) -> Result<SignedIn> {

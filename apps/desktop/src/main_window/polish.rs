@@ -195,7 +195,7 @@ pub(crate) fn action_icon(label: &str) -> Option<&'static str> {
         "Copy address" => "icons/copy.svg", "Load remote images" => "icons/image.svg", "Load more" => "icons/load-more.svg",
         "Delete" => "icons/trash.svg", "Empty Trash" | "Delete all" => "icons/empty-trash.svg", "Cancel" => "icons/close.svg",
         "Undo" => "icons/undo.svg", "Send again" => "icons/retry-send.svg", "Edit draft" => "icons/edit-draft.svg",
-        "New task" | "Add task" => "icons/plus.svg", "New list" | "Add list" => "icons/new-list.svg",
+        "New task" => "icons/plus.svg", "New list" | "Add list" => "icons/new-list.svg",
         "Rename" => "icons/rename.svg", "Delete list" => "icons/delete-list.svg", "Open mail" => "icons/linked-mail.svg",
         "New event" => "icons/new-event.svg", "Today" => "icons/calendar.svg", "Join" | "Join meeting" => "icons/camera.svg",
         "Open in Google Calendar" => "icons/external.svg", "Close" => "icons/close.svg",

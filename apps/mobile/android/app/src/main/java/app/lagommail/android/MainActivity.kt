@@ -54,6 +54,7 @@ import app.lagommail.core.SendAttachment
 import app.lagommail.core.installSecretStore
 import app.lagommail.core.parseMailto
 import app.lagommail.core.seedDemo
+import app.lagommail.core.seedDemoWithoutCalendar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -86,21 +87,26 @@ class LagomApplication : Application() {
     /** A store of fixture mail in the cache, never the real one, for a debug [DebugLaunch.demo]. "welcome" starts empty each time. */
     fun demoCore(demo: String): LagomCore {
         check(credentials)
-        val directory = File(cacheDir, if (demo == "welcome") "demo-welcome" else "demo")
+        val directory = File(cacheDir, if (demo == "mail" || demo == "notifications") "demo" else "demo-$demo")
         // Every demo launch starts from the same fixtures, whatever the last one marked done.
         directory.deleteRecursively()
-        if (demo != "welcome") seedDemo(directory.absolutePath)
+        when (demo) {
+            "welcome" -> {}
+            // Calendar's empty states, for screenshots.
+            "calendar-google", "calendar-granted", "calendar-none" -> seedDemoWithoutCalendar(directory.absolutePath, demo.removePrefix("calendar-"))
+            else -> seedDemo(directory.absolutePath)
+        }
         return LagomCore.open(directory.absolutePath)
     }
 }
 
 /**
  * Debug-only launch extras for screenshots without real accounts, as desktop's `LAGOM_DEMO` and `LAGOM_THEME`:
- * `--es lagomDemo mail|welcome|notifications` and `--es lagomTheme light|dark`. A release build ignores both.
+ * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-granted|calendar-none` and `--es lagomTheme light|dark`. A release build ignores both.
  */
 internal data class DebugLaunch(val demo: String? = null, val dark: Boolean? = null)
 internal fun debugLaunch(debug: Boolean, demo: String?, theme: String?): DebugLaunch =
-    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications") },
+    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none") },
         when (theme) { "light" -> false; "dark" -> true; else -> null })
 
 /** The redirect of a browser sign-in, or null for any other link. The core then checks the exact URI and state. */
@@ -307,6 +313,8 @@ class MainActivity : ComponentActivity() {
     }
     // Unread counts and Today's mail follow every mail reload and the end of a sync.
     LaunchedEffect(model.rows, model.syncing) { if (!model.syncing) planner.reloadMail() }
+    // A sync fetches the calendar too.
+    LaunchedEffect(model.syncing) { if (!model.syncing) planner.reloadAgenda() }
     LaunchedEffect(section) {
         if (section == AppSection.CALENDAR) planner.reloadAgenda()
         if (section == AppSection.TODAY) planner.reloadMail()
@@ -326,7 +334,7 @@ class MainActivity : ComponentActivity() {
                     }
                     AppSection.MAIL -> MailScreen(model, twoPane)
                     // The tablet layouts' breakpoint: a phone, also in landscape, keeps the one-day grid.
-                    AppSection.CALENDAR -> CalendarScreen(planner, grid = twoPane)
+                    AppSection.CALENDAR -> CalendarScreen(planner, model, grid = twoPane)
                     AppSection.TODO -> TodoScreen(planner)
                 }
             }

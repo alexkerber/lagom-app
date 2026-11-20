@@ -93,8 +93,8 @@ struct RootView: View {
         }
         // Unread counts, Today's mail and the sidebar counts follow every mail reload.
         .onChange(of: model.rows) { _, _ in Task { await planner.reloadMail() } }
-        // A sync can change other mailboxes while the visible rows stay the same.
-        .onChange(of: model.syncing) { _, syncing in if !syncing { Task { await planner.reloadMail() } } }
+        // A sync can change other mailboxes, and fetches the calendar, while the visible rows stay the same.
+        .onChange(of: model.syncing) { _, syncing in if !syncing { Task { await planner.reloadMail(); await planner.reloadAgenda() } } }
         .onChange(of: section) { _, section in
             if section == .calendar { Task { await planner.reloadAgenda() } }
             if section == .today { Task { await planner.reloadMail() } }
@@ -172,7 +172,7 @@ struct SidebarView: View {
             }
         }
         mailbox(.later, count: planner.later(account: nil))
-        ForEach([MailboxChoice.drafts, .sent, .done, .trash]) { mailbox($0, count: 0) }
+        ForEach(MailboxChoice.allCases.filter { $0 != .inbox && $0 != .later }) { mailbox($0, count: 0) }
         }
     }
 

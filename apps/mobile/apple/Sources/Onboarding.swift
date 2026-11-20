@@ -71,14 +71,14 @@ struct OnboardingView: View {
                 VStack(spacing: 0) {
                     DisplayTitle(text: "lagom", size: .hero).padding(.top, 24)
                     (Text("/ˈlɑːɡɔm/ ") + Text("adv., adj. Swedish.").foregroundStyle(Theme.secondary))
-                        .font(.custom(Self.medium, size: 15, relativeTo: .body)).padding(.top, 8)
+                        .font(.custom(Self.regular, size: 15, relativeTo: .body)).padding(.top, 8)
                         .accessibilityLabel("Pronounced LAH-gom. Adverb, adjective. Swedish.")
                     // One line where it fits; else one sentence a line, so no width leaves a word alone.
                     ViewThatFits(in: .horizontal) {
                         Text("Not too much. Not too little. Just right.").fixedSize()
                         Text("Not too much.\nNot too little.\nJust right.")
                     }
-                    .font(.custom(Self.medium, size: 17, relativeTo: .body)).padding(.top, 20)
+                    .font(.custom(Self.regular, size: 17, relativeTo: .body)).padding(.top, 20)
                     Button { taps += 1; choosing = true } label: {
                         // 256 + the style's 12 pt sides = 280, and it may narrow on a 320 pt screen.
                         Text("Add account").lagomFont(.base, .medium).frame(maxWidth: 256).frame(minHeight: 48)
@@ -104,8 +104,8 @@ struct OnboardingView: View {
         .transition(.asymmetric(insertion: Motion.slide(.leading, reduceMotion), removal: .opacity))
     }
 
-    /// Hauora Medium: the lightest bundled weight, for Welcome's body lines.
-    private static let medium = "Hauora-Medium"
+    /// Hauora Regular, for Welcome's body lines.
+    private static let regular = "Hauora-Regular"
 
     /// One step: Back on Choose account, the content scrolling under large text, its buttons at the foot.
     /// On iPad the column stops at 800 pt, so the buttons stay near the content.

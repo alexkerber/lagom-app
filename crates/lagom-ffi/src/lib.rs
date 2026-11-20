@@ -362,6 +362,33 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     if let Some(error) = first { return Err(error); }
     match error { Some(error) => Err(error), None => Ok(()) }
 }
+/// After a calendar grant, which already replaced this account's refresh token: keep the scopes Google granted this time.
+fn save_grant(s: &Store, id: &str, account: Account, scopes: &str) -> lagom_core::Result<MailAccount> {
+    match s.set_account_scopes(id, scopes) {
+        // Removed while the browser was open: its new secret must not stay behind.
+        Err(lagom_core::Error::NotFound) => { let _ = account.delete_password(); Err(lagom_core::Error::NotFound) }
+        other => other.map(|()| account.into()),
+    }
+}
+/// Mail, then Calendar and Google Tasks, which run even when mail failed.
+fn sync_with_google(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
+    let mail = sync_account(stores, a);
+    sync_google(stores, a);
+    mail
+}
+/// Calendar and Google Tasks, on their own connection as on desktop.
+// shortcut: a failure only reaches the log and never fails the mail sync; show a calendar sync state, as desktop does, if people miss it.
+fn sync_google(stores: &Stores, a: &Account) {
+    if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return; }
+    let log = |what: &str, result: lagom_core::Result<()>| if let Err(error) = result { eprintln!("lagom: Google {what} sync failed: {error:?}"); };
+    let mut store = match Store::open(&stores.path) { Ok(store) => store, Err(error) => return log("Calendar", Err(error)) };
+    log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
+    match store.account_scopes(&a.id) {
+        Ok(scopes) if lagom_core::oauth::tasks_allowed(&scopes) => log("Tasks", network(lagom_core::google::sync_tasks(&mut store, a))),
+        Ok(_) => {}
+        Err(error) => log("Tasks", Err(error)),
+    }
+}
 
 #[uniffi::export(async_runtime = "tokio")]
 impl LagomCore {
@@ -437,10 +464,18 @@ impl LagomCore {
         *self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
         Ok(start)
     }
+    /// Starts the browser sign-in that adds Google Calendar and Tasks to a Google account. `finish_sign_in` ends it.
+    pub fn begin_calendar_access(&self, account_id: String) -> Result<SignInStart> {
+        let a = account(&self.stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &account_id)?;
+        let (url, pending) = lagom_core::oauth::begin_calendar_access(&a)?;
+        let start = SignInStart { url, callback_scheme: pending.scheme() };
+        *self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+        Ok(start)
+    }
     /// `callback_url` is the redirect the browser handed back. Only the pending sign-in's own redirect
     /// (its URI and state) is taken; anything else is refused and leaves the sign-in pending.
-    // shortcut: adds new accounts only. When a refresh token expires the user removes the account and
-    // signs in again; use core's `reauthenticate` checks here once that happens in practice.
+    // shortcut: adds new accounts, or calendar access after `begin_calendar_access`. When a refresh token expires
+    // the user removes the account and signs in again; use core's `reauthenticate` checks here once that happens in practice.
     pub async fn finish_sign_in(&self, callback_url: String) -> Result<MailAccount> {
         let callback_url = Zeroizing::new(callback_url);
         let pending = {
@@ -450,9 +485,11 @@ impl LagomCore {
                 other => { *slot = other; return Err(failure("Sign-in was interrupted. Try again.")); }
             }
         };
+        let grant = pending.account().map(|a| a.id.clone());
         self.run_network(move |s| network(async {
             let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
             let account = signed.account;
+            if let Some(id) = grant { return save_grant(s, &id, account, &signed.scopes); }
             let saved = s.accounts().and_then(|all| {
                 if all.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
                     return Err(lagom_core::Error::Invalid("This account is already in lagom."));
@@ -478,14 +515,14 @@ impl LagomCore {
         }).await
     }
     pub async fn sync(&self, account_id: String) -> Result<()> {
-        self.run_sync(move |stores| { let a = account(&stores.folder_lock(), &account_id)?; sync_account(stores, &a) }).await
+        self.run_sync(move |stores| { let a = account(&stores.folder_lock(), &account_id)?; sync_with_google(stores, &a) }).await
     }
     pub async fn sync_all(&self) -> Result<()> {
         self.run_sync(|stores| {
             let mut first_error = None;
             let accounts = stores.folder_lock().accounts()?;
             for a in accounts {
-                if let Err(error) = sync_account(stores, &a) {
+                if let Err(error) = sync_with_google(stores, &a) {
                     first_error.get_or_insert(lagom_core::Error::Folder { folder: a.email, source: Box::new(error) });
                 }
             }

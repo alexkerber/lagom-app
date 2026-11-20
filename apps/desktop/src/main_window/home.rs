@@ -324,9 +324,7 @@ mod tests {
     #[test]
     fn review_task_creation_uses_a_plain_plus() {
         use gpui::AssetSource;
-        for label in ["New task", "Add task"] {
-            assert_eq!(action_icon(label), Some("icons/plus.svg"));
-        }
+        assert_eq!(action_icon("New task"), Some("icons/plus.svg"));
         let bytes = crate::Assets.load("icons/plus.svg").unwrap().unwrap();
         let svg = std::str::from_utf8(&bytes).unwrap();
         assert!(svg.contains("viewBox=\"0 0 16 16\""));

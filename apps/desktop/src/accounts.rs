@@ -561,9 +561,9 @@ impl AddAccount {
     }
 
     /// The first run, as on iOS and Android: one centred group. The wordmark is the one heavy element; the
-    /// dictionary line and the definition are Hauora Medium, the lightest bundled weight.
+    /// dictionary line and the definition are Hauora Regular.
     fn welcome(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        let medium = |px_size: f32| div().font_family(font::DISPLAY).font_weight(FontWeight::MEDIUM).text_size(px(px_size));
+        let regular = |px_size: f32| div().font_family(font::DISPLAY).font_weight(FontWeight::NORMAL).text_size(px(px_size));
         div()
             .w_full()
             .flex()
@@ -575,8 +575,8 @@ impl AddAccount {
             .child(crate::main_window::app_mark(118.))
             .child(div().mt(px(13.)).font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(56.))
                 .tracking(crate::theme::face::DISPLAY_TRACKING).line_height(relative(1.1)).child("lagom"))
-            .child(medium(15.).mt(px(8.)).flex().gap(px(5.)).child("/ˈlɑːɡɔm/").child(div().text_color(t.ink2).child("adv., adj. Swedish.")))
-            .child(medium(17.).mt(px(20.)).child("Not too much. Not too little. Just right."))
+            .child(regular(15.).mt(px(8.)).flex().gap(px(5.)).child("/ˈlɑːɡɔm/").child(div().text_color(t.ink2).child("adv., adj. Swedish.")))
+            .child(regular(17.).mt(px(20.)).child("Not too much. Not too little. Just right."))
             // The house primary without an icon, as the spec asks. An accent ring would vanish on the fill: focus draws ink.
             .child(div().id("welcome-add").debug_selector(|| "welcome-add".into()).track_focus(&self.stops[0])
                 .flex_shrink_0()

@@ -74,9 +74,14 @@ display = 26
 # Today's date and counts: large, with some weight (Alex 2026-11-17: "stora fonter och lite kraft").
 hero = 48
 
-# The bundled faces (OFL, apps/desktop/assets/fonts): display for Today's sentence and page titles,
-# label for small capitals. Families as the font files name them; the site's web fonts are "Hauora Sans".
+# The bundled faces (OFL, apps/desktop/assets/fonts): text for all UI text (Alex 2026-11-20: "samma
+# typsnitt överallt"), display for Today's sentence and page titles, label for small capitals and counts.
+# Families as the font files name them; the site's web fonts are "Hauora Sans".
 [type.faces]
+text = "Hauora"
+# Every weight the UI asks for, each a bundled file, so nothing is synthesised. Android's family is
+# generated from this list; desktop FONTS and iOS UIAppFonts list the same files by hand.
+text_weights = ["Regular", "Medium", "SemiBold", "Bold"]
 display = "Hauora"
 display_weight = "Bold"
 label = "Geist Mono"

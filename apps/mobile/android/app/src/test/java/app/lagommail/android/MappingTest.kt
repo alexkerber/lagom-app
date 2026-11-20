@@ -32,6 +32,40 @@ class MappingTest {
     @Test fun everyMailboxHasItsLabel() {
         assertEquals(listOf("Inbox", "Later", "Done", "Sent", "Trash"), Mailbox.entries.map { it.label() })
     }
+    @Test fun mailboxesFollowTheDesktopOrder() {
+        assertEquals(listOf("Inbox", "Later", "Sent", "Done", "Drafts", "Trash"), MailboxOrder.map { it?.label() ?: "Drafts" })
+    }
+    @Test fun mailDatesUseRelativeWordsAsDesktopAndIos() {
+        // Tuesday 10 November 2026, as iOS PlannerTests.
+        val zone = java.time.ZoneOffset.UTC
+        val dates = MailDates({ "clock" }, java.time.LocalDate.of(2026, 11, 10), zone) { date, skeleton -> "$skeleton $date" }
+        fun at(day: String) = java.time.LocalDate.parse(day).atTime(9, 42).toInstant(zone)
+        assertEquals("clock", dates.listTime(at("2026-11-10")))
+        assertEquals("Yesterday", dates.listTime(at("2026-11-09")))
+        assertEquals("EEE 2026-11-06", dates.listTime(at("2026-11-06")))
+        assertEquals("dMMM 2026-10-26", dates.listTime(at("2026-10-26")))
+        assertEquals("MMMyyyy 2025-10-01", dates.listTime(at("2025-10-01")))
+        assertEquals("Today clock", dates.readingDate(at("2026-11-10")))
+        assertEquals("Yesterday clock", dates.readingDate(at("2026-11-09")))
+        assertEquals("EEE 2026-11-06 clock", dates.readingDate(at("2026-11-06")))
+        assertEquals("dMMM 2026-10-26, clock", dates.readingDate(at("2026-10-26")))
+        assertEquals("dMMMyyyy 2025-10-01, clock", dates.readingDate(at("2025-10-01")))
+        // A skewed sender clock: the future reads as a date, and groups under Today.
+        assertEquals("dMMM 2026-11-12, clock", dates.readingDate(at("2026-11-12")))
+        assertEquals("Today", dates.group(at("2026-11-12")))
+        assertEquals("Today", dates.group(at("2026-11-10")))
+        assertEquals("Yesterday", dates.group(at("2026-11-09")))
+        // Monday is the only earlier day of this week; Sunday belongs to last week.
+        assertEquals("Earlier", dates.group(at("2026-11-08")))
+        val friday = MailDates({ "clock" }, java.time.LocalDate.of(2026, 11, 13), zone) { date, skeleton -> "$skeleton $date" }
+        assertEquals("EEEE 2026-11-11", friday.group(at("2026-11-11")))
+        assertEquals("EEEE 2026-11-09", friday.group(at("2026-11-09")))
+        assertEquals("Earlier", friday.group(at("2026-11-08")))
+    }
+    @Test fun groupsAreRunsInListOrder() {
+        assertEquals(listOf("a" to listOf(1, 2), "b" to listOf(3), "a" to listOf(4)), grouped(listOf(1, 2, 3, 4)) { if (it == 3) "b" else "a" })
+        assertEquals(emptyList<Pair<String, List<Int>>>(), grouped(emptyList<Int>()) { "a" })
+    }
     @Test fun manualServerValidatesPortsAndMapsTransport() {
         assertEquals(993.toUShort(), server(" mail.example.test ", "993", " user ", true).port)
         assertEquals(TransportSecurity.TLS, server("host", "993", "user", true).security)

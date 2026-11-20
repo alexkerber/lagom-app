@@ -37,6 +37,9 @@ class Tokens(unittest.TestCase):
         self.assertIn("DISPLAY_TRACKING: i16 = -45;", rendered[tokens.DESKTOP])
         self.assertIn('static let label = "GeistMono-Medium"', rendered[tokens.IOS])
         self.assertIn("Font(R.font.hauora_bold, FontWeight.Bold)", rendered[tokens.ANDROID])
+        self.assertIn('pub const TEXT: &str = "Hauora";', rendered[tokens.DESKTOP])
+        self.assertIn('static let text = "Hauora"', rendered[tokens.IOS])
+        self.assertIn("TextFace = FontFamily(Font(R.font.hauora_regular, FontWeight.Normal), Font(R.font.hauora_medium, FontWeight.Medium)", rendered[tokens.ANDROID])
         self.assertIn("--display-tracking: -0.045em;", rendered[tokens.SITE])
 
     def test_shared_edits_propagate_and_overrides_win(self):
