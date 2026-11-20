@@ -57,7 +57,7 @@ fn day_week_month_controls_load_their_ranges_and_month_overflow_opens_day(cx: &m
 }
 
 #[gpui::test]
-fn week_now_line_spans_grid_and_hour_minutes_are_smaller(cx: &mut TestAppContext) {
+fn week_now_line_spans_grid_and_hour_labels_are_one_plain_time(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
     cx.simulate_resize(gpui::size(px(1440.), px(900.)));
     cx.run_until_parked();
@@ -75,11 +75,13 @@ fn week_now_line_spans_grid_and_hour_minutes_are_smaller(cx: &mut TestAppContext
     let event = cx.debug_bounds(format!("week-event-{today}-{index}").leak()).unwrap();
     assert!(event.top() >= all_day.top() && event.bottom() <= all_day.bottom());
     assert!(event.size.height <= px(26.), "all-day titles use one compact line");
+    // One plain "13:00" in the "All day" label's face and colour, inside the gutter.
     let hour = cx.debug_bounds("hour-13").unwrap();
-    let minutes = cx.debug_bounds("hour-minutes-13").unwrap();
-    assert!(minutes.size.height < hour.size.height);
-    assert_eq!(minutes.top(), hour.top());
-    assert_eq!(hour.right(), minutes.left());
+    let label = cx.debug_bounds("hour-12").unwrap();
+    assert!(cx.debug_bounds("hour-minutes-13").is_none());
+    assert_eq!(hour.size.height, label.size.height);
+    assert_eq!(hour.right(), label.right());
+    assert!(hour.left() >= grid.left() && hour.right() <= grid.left() + px(GUTTER - 8.));
 }
 
 #[gpui::test]

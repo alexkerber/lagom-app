@@ -7,9 +7,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.lagommail.core.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.Date
@@ -58,6 +60,10 @@ internal class DateWords(
             else -> format(date, "EEEEdMMMM")
         }
     }
+
+    /** The calendar header, desktop's month and quiet year: the year only outside this year, so a phone header stays one line. */
+    fun monthTitle(date: LocalDate): Pair<String, String?> =
+        format(date, "MMMM") to (if (date.year == today.year) null else format(date, "yyyy"))
 }
 
 /** Today, Todo and Calendar, as iOS `PlannerModel`. Core owns the task and event rules; this holds what the pages show. */
@@ -78,6 +84,10 @@ internal class PlannerModel : ViewModel() {
     var weekStart by mutableStateOf(monday(LocalDate.now())); private set
     var week by mutableStateOf<List<AgendaItem>>(emptyList()); private set
     var error by mutableStateOf<String?>(null)
+    /** Calendars New event can write to; empty hides New event. A demo store gets the Mac's demo calendar. */
+    var eventCalendars by mutableStateOf<List<EventCalendar>>(emptyList()); private set
+    /** A demo store: New event goes into its fixture calendar, never to Google. */
+    var demo = false
 
     val unreadCount: Int get() = today?.unreadCount?.toInt() ?: 0
     val defaultList: Long? get() = (lists.firstOrNull { it.isDefault } ?: lists.firstOrNull())?.id
@@ -125,7 +135,10 @@ internal class PlannerModel : ViewModel() {
             val connected = core.calendarConnected()
             val access = core.calendarAccessNeeded()
             val granted = core.calendarGranted()
+            // The demo calendar only in the store that has one, not in the demo's empty states.
+            val calendars = if (demo) (if (connected) listOf(EventCalendar("", "demo", "Demo calendar")) else emptyList()) else core.eventCalendars()
             if (request != agendaRevision) return@guard
+            eventCalendars = calendars
             calendarConnected = connected
             calendarAccess = access
             calendarGranted = granted
@@ -148,6 +161,16 @@ internal class PlannerModel : ViewModel() {
         reloadWeek()
     }
 
+    /** Desktop `save_new_event`: null once Google (or the demo store) has the event and the week shows it, else core's words. */
+    suspend fun createEvent(calendar: EventCalendar, form: EventForm): String? {
+        val core = core ?: return "lagom is not ready yet."
+        try {
+            if (demo) core.addDemoEvent(form) else core.createEvent(calendar.account, calendar.calendar, form)
+        } catch (e: CancellationException) { throw e } catch (e: Exception) { return e.mailMessage() }
+        reloadAgenda()
+        return null
+    }
+
     /** Returns false, without asking core, for a blank title. */
     suspend fun add(title: String, list: Long, due: LocalDate?): Boolean {
         val core = core ?: return false
@@ -156,9 +179,11 @@ internal class PlannerModel : ViewModel() {
         return guard { core.addTodo(list, trimmed, due?.toString()); reloadTodos() }
     }
 
-    suspend fun toggle(todo: Todo) {
+    /** Saves at once; [settleMillis] keeps the lists as drawn a moment longer, so a tick is seen before its row moves. */
+    suspend fun toggle(todo: Todo, settleMillis: Long = 0) {
         val core = core ?: return
         guard { core.setTodoDone(todo.id, !todo.done) }
+        delay(settleMillis)
         reloadTodos()
     }
 
@@ -192,6 +217,22 @@ internal class PlannerModel : ViewModel() {
 /** A new week opens on today when it contains today, otherwise on its first day. */
 internal fun calendarDay(weekStart: LocalDate, today: LocalDate): LocalDate =
     if (today >= weekStart && today < weekStart.plusDays(7)) today else weekStart
+
+/** Desktop `new_event_default`: on today the next quarter hour (at most 23:45), on another day 09:00; an hour long. */
+internal fun newEventTimes(day: LocalDate, now: LocalDateTime): Pair<LocalDateTime, LocalDateTime> {
+    val minute = if (day == now.toLocalDate()) minOf((now.hour * 60 + now.minute + 14) / 15 * 15, 1425) else 9 * 60
+    val start = day.atStartOfDay().plusMinutes(minute.toLong())
+    return start to start.plusMinutes(60)
+}
+
+/** The core's form from the pickers: instants for a timed event, the first and last day for an all-day one. */
+internal fun eventForm(title: String, start: LocalDateTime, end: LocalDateTime, allDay: Boolean, guests: String, description: String,
+    meet: Boolean, zone: ZoneId = ZoneId.systemDefault()): EventForm =
+    EventForm(title, allDay, start.atZone(zone).toEpochSecond(), end.atZone(zone).toEpochSecond(), start.toLocalDate().toString(),
+        end.toLocalDate().toString(), zone.id, guests, description, meet)
+
+/** Desktop `interval`: a wall-clock time that daylight saving skips or repeats has no single instant. */
+internal fun unambiguous(at: LocalDateTime, zone: ZoneId = ZoneId.systemDefault()) = zone.rules.getValidOffsets(at).size == 1
 
 /** A timed event placed on the week grid, desktop `week::layout`: minutes from midnight, and its lane among overlaps. */
 internal data class WeekBlock(val index: Int, val start: Double, val end: Double, val lane: Int = 0, val lanes: Int = 1)

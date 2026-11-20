@@ -132,6 +132,11 @@ struct DateWords {
         }
     }
 
+    /// The calendar header, desktop's month and quiet year: the year only outside this year, so a phone header stays one line.
+    func monthTitle(_ date: Date) -> (month: String, year: String?) {
+        (format(date, "MMMM"), calendar.component(.year, from: date) == calendar.component(.year, from: now) ? nil : format(date, "y"))
+    }
+
     /// Core days are Gregorian whatever calendar the user reads them in.
     private var gregorian: Calendar {
         var gregorian = Calendar(identifier: .gregorian)
@@ -224,13 +229,14 @@ func weekBlocks(_ events: [AgendaItem], day: Date, calendar: Calendar = .current
 
 /// How far a mail row is dragged picks the move, as on desktop: right past `reach` is Done; left past `reach`
 /// is Later, and past 60 % of the row it is Delete where Delete is allowed. Short of `reach` nothing happens.
+/// A task has no Later: its left swipe acts only at Delete's 60 %, the same reach as in Mail.
 enum SwipeStage: Equatable {
     case done, later, delete
 
-    init?(dx: Double, width: Double, reach: Double = 120, canDelete: Bool) {
+    init?(dx: Double, width: Double, reach: Double = 120, canDelete: Bool, canLater: Bool = true) {
         if dx >= reach { self = .done }
         else if canDelete && dx <= -width * 0.6 { self = .delete }
-        else if dx <= -reach { self = .later }
+        else if canLater && dx <= -reach { self = .later }
         else { return nil }
     }
 }

@@ -50,6 +50,15 @@ final class PresentationTests: XCTestCase {
         }
     }
 
+    func testMonthTitleShowsTheYearOnlyOutsideThisYear() {
+        let w = words(now: "2026-11-20")
+        XCTAssertEqual(w.monthTitle(at(w, "2026-11-02")).month, "November")
+        XCTAssertNil(w.monthTitle(at(w, "2026-11-02")).year)
+        XCTAssertEqual(w.monthTitle(at(w, "2027-01-04")).month, "January")
+        XCTAssertEqual(w.monthTitle(at(w, "2027-01-04")).year, "2027")
+        XCTAssertEqual(w.monthTitle(at(w, "2025-12-29")).year, "2025")
+    }
+
     func testDateGroupsStopAtTheStartOfTheWeek() {
         let w = words(now: "2026-11-12") // Thursday
         XCTAssertEqual(w.group(at(w, "2026-11-12")), "Today")
@@ -126,6 +135,13 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(MailboxChoice.trash.mailbox, .trash)
     }
 
+    func testTaskSwipeHasNoLaterAndDeletesOnlyAtMailsReach() {
+        XCTAssertEqual(SwipeStage(dx: 120, width: 400, canDelete: true, canLater: false), .done)
+        XCTAssertNil(SwipeStage(dx: -200, width: 400, canDelete: true, canLater: false))
+        XCTAssertEqual(SwipeStage(dx: -240, width: 400, canDelete: true, canLater: false), .delete)
+        XCTAssertEqual(SwipeStage(dx: -200, width: 400, canDelete: true), .later)
+    }
+
     func testDueTasksCountOnlyTodayAndEarlier() {
         // Today's list also shows a few undated and future tasks; the sentence counts only the due ones, as desktop.
         func todo(_ due: String?) -> Todo { Todo(id: 1, list: 1, title: "t", due: due, done: false, fromMail: false, mailSubject: nil) }
@@ -162,6 +178,55 @@ final class PresentationTests: XCTestCase {
     override func calendarConnected() async throws -> Bool { false }
     override func calendarAccessNeeded() async throws -> [MailAccount] { [] }
     override func calendarGranted() async throws -> Bool { false }
+    var calendars = [EventCalendar(account: "g", calendar: "primary", label: "Personal · you@gmail.com")]
+    var created: [(String, String, EventForm)] = []
+    var agendaLoads = 0
+    override func eventCalendars() async throws -> [EventCalendar] { agendaLoads += 1; return calendars }
+    override func createEvent(accountId: String, calendar: String, form: EventForm) async throws {
+        if form.endUnix <= form.startUnix && !form.allDay { throw MailError.Failed(reason: "End must be later than start") }
+        created.append((accountId, calendar, form))
+    }
+}
+
+extension PresentationTests {
+    func testNewEventDefaultsFollowTheMac() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Stockholm")!
+        let day = calendar.date(from: DateComponents(year: 2026, month: 11, day: 20))!
+        let at = { (h: Int, m: Int) in calendar.date(bySettingHour: h, minute: m, second: 0, of: day)! }
+        XCTAssertEqual(PlannerModel.newEventTimes(day: day, now: at(13, 1), calendar: calendar).start, at(13, 15), "today: the next quarter hour")
+        XCTAssertEqual(PlannerModel.newEventTimes(day: day, now: at(13, 0), calendar: calendar).start, at(13, 0))
+        XCTAssertEqual(PlannerModel.newEventTimes(day: day, now: at(23, 50), calendar: calendar).start, at(23, 45), "never past 23:45")
+        let other = PlannerModel.newEventTimes(day: day, now: at(13, 1).addingTimeInterval(86400), calendar: calendar)
+        XCTAssertEqual(other.start, at(9, 0), "another day: 09:00")
+        XCTAssertEqual(other.end, at(10, 0), "an hour long")
+        let form = PlannerModel.eventForm(title: "Lunch", allDay: true, start: at(23, 30), end: at(23, 30).addingTimeInterval(3600),
+                                          guests: "", description: "", meet: false, calendar: calendar)
+        XCTAssertEqual([form.firstDay, form.lastDay], ["2026-11-20", "2026-11-21"], "all-day days are local dates")
+        XCTAssertEqual(form.timeZone, "Europe/Stockholm")
+        XCTAssertEqual(form.startUnix, Int64(at(23, 30).timeIntervalSince1970))
+    }
+
+    @MainActor func testPlannerSavesEventsThroughCoreAndReloadsTheWeek() async {
+        let core = PlannerFixtureCore(noHandle: .init())
+        let planner = PlannerModel()
+        planner.core = core
+        await planner.reloadAgenda()
+        XCTAssertEqual(planner.eventCalendars.map(\.label), ["Personal · you@gmail.com"])
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let bad = PlannerModel.eventForm(title: "Lunch", allDay: false, start: now, end: now, guests: "", description: "", meet: false)
+        let refused = await planner.createEvent(bad, in: planner.eventCalendars[0])
+        XCTAssertEqual(refused, "End must be later than start", "core's words reach the form")
+        XCTAssertEqual(core.agendaLoads, 1, "a refused event reloads nothing")
+        let good = PlannerModel.eventForm(title: "Lunch", allDay: false, start: now, end: now.addingTimeInterval(3600), guests: "", description: "", meet: true)
+        let saved = await planner.createEvent(good, in: planner.eventCalendars[0])
+        XCTAssertNil(saved)
+        XCTAssertEqual(core.created.map { "\($0.0) \($0.1) \($0.2.title) \($0.2.meet)" }, ["g primary Lunch true"])
+        XCTAssertEqual(core.agendaLoads, 2, "the week reloads at once, with Google's copy")
+        core.calendars = []
+        await planner.reloadAgenda()
+        XCTAssertTrue(planner.eventCalendars.isEmpty, "no writable calendar hides New event")
+    }
 }
 
 extension PresentationTests {

@@ -312,7 +312,7 @@ class MainActivity : ComponentActivity() {
             .collect { (open, selected) -> if (open || selected != null) show(AppSection.MAIL) }
     }
     // Local tasks and events load as soon as the store opens, not after the first sync.
-    LaunchedEffect(model.core) { model.core?.let { planner.core = it; planner.reload() } }
+    LaunchedEffect(model.core) { model.core?.let { planner.core = it; planner.demo = model.demo; planner.reload() } }
     // A page left open past midnight moves to the new day.
     LaunchedEffect(Unit) {
         var day = LocalDate.now()

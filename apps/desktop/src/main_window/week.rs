@@ -353,8 +353,7 @@ impl MainWindow {
         let mut hours = div().relative().w(px(GUTTER)).flex_shrink_0().h(px(24. * HOUR));
         for hour in 0..24 {
             hours = hours.child(div().absolute().top(px(hour as f32 * HOUR)).w_full().pr(px(8.)).flex().justify_end().items_start()
-                .child(mono(format!("{hour:02}"), t.ink).text_size(px(size::BASE)).debug_selector(move || format!("hour-{hour}")))
-                .child(mono("00", t.ink2).text_size(px(size::SMALL)).debug_selector(move || format!("hour-minutes-{hour}"))));
+                .child(mono(format!("{hour:02}:00"), t.ink2).debug_selector(move || format!("hour-{hour}"))));
         }
         let mut grid = div().relative().flex().h(px(24. * HOUR)).child(hours);
         for day in 0..if self.week.view == View::Month { 0 } else { count } {

@@ -2518,6 +2518,7 @@ mod tests {
             v.reload(cx);
             v.show_home(window, cx);
             assert_eq!(v.today.unread, 7);
+            assert_eq!(v.today.mail.len(), 3, "Today lists the newest three, as iOS and Android");
             assert_eq!(v.today.tasks.len(), 1);
         });
         cx.run_until_parked();
@@ -2531,6 +2532,15 @@ mod tests {
         view.read_with(cx, |v, _| { assert!(matches!(v.page, Page::Todo)); assert_eq!(v.today.tasks[0].title, "Future task"); });
         cx.simulate_keystrokes("secondary-1");
         assert_eq!(view.read_with(cx, |v, _| v.today.tasks.len()), 1);
+        cx.run_until_parked();
+        let newest = view.read_with(cx, |v, _| v.today.mail[0].store);
+        let at = cx.debug_bounds("home-mail-0").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(matches!(v.page, Page::Mail));
+            assert_eq!(v.inbox.current().and_then(|id| v.inbox.mail[id].store), newest);
+        });
     }
 
     #[gpui::test]
