@@ -246,7 +246,7 @@ struct OnboardingView: View {
 }
 
 /// A list row: flat, the subtle fill only while pressed.
-private struct RowStyle: ButtonStyle {
+struct RowStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
 
     func makeBody(configuration: Configuration) -> some View {

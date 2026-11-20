@@ -9,6 +9,13 @@ final class PresentationTests: XCTestCase {
     }
     private func at(_ words: DateWords, _ day: String, _ hour: Double = 9.7) -> Date { words.day(day)!.addingTimeInterval(hour * 3600) }
 
+    func testAccountRowsSayNameThenKindAsOnTheMac() {
+        XCTAssertEqual(accountKind(MailAccount(id: "a", email: "me@home.test", displayName: "Personal", kind: "Email and password")),
+                       "Personal · Email and password")
+        XCTAssertEqual(accountKind(MailAccount(id: "a", email: "me@home.test", displayName: "me@home.test", kind: "Google account")), "Google account")
+        XCTAssertEqual(accountKind(MailAccount(id: "a", email: "me@home.test", displayName: "Personal")), "Personal")
+    }
+
     func testListTimeFollowsTheDesktopDateColumn() {
         let w = words(now: "2026-11-10")
         XCTAssertEqual(w.listTime(at(w, "2026-11-10", 9.7)), "09:42")

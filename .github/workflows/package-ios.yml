@@ -22,8 +22,15 @@ permissions:
 jobs:
   package:
     name: iPhone and iPad archive
-    runs-on: macos-latest
+    # The iPhone Duo layout needs the iOS 27 SDK: an app built with an older SDK runs scaled as a plain iPhone app.
+    runs-on: xcode-27
     steps:
+      - name: Xcode 27.2, as on the release Mac
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $sdk"
+          [[ ${sdk%%.*} -ge 27 ]] || { echo "::error::iOS SDK $sdk is older than 27: the iPhone Duo would get a scaled app."; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false

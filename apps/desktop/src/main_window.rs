@@ -121,7 +121,7 @@ const SIDEBAR_ROW: f32 = 28.;
 const FOLDERS_MAX: f32 = 34. + 6. * (SIDEBAR_ROW + 2.);
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
-/// Compact windows scroll the sidebar groups beneath Search.
+/// Compact windows scroll the sidebar groups beneath the title-bar row.
 pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 
 mod glass;
@@ -584,6 +584,7 @@ impl MainWindow {
                 this.open_box(first, cx);
             }
             "settings" => this.set_page(Page::Settings(None), cx),
+            "settings-account" if demo => this.open_account_settings("personal".into(), window, cx),
             "shortcuts" => this.show_shortcuts(window, cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
@@ -1343,6 +1344,10 @@ impl MainWindow {
         let before = self.inbox.selected;
         f(&mut self.inbox);
         let ix = self.inbox.selected;
+        // The toolbar More belongs to the message it opened on.
+        if ix != before && self.message_menu == Some(polish::TOOLBAR_MENU) {
+            self.message_menu = None;
+        }
         if ix == before || self.inbox.multi() {
             self.glide = None;
             self.reveal_row(ix);
@@ -1730,24 +1735,13 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // macOS: search starts below the traffic lights' row (y 11..39) plus the 20 px gap.
-            .pt(px(if cfg!(target_os = "macos") { 59. } else { 12. }))
-            .child(
-                div()
-                    .id("search")
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(6.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .rounded(px(radius::CONTROL))
-                    .bg(t.raised)
-                    .text_color(t.ink2)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))
-                    .child(icon("icons/search.svg", t.ink2, 16.))
-                    .child(div().flex_1().child("Search")),
-            )
+            // The title-bar row, y 11..39: the traffic lights on the left (macOS), search on the right.
+            // Elsewhere the same row tops the sidebar. A logo would go in at the left.
+            .pt(px(if cfg!(target_os = "macos") { 11. } else { 12. }))
+            // No tab stop: Tab would leave Compose's field cycle. ⌘K and the menu are the keyboard route.
+            .child(div().flex().flex_shrink_0().justify_end().child(
+                icon_button(t, "search", "icons/search.svg", if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" })
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))))
             .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
                 .child(div()
                     .flex()
@@ -2311,12 +2305,13 @@ impl MainWindow {
                 toolbar()
                     .flex_wrap().h_auto().min_h(px(HEADER_H)).py(px(8.))
                     .px(px(16.))
+                    // Reply, Later, More and Done, in the same order as iOS and Android.
                     .child(polish::shortcut_button(t, "Reply", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.open_compose(true, window, cx))))
-                    .child(icon_button(t, "reply-all", "icons/reply-all.svg", "Reply all · Shift+R").on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::ReplyAll, window, cx))))
-                    .child(polish::shortcut_button(t, "Forward", None, self.hints.visible).on_click(cx.listener(|this, _, window, cx| this.compose_selected(ComposeKind::Forward, window, cx))))
                     .when(!trash, |d| d.child(
                         polish::shortcut_button(t, "Later", None, self.hints.visible).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx))),
                     ))
+                    .child(polish::toolbar_menu(t, self.message_menu == Some(polish::TOOLBAR_MENU), trash, self.inbox.selection_unread(),
+                        cx.listener(|this, action: &polish::MessageAction, window, cx| this.toolbar_action(*action, window, cx))))
                     .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {
                             this.inbox.mail[id].remote = true;
@@ -2570,8 +2565,8 @@ impl Render for MainWindow {
             self.reveal_row(self.inbox.selected);
         }
         self.prune();
-        if self.message_menu.is_some_and(|id| self.inbox.single() != Some(id) && !self.expanded.contains_key(&id)
-            && !self.popouts.iter().any(|(open, _)| *open == id)) {
+        if self.message_menu.is_some_and(|id| if id == polish::TOOLBAR_MENU { self.inbox.single().is_none() || !matches!(self.page, Page::Mail) }
+            else { self.inbox.single() != Some(id) && !self.expanded.contains_key(&id) && !self.popouts.iter().any(|(open, _)| *open == id) }) {
             self.message_menu = None;
         }
         // Off-screen motion must still advance and finish, even without an animated element.
@@ -4602,6 +4597,18 @@ mod dispatch {
     }
 
     #[gpui::test]
+    fn search_icon_sits_in_the_title_bar_row_and_opens_the_palette(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        frame(cx);
+        let search = cx.debug_bounds("search").unwrap();
+        // The traffic lights' row is y 11..39 (centre 25); the icon ends at the sidebar's right padding.
+        let sidebar = view.read_with(cx, |v, _| v.sidebar_w);
+        assert_eq!((f32::from(search.center().y), f32::from(search.right())), (if cfg!(target_os = "macos") { 25. } else { 26. }, sidebar - 12.));
+        cx.simulate_click(search.center(), Default::default());
+        assert_eq!(view.read_with(cx, |v, cx| v.palette.as_ref().map(|p| p.read(cx).query(cx))).as_deref(), Some(""));
+    }
+
+    #[gpui::test]
     fn palette_takes_letters_backspace_and_undo(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let n = inbox_len(&view, cx);
@@ -4891,14 +4898,23 @@ mod dispatch {
 
     fn assert_reading_toolbar(cx: &mut VisualTestContext) {
         frame(cx);
-        let buttons = ["Reply", "reply-all", "Forward", "Later", "Done"].map(|label| cx.debug_bounds(label).unwrap());
+        let buttons = ["Reply", "Later", "More", "Done"].map(|label| cx.debug_bounds(label).unwrap());
         for pair in buttons.windows(2) {
             assert!(pair[0].right() <= pair[1].left(), "reading actions stay in order");
-            assert_eq!(pair[0].top(), pair[1].top());
         }
-        for removed in ["Move", "Mark read", "Mark unread", "Delete"] {
-            assert!(cx.debug_bounds(removed).is_none(), "{removed} crowds the reading toolbar");
+        assert_eq!(buttons[0].top(), buttons[1].top());
+        for removed in ["reply-all", "Forward", "Move", "Mark read", "Mark unread", "Delete"] {
+            assert!(cx.debug_bounds(removed).is_none(), "{removed} belongs in More");
         }
+    }
+
+    /// Opens the toolbar's More and checks its five actions, in the order every platform uses.
+    fn open_more(cx: &mut VisualTestContext) {
+        let at = cx.debug_bounds("More").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        frame(cx);
+        let items = ["Reply all", "Forward", "Move", "Delete", "Mark unread"].map(|label| cx.debug_bounds(format!("menu-{label}").leak()).unwrap());
+        for pair in items.windows(2) { assert!(pair[0].bottom() <= pair[1].top(), "More keeps its order"); }
     }
 
     #[gpui::test]
@@ -4907,13 +4923,18 @@ mod dispatch {
         assert_reading_toolbar(cx);
         let counter = cx.debug_bounds("message-counter").unwrap();
         let popout = cx.debug_bounds("pop-out").unwrap();
-        assert!(cx.debug_bounds("Later").unwrap().right() <= counter.left());
+        assert!(cx.debug_bounds("More").unwrap().right() <= counter.left());
         assert!(counter.right() <= popout.left());
         assert!(popout.right() <= cx.debug_bounds("Done").unwrap().left());
         view.update(cx, |v, _| v.inbox.mail[0].cc = "copy@example.com".into());
-        let at = cx.debug_bounds("reply-all").unwrap().center();
+        view.update(cx, |v, _| v.inbox.mail[0].unread = false);
+        open_more(cx);
+        let at = cx.debug_bounds("menu-Reply all").unwrap().center();
         cx.simulate_click(at, Default::default());
-        view.read_with(cx, |v, cx| assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx).cc, ["copy@example.com"]));
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.compose.as_ref().unwrap().read(cx).outgoing(cx).cc, ["copy@example.com"]);
+            assert!(v.message_menu.is_none(), "a chosen action closes More");
+        });
     }
 
     #[gpui::test]
@@ -4925,7 +4946,9 @@ mod dispatch {
         view.update(cx, |v, cx| v.select(Inbox::next, cx));
         let mut popcx = VisualTestContext::from_window(popout.into(), &cx.cx);
         assert_reading_toolbar(&mut popcx);
-        let at = popcx.debug_bounds("reply-all").unwrap().center();
+        view.update(cx, |v, _| v.inbox.mail[0].unread = false);
+        open_more(&mut popcx);
+        let at = popcx.debug_bounds("menu-Reply all").unwrap().center();
         popcx.simulate_click(at, Default::default());
         view.read_with(cx, |v, cx| {
             let mail = v.compose.as_ref().unwrap().read(cx).outgoing(cx);
@@ -4946,6 +4969,31 @@ mod dispatch {
         let before = view.read_with(cx, |v, _| v.inbox.selection_unread());
         cx.simulate_keystrokes("shift-u");
         assert_eq!(view.read_with(cx, |v, _| v.inbox.selection_unread()), !before);
+    }
+
+    #[gpui::test]
+    fn toolbar_more_moves_marks_and_deletes_the_selection(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        view.update(cx, |v, cx| { let id = v.inbox.current().unwrap(); v.inbox.mail[id].unread = false; cx.notify(); });
+        open_more(cx);
+        let at = cx.debug_bounds("menu-Move").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        view.read_with(cx, |v, cx| assert_eq!(v.palette.as_ref().unwrap().read(cx).query(cx), "move "));
+        cx.simulate_keystrokes("escape");
+        open_more(cx);
+        let at = cx.debug_bounds("menu-Mark unread").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(view.read_with(cx, |v, _| v.inbox.selection_unread() && v.message_menu.is_none()));
+        let first = view.read_with(cx, |v, _| v.inbox.current());
+        let at = cx.debug_bounds("More").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        frame(cx);
+        let at = cx.debug_bounds("menu-Delete").unwrap().center();
+        cx.simulate_click(at, Default::default());
+        assert!(view.read_with(cx, |v, _| v.inbox.trash.contains(&first.unwrap())), "Delete moves the message to Trash");
+        view.update(cx, |v, cx| { v.message_menu = Some(polish::TOOLBAR_MENU); cx.notify(); });
+        cx.simulate_keystrokes("j");
+        assert!(view.read_with(cx, |v, _| v.message_menu.is_none()), "More closes when another message is selected");
     }
 
     #[gpui::test]
@@ -5042,7 +5090,10 @@ mod dispatch {
             match route {
                 "toolbar" => {
                     cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-                    let at = cx.debug_bounds("Forward").unwrap().center();
+                    let at = cx.debug_bounds("More").unwrap().center();
+                    cx.simulate_click(at, Default::default());
+                    cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+                    let at = cx.debug_bounds("menu-Forward").unwrap().center();
                     cx.simulate_click(at, Default::default());
                 }
                 "palette" => {
