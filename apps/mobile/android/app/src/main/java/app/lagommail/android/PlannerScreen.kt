@@ -310,7 +310,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     // shortcut: the dot follows list order, so it moves when lists are added or removed; store a colour if people ask to choose one.
                     item(key = "list-${list.id}") { ListHeading(list.name, accountAccent(index), planner.openCount(list.id), Modifier.padding(top = 16.dp, bottom = 4.dp)) }
                     items(all.filter { !it.done }, key = { it.id }) { DeletableTodoRow(planner, it, words) }
-                    item(key = "add-${list.id}") { AddRow("Add task") { adding = list.id } }
+                    item(key = "add-${list.id}") { AddRow("New task") { adding = list.id } }
                     if (done.isNotEmpty()) {
                         val open = list.id in showDone
                         item(key = "done-${list.id}") {

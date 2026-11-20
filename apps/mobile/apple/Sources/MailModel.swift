@@ -2,8 +2,9 @@ import Foundation
 import Observation
 import UniformTypeIdentifiers
 
+/// The mailboxes in the order of every lagom app, desktop's first.
 enum MailboxChoice: String, CaseIterable, Identifiable {
-    case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", trash = "Trash", drafts = "Drafts"
+    case inbox = "Inbox", later = "Later", sent = "Sent", done = "Done", drafts = "Drafts", trash = "Trash"
     var id: String { rawValue }
     var mailbox: Mailbox {
         switch self {
@@ -24,6 +25,18 @@ enum MailboxChoice: String, CaseIterable, Identifiable {
         case .done: "done"
         case .trash: "trash"
         case .drafts: "compose"
+        }
+    }
+    /// The empty list. Later and Done fill from your own actions, not a refresh, so each says what lands there.
+    /// Same words on Android.
+    var empty: (title: String, detail: String?) {
+        switch self {
+        case .inbox: ("Nothing left.", "Not too much. Not too little. Just right.")
+        case .later: ("Nothing waiting.", "Mail you put off waits here.")
+        case .sent: ("Nothing sent.", "Mail you send lands here.")
+        case .done: ("Nothing done yet.", "Mail you mark Done lands here.")
+        case .drafts: ("No drafts", nil)
+        case .trash: ("Trash is empty.", "Deleted mail lands here.")
         }
     }
 }
