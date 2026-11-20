@@ -19,6 +19,8 @@ final class PlannerModel {
     var calendarAccess: [MailAccount] = []
     /// A Google account allows calendar access; until its first fetch Calendar waits for the sync.
     var calendarGranted = false
+    /// Google accounts with Calendar but without Google Tasks: To-do offers Tasks again.
+    var tasksAccess: [MailAccount] = []
     /// Writable Google calendars; New event shows only when there is one. The demo has the Mac's "Demo calendar".
     var eventCalendars: [EventCalendar] = []
     var counts: [MailCounts] = []
@@ -66,16 +68,25 @@ final class PlannerModel {
         } catch { self.error = error.localizedDescription }
     }
 
+    private var todosLoad = 0
+
     func reloadTodos() async {
         guard let core else { return }
+        // Adds, ticks and syncs reload at once; only the latest request lands, as on Android.
+        todosLoad += 1
+        let load = todosLoad
         do {
             let lists = try await core.todoLists()
             var todos: [Int64: [Todo]] = [:]
             for list in lists { todos[list.id] = try await core.todos(list: list.id, includeDone: true) }
+            let today = try await core.today(unreadLimit: 3)
+            let tasksAccess = try await core.tasksAccessNeeded()
+            guard load == todosLoad else { return }
             self.lists = lists
             self.todos = todos
-            today = try await core.today(unreadLimit: 3)
-        } catch { self.error = error.localizedDescription }
+            self.today = today
+            self.tasksAccess = tasksAccess
+        } catch { if load == todosLoad { self.error = error.localizedDescription } }
     }
 
     func reloadAgenda() async {
@@ -132,7 +143,8 @@ final class PlannerModel {
             let c = calendar.dateComponents([.hour, .minute], from: now)
             minute = min(((c.hour ?? 0) * 60 + (c.minute ?? 0) + 14) / 15 * 15, 1425)
         } else { minute = 9 * 60 }
-        let start = calendar.date(byAdding: .minute, value: minute, to: midnight) ?? midnight
+        // The wall clock, not minutes since midnight: on a clock-change day those are an hour off.
+        let start = calendar.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: midnight) ?? midnight
         return (start, start.addingTimeInterval(3600))
     }
 
@@ -161,7 +173,8 @@ final class PlannerModel {
             await reloadTodos()
             return true
         } catch {
-            self.error = error.localizedDescription
+            // Named, since the field may already hold the next task.
+            self.error = "Could not add “\(title)”: \(error.localizedDescription)"
             return false
         }
     }

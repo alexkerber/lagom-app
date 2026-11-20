@@ -157,8 +157,18 @@ final class PresentationTests: XCTestCase {
     var counts = [MailCounts(account: "a", inbox: 3, later: 1), MailCounts(account: "b", inbox: 4, later: 0)]
 
     override func todoLists() async throws -> [TodoList] { lists }
-    override func todos(list: Int64, includeDone: Bool) async throws -> [Todo] { tasks.filter { $0.list == list } }
+    /// Holds the next `todos` call after its snapshot until `release()`, once.
+    var holdNextTodos = false
+    private(set) var held: CheckedContinuation<Void, Never>?
+    func release() { held?.resume(); held = nil }
+    override func todos(list: Int64, includeDone: Bool) async throws -> [Todo] {
+        let snapshot = tasks.filter { $0.list == list }
+        if holdNextTodos { holdNextTodos = false; await withCheckedContinuation { held = $0 } }
+        return snapshot
+    }
+    var refuseAdd = false
     override func addTodo(list: Int64, title: String, dueDate: String?) async throws -> Todo {
+        if refuseAdd { throw MailError.Failed(reason: "not found") }
         added.append((list, title, dueDate))
         let todo = Todo(id: Int64(tasks.count + 1), list: list, title: title, due: dueDate, done: false, fromMail: false, mailSubject: nil)
         tasks.append(todo)
@@ -178,6 +188,7 @@ final class PresentationTests: XCTestCase {
     override func calendarConnected() async throws -> Bool { false }
     override func calendarAccessNeeded() async throws -> [MailAccount] { [] }
     override func calendarGranted() async throws -> Bool { false }
+    override func tasksAccessNeeded() async throws -> [MailAccount] { [] }
     var calendars = [EventCalendar(account: "g", calendar: "primary", label: "Personal · you@gmail.com")]
     var created: [(String, String, EventForm)] = []
     var agendaLoads = 0
@@ -200,6 +211,12 @@ extension PresentationTests {
         let other = PlannerModel.newEventTimes(day: day, now: at(13, 1).addingTimeInterval(86400), calendar: calendar)
         XCTAssertEqual(other.start, at(9, 0), "another day: 09:00")
         XCTAssertEqual(other.end, at(10, 0), "an hour long")
+        // Clock-change days: 09:00 on the wall clock, not 540 minutes after midnight.
+        for (month, day) in [(3, 29), (10, 25)] {
+            let change = calendar.date(from: DateComponents(year: 2026, month: month, day: day))!
+            let start = PlannerModel.newEventTimes(day: change, now: at(13, 1), calendar: calendar).start
+            XCTAssertEqual(calendar.dateComponents([.hour, .minute], from: start), DateComponents(hour: 9, minute: 0), "2026-\(month)-\(day)")
+        }
         let form = PlannerModel.eventForm(title: "Lunch", allDay: true, start: at(23, 30), end: at(23, 30).addingTimeInterval(3600),
                                           guests: "", description: "", meet: false, calendar: calendar)
         XCTAssertEqual([form.firstDay, form.lastDay], ["2026-11-20", "2026-11-21"], "all-day days are local dates")
@@ -252,6 +269,25 @@ extension PresentationTests {
         XCTAssertEqual(core.added.first?.2, "2026-11-12", "a late evening stays on its local day")
         XCTAssertEqual(planner.todos[1]?.map(\.title), ["Pack"])
         XCTAssertEqual(planner.today?.tasks.count, 1)
+        core.refuseAdd = true
+        let refused = await planner.add(title: "Call Maja", list: 1, due: nil)
+        XCTAssertFalse(refused)
+        XCTAssertEqual(planner.error, "Could not add “Call Maja”: not found", "the alert names a refused task")
+    }
+
+    @MainActor func testAnOlderTaskReloadThatEndsLastNeverHidesANewTask() async {
+        let core = PlannerFixtureCore(noHandle: .init())
+        let planner = PlannerModel()
+        planner.core = core
+        core.holdNextTodos = true
+        let old = Task { await planner.reloadTodos() }
+        while core.held == nil { await Task.yield() }
+        let added = await planner.add(title: "Second", list: 1, due: nil)
+        XCTAssertTrue(added)
+        XCTAssertEqual(planner.todos[1]?.map(\.title), ["Second"])
+        core.release()
+        await old.value
+        XCTAssertEqual(planner.todos[1]?.map(\.title), ["Second"], "the older snapshot must not land")
     }
 
     @MainActor func testPlannerTogglesThroughCoreAndReloads() async {

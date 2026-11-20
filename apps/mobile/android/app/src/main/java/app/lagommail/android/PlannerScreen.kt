@@ -108,7 +108,9 @@ internal val AppSection.icon: Int get() = when (this) {
     val density = LocalDensity.current
     val style = timeStyle()
     val measurer = rememberTextMeasurer()
-    return remember(context, density, style) {
+    // The clock setting can change while Today stays composed; the rows read it at every recomposition.
+    val twentyFour = android.text.format.DateFormat.is24HourFormat(context)
+    return remember(context, density, style, twentyFour) {
         val format = android.text.format.DateFormat.getTimeFormat(context)
         // A fixed date: on a daylight-saving day one hour is missing or repeated.
         val hour = java.util.Calendar.getInstance().apply { set(2026, 0, 1) }
@@ -237,7 +239,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     }
                     if (events.isNotEmpty() && nowIndex == events.size) NowLine(now, column)
                     // Also beside another account's calendar: each Google account allows its own.
-                    access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
+                    CalendarAccessButtons(planner, model, planner.calendarAccess, Modifier.padding(top = 8.dp))
                 }
                 Column {
                     MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
@@ -367,7 +369,7 @@ private const val NEW_LIST = Long.MIN_VALUE
 /** Local task lists, as iOS `TodoView` and the desktop's Todo page. Adding happens where the eye is (Alex 2026-11-20,
  *  "plus uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips above
  *  the keyboard. Enter adds and keeps the field open for the next task; Close or Back keeps what was typed. */
-@Composable internal fun TodoScreen(planner: PlannerModel) {
+@Composable internal fun TodoScreen(planner: PlannerModel, model: MailModel) {
     // The list the field is open in, NEW_LIST, or null.
     var adding by rememberSaveable { mutableStateOf<Long?>(null) }
     var title by rememberSaveable { mutableStateOf("") }
@@ -377,11 +379,17 @@ private const val NEW_LIST = Long.MIN_VALUE
     var showDone by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val words = DateWords()
     val due = dueDay?.let(LocalDate::ofEpochDay)
+    /** A task core refused comes back into its field, unless that field already holds the next one or its list is gone;
+     *  the alert names it either way. */
+    fun add(text: String, target: Long, day: Long?) = planner.perform {
+        if (!planner.add(text, target, day?.let(LocalDate::ofEpochDay)) && title.isEmpty() && (adding == null || adding == target)
+            && planner.lists.any { it.id == target }) { adding = target; title = text; dueDay = day }
+    }
     /** Saves what the field holds and closes it. */
     fun commit() {
         val text = title.trim()
         val target = adding
-        if (text.isNotEmpty() && target != null) planner.perform { if (target == NEW_LIST) planner.addList(text) else planner.add(text, target, due) }
+        if (text.isNotEmpty() && target != null) { if (target == NEW_LIST) planner.perform { planner.addList(text) } else add(text, target, dueDay) }
         title = ""; dueDay = null; adding = null
     }
     fun open(target: Long) { commit(); adding = target }
@@ -391,11 +399,13 @@ private const val NEW_LIST = Long.MIN_VALUE
         if (title.isBlank() || target == NEW_LIST) { commit(); return }
         val text = title.trim()
         title = ""
-        planner.perform { planner.add(text, target, due) }
+        add(text, target, dueDay)
     }
     BackHandler(enabled = adding != null) { commit() }
     Column(Modifier.fillMaxSize().imePadding()) {
         PageTitle(AppSection.TODO.title)
+        // Calendar granted but Google Tasks declined or taken back: as the Mac's To-do, ask here.
+        CalendarAccessButtons(planner, model, planner.tasksAccess, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp), tasks = true)
         Refreshable(planner, { planner.reloadTodos() }, Modifier.weight(1f)) {
             // The circles' column lines up under the page title; the due chips end on its 16 dp margin.
             LazyColumn(Modifier.fillMaxSize().padding(start = 4.dp, end = 8.dp)) {
@@ -646,16 +656,26 @@ private const val NEW_LIST = Long.MIN_VALUE
     WeekGrid(planner, model, oneDay = !grid)
 }
 
-/** Desktop's "Show your Google Calendar": Google asks once in the browser, then the redirect's sync fills Calendar and Today. */
-@Composable private fun CalendarAccessButton(planner: PlannerModel, model: MailModel, account: MailAccount, modifier: Modifier = Modifier) {
+/** Desktop's "Show your Google Calendar": Google asks once in the browser, then the redirect's sync fills Calendar, Today
+ *  and To-do. One per account that needs it; with more than one each names its address, since Google must be answered
+ *  with that account. [tasks] is To-do's grant for Google Tasks; Calendar's asks for both. */
+@Composable private fun CalendarAccessButtons(planner: PlannerModel, model: MailModel, accounts: List<MailAccount>, modifier: Modifier = Modifier,
+    tasks: Boolean = false) {
+    if (accounts.isEmpty()) return
     val context = LocalContext.current
     // A second tap while the browser opens would replace the pending sign-in and fail the first redirect.
     var opening by remember { mutableStateOf(false) }
     LaunchedEffect(opening) { if (opening) { delay(2_000); opening = false } }
-    HouseButton(if (model.signingIn) "Connecting…" else "Show your Google Calendar", R.drawable.ic_calendar, modifier, primary = true,
-        enabled = !model.signingIn && !opening) {
-        opening = true
-        planner.perform { openSignIn(context, requireNotNull(planner.core).beginCalendarAccess(account.id).url) }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        accounts.forEach { account ->
+            val title = if (accounts.size == 1) (if (tasks) "Allow Google Tasks access" else "Show your Google Calendar")
+                else "${if (tasks) "Allow Google Tasks" else "Show calendar"} · ${account.email}"
+            HouseButton(if (model.signingIn) "Connecting…" else title, if (tasks) R.drawable.ic_todo else R.drawable.ic_calendar, primary = true,
+                enabled = !model.signingIn && !opening) {
+                opening = true
+                planner.perform { openSignIn(context, requireNotNull(planner.core).beginCalendarAccess(account.id).url) }
+            }
+        }
     }
 }
 
@@ -674,15 +694,19 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
     // 16 dp as Today and To-do, on phones and tablets alike.
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3), compact = oneDay,
-            newEvent = { creating = if (oneDay) selected else calendarDay(planner.weekStart, LocalDate.now()) }.takeIf { planner.eventCalendars.isNotEmpty() }) {
+            newEvent = {
+                planner.eventAnswer = null
+                creating = if (oneDay) selected else calendarDay(planner.weekStart, LocalDate.now())
+            }.takeIf { planner.eventCalendars.isNotEmpty() }) {
             selected = LocalDate.now()
             planner.perform { planner.showWeek(0) }
         }
         if (oneDay) WeekStrip(week, selected) { selected = it }
         val access = planner.calendarAccess.firstOrNull()
         if (!planner.calendarConnected && planner.week.isEmpty() && access != null) {
-            EmptyState(R.drawable.ic_calendar, "Calendar is not connected", Modifier.fillMaxSize(), "Google asks once for access to ${access.email}.") {
-                CalendarAccessButton(planner, model, access)
+            EmptyState(R.drawable.ic_calendar, "Calendar is not connected", Modifier.fillMaxSize(),
+                if (planner.calendarAccess.size == 1) "Google asks once for access to ${access.email}." else "Google asks once for each account.") {
+                CalendarAccessButtons(planner, model, planner.calendarAccess)
             }
         } else if (!planner.calendarConnected && planner.week.isEmpty() && planner.calendarGranted) {
             EmptyState(R.drawable.ic_calendar, "Calendar not synced yet", Modifier.fillMaxSize(), "Your calendar shows here after the next sync.")
@@ -690,7 +714,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
             EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(),
                 "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
         } else {
-            access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
+            CalendarAccessButtons(planner, model, planner.calendarAccess, Modifier.padding(top = 8.dp))
             if (!oneDay) Row(Modifier.padding(top = 8.dp)) {
                 Spacer(Modifier.width(Gutter))
                 days.forEach { WeekDayHead(it, Modifier.weight(1f)) }
@@ -743,31 +767,36 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
     var meet by rememberSaveable { mutableStateOf(false) }
     var guests by rememberSaveable { mutableStateOf("") }
     var description by rememberSaveable { mutableStateOf("") }
-    // The chosen (account, calendar), not its position: a sync may reload the list. Null is the first.
-    var calendar by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
+    // The (account, calendar) shown when the dialog opened, or the one picked since: Save must not move the event to
+    // whichever calendar a sync put first.
+    var calendar by rememberSaveable { mutableStateOf(planner.eventCalendars.firstOrNull()?.let { it.account to it.calendar }) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    // The model's, so a dialog restored after rotation stays busy until the first save answers.
+    val saving = planner.savingEvent
+    LaunchedEffect(planner.eventAnswer) {
+        val answer = planner.eventAnswer ?: return@LaunchedEffect
+        planner.eventAnswer = null
+        if (answer.isEmpty()) close() else error = answer
+    }
     // The open picker: "date", "start", "endDate" or "end".
     var picking by remember { mutableStateOf<String?>(null) }
     val calendars = planner.eventCalendars
     val focus = remember { FocusRequester() }
     // Moving the start keeps the length, as the system calendars do.
     fun moveStart(to: LocalDateTime) { end = end.plus(java.time.Duration.between(start, to)); start = to }
-    val chosen = calendar ?: calendars.firstOrNull()?.let { it.account to it.calendar }
+    val chosen = calendar
+    // A calendar that left the list asks for a choice instead of picking another one.
+    val gone = calendars.none { it.account to it.calendar == chosen }
     fun save() {
         if (saving) return
         val target = calendars.firstOrNull { it.account to it.calendar == chosen }
-        if (target == null) { error = "choose a writable calendar"; return }
+        if (target == null) { error = "Choose a calendar"; return }
         if (!allDay && !(unambiguous(start) && unambiguous(end))) {
             error = "This local time is skipped or repeated by daylight saving; choose an unambiguous time"
             return
         }
-        saving = true
         error = null
-        planner.perform {
-            try { planner.createEvent(target, eventForm(title, start, end, allDay, guests, description, meet)).let { if (it == null) close() else error = it } }
-            finally { saving = false }
-        }
+        planner.saveEvent(target, eventForm(title, start, end, allDay, guests, description, meet))
     }
     val words = { date: LocalDate -> localDate(date, if (date.year == LocalDate.now().year) "EEEdMMM" else "EEEdMMMyyyy") }
     val clockFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
@@ -781,7 +810,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
             PickerRow(if (allDay) "Last day" else "End date", words(end.toLocalDate()), !saving) { picking = "endDate" }
             if (!allDay) PickerRow("End", time(end), !saving) { picking = "end" }
             SwitchRow("All day", R.drawable.ic_all_day, allDay, !saving) { allDay = it }
-            if (calendars.size > 1) calendars.forEach { option ->
+            if (calendars.size > 1 || gone) calendars.forEach { option ->
                 val key = option.account to option.calendar
                 Text(option.label, Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(8.dp))
                     .background(if (key == chosen) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)

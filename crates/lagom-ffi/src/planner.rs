@@ -95,12 +95,26 @@ fn create_cached(stores: &Stores, s: &Store, account_id: &str, calendar: &str,
     create: impl Future<Output = lagom_core::Result<lagom_core::google::CreatedEvent>>) -> lagom_core::Result<()> {
     let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // shortcut: a Meet link Google is still making arrives with the next sync; the Mac fetches it again after 5 s.
-    let created = network(create)?;
+    let created = match network(create) {
+        // Google refused the write scope: drop it, as the Mac does, so New event hides and Calendar offers access again.
+        Err(lagom_core::Error::CalendarConsent) => { s.drop_calendar_scopes(account_id)?; return Err(lagom_core::Error::CalendarConsent); }
+        other => other?,
+    };
     // Google has the event: a failed cache write must not read as a failed save, or a retry makes a second one.
-    // The next sync fetches it, as on the Mac (`event_created` reports only Google's result).
-    if let Err(error) = s.insert_calendar_event(account_id, calendar, &created.event) { eprintln!("lagom: new event not cached: {error:?}"); }
+    // The event is kept and written at the next sync, as the Mac's pending events: past the 60-day fetch no sync brings it.
+    if let Err(error) = s.insert_calendar_event(account_id, calendar, &created.event) {
+        eprintln!("lagom: new event not cached: {error:?}");
+        stores.unsaved_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((account_id.into(), calendar.into(), created.event));
+    }
     Ok(())
 }
+
+/// Writes the account's confirmed events the cache refused; each stays until it is cached or its account is gone.
+pub(crate) fn cache_unsaved(stores: &Stores, s: &Store, account_id: &str) {
+    stores.unsaved_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(account, calendar, event)|
+        account != account_id || (s.insert_calendar_event(account, calendar, event).is_err() && account_exists(s, account)));
+}
+fn account_exists(s: &Store, id: &str) -> bool { s.accounts().map_or(true, |all| all.iter().any(|a| a.id == id)) }
 
 fn item(day: &str, e: AgendaEvent) -> AgendaItem {
     AgendaItem { day: day.into(), account: e.account, calendar: e.calendar, title: e.event.title, start_unix: e.event.start_utc,
@@ -187,6 +201,19 @@ impl LagomCore {
             for a in s.accounts()? {
                 if a.auth == lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google)
                     && !lagom_core::oauth::calendar_allowed(&s.account_scopes(&a.id)?) { needed.push(a.into()); }
+            }
+            Ok(needed)
+        }).await
+    }
+    /// Google accounts that allow calendar access but not Google Tasks (declined at the grant, or taken back since),
+    /// for To-do's "Allow Google Tasks access". Accounts without calendar access get both from Calendar's grant.
+    pub async fn tasks_access_needed(&self) -> Result<Vec<MailAccount>> {
+        self.run(|s| {
+            let mut needed = Vec::new();
+            for a in s.accounts()? {
+                let scopes = s.account_scopes(&a.id)?;
+                if a.auth == lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google)
+                    && lagom_core::oauth::calendar_allowed(&scopes) && !lagom_core::oauth::tasks_allowed(&scopes) { needed.push(a.into()); }
             }
             Ok(needed)
         }).await
@@ -442,6 +469,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn calendar_without_tasks_offers_tasks_access_on_its_own() {
+        let (_dir, core) = open();
+        let id = {
+            let s = core.stores.local.lock().unwrap();
+            let (imap, smtp) = lagom_core::presets::servers("both@gmail.com").unwrap();
+            let mut a = Account::new("both@gmail.com".into(), imap, smtp).unwrap();
+            a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            s.save_authorized_account(&a, &format!("https://mail.google.com/ {}", lagom_core::oauth::GOOGLE_CALENDAR_SCOPES)).unwrap();
+            a.id
+        };
+        assert!(core.tasks_access_needed().await.unwrap().is_empty(), "both granted");
+        // Tasks declined at the grant, or taken back by Google: Calendar stays, To-do offers Tasks again.
+        let without_tasks = core.stores.local.lock().unwrap().account_scopes(&id).unwrap().replace(lagom_core::oauth::GOOGLE_TASKS_SCOPE, "");
+        core.stores.local.lock().unwrap().set_account_scopes(&id, &without_tasks).unwrap();
+        assert!(core.calendar_access_needed().await.unwrap().is_empty());
+        assert_eq!(core.tasks_access_needed().await.unwrap().iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        // No calendar either: Calendar's grant asks for both, so To-do does not ask as well.
+        core.stores.local.lock().unwrap().set_account_scopes(&id, "https://mail.google.com/").unwrap();
+        assert!(core.tasks_access_needed().await.unwrap().is_empty());
+        assert_eq!(core.calendar_access_needed().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn demo_without_calendar_offers_google_access_or_nothing() {
         for (state, offered, granted) in [("google", 1, false), ("granted", 0, true), ("none", 0, false)] {
             let dir = tempfile::tempdir().unwrap();
@@ -503,14 +553,38 @@ mod tests {
         let event = draft.event("created-1".into()).unwrap();
         let created = lagom_core::google::CreatedEvent { event, conference_pending: false };
         let (stores, id) = (core.stores.clone(), google.id.clone());
+        let (mut later, lunch) = (created.clone(), created.event.clone());
+        (later.event.remote_id, later.event.title) = ("created-2".into(), "Trip planning".into());
         tokio::task::spawn_blocking(move || {
             let s = Store::open(&stores.path).unwrap();
             // Google saved it, so a cache that cannot take it is no failed save: a retry would make a second event.
-            create_cached(&stores, &s, &id, "gone", async { Ok(created.clone()) }).unwrap();
-            create_cached(&stores, &s, &id, "primary", async { Ok(created) })
-        }).await.unwrap().unwrap();
+            create_cached(&stores, &s, &id, "later", async { Ok(later) }).unwrap();
+            create_cached(&stores, &s, &id, "primary", async { Ok(created) }).unwrap();
+            assert_eq!(stores.unsaved_events.lock().unwrap().len(), 1, "the refused one waits for the next sync");
+            // The next sync writes it once the cache takes it; past the fetch window no fetch would bring it.
+            cache_unsaved(&stores, &s, "other account");
+            assert_eq!(stores.unsaved_events.lock().unwrap().len(), 1);
+            cache_unsaved(&stores, &s, &id);
+            assert_eq!(stores.unsaved_events.lock().unwrap().len(), 1, "still refused, still kept");
+            s.replace_calendar_window(&id, nine - 7 * 86_400, nine + 30 * 86_400, &[(lagom_core::calendar::Calendar { remote_id: "primary".into(),
+                name: "Personal".into(), color: None, shown: true, writable: true }, vec![lunch]), (lagom_core::calendar::Calendar { remote_id: "later".into(),
+                name: "Later".into(), color: None, shown: true, writable: true }, vec![])]).unwrap();
+            cache_unsaved(&stores, &s, &id);
+            assert!(stores.unsaved_events.lock().unwrap().is_empty());
+        }).await.unwrap();
         let week = core.agenda(today.to_string(), 1).await.unwrap();
-        assert_eq!(week.iter().map(|e| (e.title.as_str(), e.start_unix, e.end_unix)).collect::<Vec<_>>(), [("Lunch with Maja", nine, nine + 3600)]);
+        assert_eq!(week.iter().map(|e| (e.title.as_str(), e.start_unix, e.end_unix)).collect::<Vec<_>>(),
+            [("Trip planning", nine, nine + 3600), ("Lunch with Maja", nine, nine + 3600)]);
+
+        // Google refuses the write scope while reads still work: New event hides and Calendar offers access again.
+        let (stores, id) = (core.stores.clone(), google.id.clone());
+        let refused = tokio::task::spawn_blocking(move || {
+            let s = Store::open(&stores.path).unwrap();
+            create_cached(&stores, &s, &id, "primary", async { Err(lagom_core::Error::CalendarConsent) })
+        }).await.unwrap();
+        assert!(matches!(refused, Err(lagom_core::Error::CalendarConsent)));
+        assert!(core.event_calendars().await.unwrap().is_empty());
+        assert_eq!(core.calendar_access_needed().await.unwrap().iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [google.id.as_str()]);
     }
 
     #[tokio::test]

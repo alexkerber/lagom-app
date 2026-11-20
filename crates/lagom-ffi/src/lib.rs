@@ -222,7 +222,9 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     sign_in: Mutex<Option<lagom_core::oauth::Pending>>,
     // A calendar fetch, or a new event and its cache write: a fetch that began before Google stored the
     // event must not replace the window without it. After removal in the lock order.
-    calendar: Mutex<()> }
+    calendar: Mutex<()>,
+    // New events Google confirmed but the cache refused: (account, calendar, event), written again at the next sync.
+    unsaved_events: Mutex<Vec<(String, String, lagom_core::calendar::Event)>> }
 
 impl LagomCore {
     async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
@@ -400,6 +402,8 @@ fn sync_google(stores: &Stores, a: &Account) {
     let mut store = match Store::open(&stores.path) { Ok(store) => store, Err(error) => return log("Calendar", Err(error)) };
     {
         let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Before the fetch, so an event deleted in Google since then leaves again with its window.
+        planner::cache_unsaved(stores, &store, &a.id);
         log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
     }
     match store.account_scopes(&a.id) {
@@ -425,7 +429,7 @@ impl LagomCore {
         let store = Store::open(&path)?;
         store.recover_outbox()?;
         let local = Store::open(&path)?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None), calendar: Mutex::new(()) }), background_cancel: Arc::default() });
+        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None), calendar: Mutex::new(()), unsaved_events: Default::default() }), background_cancel: Arc::default() });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }

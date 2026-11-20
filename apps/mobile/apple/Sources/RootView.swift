@@ -93,11 +93,12 @@ struct RootView: View {
         }
         // Unread counts, Today's mail and the sidebar counts follow every mail reload.
         .onChange(of: model.rows) { _, _ in Task { await planner.reloadMail() } }
-        // A sync can change other mailboxes, and fetches the calendar, while the visible rows stay the same.
-        .onChange(of: model.syncing) { _, syncing in if !syncing { Task { await planner.reloadMail(); await planner.reloadAgenda() } } }
+        // A sync can change other mailboxes, and fetches the calendar and Google Tasks, while the visible rows stay the same.
+        .onChange(of: model.syncing) { _, syncing in if !syncing { Task { await planner.reload() } } }
         .onChange(of: section) { _, section in
             if section == .calendar { Task { await planner.reloadAgenda() } }
             if section == .today { Task { await planner.reloadMail() } }
+            if section == .todo { Task { await planner.reloadTodos() } }
         }
         // Last, so the sheets above read it too.
         .readsPageMargin()
@@ -121,7 +122,7 @@ struct RootView: View {
         case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 })
         case .mail: MailView(model: model, planner: planner, settingsOpen: $settingsOpen)
         case .calendar: CalendarView(planner: planner, model: model)
-        case .todo: TodoView(planner: planner, openMail: openMail)
+        case .todo: TodoView(planner: planner, model: model, openMail: openMail)
         case .settings: SettingsView(model: model)
         }
     }

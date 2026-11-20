@@ -323,11 +323,12 @@ class MainActivity : ComponentActivity() {
     }
     // Unread counts and Today's mail follow every mail reload and the end of a sync.
     LaunchedEffect(model.rows, model.syncing) { if (!model.syncing) planner.reloadMail() }
-    // A sync fetches the calendar too.
-    LaunchedEffect(model.syncing) { if (!model.syncing) planner.reloadAgenda() }
+    // A sync fetches the calendar and Google Tasks too.
+    LaunchedEffect(model.syncing) { if (!model.syncing) { planner.reloadAgenda(); planner.reloadTodos() } }
     LaunchedEffect(section) {
         if (section == AppSection.CALENDAR) planner.reloadAgenda()
         if (section == AppSection.TODAY) planner.reloadMail()
+        if (section == AppSection.TODO) planner.reloadTodos()
     }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
@@ -345,7 +346,7 @@ class MainActivity : ComponentActivity() {
                     AppSection.MAIL -> MailScreen(model, twoPane)
                     // The tablet layouts' breakpoint: a phone, also in landscape, keeps the one-day grid.
                     AppSection.CALENDAR -> CalendarScreen(planner, model, grid = twoPane)
-                    AppSection.TODO -> TodoScreen(planner)
+                    AppSection.TODO -> TodoScreen(planner, model)
                 }
             }
         }
