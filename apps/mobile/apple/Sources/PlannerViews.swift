@@ -664,6 +664,129 @@ struct NewTaskView: View {
     }
 }
 
+/// The Mac's New event sheet (`new_event.rs`): the same fields, words and defaults, with the system date and time pickers.
+struct NewEventView: View {
+    let planner: PlannerModel
+    @State private var title = ""
+    @State private var start: Date
+    @State private var end: Date
+    @State private var allDay = false
+    @State private var meet = false
+    /// The chosen calendar; nil is the first.
+    @State private var choice: EventCalendar?
+    @State private var guests = ""
+    @State private var details = ""
+    @State private var error: String?
+    @State private var saving = false
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var focused: Bool
+
+    init(planner: PlannerModel, day: Date) {
+        self.planner = planner
+        let times = PlannerModel.newEventTimes(day: day)
+        _start = State(initialValue: times.start)
+        _end = State(initialValue: times.end)
+    }
+
+    var body: some View {
+        let calendars = planner.eventCalendars
+        SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() }) {
+            ScrollView {
+                VStack(spacing: 0) {
+                    FieldRow(label: "Title", labelWidth: 84) {
+                        TextField("Event title", text: $title).focused($focused).submitLabel(.done).accessibilityLabel("Title")
+                    }
+                    FieldRow(label: "Date", labelWidth: 84) { picker("Date", $start, .date) }
+                    if !allDay { FieldRow(label: "Start", labelWidth: 84) { picker("Start", $start, .hourAndMinute) } }
+                    FieldRow(label: allDay ? "Last day" : "End date", labelWidth: 84) { picker(allDay ? "Last day" : "End date", $end, .date) }
+                    if !allDay { FieldRow(label: "End", labelWidth: 84) { picker("End", $end, .hourAndMinute) } }
+                    toggle("All day", icon: "sun", $allDay)
+                    if calendars.count > 1 {
+                        FieldRow(label: "Calendar", labelWidth: 84) {
+                            Picker("Calendar", selection: Binding(get: { choice ?? calendars[0] }, set: { choice = $0 })) {
+                                ForEach(calendars, id: \.self) { Text($0.label).tag($0) }
+                            }
+                            .labelsHidden().tint(Theme.ink)
+                        }
+                    } else if let only = calendars.first {
+                        FieldRow(label: "Calendar", labelWidth: 84) { Text(only.label).foregroundStyle(Theme.secondary).lineLimit(1) }
+                    }
+                    toggle("Add Google Meet", icon: "video", $meet)
+                    FieldRow(label: "Guests", labelWidth: 84) {
+                        TextField("Email addresses (optional)", text: $guests)
+                            .keyboardType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityLabel("Guests, email addresses (optional)")
+                    }
+                    FieldRow(label: "Description", labelWidth: 84) {
+                        TextField("Description (optional)", text: $details, axis: .vertical).lineLimit(1...6).accessibilityLabel("Description")
+                    }
+                    if Storage.demo && meet {
+                        Text("Demo: no meeting link or invitations will be created").lagomFont(.small).foregroundStyle(Theme.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
+                    }
+                    if let error {
+                        Text(error).lagomFont(.base).foregroundStyle(Theme.danger)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .disabled(saving)
+            }
+            .scrollDismissesKeyboard(.interactively)
+        } footer: {
+            Button(saving ? "Saving…" : "Save event", action: save).buttonStyle(HouseButtonStyle(primary: true))
+                .disabled(saving || calendars.isEmpty)
+            Spacer(minLength: 0)
+        }
+        // An event moves as a whole: a later start keeps its length, as Apple's Calendar does.
+        .onChange(of: start) { old, new in end = end.addingTimeInterval(new.timeIntervalSince(old)) }
+        .onAppear {
+            focused = Storage.newEventScreen == nil
+            if Storage.newEventScreen == "filled" || Storage.newEventScreen == "saved" {
+                (title, guests, details) = ("Coffee with Johan", "johan@ek.example", "The invoice, and the coffee machine.")
+                start = Calendar.current.date(bySettingHour: 12, minute: 15, second: 0, of: start) ?? start
+                if Storage.newEventScreen == "saved" { Task { try? await Task.sleep(for: .seconds(1)); save() } }
+            }
+        }
+        .interactiveDismissDisabled(saving)
+        .presentationDetents([.large])
+    }
+
+    private func picker(_ label: String, _ value: Binding<Date>, _ parts: DatePickerComponents) -> some View {
+        DatePicker(label, selection: value, displayedComponents: parts).labelsHidden().accessibilityLabel(label)
+    }
+
+    /// Desktop `toggle_row`: the label, its icon, and the switch.
+    private func toggle(_ label: String, icon: String, _ isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 8) {
+                Icon(icon).foregroundStyle(Theme.secondary)
+                Text(label).lagomFont(.base).foregroundStyle(Theme.ink)
+            }
+        }
+        .tint(Theme.accentFill)
+        .frame(minHeight: 50)
+        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+    }
+
+    private func save() {
+        guard !saving else { return }
+        // By identity, not position: a sync may reload the list while the sheet is open.
+        guard let target = choice.map({ planner.eventCalendars.contains($0) ? $0 : nil }) ?? planner.eventCalendars.first else {
+            error = "choose a writable calendar"
+            return
+        }
+        saving = true
+        error = nil
+        let form = PlannerModel.eventForm(title: title, allDay: allDay, start: start, end: end, guests: guests, description: details, meet: meet)
+        Task {
+            error = await planner.createEvent(form, in: target)
+            saving = false
+            if error == nil { dismiss() }
+        }
+    }
+}
+
 /// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo (Alex 2026-11-17).
 struct CalendarView: View {
     let planner: PlannerModel
@@ -688,6 +811,8 @@ private struct WeekGrid: View {
     private let calendar = Calendar.current
     @State private var position = ScrollPosition(edge: .top)
     @State private var allDayHeight: CGFloat = 0
+    @State private var newEvent = false
+    @State private var demoSheetShown = false
 
     var body: some View {
         let week = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: planner.weekStart) }
@@ -746,15 +871,32 @@ private struct WeekGrid: View {
         .onChange(of: planner.weekStart, initial: true) { _, start in
             selected = calendar.isDate(PlannerModel.monday(.now), inSameDayAs: start) ? calendar.startOfDay(for: .now) : start
         }
+        .sheet(isPresented: $newEvent) { NewEventView(planner: planner, day: newEventDay(week)).duoRail() }
+        .task(id: planner.eventCalendars.isEmpty) {
+            guard !planner.eventCalendars.isEmpty, Storage.newEventScreen != nil, !demoSheetShown else { return }
+            demoSheetShown = true
+            try? await Task.sleep(for: .seconds(2.5)) // a sheet asked for during the launch hand-over is dropped
+            newEvent = true
+        }
         .railColumn(top: {
             if oneDay {
                 VStack(spacing: 8) {
+                    // New event at the top, as New task on To-do and New message in Mail.
+                    if !planner.eventCalendars.isEmpty {
+                        RailButton(title: "New event", icon: "plus", primary: true) { newEvent = true }.padding(.bottom, 8)
+                    }
                     RailButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
                     RailButton(title: "Today", icon: "calendar") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }
                     RailButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
                 }
             }
         }, bottom: { EmptyView() })
+    }
+
+    /// Desktop `new_event_default`: the day shown, or in a week today when it is in the week, else its Monday.
+    private func newEventDay(_ week: [Date]) -> Date {
+        if oneDay { return selected }
+        return week.contains { calendar.isDateInToday($0) } ? .now : planner.weekStart
     }
 
     /// The week as seven tappable days, Spark's strip: the chosen day in the accent circle, today in the accent.
@@ -798,6 +940,10 @@ private struct WeekGrid: View {
                 Button("Today") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
                 IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
             }
+            // The Mac's accent New event after the week buttons; a phone shows only its plus. On the Duo it is in the column.
+            if railInset == 0 && !planner.eventCalendars.isEmpty {
+                HouseButton(title: "New event", icon: "plus", primary: true, iconOnly: oneDay) { newEvent = true }
+            }
         }
         .frame(minHeight: 44)
     }
@@ -810,13 +956,14 @@ private struct WeekGrid: View {
         return ScrollView {
                 HStack(alignment: .top, spacing: 0) {
                     VStack(spacing: 0) {
+                        // One plain "13:00" in the "All day" label's face and colour, in this device's clock.
                         ForEach(0..<24, id: \.self) { hour in
-                            HStack(alignment: .firstTextBaseline, spacing: 1) {
-                                Text(String(format: "%02d", hour)).lagomFont(.base).foregroundStyle(Theme.ink)
-                                Text("00").lagomFont(.small).foregroundStyle(Theme.secondary)
-                            }
-                            .monospacedDigit().padding(.trailing, 8)
-                            .frame(width: Self.gutter, height: Self.hour, alignment: .topTrailing).offset(y: -8)
+                            // A fixed date: on a daylight-saving day one hour is missing or repeated.
+                            Text(calendar.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: hour)) ?? .now, format: .dateTime.hour().minute())
+                                .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+                                .lineLimit(1).minimumScaleFactor(0.6) // "12:00 PM" must fit the gutter on one line
+                                .padding(.trailing, 8)
+                                .frame(width: Self.gutter, height: Self.hour, alignment: .topTrailing).offset(y: -8)
                         }
                     }
                     .accessibilityHidden(true)

@@ -66,7 +66,9 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
+import java.time.LocalDateTime
 import java.time.LocalTime
+import androidx.compose.ui.text.input.KeyboardType
 import app.lagommail.core.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -108,7 +110,8 @@ internal val AppSection.icon: Int get() = when (this) {
     val measurer = rememberTextMeasurer()
     return remember(context, density, style) {
         val format = android.text.format.DateFormat.getTimeFormat(context)
-        val hour = java.util.Calendar.getInstance()
+        // A fixed date: on a daylight-saving day one hour is missing or repeated.
+        val hour = java.util.Calendar.getInstance().apply { set(2026, 0, 1) }
         val labels = (0..23).map { hour.set(java.util.Calendar.HOUR_OF_DAY, it); hour.set(java.util.Calendar.MINUTE, 0); format.format(hour.time) }
         with(density) { labels.maxOf { measurer.measure(it, style, maxLines = 1).size.width }.toDp() }
     }
@@ -657,7 +660,8 @@ private const val NEW_LIST = Long.MIN_VALUE
 }
 
 private val HourHeight = 60.dp
-private val Gutter = 48.dp
+/** The hour column: 48 dp, or wider when the locale's clock needs it ("12:00 PM" in a large font). */
+private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
 
 /** iPad's week, desktop `week::week_view`: day columns on an hour grid, all-day events above, the now line across. */
 @Composable private fun WeekGrid(planner: PlannerModel, model: MailModel, oneDay: Boolean) {
@@ -666,8 +670,11 @@ private val Gutter = 48.dp
     val days = if (oneDay) listOf(selected) else week
     val byDay = planner.week.groupBy { it.day }
     var shown by remember { mutableStateOf<AgendaItem?>(null) }
-    Column(Modifier.fillMaxSize().padding(horizontal = if (oneDay) 16.dp else 24.dp)) {
-        WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3)) {
+    var creating by rememberSaveable { mutableStateOf<LocalDate?>(null) }
+    // 16 dp as Today and To-do, on phones and tablets alike.
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3), compact = oneDay,
+            newEvent = { creating = if (oneDay) selected else calendarDay(planner.weekStart, LocalDate.now()) }.takeIf { planner.eventCalendars.isNotEmpty() }) {
             selected = LocalDate.now()
             planner.perform { planner.showWeek(0) }
         }
@@ -704,10 +711,11 @@ private val Gutter = 48.dp
         }
     }
     shown?.let { EventDetails(planner, it) { shown = null } }
+    creating?.let { NewEventDialog(planner, it) { creating = null } }
 }
 
 /** The selected day's month on phones, the week's Thursday on tablets, and the week buttons. */
-@Composable private fun WeekHeader(planner: PlannerModel, month: LocalDate, onToday: () -> Unit) {
+@Composable private fun WeekHeader(planner: PlannerModel, month: LocalDate, compact: Boolean, newEvent: (() -> Unit)?, onToday: () -> Unit) {
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.weight(1f).semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -719,8 +727,123 @@ private val Gutter = 48.dp
         LagomIconButton("Previous week", R.drawable.ic_chevron_left) { planner.perform { planner.showWeek(-1) } }
         HouseButton("Today", onClick = onToday)
         LagomIconButton("Next week", R.drawable.ic_chevron_right) { planner.perform { planner.showWeek(1) } }
+        // A phone's header holds the month and the week buttons on one line, so New event shows its icon there.
+        newEvent?.let { HouseButton("New event", R.drawable.ic_new_event, primary = true, iconOnly = compact, onClick = it) }
     }
 }
+
+/** Desktop `new_event_sheet`: the same fields, words and defaults, with the system's date and time pickers. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun NewEventDialog(planner: PlannerModel, day: LocalDate, close: () -> Unit) {
+    val defaults = remember(day) { newEventTimes(day, LocalDateTime.now()) }
+    var title by rememberSaveable { mutableStateOf("") }
+    var start by rememberSaveable { mutableStateOf(defaults.first) }
+    var end by rememberSaveable { mutableStateOf(defaults.second) }
+    var allDay by rememberSaveable { mutableStateOf(false) }
+    var meet by rememberSaveable { mutableStateOf(false) }
+    var guests by rememberSaveable { mutableStateOf("") }
+    var description by rememberSaveable { mutableStateOf("") }
+    // The chosen (account, calendar), not its position: a sync may reload the list. Null is the first.
+    var calendar by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    // The open picker: "date", "start", "endDate" or "end".
+    var picking by remember { mutableStateOf<String?>(null) }
+    val calendars = planner.eventCalendars
+    val focus = remember { FocusRequester() }
+    // Moving the start keeps the length, as the system calendars do.
+    fun moveStart(to: LocalDateTime) { end = end.plus(java.time.Duration.between(start, to)); start = to }
+    val chosen = calendar ?: calendars.firstOrNull()?.let { it.account to it.calendar }
+    fun save() {
+        if (saving) return
+        val target = calendars.firstOrNull { it.account to it.calendar == chosen }
+        if (target == null) { error = "choose a writable calendar"; return }
+        if (!allDay && !(unambiguous(start) && unambiguous(end))) {
+            error = "This local time is skipped or repeated by daylight saving; choose an unambiguous time"
+            return
+        }
+        saving = true
+        error = null
+        planner.perform {
+            try { planner.createEvent(target, eventForm(title, start, end, allDay, guests, description, meet)).let { if (it == null) close() else error = it } }
+            finally { saving = false }
+        }
+    }
+    val words = { date: LocalDate -> localDate(date, if (date.year == LocalDate.now().year) "EEEdMMM" else "EEEdMMMyyyy") }
+    val clockFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
+    val time = { at: LocalDateTime -> clockFormat.format(Date.from(at.atZone(ZoneId.systemDefault()).toInstant())) }
+    AlertDialog(onDismissRequest = { if (!saving) close() }, title = { Text("New event") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            OutlinedTextField(title, { title = it }, label = { Text("Title") }, placeholder = { Text("Event title") }, singleLine = true, enabled = !saving,
+                modifier = Modifier.fillMaxWidth().focusRequester(focus))
+            PickerRow("Date", words(start.toLocalDate()), !saving) { picking = "date" }
+            if (!allDay) PickerRow("Start", time(start), !saving) { picking = "start" }
+            PickerRow(if (allDay) "Last day" else "End date", words(end.toLocalDate()), !saving) { picking = "endDate" }
+            if (!allDay) PickerRow("End", time(end), !saving) { picking = "end" }
+            SwitchRow("All day", R.drawable.ic_all_day, allDay, !saving) { allDay = it }
+            if (calendars.size > 1) calendars.forEach { option ->
+                val key = option.account to option.calendar
+                Text(option.label, Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(8.dp))
+                    .background(if (key == chosen) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                    .selectable(key == chosen, enabled = !saving, role = Role.RadioButton) { calendar = key }
+                    .wrapContentHeight().padding(horizontal = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            } else calendars.firstOrNull()?.let { Text(it.label, color = lagom.ink2, style = timeStyle()) }
+            SwitchRow("Add Google Meet", R.drawable.ic_camera, meet, !saving) { meet = it }
+            OutlinedTextField(guests, { guests = it }, label = { Text("Guests · email addresses (optional)") }, singleLine = true, enabled = !saving,
+                placeholder = { Text("guest@example.com, guest2@example.com") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(description, { description = it }, label = { Text("Description") }, placeholder = { Text("Description (optional)") },
+                enabled = !saving, minLines = 2, modifier = Modifier.fillMaxWidth())
+            if (planner.demo && meet) Text("Demo: no meeting link or invitations will be created", color = lagom.ink2, style = timeStyle())
+            error?.let { Text(it, color = lagom.danger, style = MaterialTheme.typography.bodySmall) }
+        }
+    }, confirmButton = { TextButton(enabled = !saving, onClick = ::save) { Text(if (saving) "Saving…" else "Save event") } },
+        dismissButton = { TextButton(enabled = !saving, onClick = close) { Text("Cancel") } })
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    when (val which = picking) {
+        "date", "endDate" -> {
+            val current = if (which == "date") start else end
+            // The picker counts in UTC midnights.
+            val state = rememberDatePickerState(initialSelectedDateMillis = current.toLocalDate().atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
+            DatePickerDialog(onDismissRequest = { picking = null }, confirmButton = {
+                TextButton(onClick = {
+                    state.selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }?.let { date ->
+                        if (which == "date") moveStart(date.atTime(start.toLocalTime())) else end = date.atTime(end.toLocalTime())
+                    }
+                    picking = null
+                }) { Text("OK") }
+            }, dismissButton = { TextButton(onClick = { picking = null }) { Text("Cancel") } }) { DatePicker(state) }
+        }
+        "start", "end" -> {
+            val current = if (which == "start") start else end
+            val state = rememberTimePickerState(current.hour, current.minute, android.text.format.DateFormat.is24HourFormat(LocalContext.current))
+            AlertDialog(onDismissRequest = { picking = null }, text = { TimePicker(state) }, confirmButton = {
+                TextButton(onClick = {
+                    val at = current.toLocalDate().atTime(state.hour, state.minute)
+                    if (which == "start") moveStart(at) else end = at
+                    picking = null
+                }) { Text("OK") }
+            }, dismissButton = { TextButton(onClick = { picking = null }) { Text("Cancel") } })
+        }
+    }
+}
+
+/** A quiet label and the value; a tap opens its picker. */
+@Composable private fun PickerRow(label: String, value: String, enabled: Boolean, open: () -> Unit) =
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), color = lagom.ink2)
+        TextButton(enabled = enabled, onClick = open, modifier = Modifier.semantics { contentDescription = "$label, $value" }) { Text(value) }
+    }
+
+/** The Mac's toggle row: its icon, the label and a switch; the whole row toggles. */
+@Composable private fun SwitchRow(label: String, icon: Int, on: Boolean, enabled: Boolean, change: (Boolean) -> Unit) =
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(on, enabled = enabled, role = Role.Switch, onValueChange = change),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        LagomIcon(icon, tint = lagom.ink2, size = 16.dp)
+        Text(label, Modifier.weight(1f))
+        Switch(on, onCheckedChange = null, enabled = enabled)
+    }
+
 
 /** Seven tappable days: the selection is filled, today otherwise stays in the accent. */
 @Composable private fun WeekStrip(week: List<LocalDate>, selected: LocalDate, onSelect: (LocalDate) -> Unit) {
@@ -769,14 +892,19 @@ private val Gutter = 48.dp
     val hour = with(LocalDensity.current) { HourHeight.roundToPx() }
     LaunchedEffect(days, first) { scroll.scrollTo(first * hour) }
     val colors = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val hours = remember(context) {
+        val format = android.text.format.DateFormat.getTimeFormat(context)
+        val at = java.util.Calendar.getInstance().apply { set(2026, 0, 1, 0, 0) } // a fixed date, as `timeColumn`
+        (0..23).map { at.set(java.util.Calendar.HOUR_OF_DAY, it); format.format(at.time) }
+    }
     Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(top = 12.dp)) {
         Row {
             Column(Modifier.width(Gutter).clearAndSetSemantics {}) {
                 (0 until 24).forEach { h ->
-                    Row(Modifier.height(HourHeight).fillMaxWidth().offset(y = (-8).dp).padding(end = 8.dp), horizontalArrangement = Arrangement.End) {
-                        Text(h.toString().padStart(2, '0'), color = colors.onSurface, style = MaterialTheme.typography.bodyMedium)
-                        Text("00", color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
-                    }
+                    // One plain label in the locale's clock, "13:00" or "1:00 PM", as the Mac's gutter.
+                    Text(hours[h], Modifier.height(HourHeight).fillMaxWidth().offset(y = (-8).dp).padding(end = 8.dp), color = colors.onSurfaceVariant,
+                        style = timeStyle(), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                 }
             }
             days.forEachIndexed { i, day -> DayColumn(day, byDay[day.toString()].orEmpty(), blocks[i], Modifier.weight(1f), onShow) }

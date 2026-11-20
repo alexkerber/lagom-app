@@ -65,6 +65,8 @@ android {
         }
     }
     buildTypes {
+        // `-Plagom.applicationIdSuffix=.cal` installs a debug build beside another agent's, on a shared emulator.
+        debug { providers.gradleProperty("lagom.applicationIdSuffix").orNull?.let { applicationIdSuffix = it } }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

@@ -1126,6 +1126,16 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun calendarAccessNeeded(): List<MailAccount> = calendarAccess
     var granted = false
     override suspend fun calendarGranted(): Boolean = granted
+    var calendars = emptyList<EventCalendar>()
+    override suspend fun eventCalendars(): List<EventCalendar> = calendars
+    val createdEvents = mutableListOf<Triple<String, String, EventForm>>()
+    val demoEvents = mutableListOf<EventForm>()
+    var rejectEvent: String? = null
+    override suspend fun createEvent(accountId: String, calendar: String, form: EventForm) {
+        rejectEvent?.let { throw MailException.Failed(it) }
+        createdEvents += Triple(accountId, calendar, form)
+    }
+    override suspend fun addDemoEvent(form: EventForm) { demoEvents += form }
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
     override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
