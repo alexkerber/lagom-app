@@ -62,6 +62,8 @@ internal val SplashIcon = 160.dp
 
 @Composable internal fun Onboarding(model: MailModel, askNotifications: Boolean, demo: Boolean, answer: (allow: Boolean) -> Unit) {
     var choosing by rememberSaveable { mutableStateOf(false) }
+    // Welcome's icon settles once; Back to Welcome does not replay the splash hand-over.
+    var settled by rememberSaveable { mutableStateOf(false) }
     // Demo lists both providers so the step can be captured; a tap there only shows the core's refusal.
     val providers = remember { listOf(SignInProvider.GOOGLE to "Google", SignInProvider.MICROSOFT to "Microsoft").filter { demo || signInAvailable(it.first) } }
     val form = model.accountForm
@@ -82,7 +84,7 @@ internal val SplashIcon = 160.dp
             (fadeOut(tween(150, easing = EaseOut)) + slideOutHorizontally(move) { if (forward) -it / 8 else it / 8 })
     }) { shown ->
         when (shown) {
-            Step.WELCOME -> Welcome(model, ::addAccount)
+            Step.WELCOME -> Welcome(model, settled, { settled = true }, ::addAccount)
             Step.CHOOSE -> ChooseAccount(model, providers) { choosing = false }
             Step.FORM -> model.accountForm?.let { AddAccountScreen(model, it, showProviders = false) { model.accountForm = null } }
             Step.NOTIFICATIONS -> Notifications(answer)
@@ -134,18 +136,18 @@ internal val SplashIcon = 160.dp
 @Composable private fun WideButton(text: String, @DrawableRes icon: Int, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) =
     HouseButton(text, icon, Modifier.fillMaxWidth().heightIn(min = 48.dp), primary = primary, enabled = enabled, onClick = onClick)
 
-@Composable private fun Welcome(model: MailModel, addAccount: () -> Unit) {
+@Composable private fun Welcome(model: MailModel, settled: Boolean, settle: () -> Unit, addAccount: () -> Unit) {
     val c = lagom
     // The icon starts where the splash drew it (160 dp circle, window centre) and settles into place.
-    var settled by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(Unit) { delay(300); settled = true }
+    LaunchedEffect(Unit) { if (!settled) { delay(300); settle() } }
     val t by animateFloatAsState(if (settled) 1f else 0f, tween(450, easing = EaseOut), label = "settle")
     var centre by remember { mutableStateOf(Offset.Unspecified) }
     var mark by remember { mutableStateOf(Offset.Unspecified) }
     val icon = 64.dp
     StepPage(Modifier.onGloballyPositioned { centre = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }, buttons = {
         Column(Modifier.alpha(t), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            WideButton("Add account", R.drawable.ic_account_add, primary = true, enabled = model.core != null, onClick = addAccount)
+            // Hidden until the icon settles, so it takes no tap or TalkBack focus before it shows.
+            WideButton("Add account", R.drawable.ic_account_add, primary = true, enabled = model.core != null && settled, onClick = addAccount)
             // The store could not open: the only way on is to try again.
             if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync) { model.perform { model.setForeground(true) } }
             Text("No tracking. No lagom servers.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
@@ -172,7 +174,7 @@ internal val SplashIcon = 160.dp
                 color = c.ink2, fontSize = TextSize.body, lineHeight = TextSize.body * Leading)
             // One sentence a line, so no width leaves a word alone.
             DisplayTitle("Not too much.\nNot too little.\nJust right.", TextSize.display,
-                Modifier.padding(top = 24.dp).clearAndSetSemantics { heading(); contentDescription = "Not too much. Not too little. Just right." })
+                Modifier.padding(top = 24.dp).clearAndSetSemantics { contentDescription = "Not too much. Not too little. Just right." })
         }
     }
 }
@@ -199,10 +201,10 @@ internal val SplashIcon = 160.dp
         MonoLabel("Other mail", Modifier.padding(top = 32.dp, bottom = 8.dp))
         // The address decides the servers, so every mail app opens the same form.
         Rows {
-            listOf("iCloud" to R.drawable.ic_cloud, "Fastmail" to R.drawable.ic_inbox, "Yahoo" to R.drawable.ic_mail, "Other (IMAP)" to R.drawable.ic_settings)
-                .forEachIndexed { index, (name, icon) ->
+            listOf("iCloud", "Fastmail", "Yahoo", "Other (IMAP)")
+                .forEachIndexed { index, name ->
                     if (index > 0) Hairline()
-                    Choice(name, { LagomIcon(icon, size = 18.dp) }) { model.accountForm = AccountForm() }
+                    Choice(name, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }) { model.accountForm = AccountForm() }
                 }
         }
         Row(Modifier.padding(top = 16.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(8.dp),

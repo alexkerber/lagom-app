@@ -1,7 +1,7 @@
 //! Add an account, as on iOS and Android: Welcome on the first run, then "Choose your mail".
-//! "Continue with Google/Microsoft" runs sign-in in the browser; iCloud and Fastmail open the
-//! app-password form with their servers; Yahoo and "Other (IMAP)" ask for the address, the worker
-//! looks up the provider, then browser sign-in or the form follows.
+//! "Continue with Google/Microsoft" runs sign-in in the browser. iCloud, Fastmail, Yahoo and
+//! "Other (IMAP)" ask for the address, as on mobile; the worker looks up the provider, then browser
+//! sign-in or the app-password form with its servers follows.
 //! "Sign in" hands the account to the mail worker, which logs in to IMAP and SMTP before it
 //! saves anything.
 
@@ -36,7 +36,7 @@ impl Provider {
             Provider::ICloud => "iCloud",
             Provider::Fastmail => "Fastmail",
             Provider::Outlook => "Microsoft",
-            Provider::Other => "Other (IMAP)",
+            Provider::Other => "Mail server",
         }
     }
 
@@ -70,7 +70,6 @@ impl Provider {
             Provider::ICloud | Provider::Fastmail => "Use an app password, not your normal password. You make one in your account settings.",
         }
     }
-
 }
 
 /// The server fields as typed.
@@ -177,9 +176,7 @@ pub struct Connect(pub Box<Account>, pub Zeroizing<String>);
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Choice {
     SignIn(oauth::Provider),
-    /// The form with this provider's servers.
-    Preset(Provider),
-    /// The address step; the name is the row's.
+    /// The address step, as on mobile: the address decides the servers. The name is the row's.
     Lookup(&'static str),
 }
 
@@ -261,8 +258,8 @@ impl AddAccount {
         let welcome = !can_cancel && std::env::var("LAGOM_SCREEN").as_deref() != Ok("add-account-choose");
         let stops: [FocusHandle; 6] = std::array::from_fn(|_| cx.focus_handle().tab_stop(true));
         let focus = cx.focus_handle();
-        // Welcome's one button takes Return; Choose shows no focus ring until Tab.
-        window.focus(if welcome { &stops[0] } else { &focus });
+        // No focus ring until Tab; Return still presses Welcome's one button.
+        window.focus(&focus);
         Self {
             screen: if welcome { Screen::Welcome } else { Screen::Choose },
             state: State::Idle,
@@ -346,7 +343,6 @@ impl AddAccount {
     fn choose(&mut self, c: Choice, window: &mut Window, cx: &mut Context<Self>) {
         match c {
             Choice::SignIn(p) => self.browser(p, true, window, cx),
-            Choice::Preset(p) => self.form(p, window, cx),
             Choice::Lookup(_) => {
                 self.screen = Screen::Address;
                 self.state = State::Idle;
@@ -360,7 +356,7 @@ impl AddAccount {
     /// rows match iOS and Android; Gmail and Outlook then go through "Other (IMAP)".
     fn choices(&self) -> Vec<Choice> {
         [oauth::Provider::Google, oauth::Provider::Microsoft].into_iter().filter(|p| (self.available)(*p)).map(Choice::SignIn)
-            .chain([Choice::Preset(Provider::ICloud), Choice::Preset(Provider::Fastmail), Choice::Lookup("Yahoo"), Choice::Lookup("Other (IMAP)")])
+            .chain(["iCloud", "Fastmail", "Yahoo", "Other (IMAP)"].map(Choice::Lookup))
             .collect()
     }
 
@@ -487,7 +483,7 @@ impl AddAccount {
             (Screen::Choose, _) => {
                 self.screen = Screen::Welcome;
                 self.state = State::Idle;
-                window.focus(&self.stops[0]);
+                window.focus(&self.focus);
                 cx.notify();
             }
             _ => {
@@ -514,7 +510,7 @@ impl AddAccount {
             "tab" if k.modifiers.shift => window.focus_prev(),
             "tab" => window.focus_next(),
             "escape" => self.back(window, cx),
-            "enter" if crate::shortcuts::submit().matches(k) || (k.modifiers == Default::default() && matches!(self.screen, Screen::Browser(_))) => match self.screen {
+            "enter" if crate::shortcuts::submit().matches(k) || (k.modifiers == Default::default() && matches!(self.screen, Screen::Browser(_) | Screen::Welcome)) => match self.screen {
                 Screen::Address => self.submit_email(cx),
                 Screen::Browser(_) => self.sign_in(window, cx),
                 Screen::Form => self.connect(cx),
@@ -572,7 +568,7 @@ impl AddAccount {
             .w_full()
             .flex()
             .flex_col()
-            .child(crate::main_window::app_mark(64.).ml(px(-6.)))
+            .child(crate::main_window::app_mark(72.).ml(px(-7.)))
             // The wordmark's "l" has a side bearing: pulled back to the icon's edge.
             .child(display("lagom", size::HERO).mt(px(24.)).ml(px(-3.)))
             .child(div().mt(px(8.)).flex().flex_wrap().gap(px(4.)).text_size(px(size::BODY)).text_color(t.ink2)
@@ -585,13 +581,14 @@ impl AddAccount {
                 .child(display("Not too much.", size::DISPLAY))
                 .child(display("Not too little.", size::DISPLAY))
                 .child(display("Just right.", size::DISPLAY)))
-            .child(self.stop(button(t, "Add account", Some(t.accent)), 0, t, window)
+            // An accent ring would vanish on the accent fill: the focused button gets an ink ring.
+            .child(button(t, "Add account", Some(t.accent)).track_focus(&self.stops[0])
                 .mt(px(40.))
                 .w_full()
                 .h(px(40.))
                 .justify_center()
-                .border_1()
-                .border_color(gpui::transparent_black())
+                .border_2()
+                .border_color(if self.stops[0].is_focused(window) { t.ink.into() } else { gpui::transparent_black() })
                 .on_click(cx.listener(|this, _, window, cx| this.welcome_done(window, cx))))
             .child(div().mt(px(8.)).text_size(px(size::SNIPPET)).text_color(t.ink2).child("No tracking. No lagom servers."))
     }
@@ -608,10 +605,7 @@ impl AddAccount {
                     // Google asks for its "G" on white, in dark mode too.
                     Choice::SignIn(p) => (format!("Continue with {}", oauth_name(p)),
                         mark.rounded_full().bg(gpui::white()).border_1().border_color(t.line).child(logo(p, 14.))),
-                    Choice::Preset(p) => (p.name().to_string(),
-                        mark.child(icon(if p == Provider::ICloud { "icons/cloud.svg" } else { "icons/inbox.svg" }, t.ink2, 16.))),
-                    Choice::Lookup(name) => (name.to_string(),
-                        mark.child(icon(if name == "Yahoo" { "icons/mail.svg" } else { "icons/settings.svg" }, t.ink2, 16.))),
+                    Choice::Lookup(name) => (name.to_string(), mark.child(icon("icons/mail.svg", t.ink2, 16.))),
                 };
                 let focused = self.stops[i].is_focused(window);
                 frame = frame.child(
@@ -909,20 +903,21 @@ mod tests {
         view.update_in(cx, |v, window, cx| { v.back(window, cx); v.choose(Choice::SignIn(oauth::Provider::Microsoft), window, cx); });
         assert_eq!(view.read_with(cx, |v, _| (v.screen, v.state.clone())), (Screen::Browser(oauth::Provider::Microsoft), State::SigningIn));
         view.update(cx, |v, _| v.available = |p| p == oauth::Provider::Google);
-        assert_eq!(view.read_with(cx, |v, _| v.choices()), [Choice::SignIn(oauth::Provider::Google), Choice::Preset(Provider::ICloud),
-            Choice::Preset(Provider::Fastmail), Choice::Lookup("Yahoo"), Choice::Lookup("Other (IMAP)")]);
+        assert_eq!(view.read_with(cx, |v, _| v.choices()), [Choice::SignIn(oauth::Provider::Google), Choice::Lookup("iCloud"),
+            Choice::Lookup("Fastmail"), Choice::Lookup("Yahoo"), Choice::Lookup("Other (IMAP)")]);
     }
 
     #[gpui::test]
     fn first_run_opens_on_welcome(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| AddAccount::new(false, vec![], window, cx));
-        assert!(view.update_in(cx, |v, window, _| v.screen == Screen::Welcome && v.stops[0].is_focused(window)), "Return presses Add account");
-        view.update_in(cx, |v, window, cx| v.press(0, window, cx));
+        assert!(view.update_in(cx, |v, window, _| v.screen == Screen::Welcome && v.focus.is_focused(window)), "no ring before Tab");
+        cx.update(|window, _| window.activate_window());
+        cx.simulate_keystrokes("enter");
         assert!(view.update_in(cx, |v, window, _| v.screen == Screen::Choose && v.focus.is_focused(window)), "no ring before Tab");
         // Without an account there is nothing to close: Esc goes back to Welcome, and no further.
         view.update_in(cx, |v, window, cx| { v.back(window, cx); v.back(window, cx); });
         assert_eq!(view.read_with(cx, |v, _| v.screen), Screen::Welcome);
-        view.update_in(cx, |v, window, cx| { v.press(0, window, cx); v.choose(Choice::Preset(Provider::Fastmail), window, cx); v.back(window, cx); });
+        view.update_in(cx, |v, window, cx| { v.press(0, window, cx); v.form(Provider::Fastmail, window, cx); v.back(window, cx); });
         assert_eq!(view.read_with(cx, |v, _| v.screen), Screen::Choose, "the form goes back to Choose");
     }
 

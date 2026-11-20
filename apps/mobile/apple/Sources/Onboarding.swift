@@ -77,6 +77,9 @@ struct OnboardingView: View {
                     .padding(.horizontal, 24).padding(.bottom, 16)
                     .frame(maxWidth: 440)
                     .opacity(step != .welcome || settled ? 1 : 0)
+                    // Hidden until the icon settles, so it takes no tap or VoiceOver focus before it shows.
+                    .allowsHitTesting(step != .welcome || settled)
+                    .accessibilityHidden(step == .welcome && !settled)
             }
             .frame(maxHeight: 800).frame(maxHeight: .infinity)
         }
@@ -101,7 +104,7 @@ struct OnboardingView: View {
                     .lagomFont(.body).foregroundStyle(Theme.secondary).padding(.top, 8)
                     .accessibilityLabel("Pronounced LAH-gom. Adverb, adjective. Swedish.")
                 // One sentence a line, so no width leaves a word alone.
-                DisplayTitle(text: "Not too much.\nNot too little.\nJust right.", size: .display).padding(.top, 24)
+                DisplayTitle(text: "Not too much.\nNot too little.\nJust right.", size: .display, header: false).padding(.top, 24)
                     .accessibilityLabel("Not too much. Not too little. Just right.")
             }
             .opacity(settled ? 1 : 0)
@@ -126,13 +129,13 @@ struct OnboardingView: View {
                 MonoLabel(text: "Other mail").padding(.top, 32).padding(.bottom, 8)
                 // The address decides the servers, so every mail app opens the same form.
                 rows {
-                    row("iCloud", mark: Icon("cloud", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                    row("iCloud", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
                     hairline
-                    row("Fastmail", mark: Icon("inbox", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                    row("Fastmail", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
                     hairline
                     row("Yahoo", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
                     hairline
-                    row("Other (IMAP)", mark: Icon("settings", size: 18).foregroundStyle(Theme.secondary)) { other = true }
+                    row("Other (IMAP)", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
                 }
             }
             .disabled(connecting)
@@ -230,11 +233,18 @@ private struct RowStyle: ButtonStyle {
 private struct DisplayTitle: View {
     let text: String
     let size: TextSize
+    var header = true
     @ScaledMetric(relativeTo: .largeTitle) private var scale: CGFloat = 1
 
     var body: some View {
-        Text(text).font(.custom(Theme.Face.display, size: size.points, relativeTo: .largeTitle))
-            .tracking(size.points * scale * Theme.Face.displayTracking)
-            .accessibilityAddTraits(.isHeader)
+        // One Text a line: Hauora's own line height is about 1.37; the site, Android and Mac set 1.15.
+        VStack(alignment: .leading, spacing: size.points * scale * -0.22) {
+            ForEach(text.components(separatedBy: "\n"), id: \.self) { line in
+                Text(line).font(.custom(Theme.Face.display, size: size.points, relativeTo: .largeTitle))
+                    .tracking(size.points * scale * Theme.Face.displayTracking)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(header ? .isHeader : [])
     }
 }
