@@ -16,7 +16,9 @@ struct OnboardingView: View {
     @State private var connecting = false
     @State private var error: String?
     @State private var height: CGFloat = 0
-    /// Welcome's icon starts where the launch screen drew it (96 pt, centred) and settles into place.
+    /// Welcome's group, for its place at 45 % of the free height.
+    @State private var group: CGFloat = 0
+    /// Welcome's icon starts where the launch screen drew it (96 pt, centred) and travels into place.
     @State private var settled = false
     @State private var root = CGRect.zero
     @State private var mark = CGRect.zero
@@ -31,7 +33,7 @@ struct OnboardingView: View {
     var body: some View {
         ZStack {
             switch step {
-            case .welcome: page(.welcome)
+            case .welcome: welcome
             case .choose: page(.choose)
             case .notifications: page(.notifications)
             }
@@ -52,6 +54,53 @@ struct OnboardingView: View {
             withAnimation(reduceMotion ? Motion.fade : .smooth(duration: 0.45)) { settled = true }
         }
     }
+
+    /// Welcome, as on Mac and Android: one centred group (icon, wordmark, dictionary line, definition, button, caption)
+    /// with its middle a little above the screen's, scrolling under large text. The wordmark is the one heavy element.
+    private var welcome: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                Image("LaunchIcon")
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { mark = $0 }
+                    .offset(settled || mark == .zero ? .zero : CGSize(width: root.midX - mark.midX, height: root.midY - mark.midY))
+                    .opacity(mark == .zero ? 0 : 1)
+                    .accessibilityHidden(true)
+                VStack(spacing: 0) {
+                    DisplayTitle(text: "lagom", size: .hero).padding(.top, 24)
+                    (Text("/ˈlɑːɡɔm/ ") + Text("adv., adj. Swedish.").foregroundStyle(Theme.secondary))
+                        .font(.custom(Self.medium, size: 15, relativeTo: .body)).padding(.top, 8)
+                        .accessibilityLabel("Pronounced LAH-gom. Adverb, adjective. Swedish.")
+                    // One line where it fits; else one sentence a line, so no width leaves a word alone.
+                    ViewThatFits(in: .horizontal) {
+                        Text("Not too much. Not too little. Just right.").fixedSize()
+                        Text("Not too much.\nNot too little.\nJust right.")
+                    }
+                    .font(.custom(Self.medium, size: 17, relativeTo: .body)).padding(.top, 20)
+                    Button { taps += 1; choosing = true } label: {
+                        Text("Add account").lagomFont(.base, .medium).frame(width: 280).frame(minHeight: 48)
+                    }
+                    .buttonStyle(HouseButtonStyle(primary: true)).padding(.top, 32)
+                    Text("No tracking. No lagom servers.").lagomFont(.small).foregroundStyle(Theme.secondary).padding(.top, 12)
+                }
+                .opacity(settled ? 1 : 0)
+                // Hidden until the icon settles, so it takes no tap or VoiceOver focus before it shows.
+                .allowsHitTesting(settled)
+                .accessibilityHidden(!settled)
+            }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 24).padding(.vertical, 16)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { group = $0 }
+            .padding(.top, max(0, (height - group) * 0.45))
+            .frame(maxWidth: .infinity, minHeight: height, alignment: .top)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .background(Theme.background)
+        .transition(.asymmetric(insertion: Motion.slide(.leading, reduceMotion), removal: .opacity))
+    }
+
+    /// Hauora Medium: the lightest bundled weight, for Welcome's body lines.
+    private static let medium = "Hauora-Medium"
 
     /// One step: Back on Choose account, the content scrolling under large text, its buttons at the foot.
     /// On iPad the column stops at 800 pt, so the buttons stay near the content.
@@ -76,10 +125,6 @@ struct OnboardingView: View {
                 VStack(spacing: 8) { buttons(step) }
                     .padding(.horizontal, 24).padding(.bottom, 16)
                     .frame(maxWidth: 440)
-                    .opacity(step != .welcome || settled ? 1 : 0)
-                    // Hidden until the icon settles, so it takes no tap or VoiceOver focus before it shows.
-                    .allowsHitTesting(step != .welcome || settled)
-                    .accessibilityHidden(step == .welcome && !settled)
             }
             .frame(maxHeight: 800).frame(maxHeight: .infinity)
         }
@@ -89,25 +134,7 @@ struct OnboardingView: View {
 
     @ViewBuilder private func content(_ step: Step) -> some View {
         switch step {
-        case .welcome:
-            Image("LaunchIcon").resizable().frame(width: 64, height: 64)
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { mark = $0 }
-                .scaleEffect(settled ? 1 : 96 / 64)
-                .offset(settled || mark == .zero ? .zero : CGSize(width: root.midX - mark.midX, height: root.midY - mark.midY))
-                .opacity(mark == .zero ? 0 : 1)
-                .accessibilityHidden(true)
-            // The dictionary entry, as on the site's hero. The wordmark's "l" has a side bearing: pulled back to the icon's edge.
-            VStack(alignment: .leading, spacing: 0) {
-                DisplayTitle(text: "lagom", size: .hero).padding(.leading, -3).padding(.top, 24)
-                (Text("/ˈlɑːɡɔm/").font(.custom(Theme.Face.label, size: TextSize.body.points, relativeTo: .body)).foregroundStyle(Theme.ink)
-                    + Text(" (\"LAH-gom\") ") + Text("adv., adj.").italic() + Text(" Swedish."))
-                    .lagomFont(.body).foregroundStyle(Theme.secondary).padding(.top, 8)
-                    .accessibilityLabel("Pronounced LAH-gom. Adverb, adjective. Swedish.")
-                // One sentence a line, so no width leaves a word alone.
-                DisplayTitle(text: "Not too much.\nNot too little.\nJust right.", size: .display, header: false).padding(.top, 24)
-                    .accessibilityLabel("Not too much. Not too little. Just right.")
-            }
-            .opacity(settled ? 1 : 0)
+        case .welcome: EmptyView()
         case .choose:
             DisplayTitle(text: "Choose your mail", size: .display).padding(.top, 8)
             let providers = [(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")]
@@ -165,11 +192,7 @@ struct OnboardingView: View {
 
     @ViewBuilder private func buttons(_ step: Step) -> some View {
         switch step {
-        case .welcome:
-            wide("Add account", icon: "account-add", primary: true) { taps += 1; choosing = true }
-            Text("No tracking. No lagom servers.")
-                .lagomFont(.small).foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
-        case .choose: EmptyView()
+        case .welcome, .choose: EmptyView()
         case .notifications:
             wide("Allow", icon: "done", primary: true) { taps += 1; allow() }
             wide("Not now", icon: "close", action: notNow)

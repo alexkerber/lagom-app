@@ -1540,6 +1540,8 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         } else { label.into() })).into());
     match fill {
         // A translucent tint would replace the fill, so a filled button dims a little instead.
+        // The accent fill is the primary button: the solid token fill, not the pale dark-mode accent.
+        Some(bg) if bg == t.accent => base.bg(t.accent_fill).text_color(t.accent_fill_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.text_color(t.ink), t, false),
     }
@@ -1547,7 +1549,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
 
 fn action_glyph(t: &Theme, path: &'static str, fill: Option<Rgba>) -> gpui::Svg {
     // GPUI's SVG paint path requires an explicit color on the SVG itself.
-    icon(path, if fill.is_some() { t.accent_ink } else { t.ink2 }, 16.)
+    icon(path, match fill { Some(bg) if bg == t.accent => t.accent_fill_ink, Some(_) => t.accent_ink, None => t.ink2 }, 16.)
         .when(fill.is_none(), |s| s.group_hover("action", |s| s.text_color(t.ink)))
 }
 

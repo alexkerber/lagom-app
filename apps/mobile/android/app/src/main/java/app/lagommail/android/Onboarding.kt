@@ -22,6 +22,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -136,6 +139,8 @@ internal val SplashIcon = 160.dp
 @Composable private fun WideButton(text: String, @DrawableRes icon: Int, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) =
     HouseButton(text, icon, Modifier.fillMaxWidth().heightIn(min = 48.dp), primary = primary, enabled = enabled, onClick = onClick)
 
+/** Welcome, as on Mac and iOS: one centred group (icon, wordmark, dictionary line, definition, button, caption) with its
+ *  middle a little above the screen's, scrolling under large text. The wordmark is the one heavy element. */
 @Composable private fun Welcome(model: MailModel, settled: Boolean, settle: () -> Unit, addAccount: () -> Unit) {
     val c = lagom
     // The icon starts where the splash drew it (160 dp circle, window centre) and settles into place.
@@ -143,38 +148,45 @@ internal val SplashIcon = 160.dp
     val t by animateFloatAsState(if (settled) 1f else 0f, tween(450, easing = EaseOut), label = "settle")
     var centre by remember { mutableStateOf(Offset.Unspecified) }
     var mark by remember { mutableStateOf(Offset.Unspecified) }
-    val icon = 64.dp
-    StepPage(Modifier.onGloballyPositioned { centre = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }, buttons = {
-        Column(Modifier.alpha(t), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Hidden until the icon settles, so it takes no tap or TalkBack focus before it shows.
-            WideButton("Add account", R.drawable.ic_account_add, primary = true, enabled = model.core != null && settled, onClick = addAccount)
-            // The store could not open: the only way on is to try again.
-            if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync) { model.perform { model.setForeground(true) } }
-            Text("No tracking. No lagom servers.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
-        }
-    }) {
-        val measured = centre.isSpecified && mark.isSpecified
-        AppIcon(icon, Modifier.onGloballyPositioned { mark = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }
-            .graphicsLayer {
-                if (measured) {
-                    translationX = (centre.x - mark.x) * (1 - t); translationY = (centre.y - mark.y) * (1 - t)
-                    scaleX = lerp(SplashIcon / icon, 1f, t); scaleY = scaleX
+    val icon = 96.dp
+    BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { centre = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }
+        .systemBarsPadding()) {
+        // 45 % of the free height above the group, 55 % below.
+        Box(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(horizontal = 24.dp, vertical = 16.dp),
+            contentAlignment = BiasAlignment(0f, -0.1f)) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                val measured = centre.isSpecified && mark.isSpecified
+                AppIcon(icon, Modifier.onGloballyPositioned { mark = it.positionInWindow() + Offset(it.size.width / 2f, it.size.height / 2f) }
+                    .graphicsLayer {
+                        if (measured) {
+                            translationX = (centre.x - mark.x) * (1 - t); translationY = (centre.y - mark.y) * (1 - t)
+                            scaleX = lerp(SplashIcon / icon, 1f, t); scaleY = scaleX
+                        }
+                        alpha = if (measured) 1f else 0f
+                    }, corner = lerp(0.5f, 0.24f, t))
+                Column(Modifier.alpha(t), horizontalAlignment = Alignment.CenterHorizontally) {
+                    DisplayTitle("lagom", TextSize.hero, Modifier.padding(top = 24.dp))
+                    Text(buildAnnotatedString {
+                        append("/ˈlɑːɡɔm/ ")
+                        withStyle(SpanStyle(color = c.ink2)) { append("adv., adj. Swedish.") }
+                    }, Modifier.padding(top = 8.dp).clearAndSetSemantics { contentDescription = "Pronounced LAH-gom. Adverb, adjective. Swedish." },
+                        color = c.ink, fontFamily = DisplayFace, fontWeight = FontWeight.Medium, fontSize = 15.sp, textAlign = TextAlign.Center)
+                    // One line where it fits; else one sentence a line, so no width leaves a word alone.
+                    var stacked by remember { mutableStateOf(false) }
+                    Text(if (stacked) "Not too much.\nNot too little.\nJust right." else "Not too much. Not too little. Just right.",
+                        Modifier.padding(top = 20.dp), color = c.ink, fontFamily = DisplayFace, fontWeight = FontWeight.Medium, fontSize = 17.sp,
+                        lineHeight = 17.sp * Leading, textAlign = TextAlign.Center, softWrap = stacked,
+                        onTextLayout = { if (!stacked && it.hasVisualOverflow) stacked = true })
+                    // Hidden until the icon settles, so it takes no tap or TalkBack focus before it shows.
+                    Column(Modifier.padding(top = 32.dp).width(280.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        HouseButton("Add account", modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), primary = true,
+                            enabled = model.core != null && settled, onClick = addAccount)
+                        // The store could not open: the only way on is to try again.
+                        if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync) { model.perform { model.setForeground(true) } }
+                    }
+                    Text("No tracking. No lagom servers.", Modifier.padding(top = 12.dp), color = c.ink2, fontSize = TextSize.small, textAlign = TextAlign.Center)
                 }
-                alpha = if (measured) 1f else 0f
-            }, corner = lerp(0.5f, 0.24f, t))
-        // The dictionary entry, as on the site's hero. The wordmark's "l" has a side bearing: pulled back to the icon's edge.
-        Column(Modifier.alpha(t)) {
-            DisplayTitle("lagom", TextSize.hero, Modifier.padding(top = 24.dp).offset(x = (-3).dp))
-            Text(buildAnnotatedString {
-                withStyle(SpanStyle(fontFamily = LabelFace, color = c.ink)) { append("/ˈlɑːɡɔm/") }
-                append(" (\"LAH-gom\") ")
-                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append("adv., adj.") }
-                append(" Swedish.")
-            }, Modifier.padding(top = 8.dp).clearAndSetSemantics { contentDescription = "Pronounced LAH-gom. Adverb, adjective. Swedish." },
-                color = c.ink2, fontSize = TextSize.body, lineHeight = TextSize.body * Leading)
-            // One sentence a line, so no width leaves a word alone.
-            DisplayTitle("Not too much.\nNot too little.\nJust right.", TextSize.display,
-                Modifier.padding(top = 24.dp).clearAndSetSemantics { contentDescription = "Not too much. Not too little. Just right." })
+            }
         }
     }
 }

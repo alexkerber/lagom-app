@@ -19,7 +19,8 @@ MOBILE_COLORS = {
     "ink2": ("secondary", "ink2"), "line": ("line", "line"),
     "sel": ("selected", "sel"), "sel_focus": ("selection", "selFocus"),
     "sel_icon": ("selectionIcon", "selIcon"), "accent": ("accent", "accent"),
-    "accent_ink": ("accentInk", "accentInk"), "done": ("done", "done"),
+    "accent_ink": ("accentInk", "accentInk"), "accent_fill": ("accentFill", "accentFill"),
+    "accent_fill_ink": ("accentFillInk", "accentFillInk"), "done": ("done", "done"),
     "later": ("later", "later"), "danger": ("danger", "danger"),
     "sidebar": ("sidebar", "sidebar"),
 }
@@ -70,6 +71,9 @@ def rust(tokens):
             out.append(f"            {key}: rgb(0x{c[key]:06X}),")
         out += ["            sel_focus: rgb(accent.selection()),", "            sel_icon: rgb(accent.selection()),",
                 f"            accent: rgb(accent.hex().{index}),", f"            accent_ink: rgb(0x{c['accent_ink']:06X}),",
+                # Another accent the person picked fills its own buttons; Dusk uses the solid Swedish blue.
+                f"            accent_fill: if accent == Accent::Dusk {{ rgb(0x{c['accent_fill']:06X}) }} else {{ rgb(accent.hex().{index}) }},",
+                f"            accent_fill_ink: if accent == Accent::Dusk {{ rgb(0x{c['accent_fill_ink']:06X}) }} else {{ rgb(0x{c['accent_ink']:06X}) }},",
                 f"            swipe_done: rgb(Accent::PineGreen.hex().{index}),", f"            swipe_later: rgb(Accent::Gold.hex().{index}),",
                 f"            danger: rgb(0x{c['danger']:06X}),",
                 f"            press: Rgba {{ a: {c['press_alpha']}, ..rgb(0x{c['ink']:06X}) }},", "        }", "    }"]

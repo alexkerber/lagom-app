@@ -13,6 +13,8 @@ extension Theme {
     static let selectionIcon = color(0x2A5BB8, 0x94ADDC)
     static let accent = color(0x2A5BB8, 0x8AB0F5)
     static let accentInk = color(0xFFFFFF, 0x1E1E1E)
+    static let accentFill = color(0x2A5BB8, 0x2F63CC)
+    static let accentFillInk = color(0xFFFFFF, 0xFFFFFF)
     static let done = color(0x1E6B4E, 0x4CC38A)
     static let later = color(0x94640A, 0xF5C22E)
     static let danger = color(0xC62828, 0xF87171)

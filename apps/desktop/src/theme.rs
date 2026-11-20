@@ -31,6 +31,9 @@ pub struct Theme {
     pub sel_icon: Rgba,
     pub accent: Rgba,
     pub accent_ink: Rgba,
+    /// Primary buttons: a solid fill under `accent_fill_ink`, the same weight in light and dark.
+    pub accent_fill: Rgba,
+    pub accent_fill_ink: Rgba,
     // Behind a swiped row, by the move it commits to. `accent_ink` sits on all three:
     // 5.1–7.0:1 in light (white), 6.0–10:1 in dark (near black).
     pub swipe_done: Rgba,
@@ -69,6 +72,8 @@ impl Theme {
             sel_icon: rgb(accent.selection()),
             accent: rgb(accent.hex().0),
             accent_ink: rgb(0xFFFFFF),
+            accent_fill: if accent == Accent::Dusk { rgb(0x2A5BB8) } else { rgb(accent.hex().0) },
+            accent_fill_ink: if accent == Accent::Dusk { rgb(0xFFFFFF) } else { rgb(0xFFFFFF) },
             swipe_done: rgb(Accent::PineGreen.hex().0),
             swipe_later: rgb(Accent::Gold.hex().0),
             danger: rgb(0xC62828),
@@ -89,6 +94,8 @@ impl Theme {
             sel_icon: rgb(accent.selection()),
             accent: rgb(accent.hex().1),
             accent_ink: rgb(0x1E1E1E),
+            accent_fill: if accent == Accent::Dusk { rgb(0x2F63CC) } else { rgb(accent.hex().1) },
+            accent_fill_ink: if accent == Accent::Dusk { rgb(0xFFFFFF) } else { rgb(0x1E1E1E) },
             swipe_done: rgb(Accent::PineGreen.hex().1),
             swipe_later: rgb(Accent::Gold.hex().1),
             danger: rgb(0xF87171),

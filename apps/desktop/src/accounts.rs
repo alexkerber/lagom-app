@@ -560,37 +560,44 @@ impl AddAccount {
             .text_size(px(size::SNIPPET)).text_color(t.ink2).cursor_pointer().hover(|s| s.underline()).child(label)
     }
 
-    /// The first run, as the mobile Welcome: the icon, the dictionary entry of the site's hero and one button.
+    /// The first run, as on iOS and Android: one centred group. The wordmark is the one heavy element; the
+    /// dictionary line and the definition are Hauora Medium, the lightest bundled weight.
     fn welcome(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        let display = |text: &'static str, px_size: f32| div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(px_size))
-            .tracking(crate::theme::face::DISPLAY_TRACKING).line_height(relative(1.15)).child(text);
+        let medium = |px_size: f32| div().font_family(font::DISPLAY).font_weight(FontWeight::MEDIUM).text_size(px(px_size));
         div()
             .w_full()
             .flex()
             .flex_col()
-            .child(crate::main_window::app_mark(72.).ml(px(-7.)))
-            // The wordmark's "l" has a side bearing: pulled back to the icon's edge.
-            .child(display("lagom", size::HERO).mt(px(24.)).ml(px(-3.)))
-            .child(div().mt(px(8.)).flex().flex_wrap().gap(px(4.)).text_size(px(size::BODY)).text_color(t.ink2)
-                .child(div().font_family(font::MONO).text_color(t.ink).child("/ˈlɑːɡɔm/"))
-                .child("(\"LAH-gom\")")
-                .child(div().italic().child("adv., adj."))
-                .child("Swedish."))
-            // One sentence a line, so no width leaves a word alone.
-            .child(div().mt(px(24.)).flex().flex_col()
-                .child(display("Not too much.", size::DISPLAY))
-                .child(display("Not too little.", size::DISPLAY))
-                .child(display("Just right.", size::DISPLAY)))
-            // An accent ring would vanish on the accent fill: the focused button gets an ink ring.
-            .child(button(t, "Add account", Some(t.accent)).track_focus(&self.stops[0])
-                .mt(px(40.))
-                .w_full()
+            .items_center()
+            .text_center()
+            // The Dock icon's plate fills 824 of 1024 px: 118 px shows the 96 px plate with 11 px clear around it. A negative
+            // margin here collapsed the group's height to 0 in layout, so the clear edge comes off the next gap instead.
+            .child(crate::main_window::app_mark(118.))
+            .child(div().mt(px(13.)).font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(56.))
+                .tracking(crate::theme::face::DISPLAY_TRACKING).line_height(relative(1.1)).child("lagom"))
+            .child(medium(15.).mt(px(8.)).flex().gap(px(5.)).child("/ˈlɑːɡɔm/").child(div().text_color(t.ink2).child("adv., adj. Swedish.")))
+            .child(medium(17.).mt(px(20.)).child("Not too much. Not too little. Just right."))
+            // The house primary without an icon, as the spec asks. An accent ring would vanish on the fill: focus draws ink.
+            .child(div().id("welcome-add").debug_selector(|| "welcome-add".into()).track_focus(&self.stops[0])
+                .flex_shrink_0()
+                .mt(px(32.))
+                .w(px(280.))
                 .h(px(40.))
+                .flex()
+                .items_center()
                 .justify_center()
+                .rounded(px(radius::CONTROL))
+                .bg(t.accent_fill)
+                .text_color(t.accent_fill_ink)
+                .text_size(px(size::BASE))
+                .font_weight(FontWeight::MEDIUM)
+                .hover(|s| s.opacity(0.92))
+                .active(|s| s.opacity(0.8))
+                .child("Add account")
                 .border_2()
                 .border_color(if self.stops[0].is_focused(window) { t.ink.into() } else { gpui::transparent_black() })
                 .on_click(cx.listener(|this, _, window, cx| this.welcome_done(window, cx))))
-            .child(div().mt(px(8.)).text_size(px(size::SNIPPET)).text_color(t.ink2).child("No tracking. No lagom servers."))
+            .child(div().mt(px(12.)).text_size(px(13.)).text_color(t.ink2).child("No tracking. No lagom servers."))
     }
 
     /// "Choose your mail", as on iOS and Android: rows in hairline frames, like a shopping list.
@@ -830,6 +837,7 @@ impl Render for AddAccount {
         let t = Theme::for_appearance(window.appearance(), DEFAULT_ACCENT);
         // The short steps sit centred in a 440 px column, as on iOS and Android; the form reads top-down.
         let centred = !matches!(self.screen, Screen::Form);
+        let welcome = self.screen == Screen::Welcome;
         let content = match self.screen {
             Screen::Welcome => self.welcome(&t, window, cx),
             Screen::Choose => self.choose_view(&t, window, cx),
@@ -857,8 +865,11 @@ impl Render for AddAccount {
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .child(div().w_full().h(px(32.)).flex().children(nav.map(|b| b.on_click(cx.listener(|this, _, window, cx| this.back(window, cx))))))
-            .child(div().w_full().flex_1().flex().flex_col().items_center().when(centred, |d| d.justify_center()).pb(px(32.))
-                .child(div().w_full().max_w(px(if centred { 440. } else { 560. })).when(!centred, |d| d.pt(px(24.))).child(content)))
+            // Welcome centres on the window, title bar included: above the group sit the main window's 36 px welcome
+            // top, this view's 24 px padding and the 32 px nav row (92); below, 8 + 24 + this 60 px pad (92).
+            .child(div().w_full().flex_1().flex().flex_col().items_center().when(centred, |d| d.justify_center())
+                .pb(px(if welcome { 60. } else { 32. }))
+                .child(div().flex_shrink_0().w_full().max_w(px(if centred { 440. } else { 560. })).when(!centred, |d| d.pt(px(24.))).child(content)))
     }
 }
 
