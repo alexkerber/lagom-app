@@ -3,7 +3,19 @@ package app.lagommail.android
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.annotation.DrawableRes
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -18,6 +30,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -57,7 +70,9 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import androidx.compose.ui.text.input.KeyboardType
 import app.lagommail.core.*
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -110,11 +125,15 @@ internal val AppSection.icon: Int get() = when (this) {
     }
 }
 
-/** A task list's heading, "● Work  4": its dot, its name and the tasks still to do. */
+/** The task circles' column: a list's dot, the add and Completed glyphs sit in it, so every line's words start
+ *  where the task titles do. */
+@Composable private fun Lead(content: @Composable () -> Unit) = Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) { content() }
+
+/** A task list's heading, "● Work  4": its dot over the task circles, its name over their titles and the tasks still to do. */
 @Composable private fun ListHeading(title: String, dot: Color, open: Int, modifier: Modifier = Modifier) {
-    Row(modifier.padding(bottom = 8.dp).semantics(mergeDescendants = true) { heading() }, verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.size(8.dp).background(dot, CircleShape))
+    Row(modifier.heightIn(min = 40.dp).semantics(mergeDescendants = true) { heading() }, verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Lead { Box(Modifier.size(8.dp).background(dot, CircleShape)) }
         // The count keeps its room when a long name ellipsizes.
         Text(title, Modifier.weight(1f, fill = false), color = lagom.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
         if (open > 0) Text("$open", Modifier.semantics { contentDescription = "$open open" }, color = lagom.ink2,
@@ -161,15 +180,18 @@ internal val AppSection.icon: Int get() = when (this) {
 @Composable private fun Quiet(text: String) =
     Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
 
-/** "+ New task", "+ Add task": a quiet line that adds. */
+/** "+ New task", "+ New list": a quiet line that adds, its plus over the task circles. */
 @Composable private fun AddRow(title: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         val ink = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.38f)
-        LagomIcon(R.drawable.ic_plus, Modifier.padding(horizontal = 2.dp), tint = ink)
+        Lead { LagomIcon(R.drawable.ic_plus, tint = ink) }
         Text(title, color = ink)
     }
 }
+
+/** How long a tick shows before its task moves to Completed, so the tap is seen. */
+private const val TICK_MILLIS = 280L
 
 
 /** Pull to refresh for a planner page; the indicator shows only for the pull. */
@@ -221,7 +243,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
                     val tasks = planner.today?.tasks.orEmpty()
                     if (tasks.isEmpty()) Quiet("Nothing due today.")
-                    tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { planner.toggle(todo) } } }
+                    tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { planner.toggle(todo, TICK_MILLIS) } } }
                     AddRow("New task", enabled = planner.lists.isNotEmpty()) { newTask = true }
                 }
                 Column {
@@ -287,117 +309,273 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
     }
 }
 
-/** A task, desktop `task_row`: a completion circle, its title, a mail mark, and the due chip. */
-@Composable private fun TodoRow(todo: Todo, words: DateWords, modifier: Modifier = Modifier, toggle: () -> Unit) {
+/** A task, desktop `task_row`: a completion circle, its title, a mail mark, and the due chip. A tap ticks the circle at
+ *  once; [toggle] saves and reloads a moment later (TICK_MILLIS), so the tick is seen before the row moves. */
+@Composable private fun TodoRow(todo: Todo, words: DateWords, modifier: Modifier = Modifier, toggle: () -> Job) {
     val colors = MaterialTheme.colorScheme
+    val haptics = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    var ticked by remember(todo.id) { mutableStateOf<Boolean?>(null) }
+    val done = ticked ?: todo.done
+    fun tap() {
+        if (ticked != null) return // one change at a time
+        ticked = !todo.done
+        if (!todo.done) haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
+        // The model's job outlives the row; the reload clears the tick, or brings the circle back if core refused.
+        val job = toggle()
+        scope.launch { job.join(); ticked = null }
+    }
     Row(modifier.fillMaxWidth().heightIn(min = 48.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         // A checkbox named after its task; iOS's words are the action TalkBack offers.
-        Box(Modifier.size(48.dp).toggleable(todo.done, role = Role.Checkbox) { toggle() }.semantics {
+        Box(Modifier.size(48.dp).toggleable(done, role = Role.Checkbox) { tap() }.semantics {
             contentDescription = todo.title
-            onClick(if (todo.done) "Mark as not done" else "Mark as done") { toggle(); true }
-        }, contentAlignment = Alignment.Center) {
-            Box(Modifier.size(21.dp).border(1.dp, colors.onSurfaceVariant, CircleShape), contentAlignment = Alignment.Center) {
-                if (todo.done) LagomIcon(R.drawable.ic_done, size = 14.dp)
-            }
-        }
-        Text(todo.title, Modifier.weight(1f), color = if (todo.done) colors.onSurfaceVariant else colors.onSurface,
-            textDecoration = if (todo.done) TextDecoration.LineThrough else null)
+            onClick(if (done) "Mark as not done" else "Mark as done") { tap(); true }
+        }, contentAlignment = Alignment.Center) { CheckCircle(done) }
+        Text(todo.title, Modifier.weight(1f), color = if (done) colors.onSurfaceVariant else colors.onSurface,
+            textDecoration = if (done) TextDecoration.LineThrough else null)
         if (todo.fromMail) LagomIcon(R.drawable.ic_linked_mail, size = 16.dp, label = "From mail")
-        val due = if (todo.done) null else todo.due?.let(words::due)
-        if (due != null) {
-            val (label, overdue) = due
-            Text(label, Modifier.background(if (overdue) colors.error.copy(alpha = 0.12f) else colors.surfaceVariant, RoundedCornerShape(6.dp))
-                .padding(horizontal = 7.dp, vertical = 3.dp).semantics { contentDescription = if (overdue) "Overdue, due $label" else "Due $label" },
-                color = if (overdue) colors.error else colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
-        }
+        val due = if (done) null else todo.due?.let(words::due)
+        if (due != null) DueChip(due.first, due.second)
     }
 }
 
-/** Local task lists, as iOS `TodoView` and the desktop's Todo page. */
+/** The completion circle: a hairline ring that fills with Done's pine green and a tick. The fill springs in and fades;
+ *  with animations off it is there at once. */
+@Composable private fun CheckCircle(done: Boolean) {
+    val c = lagom
+    val scale by animateFloatAsState(if (done) 1f else 0.5f, landing(), label = "tick scale")
+    val shown by animateFloatAsState(if (done) 1f else 0f, Fade, label = "tick fade")
+    Box(Modifier.size(21.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.matchParentSize().graphicsLayer { alpha = 1f - shown }.border(1.dp, c.ink2, CircleShape))
+        Box(Modifier.matchParentSize().graphicsLayer { alpha = shown; scaleX = scale; scaleY = scale }.background(c.done, CircleShape),
+            contentAlignment = Alignment.Center) { LagomIcon(R.drawable.ic_done, size = 15.dp, tint = c.accentInk) }
+    }
+}
+
+/** A due date, desktop's chip: quiet, or red once overdue. */
+@Composable private fun DueChip(label: String, overdue: Boolean = false) {
+    val colors = MaterialTheme.colorScheme
+    Text(label, Modifier.background(if (overdue) colors.error.copy(alpha = 0.12f) else colors.surfaceVariant, RoundedCornerShape(6.dp))
+        .padding(horizontal = 7.dp, vertical = 3.dp).semantics { contentDescription = if (overdue) "Overdue, due $label" else "Due $label" },
+        color = if (overdue) colors.error else colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+}
+
+/** The inline field's target when it adds a list rather than a task. */
+private const val NEW_LIST = Long.MIN_VALUE
+
+/** Local task lists, as iOS `TodoView` and the desktop's Todo page. Adding happens where the eye is (Alex 2026-11-20,
+ *  "plus uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips above
+ *  the keyboard. Enter adds and keeps the field open for the next task; Close or Back keeps what was typed. */
 @Composable internal fun TodoScreen(planner: PlannerModel) {
+    // The list the field is open in, NEW_LIST, or null.
     var adding by rememberSaveable { mutableStateOf<Long?>(null) }
-    var newList by rememberSaveable { mutableStateOf(false) }
-    var menu by remember { mutableStateOf(false) }
+    var title by rememberSaveable { mutableStateOf("") }
+    // As an epoch day, which saved state can hold.
+    var dueDay by rememberSaveable { mutableStateOf<Long?>(null) }
+    var picking by remember { mutableStateOf(false) }
     var showDone by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val words = DateWords()
-    Column(Modifier.fillMaxSize()) {
-        PageTitle(AppSection.TODO.title) {
-            Box {
-                LagomIconButton("Add", R.drawable.ic_plus) { menu = true }
-                DropdownMenu(menu, { menu = false }) {
-                    DropdownMenuItem(text = { Text("New task") }, enabled = planner.lists.isNotEmpty(), onClick = { menu = false; adding = planner.defaultList })
-                    DropdownMenuItem(text = { Text("New list") }, onClick = { menu = false; newList = true })
-                }
-            }
-        }
+    val due = dueDay?.let(LocalDate::ofEpochDay)
+    /** Saves what the field holds and closes it. */
+    fun commit() {
+        val text = title.trim()
+        val target = adding
+        if (text.isNotEmpty() && target != null) planner.perform { if (target == NEW_LIST) planner.addList(text) else planner.add(text, target, due) }
+        title = ""; dueDay = null; adding = null
+    }
+    fun open(target: Long) { commit(); adding = target }
+    /** Enter: the task is added and the field stays for the next; an empty Enter, or a list name, closes it. */
+    fun submit() {
+        val target = adding ?: return
+        if (title.isBlank() || target == NEW_LIST) { commit(); return }
+        val text = title.trim()
+        title = ""
+        planner.perform { planner.add(text, target, due) }
+    }
+    BackHandler(enabled = adding != null) { commit() }
+    Column(Modifier.fillMaxSize().imePadding()) {
+        PageTitle(AppSection.TODO.title)
         Refreshable(planner, { planner.reloadTodos() }, Modifier.weight(1f)) {
-            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                if (planner.lists.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_todo, "No lists", Modifier.fillParentMaxSize(), "Add a list to start.") }
-                // The lists and their add rows stay below, so adding is still one tap away.
-                else if (planner.lists.all { planner.openCount(it.id) == 0 }) item(key = "clear") {
-                    DisplaySentence(AnnotatedString("Nothing to do.\nA clear day."), Modifier.fillMaxWidth().padding(vertical = 48.dp),
-                        color = lagom.ink, textAlign = TextAlign.Center)
+            // The circles' column lines up under the page title; the due chips end on its 16 dp margin.
+            LazyColumn(Modifier.fillMaxSize().padding(start = 4.dp, end = 8.dp)) {
+                if (planner.lists.isEmpty() && adding != NEW_LIST) item(key = "empty") {
+                    EmptyState(R.drawable.ic_todo, "No lists yet", Modifier.fillParentMaxSize(), "A list holds what there is to do.") {
+                        HouseButton("New list", R.drawable.ic_plus) { open(NEW_LIST) }
+                    }
+                }
+                // The lists and their New task lines stay below, so adding is still one tap away.
+                else if (planner.lists.isNotEmpty() && planner.lists.all { planner.openCount(it.id) == 0 }) item(key = "clear") {
+                    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DisplaySentence(AnnotatedString("Nothing to do.\nA clear day."), color = lagom.ink)
+                        Quiet("Add a task below when something comes up.")
+                    }
                 }
                 planner.lists.forEachIndexed { index, list ->
                     val all = planner.todos[list.id].orEmpty()
                     val done = all.filter { it.done }
                     // shortcut: the dot follows list order, so it moves when lists are added or removed; store a colour if people ask to choose one.
-                    item(key = "list-${list.id}") { ListHeading(list.name, accountAccent(index), planner.openCount(list.id), Modifier.padding(top = 16.dp, bottom = 4.dp)) }
-                    items(all.filter { !it.done }, key = { it.id }) { DeletableTodoRow(planner, it, words) }
-                    item(key = "add-${list.id}") { AddRow("New task") { adding = list.id } }
+                    item(key = "list-${list.id}") {
+                        ListHeading(list.name, accountAccent(index), all.size - done.size, Modifier.padding(top = if (index == 0) 8.dp else 24.dp))
+                    }
+                    items(all.filter { !it.done }, key = { it.id }) { SwipeTodoRow(planner, it, words, Modifier.animateItem()) }
+                    item(key = "add-${list.id}") {
+                        if (adding == list.id) AddField(title, { title = it }, false, due?.let { words.due(it.toString())?.first }, ::submit) {
+                            // Only this field's own leaving: moving to another list's field has already saved it.
+                            if (!picking && adding == list.id) commit()
+                        }
+                        else AddRow("New task") { open(list.id) }
+                    }
                     if (done.isNotEmpty()) {
-                        val open = list.id in showDone
+                        val expanded = list.id in showDone
                         item(key = "done-${list.id}") {
                             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
-                                showDone = if (open) showDone - list.id else showDone + list.id
-                            }.semantics { stateDescription = if (open) "Expanded" else "Collapsed" }.padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                LagomIcon(if (open) R.drawable.ic_chevron else R.drawable.ic_chevron_right, size = 16.dp)
+                                showDone = if (expanded) showDone - list.id else showDone + list.id
+                            }.semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" },
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Lead { LagomIcon(if (expanded) R.drawable.ic_chevron else R.drawable.ic_chevron_right, size = 16.dp) }
                                 Text("Completed (${done.size})", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                        if (open) items(done, key = { it.id }) { DeletableTodoRow(planner, it, words) }
+                        if (expanded) items(done, key = { it.id }) { SwipeTodoRow(planner, it, words, Modifier.animateItem()) }
+                    }
+                }
+                item(key = "new-list") {
+                    Box(Modifier.padding(top = 16.dp)) {
+                        if (adding == NEW_LIST) AddField(title, { title = it }, true, null, ::submit) { if (adding == NEW_LIST) commit() }
+                        else if (planner.lists.isNotEmpty()) AddRow("New list") { open(NEW_LIST) }
                     }
                 }
             }
         }
+        if (adding != null && adding != NEW_LIST) DueBar(due, { dueDay = it?.toEpochDay() }, { picking = true }) { commit() }
     }
-    adding?.let { list -> NewTaskDialog(planner, list, null) { adding = null } }
-    if (newList) NewListDialog(planner) { newList = false }
+    if (picking) {
+        // The picker counts in UTC midnights.
+        val today = LocalDate.now().atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        // From today on, as on iPhone.
+        val state = rememberDatePickerState(initialSelectedDateMillis = (due ?: LocalDate.now().plusDays(1)).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+            selectableDates = object : SelectableDates { override fun isSelectableDate(utcTimeMillis: Long) = utcTimeMillis >= today })
+        DatePickerDialog(onDismissRequest = { picking = false }, confirmButton = {
+            TextButton(onClick = {
+                state.selectedDateMillis?.let { dueDay = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate().toEpochDay() }
+                picking = false
+            }) { Text("OK") }
+        }, dismissButton = { TextButton(onClick = { picking = false }) { Text("Cancel") } }) { DatePicker(state) }
+    }
 }
 
-/** A swipe to the start deletes, as iOS's destructive swipe; TalkBack gets the same as an action. */
+/** "New task" (or "New list") as a field in place: an empty circle (or the list dot) where the row will be. */
+@Composable private fun AddField(value: String, onValue: (String) -> Unit, list: Boolean, due: String?, submit: () -> Unit, leave: () -> Unit) {
+    val c = lagom
+    val focus = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Lead {
+            if (list) Box(Modifier.size(8.dp).background(c.line, CircleShape))
+            else Box(Modifier.size(21.dp).border(1.dp, c.line, CircleShape))
+        }
+        val style = if (list) MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold, color = c.ink)
+            else MaterialTheme.typography.bodyLarge.copy(color = c.ink)
+        BasicTextField(value, onValue, Modifier.weight(1f).focusRequester(focus).onFocusChanged {
+            // Leaving the field keeps what was typed.
+            if (focused && !it.isFocused) leave()
+            focused = it.isFocused
+        }.semantics { contentDescription = if (list) "New list name" else "New task" }, textStyle = style, singleLine = true,
+            cursorBrush = SolidColor(c.accent),
+            // A custom Done keeps the keyboard up for the next task.
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { submit() }),
+            decorationBox = { inner ->
+                Box { if (value.isEmpty()) Text(if (list) "List name" else "New task", style = style.copy(color = c.ink2)); inner() }
+            })
+        due?.let { DueChip(it) }
+    }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+}
+
+/** Due chips above the keyboard while a task is typed: Today, Tomorrow, or a date. */
+@Composable private fun DueBar(due: LocalDate?, choose: (LocalDate?) -> Unit, pick: () -> Unit, close: () -> Unit) {
+    val c = lagom
+    val today = LocalDate.now()
+    val tomorrow = today.plusDays(1)
+    val other = due != null && due != today && due != tomorrow
+    Row(Modifier.fillMaxWidth().background(c.bg).drawHairline(c.line, top = true).padding(start = 16.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DueOption("Today", due == today) { choose(if (due == today) null else today) }
+        DueOption("Tomorrow", due == tomorrow) { choose(if (due == tomorrow) null else tomorrow) }
+        DueOption(if (other) DateWords().due(due.toString())?.first ?: "Date" else "Date", other, R.drawable.ic_calendar, pick)
+        Spacer(Modifier.weight(1f))
+        LagomIconButton("Close", R.drawable.ic_close, onClick = close)
+    }
+}
+
+@Composable private fun DueOption(text: String, on: Boolean, @DrawableRes icon: Int? = null, onClick: () -> Unit) {
+    val c = lagom
+    val ink = if (on) c.accentFillInk else c.ink
+    Row(Modifier.minimumInteractiveComponentSize().heightIn(min = 32.dp).clip(RoundedCornerShape(Radius.control))
+        .background(if (on) c.accentFill else c.subtle).clickable(role = Role.Button, onClick = onClick)
+        .semantics { selected = on; contentDescription = "Due $text" }.padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        icon?.let { LagomIcon(it, size = 16.dp, tint = ink) }
+        Text(text, color = ink, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+    }
+}
+
+/** As Mail: right past 120 dp is Done (Not done in Completed), left past 60 % of the row is Delete; tasks have no
+ *  Later. The colour behind shows the move a release makes. TalkBack gets Delete as an action. */
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun DeletableTodoRow(planner: PlannerModel, todo: Todo, words: DateWords) {
-    val state = rememberSwipeToDismissBoxState()
-    // The settled value changes only after release, so a drag that turns back never deletes.
+@Composable private fun SwipeTodoRow(planner: PlannerModel, todo: Todo, words: DateWords, modifier: Modifier = Modifier) {
+    val reach = with(LocalDensity.current) { 120.dp.toPx() }
+    // The threshold depends on the direction, which only the state knows.
+    val holder = remember { arrayOfNulls<SwipeToDismissBoxState>(1) }
+    val width = remember { floatArrayOf(0f) }
+    val state = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
+        // A quick flick must still cover Mail's distance; the box alone would settle on speed.
+        val stage = holder[0]?.let { swipeStage(it.requireOffset(), width[0], reach, true) }
+        when (value) {
+            SwipeToDismissBoxValue.StartToEnd -> stage == MailAction.Done
+            SwipeToDismissBoxValue.EndToStart -> stage == MailAction.Delete
+            SwipeToDismissBoxValue.Settled -> true
+        }
+    }, positionalThreshold = { total ->
+        if (holder[0]?.dismissDirection == SwipeToDismissBoxValue.EndToStart) total * 0.6f else reach
+    })
+    holder[0] = state
+    val haptics = LocalHapticFeedback.current
+    LaunchedEffect(state.targetValue) {
+        if (state.targetValue != SwipeToDismissBoxValue.Settled) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+    }
+    // The settled value changes only after release, so a drag that turns back never acts.
     LaunchedEffect(state.settledValue) {
-        if (state.settledValue != SwipeToDismissBoxValue.EndToStart) return@LaunchedEffect
-        // In the model's scope, so leaving the page never cuts a delete short. A deleted row leaves with the reload.
-        planner.perform { planner.delete(todo) }.join()
+        when (state.settledValue) {
+            // In the model's scope, so leaving the page never cuts the change short. The row moves with the reload.
+            SwipeToDismissBoxValue.EndToStart -> planner.perform { planner.delete(todo) }.join()
+            SwipeToDismissBoxValue.StartToEnd -> planner.perform { planner.toggle(todo) }.join()
+            SwipeToDismissBoxValue.Settled -> return@LaunchedEffect
+        }
         state.reset()
     }
-    SwipeToDismissBox(state, enableDismissFromStartToEnd = false, backgroundContent = {
-        Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            Text("Delete", color = MaterialTheme.colorScheme.onError)
+    SwipeToDismissBox(state, modifier = modifier.onSizeChanged { width[0] = it.width.toFloat() }, backgroundContent = {
+        val c = lagom
+        val right = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
+        val acting = state.targetValue != SwipeToDismissBoxValue.Settled
+        val fill by animateColorAsState(if (!acting) c.subtle else if (right) c.done else c.danger, tween(100, easing = EaseOut), label = "swipe fill")
+        val ink = if (acting) c.accentInk else c.ink2
+        Row(Modifier.fillMaxSize().background(fill).padding(horizontal = 20.dp).clearAndSetSemantics {},
+            horizontalArrangement = if (right) Arrangement.Start else Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            LagomIcon(if (right) R.drawable.ic_done else R.drawable.ic_trash, tint = ink, size = 20.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(if (!right) "Delete" else if (todo.done) "Not done" else "Done", color = ink, style = MaterialTheme.typography.labelLarge)
         }
     }) {
-        Surface {
+        Surface(color = lagom.bg) {
             TodoRow(todo, words, Modifier.semantics {
                 customActions = listOf(CustomAccessibilityAction("Delete") { planner.perform { planner.delete(todo) }; true })
-            }) { planner.perform { planner.toggle(todo) } }
+            }) { planner.perform { planner.toggle(todo, TICK_MILLIS) } }
         }
     }
-}
-
-@Composable private fun NewListDialog(planner: PlannerModel, close: () -> Unit) {
-    var name by rememberSaveable { mutableStateOf("") }
-    AlertDialog(onDismissRequest = close, title = { Text("New list") }, text = {
-        OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-    }, confirmButton = { TextButton(onClick = { close(); planner.perform { planner.addList(name) } }) { Text("Add") } },
-        dismissButton = { TextButton(onClick = close) { Text("Cancel") } })
 }
 
 /** iOS `NewTaskView`: a title, the list when there are several, and an optional due date. */
