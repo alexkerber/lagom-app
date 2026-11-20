@@ -9,6 +9,9 @@ on:
     paths:
       - scripts/package-macos.sh
       - scripts/build-release.sh
+      - scripts/sparkle.sh
+      - scripts/sparkle-item.sh
+      - apps/desktop/macos/sparkle-ed-public-key
       - .github/workflows/package-macos.yml
   workflow_dispatch:
 
@@ -21,6 +24,8 @@ jobs:
     runs-on: macos-latest
     outputs:
       dmg: ${{ steps.package.outputs.dmg }}
+      version: ${{ steps.version.outputs.version }}
+      signed: ${{ steps.signing.outputs.signed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -49,6 +54,10 @@ jobs:
           else
             echo '::warning::No LAGOM_OAUTH_ENV secret: Google and Microsoft sign-in are off in this dmg.'
           fi
+      - name: Sparkle public key
+        run: |
+          [[ -s apps/desktop/macos/sparkle-ed-public-key ]] \
+            || echo '::warning::No apps/desktop/macos/sparkle-ed-public-key: this dmg has no automatic updates. Run scripts/sparkle-keys.sh.'
       # Pull requests never get the signing keys, even from branches in this repository.
       - name: Signing keychain and notary key
         id: signing
@@ -93,6 +102,8 @@ jobs:
           echo "path=$dmg" >> "$GITHUB_OUTPUT"
           lipo -archs target/macos/lagom.app/Contents/MacOS/lagom
           codesign -dv target/macos/lagom.app 2>&1 | grep -E 'Identifier|Authority|Signature|Runtime'
+          [[ ! -d target/macos/lagom.app/Contents/Frameworks/Sparkle.framework ]] \
+            || codesign -dv target/macos/lagom.app/Contents/Frameworks/Sparkle.framework 2>&1 | grep -E 'Authority|Runtime'
       - name: Remove signing material
         if: always()
         run: |
@@ -104,17 +115,52 @@ jobs:
           path: ${{ steps.package.outputs.path }}
           if-no-files-found: error
 
+  # Its own job on a fresh runner: the EdDSA private key never shares a machine with cargo, the
+  # build scripts of dependencies or a checkout they could have changed. Tags only.
+  sparkle:
+    name: Sign the update for Sparkle
+    needs: package
+    if: github.ref_type == 'tag' && needs.package.outputs.signed == '1'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-dmg
+          path: target/macos
+      - name: Appcast item
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [[ ! -s apps/desktop/macos/sparkle-ed-public-key ]]; then
+            exit 0
+          elif [[ -z $SPARKLE_ED_PRIVATE_KEY ]]; then
+            echo '::warning::No SPARKLE_ED_PRIVATE_KEY secret: this release gets no appcast item, so Sparkle will not offer it.'
+            exit 0
+          fi
+          scripts/sparkle-item.sh "$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-appcast
+          path: target/macos/lagom-*.appcast.xml
+          if-no-files-found: ignore
+
   release:
     name: Attach to the GitHub release
-    needs: package
-    if: github.ref_type == 'tag'
+    needs: [package, sparkle]
+    # The dmg still ships when the Sparkle job is skipped (ad-hoc build) or has no key.
+    if: always() && github.ref_type == 'tag' && needs.package.result == 'success' && needs.sparkle.result != 'failure'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: macos-dmg
+          pattern: macos-*
+          merge-multiple: true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
@@ -128,4 +174,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           DMG: ${{ needs.package.outputs.dmg }}
-        run: repo/scripts/upload-release.sh "$TAG" "$DMG"
+        # The appcast item goes with the dmg; Pages builds the feed from it once the release is published.
+        run: |
+          files=("$DMG")
+          [[ ! -f ${DMG%.dmg}.appcast.xml ]] || files+=("${DMG%.dmg}.appcast.xml")
+          repo/scripts/upload-release.sh "$TAG" "${files[@]}"

@@ -11,6 +11,9 @@ actions!(
     [Quit, Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen, OpenRepository, About]
 );
 
+#[cfg(lagom_sparkle)]
+actions!(lagom, [CheckForUpdates]);
+
 const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
 
 pub fn init(cx: &mut App) {
@@ -29,6 +32,8 @@ pub fn init(cx: &mut App) {
         cx.quit();
     });
     cx.on_action(|_: &About, _| crate::icon::about());
+    #[cfg(lagom_sparkle)]
+    cx.on_action(|_: &CheckForUpdates, _| crate::updates::check());
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -50,6 +55,8 @@ pub fn init(cx: &mut App) {
             name: "lagom".into(),
             items: vec![
                 MenuItem::action("About lagom", About),
+                #[cfg(lagom_sparkle)]
+                MenuItem::action("Check for Updates…", CheckForUpdates),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", crate::main_window::OpenSettings),
                 MenuItem::separator(),

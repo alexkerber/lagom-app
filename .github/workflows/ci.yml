@@ -51,6 +51,10 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test workspace
         run: cargo test --workspace --locked
+      # The dmg's Sparkle code only compiles with LAGOM_SPARKLE=1 (build.rs).
+      - name: Check the Sparkle build
+        if: runner.os == 'macOS'
+        run: LAGOM_SPARKLE=1 cargo check -p lagom --locked
       - name: Test HTML sizing script
         run: node --test apps/desktop/src/main_window/html/fit.test.cjs
       - name: Check mobile icon assets
