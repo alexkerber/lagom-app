@@ -232,8 +232,8 @@ struct Clean {
     parts: Option<Vec<crate::inline::InlinePart>>,
     /// The `data:` image sources kept so far, so the quote stays under `MAX_INLINE_BYTES`.
     data_bytes: usize,
-    /// Distinct `data:` images kept so far, at most `MAX_DATA_IMAGES`.
-    data_images: usize,
+    /// The distinct `data:` images kept so far and the source each got, at most `MAX_DATA_IMAGES`.
+    kept: Vec<(Vec<u8>, String)>,
 }
 
 struct CleanSink(std::cell::RefCell<Clean>);
@@ -331,22 +331,22 @@ impl Clean {
         if src.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
             let data = data_image(src)?;
             let mime = image_type(&data)?;
-            // One part per image, however often the quote shows it; at most MAX_DATA_IMAGES, so this scan stays short.
-            if let Some(part) = self.parts.as_ref().and_then(|parts| parts.iter().find(|p| p.data == data)) {
-                return Some(format!("cid:{}", part.cid));
-            }
-            if self.data_images >= MAX_DATA_IMAGES || self.data_bytes + data.len() > crate::inline::MAX_INLINE_BYTES { return None; }
-            self.data_images += 1;
+            // One source per distinct image, however often the quote shows it, on both paths; at most
+            // MAX_DATA_IMAGES distinct ones, so this scan stays short.
+            if let Some((_, kept)) = self.kept.iter().find(|(seen, _)| *seen == data) { return Some(kept.clone()); }
+            if self.kept.len() >= MAX_DATA_IMAGES || self.data_bytes + data.len() > crate::inline::MAX_INLINE_BYTES { return None; }
             self.data_bytes += data.len();
-            return Some(match &mut self.parts {
+            let source = match &mut self.parts {
                 Some(parts) => {
                     let cid = format!("quote{}@lagommail.app", parts.len() + 1);
-                    parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data });
+                    parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data: data.clone() });
                     format!("cid:{cid}")
                 }
                 // The sniffed type, never the one the sender wrote.
                 None => { use base64::Engine; format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)) }
-            });
+            };
+            self.kept.push((data, source.clone()));
+            return Some(source);
         }
         web_url(src)
     }
@@ -445,7 +445,13 @@ mod tests {
         let (out, parts) = sanitize_parts(&html);
         assert_eq!((parts.len(), out.matches("<img").count()), (super::MAX_DATA_IMAGES, super::MAX_DATA_IMAGES));
         assert_eq!(sanitize(&html).matches("<img").count(), super::MAX_DATA_IMAGES, "the preview keeps the same cap");
-        // The cap bounds the work too: each image is compared with at most MAX_DATA_IMAGES kept parts.
+        // The cap bounds the work too: each image is compared with at most MAX_DATA_IMAGES kept ones.
+        // Repeats count once, on both paths (Codex re-review): 150 copies of A, then B, keep B.
+        let image = |byte: u8| format!("<img src=\"data:image/png;base64,{}\">", base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G', byte]));
+        let repeated = format!("{}{}", image(1).repeat(150), image(2));
+        assert_eq!(sanitize(&repeated).matches("<img").count(), 151, "the preview keeps the second image");
+        let (out, parts) = sanitize_parts(&repeated);
+        assert_eq!((parts.len(), out.matches("<img").count()), (2, 151), "sending keeps both, as two parts");
     }
 
     #[test]
