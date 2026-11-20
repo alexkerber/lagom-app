@@ -78,6 +78,10 @@ impl MessageWindow {
     fn more_action(&mut self, action: polish::MessageAction, cx: &mut Context<Self>) {
         self.more = matches!(action, polish::MessageAction::Menu);
         let id = self.id;
+        if self.more {
+            // One menu at a time: More closes the card menu.
+            self.main.update(cx, |main, _, cx| if main.message_menu == Some(id) { main.message_menu = None; cx.notify(); }).ok();
+        }
         match action {
             polish::MessageAction::ReplyAll => self.compose(ComposeKind::ReplyAll, cx),
             polish::MessageAction::Forward => self.compose(ComposeKind::Forward, cx),
@@ -118,6 +122,8 @@ impl Render for MessageWindow {
             main.inbox.trash.contains(&id)
         };
         let card_menu = main.message_menu == Some(id);
+        // Mark read/unread acts on the whole thread, so the label reads the whole thread too.
+        let unread = main.inbox.members(id).iter().any(|&i| main.inbox.mail.get(i).is_some_and(|m| m.unread));
         let menu_open = card_menu || self.more;
         self.web.frame(Some((id, &m)), &t, menu_open, window, cx);
         crate::rich::release(window, cx);
@@ -127,7 +133,10 @@ impl Render for MessageWindow {
             this.update(cx, |this, cx| this.reply(cx)).ok();
         };
         let main_window = self.main;
+        let popout = cx.entity().downgrade();
         let menu = polish::reading_menu(&t, id, card_menu, move |action, _, cx| {
+            // One menu at a time: the card menu closes the toolbar's More.
+            if matches!(action, polish::MessageAction::Menu) { popout.update(cx, |p, cx| { p.more = false; cx.notify(); }).ok(); }
             main_window.update(cx, |main, window, cx| {
                 if matches!(action, polish::MessageAction::ReplyAll | polish::MessageAction::Forward | polish::MessageAction::Move) { window.activate_window(); }
                 main.message_action(id, *action, window, cx);
@@ -178,7 +187,7 @@ impl Render for MessageWindow {
                     .child(button(&t, "Reply", None).on_click(cx.listener(|this, _, _, cx| this.reply(cx))))
                     .when(!in_trash, |d| d
                         .child(button(&t, "Later", None).on_click(cx.listener(|this, _, _, cx| this.act(Move::Later, cx)))))
-                    .child(polish::toolbar_menu(&t, self.more, in_trash, m.unread,
+                    .child(polish::toolbar_menu(&t, self.more, in_trash, unread,
                         cx.listener(|this, action: &polish::MessageAction, _, cx| this.more_action(*action, cx))))
                     .when((web || m.rich.is_some()) && self.web.has_remote && !m.remote, |d| {
                         d.child(button(&t, "Load remote images", None).on_click(cx.listener(move |this, _, _, cx| {

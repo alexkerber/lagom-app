@@ -743,7 +743,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                 var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
                 // One tap is tomorrow, as desktop's L; a long press offers the other times.
                 HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working,
-                    onLongClick = { choices = model.core?.laterChoices().orEmpty() }) {
+                    onLongClickLabel = "Choose a time", onLongClick = { choices = model.core?.laterChoices().orEmpty() }) {
                     model.perform { model.act(MailAction.Later, id, conversation = false) }
                 }
                 DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {

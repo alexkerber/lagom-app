@@ -1343,6 +1343,10 @@ impl MainWindow {
         let before = self.inbox.selected;
         f(&mut self.inbox);
         let ix = self.inbox.selected;
+        // The toolbar More belongs to the message it opened on.
+        if ix != before && self.message_menu == Some(polish::TOOLBAR_MENU) {
+            self.message_menu = None;
+        }
         if ix == before || self.inbox.multi() {
             self.glide = None;
             self.reveal_row(ix);
@@ -4985,6 +4989,9 @@ mod dispatch {
         let at = cx.debug_bounds("menu-Delete").unwrap().center();
         cx.simulate_click(at, Default::default());
         assert!(view.read_with(cx, |v, _| v.inbox.trash.contains(&first.unwrap())), "Delete moves the message to Trash");
+        view.update(cx, |v, cx| { v.message_menu = Some(polish::TOOLBAR_MENU); cx.notify(); });
+        cx.simulate_keystrokes("j");
+        assert!(view.read_with(cx, |v, _| v.message_menu.is_none()), "More closes when another message is selected");
     }
 
     #[gpui::test]

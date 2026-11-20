@@ -607,8 +607,12 @@ extension MailView {
 
     /// Later's other times, behind a long press.
     @ViewBuilder func laterTimes(id: Int64) -> some View {
-        ForEach(model.core?.laterChoices() ?? [], id: \.label) { choice in
-            Button(choice.label) { act(.later, id: id, until: choice.untilUnix) }
+        // The menu is built ahead of the press, so read the time again when the item fires.
+        ForEach(Array((model.core?.laterChoices() ?? []).enumerated()), id: \.offset) { ix, choice in
+            Button(choice.label) {
+                let choices = model.core?.laterChoices() ?? []
+                act(.later, id: id, until: choices.indices.contains(ix) ? choices[ix].untilUnix : choice.untilUnix)
+            }
         }
     }
 }

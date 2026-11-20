@@ -166,7 +166,9 @@ impl MainWindow {
                             this.open_notification(crate::notifications::Target { account: mail.account.clone(), message: Some(id) }, window, cx);
                         } else {
                             this.open_box(None, cx);
-                            let found = this.inbox.items.iter().position(|&id| this.inbox.mail[id].address == mail.address && this.inbox.mail[id].subject == mail.subject);
+                            // Demo mail has no store id. Select by list row, which can be a thread or a filtered row.
+                            let wanted = this.inbox.items.iter().copied().find(|&id| this.inbox.mail[id].address == mail.address && this.inbox.mail[id].subject == mail.subject);
+                            let found = wanted.and_then(|wanted| this.inbox.list().iter().position(|&row| this.inbox.members(row).contains(&wanted)));
                             if let Some(ix) = found {
                                 this.select(|inbox| inbox.select(ix), cx);
                             }
