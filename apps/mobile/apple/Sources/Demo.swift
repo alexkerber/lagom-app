@@ -20,6 +20,15 @@ enum Storage {
         #endif
     }
 
+    /// DEBUG builds launched with `-LagomDemoSettings list|account` open Settings, or its first account's page, for screenshots without taps.
+    static var settingsScreen: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "LagomDemoSettings")
+        #else
+        nil
+        #endif
+    }
+
     static func directory() throws -> URL {
         if demo {
             // `-LagomDemoCalendar google|granted|none`: Calendar's empty states, for screenshots.

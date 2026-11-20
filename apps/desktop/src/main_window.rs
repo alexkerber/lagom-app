@@ -584,6 +584,7 @@ impl MainWindow {
                 this.open_box(first, cx);
             }
             "settings" => this.set_page(Page::Settings(None), cx),
+            "settings-account" if demo => this.open_account_settings("personal".into(), window, cx),
             "shortcuts" => this.show_shortcuts(window, cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
