@@ -16,7 +16,8 @@ struct OnboardingView: View {
     @State private var connecting = false
     @State private var error: String?
     @State private var height: CGFloat = 0
-    /// Welcome's group height, to centre it in the free height.
+    /// Welcome's own height and group height: the page ScrollView writes `height` while both show in the transition.
+    @State private var welcomeHeight: CGFloat = 0
     @State private var group: CGFloat = 0
     /// Bottom safe-area inset minus top: Welcome centres on the whole screen, not the safe area.
     @State private var inset: CGFloat = 0
@@ -79,7 +80,8 @@ struct OnboardingView: View {
                     }
                     .font(.custom(Self.medium, size: 17, relativeTo: .body)).padding(.top, 20)
                     Button { taps += 1; choosing = true } label: {
-                        Text("Add account").lagomFont(.base, .medium).frame(width: 280).frame(minHeight: 48)
+                        // 256 + the style's 12 pt sides = 280, and it may narrow on a 320 pt screen.
+                        Text("Add account").lagomFont(.base, .medium).frame(maxWidth: 256).frame(minHeight: 48)
                     }
                     .buttonStyle(HouseButtonStyle(primary: true)).padding(.top, 32)
                     Text("No tracking. No lagom servers.").lagomFont(.small).foregroundStyle(Theme.secondary).padding(.top, 12)
@@ -92,11 +94,11 @@ struct OnboardingView: View {
             .multilineTextAlignment(.center)
             .padding(.horizontal, 24).padding(.vertical, 16)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { group = $0 }
-            .padding(.top, max(0, (height - group + inset) / 2))
-            .frame(maxWidth: .infinity, minHeight: height, alignment: .top)
+            .padding(.top, max(0, (welcomeHeight - group + inset) / 2))
+            .frame(maxWidth: .infinity, minHeight: welcomeHeight, alignment: .top)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { welcomeHeight = $0 }
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom - $0.safeAreaInsets.top } action: { inset = $0 }
         .background(Theme.background)
         .transition(.asymmetric(insertion: Motion.slide(.leading, reduceMotion), removal: .opacity))

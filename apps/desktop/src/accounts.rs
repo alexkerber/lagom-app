@@ -661,11 +661,11 @@ impl AddAccount {
             .items_center()
             .justify_center()
             .rounded(px(radius::CONTROL))
-            .bg(t.accent)
+            .bg(t.accent_fill)
             .hover(|s| s.opacity(0.92))
             .active(|s| s.opacity(0.8))
             .on_click(cx.listener(|this, _, _, cx| this.submit_email(cx)))
-            .child(icon("icons/next.svg", t.accent_ink, 16.));
+            .child(icon("icons/next.svg", t.accent_fill_ink, 16.));
         div()
             .w_full()
             .flex()

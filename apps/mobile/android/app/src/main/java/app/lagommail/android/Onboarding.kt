@@ -24,7 +24,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.isSpecified
@@ -162,7 +161,9 @@ internal val SplashIcon = 160.dp
                         }
                         alpha = if (measured) 1f else 0f
                     }, corner = lerp(0.5f, 0.24f, t))
-                Column(Modifier.alpha(t), horizontalAlignment = Alignment.CenterHorizontally) {
+                // Hidden until the icon settles, so it takes no tap or TalkBack focus before it shows.
+                Column(Modifier.graphicsLayer { alpha = t }.then(if (settled) Modifier else Modifier.clearAndSetSemantics {}),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
                     DisplayTitle("lagom", TextSize.hero, Modifier.padding(top = 24.dp))
                     Text(buildAnnotatedString {
                         append("/ˈlɑːɡɔm/ ")
@@ -175,12 +176,11 @@ internal val SplashIcon = 160.dp
                         Modifier.padding(top = 20.dp), color = c.ink, fontFamily = DisplayFace, fontWeight = FontWeight.Medium, fontSize = 17.sp,
                         lineHeight = 17.sp * Leading, textAlign = TextAlign.Center, softWrap = stacked,
                         onTextLayout = { if (!stacked && it.hasVisualOverflow) stacked = true })
-                    // Hidden until the icon settles, so it takes no tap or TalkBack focus before it shows.
                     Column(Modifier.padding(top = 32.dp).width(280.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         HouseButton("Add account", modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), primary = true,
                             enabled = model.core != null && settled, onClick = addAccount)
                         // The store could not open: the only way on is to try again.
-                        if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync) { model.perform { model.setForeground(true) } }
+                        if (model.core == null && !model.loading) WideButton("Try again", R.drawable.ic_sync, enabled = settled) { model.perform { model.setForeground(true) } }
                     }
                     Text("No tracking. No lagom servers.", Modifier.padding(top = 12.dp), color = c.ink2, fontSize = TextSize.small, textAlign = TextAlign.Center)
                 }

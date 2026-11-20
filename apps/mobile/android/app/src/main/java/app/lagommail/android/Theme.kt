@@ -101,7 +101,7 @@ internal object TextSize {
     val hero = 56.sp
 }
 
-internal val DisplayFace = FontFamily(Font(R.font.hauora_bold, FontWeight.Bold))
+internal val DisplayFace = FontFamily(Font(R.font.hauora_medium, FontWeight.Medium), Font(R.font.hauora_bold, FontWeight.Bold))
 internal val LabelFace = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Medium))
 internal const val DisplayTracking = -0.045f
 
@@ -196,13 +196,13 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
         // A full-width button passes its width on to the drawn shape.
         propagateMinConstraints = true) {
         Row(Modifier.minimumInteractiveComponentSize().heightIn(min = 36.dp).clip(RoundedCornerShape(Radius.control))
+            // Disabled dims fill and label alike. A layer in both states: Modifier.alpha drops its layer at 1f, and that
+            // chain change left the fill undrawn when a disabled button turned enabled (Welcome, emulator-5604, 2026-11-20).
+            .graphicsLayer { alpha = if (enabled) 1f else 0.5f }
             // No outline, as desktop since #168: a quiet fill marks the button.
             .background(if (primary) c.accentFill else c.subtle)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { if (iconOnly) contentDescription = text }
-            // A layer in both states: Modifier.alpha drops its layer at 1f, and that chain change left the fill undrawn
-            // when a disabled button turned enabled (Welcome, emulator-5604, 2026-11-20).
-            .graphicsLayer { alpha = if (enabled) 1f else 0.5f }
             .padding(horizontal = if (iconOnly) 9.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
             icon?.let { LagomIcon(it, tint = if (primary) c.accentFillInk else if (danger) c.danger else c.ink2) }
