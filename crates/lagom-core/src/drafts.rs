@@ -25,13 +25,19 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
         let start = open + crate::smtp::QUOTE_OPEN.len();
         let end = html.rfind(crate::smtp::QUOTE_CLOSE).filter(|&end| end >= start)?;
         let (quote, cids) = crate::inline::data_uris(&html[start..end], |cid| first(cid).map(|p| p.decoded().into_owned()));
-        // Only the parts now inside the quote leave the attachments: a referenced PDF stays one.
-        embedded = cids.iter().filter_map(|cid| first(cid).map(|p| p.id())).collect();
         // The server's copy is as untrusted as the original: it is cleaned again before compose shows it.
         let html_quote = crate::html::sanitize(&quote);
+        // Only images the cleaned quote still shows leave the attachments: a referenced PDF, or an image
+        // in an attribute the sanitizer drops, stays one.
+        let kept = crate::html::sanitize_parts(&html_quote).1;
+        embedded = cids.iter().filter_map(|cid| first(cid)).filter(|p| kept.iter().any(|k| *k.data == *p.decoded())).map(|p| p.id()).collect();
         if html_only {
-            // The reply is the HTML before the marker, so removing the quote removes all of it.
-            text = crate::mime::html_to_text(&html[..open]).trim_end().to_owned();
+            // The reply is the HTML before the marker, so removing the quote removes all of it. Other body parts stay.
+            let quote_part = parsed.html_body().next().map(|p| p.id());
+            let reply = crate::mime::html_to_text(&html[..open]).trim_end().to_owned();
+            text = parsed.text_body().filter_map(|p| if Some(p.id()) == quote_part { Some(reply.clone()) }
+                else { p.text().filter(|_| matches!(p.kind(), mail_parser::PartKind::Html)).map(|h| crate::mime::html_to_text(&h)) })
+                .collect::<Vec<_>>().join("\n");
             let lines = crate::mime::html_to_text(&html_quote);
             let lines = lines.trim_end().lines().map(|line| format!("> {line}").trim_end().to_owned()).collect::<Vec<_>>().join("\n");
             return Some(crate::compose::Quoted { text: lines, html: html_quote });
@@ -338,6 +344,20 @@ mod tests {
         assert!(!draft.quoted.as_ref().unwrap().html.contains("data:"));
         let back = parse_draft(&crate::smtp::compose_draft(&account, &Draft { account: account.id.clone(), ..draft.clone() }, "token").unwrap()).unwrap();
         assert_eq!(back.attachments, draft.attachments, "reopening keeps it");
+        // An image only in an attribute the sanitizer drops is not in the quote either: it stays an attachment.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let background = format!("Subject: Re: x\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+            Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>{open}<table><tr><td background=\"cid:logo@x\">Logo</td></tr></table>{close}\r\n--m\r\n\
+            Content-Type: image/png\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=logo.png\r\nContent-ID: <logo@x>\r\n\r\n{png}\r\n--m--\r\n");
+        let draft = parse_draft(background.as_bytes()).unwrap();
+        assert!(!draft.quoted.unwrap().html.contains("data:"));
+        assert_eq!(draft.attachments.iter().map(|a| a.filename.as_str()).collect::<Vec<_>>(), ["logo.png"]);
+        // A second HTML body part after the quoted one stays in the text.
+        let postscript = format!("Subject: Re: x\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+            Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>{open}<p>Secret original</p>{close}\r\n--m\r\n\
+            Content-Type: text/html; charset=utf-8\r\nContent-Disposition: inline\r\n\r\n<p>PS</p>\r\n--m--\r\n");
+        let draft = parse_draft(postscript.as_bytes()).unwrap();
+        assert!(draft.text.starts_with("Hi") && draft.text.contains("PS") && !draft.text.contains("Secret"), "{:?}", draft.text);
     }
 
     #[test]

@@ -11,6 +11,7 @@ struct ComposeView: View {
     @State private var contactsAccount: String?
     @State private var contactsError: String?
     @FocusState private var addressFocus: String?
+    @FocusState private var bodyFocus: Bool
     // Suggestions follow the caret: editing an earlier recipient must not complete the last one.
     @State private var addressSelection: [String: TextSelection] = [:]
     @State private var pickingFiles = false
@@ -203,6 +204,7 @@ struct ComposeView: View {
                 .frame(minHeight: 120, maxHeight: scrolls ? 200 : .infinity)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .accessibilityLabel("Message body")
+                .focused($bodyFocus)
             if let quoted = draft.quoted { quote(quoted) }
         }
     }
@@ -240,7 +242,7 @@ struct ComposeView: View {
     @ViewBuilder private func quote(_ quoted: QuotedMail) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                Button { quoteOpen.toggle() } label: {
+                Button { setQuoteOpen(!quoteOpen) } label: {
                     HStack(spacing: 8) {
                         Text("···").font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .caption))
                         Text(quoteOpen ? "Hide quoted message" : "Quoted message").lagomFont(.small)
@@ -253,7 +255,7 @@ struct ComposeView: View {
                 .accessibilityLabel(quoteOpen ? "Hide quoted message" : "Show quoted message")
                 Spacer(minLength: 0)
                 IconButton(title: "Remove quoted message", icon: "close") {
-                    quoteOpen = false
+                    setQuoteOpen(false)
                     draft.quoted = nil
                     model.composeDraft = draft
                 }
@@ -269,6 +271,14 @@ struct ComposeView: View {
             }
         }
         .padding(.horizontal, 8)
+    }
+
+    /// Opening or closing the quote swaps the scrolling and the fixed form, and with it the editor:
+    /// a body that was being written gets the keyboard back.
+    private func setQuoteOpen(_ open: Bool) {
+        let writing = bodyFocus
+        quoteOpen = open
+        if writing { Task { @MainActor in bodyFocus = true } }
     }
 
     private func binding(_ field: WritableKeyPath<ComposeDraft, String>) -> Binding<String> {
