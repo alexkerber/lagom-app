@@ -36,9 +36,11 @@ fn network<T>(future: impl Future<Output = lagom_core::Result<T>>) -> lagom_core
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct MailAccount { pub id: String, pub email: String, pub display_name: String }
+pub struct MailAccount { pub id: String, pub email: String, pub display_name: String,
+    /// How it signs in, in Settings' words ("Email and password", "Google account").
+    #[uniffi(default = "")] pub kind: String }
 impl From<Account> for MailAccount {
-    fn from(a: Account) -> Self { Self { id: a.id, email: a.email, display_name: a.display_name } }
+    fn from(a: Account) -> Self { Self { kind: a.auth.kind().into(), id: a.id, email: a.email, display_name: a.display_name } }
 }
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum TransportSecurity { Tls, StartTls, Plain }

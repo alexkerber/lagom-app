@@ -226,13 +226,13 @@ internal val SplashIcon = 160.dp
 }
 
 /** A list of rows in one hairline frame, like a shopping list. */
-@Composable private fun Rows(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+@Composable internal fun Rows(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     val shape = RoundedCornerShape(Radius.control)
     Column(modifier.fillMaxWidth().clip(shape).border(1.dp, lagom.line, shape), content = content)
 }
 
-/** Between rows, from the text's edge: 16 inset + 32 mark + 16 gap. */
-@Composable private fun Hairline() = HorizontalDivider(Modifier.padding(start = 64.dp), thickness = 1.dp, color = lagom.line)
+/** Between rows, from the text's edge: 16 inset + 32 mark + 16 gap; 16 where rows have no mark. */
+@Composable internal fun Hairline(inset: Int = 64) = HorizontalDivider(Modifier.padding(start = inset.dp), thickness = 1.dp, color = lagom.line)
 
 /** One account kind: its mark, the name and a chevron. */
 @Composable private fun Choice(title: String, mark: @Composable () -> Unit, onClick: () -> Unit) {

@@ -168,7 +168,7 @@ private struct CalendarAccessButton: View {
     var body: some View {
         Button { Task { await allow() } } label: {
             HStack(spacing: 6) {
-                if connecting { ProgressView().controlSize(.small).tint(Theme.accentInk) } else { Icon("calendar").foregroundStyle(Theme.accentInk) }
+                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) } else { Icon("calendar").foregroundStyle(Theme.accentFillInk) }
                 Text(connecting ? "Connecting…" : "Show your Google Calendar").lineLimit(1)
             }
         }

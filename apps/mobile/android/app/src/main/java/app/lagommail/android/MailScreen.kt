@@ -31,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -60,19 +61,19 @@ import kotlin.math.roundToInt
 
 @Composable internal fun MailScreen(model: MailModel, twoPane: Boolean) {
     var retrying by remember { mutableStateOf<SendFailure?>(null) }
-    var removing by remember { mutableStateOf<MailAccount?>(null) }
-    var signing by remember { mutableStateOf<MailAccount?>(null) }
-    var naming by remember { mutableStateOf<MailAccount?>(null) }
-    var settings by remember { mutableStateOf(false) }
+    var settings by rememberSaveable { mutableStateOf(false) }
+    // A mailto link, a share or a notification (a new draft or an opened message) leaves Settings; Add account comes back to it.
+    LaunchedEffect(model.draft != null, model.selectedId) { if (model.draft != null || model.selectedId != null) settings = false }
     // Compose and Add account cover the mail screen instead of replacing it, so the list keeps its
     // place. The form or draft rides along so a leaving screen keeps its content while it animates out.
     val overlay: Any? = model.accountForm ?: model.draft
     val rise = with(LocalDensity.current) { 12.dp.roundToPx() }
     Box(Modifier.fillMaxSize()) {
         Box(if (overlay != null || settings) Modifier.clearAndSetSemantics {} else Modifier) {
-            MailHome(model, twoPane, onRemove = { removing = it }, onSign = { signing = it }, onName = { naming = it }, onRetry = { retrying = it },
-                onSettings = { settings = true })
+            MailHome(model, twoPane, onRetry = { retrying = it }, onSettings = { settings = true })
         }
+        // Under Compose and Add account, so adding an account from Settings comes back to it.
+        if (settings) Box(if (overlay != null) Modifier.clearAndSetSemantics {} else Modifier) { SettingsScreen(model) { settings = false } }
         AnimatedContent(overlay, Modifier.fillMaxSize(), contentKey = { it?.let { screen -> screen::class } }, label = "screen", transitionSpec = {
             when {
                 // motion.md: compose rises 12 dp into place on the spring and fades in; Undo after Send plays the same arrival.
@@ -90,16 +91,6 @@ import kotlin.math.roundToInt
             }
         }
     }
-    // Settings gives way to Compose and Add account, which the tablet sidebar can open under it.
-    LaunchedEffect(overlay != null) { if (overlay != null) settings = false }
-    if (settings && overlay == null) SettingsScreen { settings = false }
-    removing?.let { account ->
-        AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remove account?") }, text = { Text("Remove ${account.email} and its local mail?") },
-            confirmButton = { TextButton(onClick = { removing = null; model.perform { model.remove(account) } }) { Text("Remove") } },
-            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } })
-    }
-    signing?.let { account -> SignatureDialog(model, account) { signing = null } }
-    naming?.let { account -> NameDialog(model, account) { naming = null } }
     model.newFolder?.let { request -> NewFolderDialog(model, request) }
     retrying?.let { failure ->
         AlertDialog(onDismissRequest = { retrying = null }, title = { Text("Send again?") },
@@ -117,8 +108,7 @@ internal fun Mailbox.label(): String = when (this) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRemove: (MailAccount) -> Unit, onSign: (MailAccount) -> Unit,
-    onName: (MailAccount) -> Unit, onRetry: (SendFailure) -> Unit, onSettings: () -> Unit) {
+@Composable private fun MailHome(model: MailModel, twoPane: Boolean, onRetry: (SendFailure) -> Unit, onSettings: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
     Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) {
@@ -175,14 +165,11 @@ internal fun Mailbox.label(): String = when (this) {
                             menu = false; model.perform { model.changeScope(account.id, model.mailbox) }
                         })
                     }
-                    DropdownMenuItem(text = { Text("Add account") }, enabled = model.core != null, onClick = { menu = false; model.accountForm = AccountForm() })
-                    model.accounts.forEach { account ->
-                        DropdownMenuItem(text = { Text("Your name for ${account.email}") }, onClick = { menu = false; onName(account) })
-                        DropdownMenuItem(text = { Text("Signature for ${account.email}") }, onClick = { menu = false; onSign(account) })
-                        DropdownMenuItem(text = { Text("Remove ${account.email}") }, onClick = { menu = false; onRemove(account) })
-                    }
+                    // The menu is a phone's sidebar, so Settings closes it as on the Mac; adding, naming, signing and
+                    // removing accounts live there (Alex 2026-11-20).
                     HorizontalDivider()
-                    DropdownMenuItem(text = { Text("Settings") }, onClick = { menu = false; onSettings() })
+                    DropdownMenuItem(text = { Text("Settings") }, leadingIcon = { LagomIcon(R.drawable.ic_settings) },
+                        onClick = { menu = false; onSettings() })
                 }
             }
             LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
