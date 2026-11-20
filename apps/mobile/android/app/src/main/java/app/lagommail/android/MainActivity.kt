@@ -93,7 +93,7 @@ class LagomApplication : Application() {
         when (demo) {
             "welcome" -> {}
             // Calendar's empty states, for screenshots.
-            "calendar-google", "calendar-none" -> seedDemoWithoutCalendar(directory.absolutePath, demo == "calendar-google")
+            "calendar-google", "calendar-granted", "calendar-none" -> seedDemoWithoutCalendar(directory.absolutePath, demo.removePrefix("calendar-"))
             else -> seedDemo(directory.absolutePath)
         }
         return LagomCore.open(directory.absolutePath)
@@ -102,11 +102,11 @@ class LagomApplication : Application() {
 
 /**
  * Debug-only launch extras for screenshots without real accounts, as desktop's `LAGOM_DEMO` and `LAGOM_THEME`:
- * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-none` and `--es lagomTheme light|dark`. A release build ignores both.
+ * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-granted|calendar-none` and `--es lagomTheme light|dark`. A release build ignores both.
  */
 internal data class DebugLaunch(val demo: String? = null, val dark: Boolean? = null)
 internal fun debugLaunch(debug: Boolean, demo: String?, theme: String?): DebugLaunch =
-    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-none") },
+    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none") },
         when (theme) { "light" -> false; "dark" -> true; else -> null })
 
 /** The redirect of a browser sign-in, or null for any other link. The core then checks the exact URI and state. */

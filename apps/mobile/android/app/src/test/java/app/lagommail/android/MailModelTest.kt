@@ -1124,6 +1124,8 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun calendarConnected(): Boolean = connected
     var calendarAccess: List<MailAccount> = emptyList()
     override suspend fun calendarAccessNeeded(): List<MailAccount> = calendarAccess
+    var granted = false
+    override suspend fun calendarGranted(): Boolean = granted
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
     override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))

@@ -177,12 +177,12 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     MonoLabel("Schedule", Modifier.padding(bottom = 8.dp))
                     val events = planner.today?.events.orEmpty()
                     val access = planner.calendarAccess.firstOrNull()
-                    if (events.isEmpty() && planner.calendarConnected) Quiet("Nothing scheduled today.")
-                    else if (events.isEmpty() && access != null) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Quiet("Google Calendar is not connected.")
-                        CalendarAccessButton(planner, model, access)
-                    }
-                    else if (events.isEmpty()) Quiet("Add a Google account to see your calendar here.")
+                    if (events.isEmpty()) Quiet(when {
+                        planner.calendarConnected -> "Nothing scheduled today."
+                        access != null -> "Google Calendar is not connected."
+                        planner.calendarGranted -> "Your calendar shows here after the next sync."
+                        else -> "Add a Google account to see your calendar here."
+                    })
                     // The now line sits before the first timed event still to start, as on desktop.
                     val nowIndex = events.indexOfFirst { !it.allDay && it.startUnix > now }.let { if (it < 0) events.size else it }
                     events.forEachIndexed { index, event ->
@@ -190,6 +190,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                         EventRow(planner, event, now)
                     }
                     if (events.isNotEmpty() && nowIndex == events.size) NowLine(now)
+                    // Also beside another account's calendar: each Google account allows its own.
+                    access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
                 }
                 Column {
                     MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
@@ -439,9 +441,14 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 }
 
 /** Desktop's "Show your Google Calendar": Google asks once in the browser, then the redirect's sync fills Calendar and Today. */
-@Composable private fun CalendarAccessButton(planner: PlannerModel, model: MailModel, account: MailAccount) {
+@Composable private fun CalendarAccessButton(planner: PlannerModel, model: MailModel, account: MailAccount, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    HouseButton(if (model.signingIn) "Connecting…" else "Show your Google Calendar", R.drawable.ic_calendar, primary = true, enabled = !model.signingIn) {
+    // A second tap while the browser opens would replace the pending sign-in and fail the first redirect.
+    var opening by remember { mutableStateOf(false) }
+    LaunchedEffect(opening) { if (opening) { delay(2_000); opening = false } }
+    HouseButton(if (model.signingIn) "Connecting…" else "Show your Google Calendar", R.drawable.ic_calendar, modifier, primary = true,
+        enabled = !model.signingIn && !opening) {
+        opening = true
         planner.perform { openSignIn(context, requireNotNull(planner.core).beginCalendarAccess(account.id).url) }
     }
 }
@@ -467,10 +474,13 @@ private val Gutter = 48.dp
             EmptyState(R.drawable.ic_calendar, "Calendar is not connected", Modifier.fillMaxSize(), "Google asks once for access to ${access.email}.") {
                 CalendarAccessButton(planner, model, access)
             }
+        } else if (!planner.calendarConnected && planner.week.isEmpty() && planner.calendarGranted) {
+            EmptyState(R.drawable.ic_calendar, "Calendar not synced yet", Modifier.fillMaxSize(), "Your calendar shows here after the next sync.")
         } else if (!planner.calendarConnected && planner.week.isEmpty()) {
             EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(),
                 "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
         } else {
+            access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
             if (!oneDay) Row(Modifier.padding(top = 8.dp)) {
                 Spacer(Modifier.width(Gutter))
                 days.forEach { WeekDayHead(it, Modifier.weight(1f)) }

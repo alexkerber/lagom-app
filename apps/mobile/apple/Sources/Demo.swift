@@ -13,12 +13,12 @@ enum Storage {
 
     static func directory() throws -> URL {
         if demo {
-            // `-LagomDemoCalendar google|none`: Calendar's empty states, for screenshots.
+            // `-LagomDemoCalendar google|granted|none`: Calendar's empty states, for screenshots.
             let calendar = UserDefaults.standard.string(forKey: "LagomDemoCalendar")
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LagomDemo" + (calendar ?? ""), isDirectory: true)
             if let calendar {
                 try? FileManager.default.removeItem(at: directory)
-                try seedDemoWithoutCalendar(dataDir: directory.path, google: calendar == "google")
+                try seedDemoWithoutCalendar(dataDir: directory.path, state: calendar)
             } else { try seedDemo(dataDir: directory.path) }
             return directory
         }

@@ -82,21 +82,21 @@ struct TodayView: View {
         let nowIndex = events.firstIndex { !$0.allDay && Date(timeIntervalSince1970: TimeInterval($0.startUnix)) > now } ?? events.count
         return VStack(alignment: .leading, spacing: 4) {
             MonoLabel(text: "Schedule").padding(.bottom, 8)
-            if events.isEmpty && planner.calendarConnected {
-                quiet("Nothing scheduled today.", icon: "calendar")
-            } else if events.isEmpty, let account = planner.calendarAccess.first {
-                VStack(alignment: .leading, spacing: 8) {
-                    quiet("Google Calendar is not connected.", icon: "calendar")
-                    CalendarAccessButton(planner: planner, model: model, account: account)
-                }
-            } else if events.isEmpty {
-                quiet("Add a Google account to see your calendar here.", icon: "calendar")
+            if events.isEmpty {
+                quiet(planner.calendarConnected ? "Nothing scheduled today."
+                      : !planner.calendarAccess.isEmpty ? "Google Calendar is not connected."
+                      : planner.calendarGranted ? "Your calendar shows here after the next sync."
+                      : "Add a Google account to see your calendar here.", icon: "calendar")
             } else {
                 ForEach(Array(events.enumerated()), id: \.offset) { index, event in
                     if index == nowIndex { NowLine(now: now) }
                     EventRow(event: event, accent: accountAccent(model.accounts, event.account), now: now)
                 }
                 if nowIndex == events.count { NowLine(now: now) }
+            }
+            // Also beside another account's calendar: each Google account allows its own.
+            if let account = planner.calendarAccess.first {
+                CalendarAccessButton(planner: planner, model: model, account: account).padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -527,11 +527,17 @@ private struct WeekGrid: View {
                     CalendarAccessButton(planner: planner, model: model, account: account)
                 }
                 .frame(maxHeight: .infinity)
+            } else if !planner.calendarConnected && planner.week.isEmpty && planner.calendarGranted {
+                EmptyState(icon: "calendar", title: "Calendar not synced yet", detail: "Your calendar shows here after the next sync.")
+                    .frame(maxHeight: .infinity)
             } else if !planner.calendarConnected && planner.week.isEmpty {
                 EmptyState(icon: "calendar", title: "Calendar needs a Google account",
                            detail: "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
                     .frame(maxHeight: .infinity)
             } else {
+                if let account = planner.calendarAccess.first {
+                    CalendarAccessButton(planner: planner, model: model, account: account)
+                }
                 if !oneDay {
                     HStack(spacing: 0) {
                         Color.clear.frame(width: Self.gutter, height: 1)

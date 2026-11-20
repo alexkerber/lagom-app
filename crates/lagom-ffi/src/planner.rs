@@ -103,6 +103,13 @@ impl LagomCore {
             Ok(false)
         }).await
     }
+    /// True once a Google account allows calendar access, fetched or not: Calendar then waits for the next sync.
+    pub async fn calendar_granted(&self) -> Result<bool> {
+        self.run(|s| {
+            for a in s.accounts()? { if lagom_core::oauth::calendar_allowed(&s.account_scopes(&a.id)?) { return Ok(true); } }
+            Ok(false)
+        }).await
+    }
     /// Google accounts without calendar access, for "Show your Google Calendar". Empty when no account can add it.
     pub async fn calendar_access_needed(&self) -> Result<Vec<MailAccount>> {
         self.run(|s| {
@@ -141,11 +148,19 @@ impl LagomCore {
 /// shortcut: shipped in release builds but only called from the DEBUG `-LagomDemo` launch argument; gate behind a cargo feature if the binary size matters.
 #[uniffi::export]
 pub fn seed_demo(data_dir: String) -> Result<()> { seed(data_dir, None) }
-/// The same fixtures without a fetched calendar, for screenshots of Calendar's empty states: with `google`,
-/// the first account is a Google account that has mail access only; otherwise every account has a password.
+/// The same fixtures without a fetched calendar, for screenshots of Calendar's empty states. `state`: "google"
+/// makes the first account a Google account with mail access only, "granted" one that allowed calendar access
+/// but has no fetch yet; anything else keeps password accounts.
 #[uniffi::export]
-pub fn seed_demo_without_calendar(data_dir: String, google: bool) -> Result<()> { seed(data_dir, Some(google)) }
-fn seed(data_dir: String, without_calendar: Option<bool>) -> Result<()> {
+pub fn seed_demo_without_calendar(data_dir: String, state: String) -> Result<()> {
+    let scopes = match state.as_str() {
+        "google" => Some("https://mail.google.com/ openid email profile".to_string()),
+        "granted" => Some(format!("https://mail.google.com/ openid email profile {}", lagom_core::oauth::GOOGLE_CALENDAR_SCOPES)),
+        _ => None,
+    };
+    seed(data_dir, Some(scopes))
+}
+fn seed(data_dir: String, without_calendar: Option<Option<String>>) -> Result<()> {
     std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
     let mut s = Store::open(std::path::Path::new(&data_dir).join("lagom.sqlite3"))?;
     if !s.accounts()?.is_empty() { return Ok(()); }
@@ -156,9 +171,9 @@ fn seed(data_dir: String, without_calendar: Option<bool>) -> Result<()> {
     for (name, email) in [("Personal", "you@home.example"), ("Work", "you@work.example")] {
         let mut a = Account::new(email.into(), server("imap.example", email), server("smtp.example", email))?;
         a.display_name = name.into();
-        if without_calendar == Some(true) && accounts.is_empty() {
+        if let (Some(Some(scopes)), true) = (&without_calendar, accounts.is_empty()) {
             a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
-            s.save_authorized_account(&a, "https://mail.google.com/ openid email profile")?;
+            s.save_authorized_account(&a, scopes)?;
         } else { s.save_account(&a)?; }
         accounts.push(a);
     }
@@ -294,6 +309,7 @@ mod tests {
             let [google, granted] = accounts;
             (google, granted)
         };
+        assert!(core.calendar_granted().await.unwrap(), "granted before the first fetch");
         let offered = core.calendar_access_needed().await.unwrap();
         assert_eq!(offered.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [google.id.as_str()]);
         let password = core.accounts().await.unwrap().into_iter().find(|a| a.email == "p@example.test").unwrap();
@@ -302,17 +318,19 @@ mod tests {
         // Google took the grant back: access is offered again and mail keeps its scope.
         core.stores.local.lock().unwrap().drop_calendar_scopes(&granted.id).unwrap();
         assert_eq!(core.calendar_access_needed().await.unwrap().len(), 2);
+        assert!(!core.calendar_granted().await.unwrap());
     }
 
     #[tokio::test]
     async fn demo_without_calendar_offers_google_access_or_nothing() {
-        for google in [true, false] {
+        for (state, offered, granted) in [("google", 1, false), ("granted", 0, true), ("none", 0, false)] {
             let dir = tempfile::tempdir().unwrap();
             let path: String = dir.path().to_string_lossy().into();
-            seed_demo_without_calendar(path.clone(), google).unwrap();
+            seed_demo_without_calendar(path.clone(), state.into()).unwrap();
             let core = LagomCore::open(path).unwrap();
             assert!(!core.calendar_connected().await.unwrap());
-            assert_eq!(core.calendar_access_needed().await.unwrap().len(), usize::from(google));
+            assert_eq!(core.calendar_access_needed().await.unwrap().len(), offered, "{state}");
+            assert_eq!(core.calendar_granted().await.unwrap(), granted, "{state}");
             assert!(!core.today(3).await.unwrap().tasks.is_empty(), "the rest of the fixtures stay");
         }
     }

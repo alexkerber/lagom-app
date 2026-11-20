@@ -71,6 +71,8 @@ internal class PlannerModel : ViewModel() {
     var calendarConnected by mutableStateOf(false); private set
     /** Google accounts that still need calendar access: Calendar and Today offer it. */
     var calendarAccess by mutableStateOf<List<MailAccount>>(emptyList()); private set
+    /** A Google account allows calendar access; until its first fetch Calendar waits for the sync. */
+    var calendarGranted by mutableStateOf(false); private set
     /** Calendar's week: its Monday and that week's events. */
     // shortcut: a time zone change keeps the old Monday until Today is tapped, as on iOS.
     var weekStart by mutableStateOf(monday(LocalDate.now())); private set
@@ -122,9 +124,11 @@ internal class PlannerModel : ViewModel() {
             val agenda = core.agenda(LocalDate.now().toString(), AGENDA_DAYS)
             val connected = core.calendarConnected()
             val access = core.calendarAccessNeeded()
+            val granted = core.calendarGranted()
             if (request != agendaRevision) return@guard
             calendarConnected = connected
             calendarAccess = access
+            calendarGranted = granted
             this.agenda = agenda
         }
         // As iOS: the start's reload also fills the week, which may have asked before the store opened.

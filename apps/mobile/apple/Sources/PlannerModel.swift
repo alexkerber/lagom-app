@@ -17,6 +17,8 @@ final class PlannerModel {
     var calendarConnected = false
     /// Google accounts that still need calendar access: Calendar and Today offer it.
     var calendarAccess: [MailAccount] = []
+    /// A Google account allows calendar access; until its first fetch Calendar waits for the sync.
+    var calendarGranted = false
     var counts: [MailCounts] = []
     var error: String?
     /// How far ahead Calendar lists cached events.
@@ -80,6 +82,7 @@ final class PlannerModel {
             let agenda = try await core.agenda(startDay: DateWords().coreDay(Date()), days: Self.agendaDays)
             calendarConnected = try await core.calendarConnected()
             calendarAccess = try await core.calendarAccessNeeded()
+            calendarGranted = try await core.calendarGranted()
             self.agenda = agenda
         } catch { self.error = error.localizedDescription }
         await reloadWeek()

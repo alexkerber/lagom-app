@@ -152,6 +152,7 @@ final class PresentationTests: XCTestCase {
     override func agenda(startDay: String, days: UInt32) async throws -> [AgendaItem] { [] }
     override func calendarConnected() async throws -> Bool { false }
     override func calendarAccessNeeded() async throws -> [MailAccount] { [] }
+    override func calendarGranted() async throws -> Bool { false }
 }
 
 extension PresentationTests {
