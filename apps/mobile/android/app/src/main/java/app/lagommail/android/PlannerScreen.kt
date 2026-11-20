@@ -533,9 +533,10 @@ private val Gutter = 48.dp
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.weight(1f).semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(localDate(month, "MMMM"), Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            val (name, year) = DateWords().monthTitle(month)
+            Text(name, Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
-            Text(localDate(month, "yyyy"), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            year?.let { Text(it, maxLines = 1, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         LagomIconButton("Previous week", R.drawable.ic_chevron_left) { planner.perform { planner.showWeek(-1) } }
         HouseButton("Today", onClick = onToday)

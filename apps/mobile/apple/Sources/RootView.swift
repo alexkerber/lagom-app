@@ -99,6 +99,8 @@ struct RootView: View {
             if section == .calendar { Task { await planner.reloadAgenda() } }
             if section == .today { Task { await planner.reloadMail() } }
         }
+        // Last, so the sheets above read it too.
+        .readsPageMargin()
     }
 
     /// Shows the unified Inbox, and a message in it when given.
@@ -125,7 +127,7 @@ struct RootView: View {
     }
 }
 
-/// The desktop sidebar without the brand (Alex 2026-11-17): Search, the pages, Mail's mailboxes with per-account Inbox,
+/// The desktop sidebar without the brand (Alex 2026-11-17): the pages, Mail's mailboxes with per-account Inbox,
 /// then Accounts; Settings at the foot.
 struct SidebarView: View {
     @Bindable var model: MailModel
@@ -136,9 +138,8 @@ struct SidebarView: View {
     @State private var newFolder: NewFolderTarget?
 
     var body: some View {
+        // Search is a button in Mail's list header, as on the Mac and the iPhone (Alex 2026-11-20).
         VStack(alignment: .leading, spacing: 20) {
-            SearchField(text: $model.searchText)
-                .onChange(of: model.searchText) { _, text in if !text.isEmpty { section = .mail } }
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(AppSection.allCases.filter { $0 != .settings }) { page in

@@ -30,8 +30,8 @@ struct SettingsView: View {
                     mainPage
                 }
             }
-            // The Mac's 600 pt column, centred on iPad.
-            .padding(.horizontal, width == .regular ? 24 : 16).padding(.vertical, 16)
+            // The system's page edges, as every page; the Mac's 600 pt column, centred on iPad.
+            .pageEdges().padding(.bottom, 16)
             .frame(maxWidth: 600, alignment: .leading)
             .frame(maxWidth: .infinity)
         }

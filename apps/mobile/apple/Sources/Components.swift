@@ -242,7 +242,7 @@ struct FilterControl: View {
     }
 }
 
-/// The desktop sidebar's Search field.
+/// The Search field, which Mail's search button opens.
 struct SearchField: View {
     @Binding var text: String
 
@@ -455,6 +455,62 @@ extension EnvironmentValues {
     var railInset: CGFloat {
         get { self[RailInsetKey.self] }
         set { self[RailInsetKey.self] = newValue }
+    }
+    /// UIKit's minimum layout margin for this window: 16 or 20 pt on a phone, 20 on iPad. Every page's side edge.
+    var pageMargin: CGFloat {
+        get { self[PageMarginKey.self] }
+        set { self[PageMarginKey.self] = newValue }
+    }
+}
+private struct PageMarginKey: EnvironmentKey { static let defaultValue: CGFloat = 16 }
+
+/// The page edges every page shares (Alex 2026-11-20: "Apple best practice"), so titles and the content under them
+/// start on one line. Sides: the system's layout margin. Top: 8 pt under the safe area; on the Duo, whose status bar
+/// sits in the right column and leaves no top inset, a 44 pt first row centres on that status bar's clock (92 pt,
+/// measured on the cover display), which also keeps it clear of the inner display's 55 pt corners.
+struct PageEdges: ViewModifier {
+    var top = true
+    @Environment(\.pageMargin) private var margin
+    @Environment(\.railInset) private var railInset
+
+    func body(content: Content) -> some View {
+        content.padding(.horizontal, margin).padding(.top, top ? (railInset > 0 ? 92 - 22 : 8) : 0)
+    }
+}
+
+extension View {
+    /// A page's header and content edges; `top: false` for a page's later blocks.
+    func pageEdges(top: Bool = true) -> some View { modifier(PageEdges(top: top)) }
+
+    /// Reads the system's layout margin at the root; views and sheets under it inherit it.
+    func readsPageMargin() -> some View { modifier(PageMarginReader()) }
+}
+
+private struct PageMarginReader: ViewModifier {
+    @State private var margin: CGFloat = 16
+
+    func body(content: Content) -> some View {
+        content.environment(\.pageMargin, margin)
+            .background(SystemMargin { if margin != $0 { margin = $0 } }.allowsHitTesting(false))
+    }
+}
+
+/// The window's root view controller knows the system margin; a size or idiom change lays this view out again.
+private struct SystemMargin: UIViewRepresentable {
+    let changed: (CGFloat) -> Void
+    func makeUIView(context: Context) -> Probe { Probe(changed: changed) }
+    func updateUIView(_ view: Probe, context: Context) {}
+
+    final class Probe: UIView {
+        let changed: (CGFloat) -> Void
+        init(changed: @escaping (CGFloat) -> Void) { self.changed = changed; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { nil }
+        override func didMoveToWindow() { super.didMoveToWindow(); read() }
+        override func layoutSubviews() { super.layoutSubviews(); read() }
+        private func read() {
+            guard let margin = window?.rootViewController?.systemMinimumLayoutMargins.leading else { return }
+            DispatchQueue.main.async { [changed] in changed(margin) }
+        }
     }
 }
 

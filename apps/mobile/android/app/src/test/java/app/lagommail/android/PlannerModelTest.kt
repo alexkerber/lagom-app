@@ -168,6 +168,13 @@ class PlannerModelTest {
         assertEquals("EEEEdMMMM 2026-11-13", words.dayTitle("2026-11-13"))
         assertEquals("not a day", words.dayTitle("not a day"))
     }
+
+    @Test fun monthTitleShowsTheYearOnlyOutsideThisYear() {
+        val words = DateWords(LocalDate.of(2026, 11, 20)) { date, skeleton -> "$skeleton $date" }
+        assertEquals("MMMM 2026-11-02" to null, words.monthTitle(LocalDate.of(2026, 11, 2)))
+        assertEquals("MMMM 2027-01-04" to "yyyy 2027-01-04", words.monthTitle(LocalDate.of(2027, 1, 4)))
+        assertEquals("MMMM 2025-12-29" to "yyyy 2025-12-29", words.monthTitle(LocalDate.of(2025, 12, 29)))
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
