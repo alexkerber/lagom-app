@@ -51,6 +51,8 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Dp
 import java.time.LocalTime
 import app.lagommail.core.*
 import kotlinx.coroutines.delay
@@ -78,6 +80,24 @@ internal val AppSection.icon: Int get() = when (this) {
 
 @Composable private fun clock(unix: Long): String =
     android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(Date(unix * 1000))
+
+/** Schedule times: small, with tabular digits. */
+@Composable private fun timeStyle() = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
+
+/** The schedule's time column, as wide as its widest label at this font scale: every hour in this
+ *  locale's clock ("11:00 AM" or "23:00") and "All day". So every bar lines up. */
+@Composable private fun timeColumn(): Dp {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val style = timeStyle()
+    val measurer = rememberTextMeasurer()
+    return remember(context, density, style) {
+        val format = android.text.format.DateFormat.getTimeFormat(context)
+        val hour = java.util.Calendar.getInstance()
+        val labels = (0..23).map { hour.set(java.util.Calendar.HOUR_OF_DAY, it); hour.set(java.util.Calendar.MINUTE, 0); format.format(hour.time) } + "All day"
+        with(density) { labels.maxOf { measurer.measure(it, style, maxLines = 1).size.width }.toDp() }
+    }
+}
 
 /** A page title as on desktop and iOS: semibold, actions on the right. */
 @Composable private fun PageTitle(title: String, trailing: @Composable RowScope.() -> Unit = {}) {
@@ -185,11 +205,12 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     })
                     // The now line sits before the first timed event still to start, as on desktop.
                     val nowIndex = events.indexOfFirst { !it.allDay && it.startUnix > now }.let { if (it < 0) events.size else it }
+                    val column = timeColumn()
                     events.forEachIndexed { index, event ->
-                        if (index == nowIndex) NowLine(now)
-                        EventRow(planner, event, now)
+                        if (index == nowIndex) NowLine(now, column)
+                        EventRow(planner, event, now, column)
                     }
-                    if (events.isNotEmpty() && nowIndex == events.size) NowLine(now)
+                    if (events.isNotEmpty() && nowIndex == events.size) NowLine(now, column)
                     // Also beside another account's calendar: each Google account allows its own.
                     access?.let { CalendarAccessButton(planner, model, it, Modifier.padding(top = 8.dp)) }
                 }
@@ -221,18 +242,18 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 }
 
 /** The current time in gold across the schedule. */
-@Composable private fun NowLine(now: Long) {
+@Composable private fun NowLine(now: Long, column: Dp) {
     val time = clock(now)
     val gold = lagom.later
     Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).clearAndSetSemantics { contentDescription = "Now, $time" },
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(time, Modifier.widthIn(min = 52.dp), color = gold, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
+        Text(time, Modifier.width(column), color = gold, style = timeStyle(), maxLines = 1)
         Box(Modifier.weight(1f).height(2.dp).background(gold, RoundedCornerShape(1.dp)))
     }
 }
 
 /** One schedule line, desktop `agenda_view`: time, a bar, the title, and a meeting link. */
-@Composable private fun EventRow(planner: PlannerModel, event: AgendaItem, now: Long) {
+@Composable private fun EventRow(planner: PlannerModel, event: AgendaItem, now: Long, column: Dp) {
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
     val title = event.title.ifEmpty { "(No title)" }
@@ -243,8 +264,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
         contentDescription = listOfNotNull(if (event.allDay) "All day" else null, title, event.location?.takeIf { it.isNotEmpty() }).joinToString(", ")
         if (!event.allDay) stateDescription = "$start – $end"
     }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(if (event.allDay) "All day" else start, Modifier.widthIn(min = 52.dp).clearAndSetSemantics {},
-            color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
+        Text(if (event.allDay) "All day" else start, Modifier.width(column).clearAndSetSemantics {},
+            color = colors.onSurfaceVariant, style = timeStyle(), maxLines = 1)
         Box(Modifier.width(2.dp).height(28.dp).background(colors.primary, RoundedCornerShape(1.dp)))
         Column(Modifier.weight(1f).clearAndSetSemantics {}) {
             Text(title, color = if (past) colors.onSurfaceVariant else colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)

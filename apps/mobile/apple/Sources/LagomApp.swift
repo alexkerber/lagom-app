@@ -303,19 +303,32 @@ struct MailView: View {
     /// The desktop list header: title, a sync mark with what is left, the All/Unread filter.
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 8) {
-                mailboxMenu
-                Spacer(minLength: 4)
-                if model.mailbox == .trash && model.folder == nil && !model.accounts.isEmpty {
-                    // In Trash the filter makes way for Empty Trash, as on desktop.
-                    HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
-                        .disabled(model.rows.isEmpty || model.working)
-                } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
-                if railInset == 0 { composeButton.padding(.trailing, -6) }
+            // When title and actions do not fit on one line (the largest text sizes), the actions go
+            // under the title, so the title never collapses to "…".
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 8) {
+                    mailboxMenu
+                    Spacer(minLength: 4)
+                    headerActions
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    mailboxMenu
+                    HStack(spacing: 8) { headerActions }
+                }
             }
             if !sidebar && model.mailbox != .drafts { SearchField(text: $model.searchText) }
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
+    }
+
+    /// The filter, or Empty Trash in Trash, and the compose button without a rail.
+    @ViewBuilder private var headerActions: some View {
+        if model.mailbox == .trash && model.folder == nil && !model.accounts.isEmpty {
+            // In Trash the filter makes way for Empty Trash, as on desktop.
+            HouseButton(title: model.emptyingTrash ? "Emptying…" : "Empty Trash", icon: "empty-trash", iconOnly: !regular) { confirmEmptyTrash = true }
+                .disabled(model.rows.isEmpty || model.working)
+        } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
+        if railInset == 0 { composeButton.padding(.trailing, -6) }
     }
 
     /// The title, sync mark and what is left open the mailboxes and accounts; the account filter
@@ -363,7 +376,7 @@ struct MailView: View {
                 HStack(spacing: 6) {
                     // Synced is the quiet default: the cloud shows only while it syncs or fails.
                     if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
-                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(1)
+                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(.leading)
                         .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
                 .foregroundStyle(Theme.secondary)
