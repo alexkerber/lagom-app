@@ -121,7 +121,7 @@ const SIDEBAR_ROW: f32 = 28.;
 const FOLDERS_MAX: f32 = 34. + 6. * (SIDEBAR_ROW + 2.);
 /// The list and reading pane headers, a macOS toolbar's height.
 const HEADER_H: f32 = 52.;
-/// Compact windows scroll the sidebar groups beneath Search.
+/// Compact windows scroll the sidebar groups beneath the title-bar row.
 pub const MIN_WINDOW: (f32, f32) = (720., 600.);
 
 mod glass;
@@ -1730,24 +1730,13 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // macOS: search starts below the traffic lights' row (y 11..39) plus the 20 px gap.
-            .pt(px(if cfg!(target_os = "macos") { 59. } else { 12. }))
-            .child(
-                div()
-                    .id("search")
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(6.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .rounded(px(radius::CONTROL))
-                    .bg(t.raised)
-                    .text_color(t.ink2)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))
-                    .child(icon("icons/search.svg", t.ink2, 16.))
-                    .child(div().flex_1().child("Search")),
-            )
+            // The title-bar row, y 11..39: the traffic lights on the left (macOS), search on the right.
+            // Elsewhere the same row tops the sidebar. A logo would go in at the left.
+            .pt(px(if cfg!(target_os = "macos") { 11. } else { 12. }))
+            // No tab stop: Tab would leave Compose's field cycle. ⌘K and the menu are the keyboard route.
+            .child(div().flex().flex_shrink_0().justify_end().child(
+                icon_button(t, "search", "icons/search.svg", if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" })
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette("", window, cx)))))
             .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
                 .child(div()
                     .flex()
@@ -4599,6 +4588,18 @@ mod dispatch {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn search_icon_sits_in_the_title_bar_row_and_opens_the_palette(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        frame(cx);
+        let search = cx.debug_bounds("search").unwrap();
+        // The traffic lights' row is y 11..39 (centre 25); the icon ends at the sidebar's right padding.
+        let sidebar = view.read_with(cx, |v, _| v.sidebar_w);
+        assert_eq!((f32::from(search.center().y), f32::from(search.right())), (if cfg!(target_os = "macos") { 25. } else { 26. }, sidebar - 12.));
+        cx.simulate_click(search.center(), Default::default());
+        assert_eq!(view.read_with(cx, |v, cx| v.palette.as_ref().map(|p| p.read(cx).query(cx))).as_deref(), Some(""));
     }
 
     #[gpui::test]
