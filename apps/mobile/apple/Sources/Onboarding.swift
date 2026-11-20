@@ -16,7 +16,7 @@ struct OnboardingView: View {
     @State private var connecting = false
     @State private var error: String?
     @State private var height: CGFloat = 0
-    /// Welcome's own height and group height: the page ScrollView writes `height` while both show in the transition.
+    /// Welcome's own height: the page ScrollView writes `height` while both show in the transition.
     @State private var welcomeHeight: CGFloat = 0
     @State private var group: CGFloat = 0
     /// Bottom safe-area inset minus top: Welcome centres on the whole screen, not the safe area.

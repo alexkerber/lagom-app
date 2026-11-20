@@ -563,7 +563,7 @@ impl AddAccount {
     /// The first run, as on iOS and Android: one centred group. The wordmark is the one heavy element; the
     /// dictionary line and the definition are Hauora Regular.
     fn welcome(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        let regular = |px_size: f32| div().font_family(font::DISPLAY).font_weight(FontWeight::NORMAL).text_size(px(px_size));
+        let regular = |px_size: f32| div().font_weight(FontWeight::NORMAL).text_size(px(px_size));
         div()
             .w_full()
             .flex()
