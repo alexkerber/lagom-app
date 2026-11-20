@@ -74,7 +74,8 @@ hero = 48
 # Families as the font files name them; the site's web fonts are "Hauora Sans".
 [type.faces]
 text = "Hauora"
-# Every weight the UI asks for; each is a bundled file, so nothing is synthesised.
+# Every weight the UI asks for, each a bundled file, so nothing is synthesised. Android's family is
+# generated from this list; desktop FONTS and iOS UIAppFonts list the same files by hand.
 text_weights = ["Regular", "Medium", "SemiBold", "Bold"]
 display = "Hauora"
 display_weight = "Bold"

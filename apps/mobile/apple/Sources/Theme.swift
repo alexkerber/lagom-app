@@ -104,16 +104,24 @@ enum TextSize {
     }
 }
 
-extension Font {
-    /// The text face at a lagom size; it scales with Dynamic Type from the size's text style.
-    static func lagom(_ size: TextSize, _ weight: Font.Weight = .regular) -> Font {
-        .custom(Theme.Face.text, size: size.points, relativeTo: size.style).weight(weight)
+/// The text face; it scales with Dynamic Type from `style`. A custom face ignores the Bold Text
+/// setting, so this steps the weight up itself, as the system font does.
+struct LagomFont: ViewModifier {
+    @Environment(\.legibilityWeight) private var legibility
+    let points: CGFloat
+    let style: Font.TextStyle
+    var weight: Font.Weight = .regular
+
+    func body(content: Content) -> some View {
+        let bold = legibility == .bold
+        let weight = !bold ? weight : weight == .regular ? .semibold : .bold
+        content.font(.custom(Theme.Face.text, size: points, relativeTo: style).weight(weight))
     }
 }
 
 extension View {
     func lagomFont(_ size: TextSize, _ weight: Font.Weight = .regular) -> some View {
-        font(.lagom(size, weight))
+        modifier(LagomFont(points: size.points, style: size.style, weight: weight))
     }
 }
 

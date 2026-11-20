@@ -99,7 +99,7 @@
 - [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.
 - [x] Selection contrast raised; sidebar native glass and opaque fallback are covered by the Liquid Glass item above.
 - [x] Sidebar selection levels: filled section row, accent-only mailbox/account/folder selection, subtle hover. Native light/dark contrast acceptance remains unverified.
-- [x] Typeface: the system font (SF Pro on macOS) is the UI default. `LAGOM_UI_FONT=inter` switches back.
+- [x] Typeface: the system font (SF Pro on macOS) is the UI default. Replaced 2026-11-20 by Hauora ("One UI typeface on every platform"); `LAGOM_UI_FONT=system` compares.
 - [x] Message list: visible rows plus two-row overscan, with animated-height spacers; integrated with persisted drafts, outbox and non-blocking quit.
 - [x] Message list: Shift-arrow/Shift-click ranges, Cmd-click toggles, Cmd+A and Escape, stable selection across sync, conversation-aware batch Done/Later/Delete/Move/read status with one Undo, and a selection summary. All/Unread filters the loaded rows. Fixture and headless tests cover selection, filtering, batch undo and worker read flags. Review fixes bind rollback to worker operations, retain selected mail past page boundaries, reveal search targets, clear the hidden Trash filter, keep the sole selection readable after Cmd-click, share thread read state between labels and actions, reject failed IMAP read-status commands, retain Undo selection across replaced store rows, link HTML tasks to the sole selection, and reveal filtered popout targets before actions.
 

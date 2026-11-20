@@ -48,7 +48,7 @@ struct LagomApp: App {
             } message: { Text(model.error ?? planner.error ?? "") }
             .tint(Theme.accent)
             // Text without its own size gets the text face at the system's body size.
-            .font(.custom(Theme.Face.text, size: 17, relativeTo: .body))
+            .modifier(LagomFont(points: 17, style: .body))
             .preferredColorScheme(Self.debugScheme)
             .task(id: phase) {
                 guard phase == .active else { return }
