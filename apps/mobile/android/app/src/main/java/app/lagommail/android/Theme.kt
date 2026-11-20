@@ -4,7 +4,9 @@ import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -189,8 +191,9 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
     Icon(painterResource(id), label, modifier.size(size), tint = tint)
 
 /** A push button, desktop `button`: bordered, or filled with the accent when `primary`. 36 dp drawn, 48 dp to touch. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable internal fun HouseButton(text: String, @DrawableRes icon: Int? = null, modifier: Modifier = Modifier, primary: Boolean = false,
-    iconOnly: Boolean = false, enabled: Boolean = true, danger: Boolean = false, onClick: () -> Unit) {
+    iconOnly: Boolean = false, enabled: Boolean = true, danger: Boolean = false, onLongClick: (() -> Unit)? = null, onLongClickLabel: String? = null, onClick: () -> Unit) {
     val c = lagom
     val ink = when { primary -> c.accentFillInk; danger -> c.danger; else -> c.ink }
     Box(modifier, contentAlignment = Alignment.Center,
@@ -202,7 +205,7 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
             .graphicsLayer { alpha = if (enabled) 1f else 0.5f }
             // No outline, as desktop since #168: a quiet fill marks the button.
             .background(if (primary) c.accentFill else c.subtle)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .combinedClickable(enabled = enabled, role = Role.Button, onLongClickLabel = onLongClickLabel, onLongClick = onLongClick, onClick = onClick)
             .semantics { if (iconOnly) contentDescription = text }
             .padding(horizontal = if (iconOnly) 9.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {

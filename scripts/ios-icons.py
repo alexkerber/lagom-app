@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Copy desktop SVGs used by Swift into iOS imagesets. Run from the repository root.
 
-Icon names belong in Icon(...), icon: arguments, or var icon: String properties,
+Icon names belong in Icon(...), Label(_, image:) menu items, icon: arguments, or var icon: String properties,
 including ternaries and switches. Keep names literal so missing SVGs can be checked.
 """
 import argparse
@@ -26,6 +26,7 @@ def used_icons():
         uses = re.finditer(
             r"\bvar\s+icon\s*:\s*String\s*\{((?:[^{}]|\{[^{}]*\})*)\}"
             r"|\bIcon\s*\(\s*([^,)]*)"
+            r"|\bLabel\s*\(\s*" + STRING + r"\s*,\s*image\s*:\s*([^,)]*)"
             r"|\bicon\s*:(?!\s*String\b)\s*([^,)]*)", code)
         for use in uses:
             expression = next(group for group in use.groups() if group is not None)

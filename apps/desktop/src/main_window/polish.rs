@@ -124,12 +124,28 @@ impl MainWindow {
             MessageAction::ReplyAll => self.compose_kind(Some(id), ComposeKind::ReplyAll, window, cx),
             MessageAction::Forward => self.compose_kind(Some(id), ComposeKind::Forward, window, cx),
             MessageAction::Unread => self.act_on(id, Move::Read(false), window, cx),
+            MessageAction::Delete => self.act_on(id, Move::Delete, window, cx),
             MessageAction::Copy => cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.inbox.mail[id].address.clone())),
             MessageAction::Move => {
                 if let Some(store) = self.inbox.mail[id].store { return self.move_message(store, window, cx); }
                 else if let Some(ix) = self.inbox.list().iter().position(|&rep| self.inbox.members(rep).contains(&id)) { self.inbox.select(ix); }
                 self.open_palette("move ", window, cx);
             }
+        }
+        cx.notify();
+    }
+
+    /// The toolbar's More acts on the selection, as the keys do.
+    pub(super) fn toolbar_action(&mut self, action: MessageAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.message_menu = None;
+        match action {
+            MessageAction::Menu => self.message_menu = Some(TOOLBAR_MENU),
+            MessageAction::Close | MessageAction::Copy => {},
+            MessageAction::ReplyAll => self.compose_selected(ComposeKind::ReplyAll, window, cx),
+            MessageAction::Forward => self.compose_selected(ComposeKind::Forward, window, cx),
+            MessageAction::Move => self.open_palette("move ", window, cx),
+            MessageAction::Delete => self.act(Move::Delete, cx),
+            MessageAction::Unread => self.toggle_read(cx),
         }
         cx.notify();
     }
@@ -151,23 +167,45 @@ pub(super) fn mailbox_style(row: Stateful<Div>, t: &Theme, selected: bool) -> St
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum MessageAction { Menu, Close, ReplyAll, Forward, Unread, Move, Copy }
+pub(super) enum MessageAction { Menu, Close, ReplyAll, Forward, Unread, Move, Copy, Delete }
 
+/// `message_menu` holds this instead of a message index while the reading toolbar's More menu is open.
+pub(super) const TOOLBAR_MENU: usize = usize::MAX;
+
+/// The card's menu for one message, in a thread or alone.
 pub(super) fn reading_menu(t: &Theme, id: usize, open: bool,
+    action: impl Fn(&MessageAction, &mut Window, &mut App) + 'static) -> Div {
+    let trigger = icon_button(t, "message-menu", "icons/more.svg", "Message actions").debug_selector(move || format!("message-menu-{id}"));
+    menu(t, trigger, open, false, &[("Reply all", "Reply all · Shift+R", MessageAction::ReplyAll), ("Forward", "Forward · F", MessageAction::Forward),
+        ("Mark unread", "Mark unread · Shift+U", MessageAction::Unread), ("Move", "Move · M", MessageAction::Move),
+        ("Copy address", "Copy address", MessageAction::Copy)], action)
+}
+
+/// The reading toolbar's More: the actions beside Reply, Later and Done, in the same order as iOS and Android.
+pub(super) fn toolbar_menu(t: &Theme, open: bool, trash: bool, unread: bool,
+    action: impl Fn(&MessageAction, &mut Window, &mut App) + 'static) -> Div {
+    menu(t, icon_button(t, "More", "icons/more.svg", "More"), open, true, &toolbar_items(trash, unread), action)
+}
+
+fn toolbar_items(trash: bool, unread: bool) -> Vec<(&'static str, &'static str, MessageAction)> {
+    let delete = if cfg!(target_os = "macos") { "Delete · ⌫" } else { "Delete · Backspace" };
+    let read = if unread { ("Mark read", "Mark read · Shift+U", MessageAction::Unread) } else { ("Mark unread", "Mark unread · Shift+U", MessageAction::Unread) };
+    [("Reply all", "Reply all · Shift+R", MessageAction::ReplyAll), ("Forward", "Forward · F", MessageAction::Forward),
+        ("Move", "Move · M", MessageAction::Move), ("Delete", delete, MessageAction::Delete), read]
+        .into_iter().filter(|item| !(trash && item.0 == "Delete")).collect()
+}
+
+fn menu(t: &Theme, trigger: Stateful<Div>, open: bool, left: bool, items: &[(&'static str, &'static str, MessageAction)],
     action: impl Fn(&MessageAction, &mut Window, &mut App) + 'static) -> Div {
     let theme = *t;
     let action = Rc::new(action);
     let toggle = action.clone();
     div().relative().flex_shrink_0()
-        .child(icon_button(t, "message-menu", "icons/more.svg", "Message actions").debug_selector(move || format!("message-menu-{id}"))
-            .on_click(move |_, window, cx| toggle(&if open { MessageAction::Close } else { MessageAction::Menu }, window, cx)))
-        .when(open, |d| d.child(gpui::deferred(div().absolute().right_0().top(px(32.)).w(px(180.)).p(px(4.))
+        .child(trigger.on_click(move |_, window, cx| toggle(&if open { MessageAction::Close } else { MessageAction::Menu }, window, cx)))
+        .when(open, |d| d.child(gpui::deferred(div().absolute().when(left, |d| d.left_0()).when(!left, |d| d.right_0()).top(px(32.)).w(px(180.)).p(px(4.))
             .bg(t.raised).border_1().border_color(t.line).rounded(px(radius::CONTROL)).flex().flex_col()
             .occlude()
-            .children([("Reply all", "Reply all · Shift+R", MessageAction::ReplyAll), ("Forward", "Forward · F", MessageAction::Forward),
-                ("Mark unread", "Mark unread · Shift+U", MessageAction::Unread), ("Move", "Move · M", MessageAction::Move),
-                ("Copy address", "Copy address", MessageAction::Copy)]
-                .into_iter().map(|(label, tip, run)| {
+            .children(items.iter().map(|&(label, tip, run)| {
                     let action = action.clone();
                     pressable(div().id(label).group(label), t, false).debug_selector(move || format!("menu-{label}"))
                         .h(px(28.)).px(px(8.)).flex().items_center().gap(px(8.)).rounded(px(radius::KEY))
@@ -252,6 +290,13 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_more_keeps_one_order_and_drops_delete_in_trash() {
+        let labels = |trash, unread| toolbar_items(trash, unread).into_iter().map(|item| item.0).collect::<Vec<_>>();
+        assert_eq!(labels(false, false), ["Reply all", "Forward", "Move", "Delete", "Mark unread"]);
+        assert_eq!(labels(true, true), ["Reply all", "Forward", "Move", "Mark read"]);
+    }
+
+    #[test]
     fn stroke_icons_set_their_own_ink_in_both_themes() {
         for t in [Theme::light(DEFAULT_ACCENT), Theme::dark(DEFAULT_ACCENT)] {
             let mut glyph = icon("icons/linked-mail.svg", t.ink2, 16.);
@@ -326,11 +371,11 @@ mod tests {
         let mut popup = gpui::VisualTestContext::from_window(popout.into(), cx);
         popup.simulate_resize(gpui::size(px(420.), px(800.)));
         popup.run_until_parked();
-        for label in ["Reply", "reply-all", "Forward", "Later", "Done"] {
+        for label in ["Reply", "Later", "More", "Done"] {
             let bounds = popup.debug_bounds(label).unwrap();
             assert!(bounds.left() >= px(0.) && bounds.right() <= px(420.), "{label} must fit the toolbar");
         }
-        for path in ["reply", "reply-all", "forward", "later", "done", "more"] {
+        for path in ["reply", "later", "done", "more"] {
             let bounds = popup.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
             assert_eq!(bounds.size, gpui::size(px(16.), px(16.)));
         }

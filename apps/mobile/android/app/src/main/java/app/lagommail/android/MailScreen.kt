@@ -3,6 +3,7 @@ package app.lagommail.android
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
+import androidx.annotation.DrawableRes
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import androidx.compose.animation.*
@@ -696,8 +697,8 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     }
 }
 
-/** The desktop reading pane: a bar with Back, Later, Delete, Move and Done filled; then the subject, the sender with the
- *  message menu, the body, attachments, and Reply. */
+/** The reading pane: a bar with Back, Reply, Later, More and Done filled, the same set and order as Mac and iOS; then the
+ *  subject, the sender with the message menu, the body, attachments, and Reply. */
 @Composable private fun MessageScreen(model: MailModel, message: MailMessage, close: (() -> Unit)?) {
     var plain by remember(message.row.id) { mutableStateOf(false) }
     val context = LocalContext.current
@@ -724,9 +725,14 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding(), start = if (close != null) 4.dp else 12.dp, end = 12.dp) {
             close?.let { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = it) }
+            HouseButton("Reply", R.drawable.ic_reply, iconOnly = true, enabled = !model.working) { model.perform { model.reply(id) } }
             Box {
                 var choices by remember { mutableStateOf<List<LaterChoice>>(emptyList()) }
-                HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working) { choices = model.core?.laterChoices().orEmpty() }
+                // One tap is tomorrow, as desktop's L; a long press offers the other times.
+                HouseButton("Later", R.drawable.ic_later, iconOnly = true, enabled = !model.working,
+                    onLongClickLabel = "Choose a time", onLongClick = { choices = model.core?.laterChoices().orEmpty() }) {
+                    model.perform { model.act(MailAction.Later, id, conversation = false) }
+                }
                 DropdownMenu(expanded = choices.isNotEmpty(), onDismissRequest = { choices = emptyList() }) {
                     choices.forEach { choice ->
                         DropdownMenuItem(text = { Text(choice.label) }, onClick = {
@@ -736,24 +742,38 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
                     }
                 }
             }
-            HouseButton("Delete", R.drawable.ic_trash, iconOnly = true, enabled = !model.working) {
-                model.perform { model.act(MailAction.Delete, id, conversation = false) }
-            }
             val targets = model.moveTargets(message.row.account)
             Box {
                 var open by remember { mutableStateOf(false) }
-                HouseButton("Move to", R.drawable.ic_move, iconOnly = true, enabled = !model.working) { open = true }
-                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    targets.forEach { folder ->
-                        DropdownMenuItem(text = { Text(folder.path) }, onClick = {
-                            open = false
-                            model.perform { model.move(id, folder, conversation = false) }
+                var moving by remember { mutableStateOf(false) }
+                HouseButton("More", R.drawable.ic_more, iconOnly = true, enabled = !model.working) { open = true }
+                DropdownMenu(expanded = open || moving, onDismissRequest = { open = false; moving = false }) {
+                    if (moving) {
+                        targets.forEach { folder ->
+                            DropdownMenuItem(text = { Text(folder.path) }, onClick = {
+                                moving = false
+                                model.perform { model.move(id, folder, conversation = false) }
+                            })
+                        }
+                        DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
+                            moving = false
+                            model.newFolder = NewFolder(message.row.account, id, conversation = false)
                         })
+                    } else {
+                        // The same five, in the same order, on every platform.
+                        @Composable fun item(label: String, @DrawableRes icon: Int, run: () -> Unit) =
+                            DropdownMenuItem(text = { Text(label) }, leadingIcon = { LagomIcon(icon) }, onClick = { open = false; run() })
+                        item("Reply all", R.drawable.ic_reply_all) { model.perform { model.reply(id, ComposeKind.REPLY_ALL) } }
+                        item("Forward", R.drawable.ic_forward) { model.perform { model.reply(id, ComposeKind.FORWARD) } }
+                        item("Move", R.drawable.ic_move) { moving = true }
+                        if (model.mailbox != Mailbox.TRASH) item("Delete", R.drawable.ic_trash) {
+                            model.perform { model.act(MailAction.Delete, id, conversation = false) }
+                        }
+                        val unread = message.row.unread
+                        item(if (unread) "Mark read" else "Mark unread", if (unread) R.drawable.ic_read else R.drawable.ic_unread) {
+                            model.perform { model.setRead(id, unread) }
+                        }
                     }
-                    DropdownMenuItem(text = { Text("New folder…") }, enabled = !model.working, onClick = {
-                        open = false
-                        model.newFolder = NewFolder(message.row.account, id, conversation = false)
-                    })
                 }
             }
             Spacer(Modifier.weight(1f))
