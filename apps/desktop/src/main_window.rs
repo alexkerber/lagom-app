@@ -192,7 +192,7 @@ fn row_y(ix: usize) -> f32 {
     LIST_PAD + ix as f32 * ROW_H
 }
 
-mod html;
+pub(crate) mod html;
 mod conversation;
 mod selection;
 mod live;
@@ -598,6 +598,14 @@ impl MainWindow {
             }
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(true, window, cx),
+            // A reply to the HTML newsletter: the quote under the editor, collapsed or open.
+            "compose-quote" | "compose-quote-open" => {
+                this.inbox.select(INBOX_LEN - 1);
+                this.open_compose(true, window, cx);
+                if let Some(c) = this.compose.clone().filter(|_| screen == "compose-quote-open") {
+                    c.update(cx, |c, cx| c.toggle_quote(cx));
+                }
+            }
             // A written reply with a word selected, Cc open with its focus ring, and live Markdown.
             "compose-text" | "compose-cc" | "compose-md" | "compose-md-bar" => {
                 this.open_compose(true, window, cx);
@@ -861,12 +869,17 @@ impl MainWindow {
                 };
                 let original = m.map(|m| m.text.as_ref().and_then(|text| text.borrow().clone())
                     .unwrap_or_else(|| m.body.join("\n\n").into()));
-                let mut body = mail::compose_body(&signature, m.zip(original.as_deref()), kind);
+                // An HTML original stays HTML under the editor; plain text quotes into the body.
+                let quoted = m.zip(original.as_deref()).and_then(|(m, text)| mail::quote(m, text, kind));
+                let mut body = mail::compose_body(&signature, m.zip(original.as_deref()).filter(|_| quoted.is_none()), kind);
                 if let Some(link) = &link { body.insert_str(0, &link.body); }
                 let source = m.filter(|_| kind == ComposeKind::Forward).and_then(|m| m.store);
                 let compose = cx.new(|cx| Compose::new(from, &to, &subject, headers, window, cx));
                 let bcc = link.as_ref().map_or_else(String::new, |l| l.bcc.join(", "));
-                compose.update(cx, |c, cx| c.initialize(&cc, &bcc, &body, source, cx));
+                compose.update(cx, |c, cx| {
+                    c.set_quote(quoted, cx);
+                    c.initialize(&cc, &bcc, &body, source, cx);
+                });
                 if let (Some(live), Some(account)) = (&self.live, account) {
                     compose.update(cx, |c, cx| c.persist(live.store.clone(), account, cx));
                 }

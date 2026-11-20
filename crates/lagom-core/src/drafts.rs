@@ -13,12 +13,36 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
     let in_reply_to = parsed.in_reply_to().and_then(|ids| ids.first()).map(|id| format!("<{id}>"));
     let references: Vec<_> = parsed.references().into_iter().flat_map(|ids| ids.iter()).map(|id| format!("<{id}>")).collect();
     let reply = (in_reply_to.is_some() || !references.is_empty()).then_some((in_reply_to, references));
+    // shortcut: foreign HTML becomes text, retain HTML when rich-text editing exists.
+    let mut text = parsed.text_bodies().map(|text| text.into_owned()).collect::<Vec<_>>().join("\n");
+    // A quoted HTML original, as `smtp` sends it: its HTML inside the marker, its "> " lines last in the text.
+    let quote = parsed.body_html(0).and_then(|html| {
+        let start = html.find(crate::smtp::QUOTE_OPEN)? + crate::smtp::QUOTE_OPEN.len();
+        let end = html.rfind(crate::smtp::QUOTE_CLOSE).filter(|&end| end >= start)?;
+        Some(html[start..end].to_owned())
+    });
+    let cids = quote.as_deref().map(crate::inline::referenced_ids).unwrap_or_default();
+    let quoted_part = |part: &mail_parser::MessagePart<'_>| part.content_id().is_some_and(|id| cids.contains(crate::inline::content_id(id)));
+    let quoted = quote.map(|html| {
+        use base64::Engine;
+        let html = crate::inline::rewrite_with(&html, |cid| parsed.root().parts().find(|p| p.content_id().is_some_and(|id| crate::inline::content_id(id) == cid))
+            .and_then(|p| { let data = p.decoded(); crate::html::image_type(&data).map(|mime| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data))) })
+            .unwrap_or_default());
+        let plain = text.replace("\r\n", "\n");
+        let plain = plain.trim_end_matches('\n');
+        // The "> " lines at the end: the reply above them always ends in an unquoted line or nothing.
+        let start = plain.lines().rev().take_while(|line| line.starts_with('>')).map(|line| line.len() + 1).sum::<usize>().min(plain.len() + 1);
+        let at = (plain.len() + 1).saturating_sub(start);
+        let quote = plain[at..].to_owned();
+        text = plain[..at].strip_suffix(crate::smtp::QUOTE_BREAK).unwrap_or(&plain[..at]).to_owned();
+        crate::compose::Quoted { text: quote, html }
+    });
     Ok(Draft {
         to: addresses(parsed.to()), cc: addresses(parsed.cc()), bcc: addresses(parsed.bcc()), subject: parsed.subject().unwrap_or_default().into(),
-        // shortcut: foreign HTML becomes text, retain HTML when rich-text editing exists.
-        text: parsed.text_bodies().map(|text| text.into_owned()).collect::<Vec<_>>().join("\n"),
+        text,
         reply,
-        attachments: parsed.root().parts().filter(|part| part.is_attachment() || matches!(part.role(), mail_parser::PartRole::MediaBody))
+        quoted,
+        attachments: parsed.root().parts().filter(|part| (part.is_attachment() || matches!(part.role(), mail_parser::PartRole::MediaBody)) && !quoted_part(part))
             .map(|part| crate::smtp::OutgoingAttachment {
                 filename: part.attachment_name().unwrap_or("attachment").into(),
                 mime_type: part.content_type().map(|ty| ty.subtype().map_or_else(|| ty.ctype().to_string(), |sub| format!("{}/{sub}", ty.ctype())))
@@ -240,6 +264,38 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_html_survives_local_save_and_server_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("mail.db")).unwrap();
+        let (imap, smtp) = crate::presets::servers("sender@gmail.com").unwrap();
+        let account = crate::account::Account::new("sender@gmail.com".into(), imap, smtp).unwrap();
+        store.save_account(&account).unwrap();
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let quoted = crate::compose::Quoted { text: "> On 2026-11-20, a@example.com wrote:\n> \n> > nested\n> Ready".into(),
+            html: format!("<div>On 2026-11-20, a@example.com wrote:</div><blockquote type=\"cite\"><table><tr><td>Ready</td></tr></table><img src=\"data:image/png;base64,{png}\"></blockquote>") };
+        let attachment = crate::smtp::OutgoingAttachment { filename: "a.bin".into(), mime_type: "application/octet-stream".into(), data: vec![7] };
+        let draft = Draft { id: "<q@example.com>".into(), account: account.id.clone(), to: "b@example.com".into(), subject: "Re: x".into(),
+            text: "\n\nThanks\n\n> my own quote\n\n-- \nAlex".into(), quoted: Some(quoted.clone()), attachments: vec![attachment.clone()], ..Default::default() };
+        store.save_draft(&draft).unwrap();
+        assert_eq!(store.draft(&draft.id).unwrap().quoted.as_ref(), Some(&quoted));
+        // The server copy, as another device reads it.
+        let raw = crate::smtp::compose_draft(&account, &draft, "token").unwrap();
+        let back = parse_draft(&raw).unwrap();
+        assert_eq!(back.text, draft.text);
+        assert_eq!(back.quoted.as_ref(), Some(&quoted));
+        assert_eq!(back.attachments, vec![attachment], "the quote's image is no attachment");
+        assert!(same_upload(&raw, &raw).unwrap());
+        // Drafts saved before quotes existed still open, without one.
+        store.db.execute("UPDATE drafts SET content=json_remove(content,'$.quoted') WHERE id=?1", [&draft.id]).unwrap();
+        let old = store.draft(&draft.id).unwrap();
+        assert_eq!((old.quoted, old.text), (None, draft.text.clone()));
+        // A plain draft from the server keeps its "> " lines in the text.
+        let plain = Draft { quoted: None, attachments: vec![], ..draft };
+        let back = parse_draft(&crate::smtp::compose_draft(&account, &plain, "token").unwrap()).unwrap();
+        assert_eq!((back.text.replace("\r\n", "\n"), back.quoted), (plain.text, None));
+    }
 
     #[test]
     fn owned_rows_timestamp_edits_and_sort_without_decoding_attachments() {

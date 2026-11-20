@@ -175,9 +175,230 @@ pub fn inert_tags(html: &str) -> std::borrow::Cow<'_, str> {
     out.into()
 }
 
+/// Text for HTML: `&`, `<`, `>` and `"` escaped, so it is safe in text and quoted attributes.
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Someone else's mail HTML, made safe to quote in mail lagom sends and in the compose preview.
+/// An allowlist rebuilt from html5ever's tokens: nothing from the input reaches the output
+/// unescaped. Scripts, styles, frames, forms, plugins, SVG and MathML go with their content;
+/// unknown tags go and keep their text. Attributes are an allowlist: no event handlers, ids or
+/// classes; links only http, https and mailto; images only http, https and raster `data:`.
+/// Every element is closed, so the quote cannot close the markup around it.
+pub fn sanitize(html: &str) -> String {
+    clean(html, None).0
+}
+
+/// `sanitize`, with each `data:` image moved to an inline part that `src` names as `cid:`.
+pub(crate) fn sanitize_parts(html: &str) -> (String, Vec<crate::inline::InlinePart>) {
+    clean(html, Some(Vec::new()))
+}
+
+const KEEP: &[&str] = &["a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "big", "blockquote", "br", "caption", "center",
+    "cite", "code", "col", "colgroup", "dd", "del", "details", "dfn", "div", "dl", "dt", "em", "figcaption", "figure", "font", "footer",
+    "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "img", "ins", "kbd", "li", "main", "mark", "nav", "ol", "p", "pre", "q", "s",
+    "samp", "section", "small", "span", "strike", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead",
+    "time", "tr", "tt", "u", "ul", "var", "wbr"];
+const VOID: &[&str] = &["br", "col", "hr", "img", "wbr"];
+/// Dropped with everything inside them.
+const DROP: &[&str] = &["script", "style", "title", "textarea", "select", "iframe", "frameset", "object", "applet", "noscript",
+    "noembed", "noframes", "template", "svg", "math", "xmp", "plaintext", "audio", "video", "canvas", "map", "head"];
+const ATTRS: &[&str] = &["align", "valign", "width", "height", "bgcolor", "color", "face", "size", "border", "cellpadding",
+    "cellspacing", "colspan", "rowspan", "dir", "lang", "title", "alt", "start", "type", "reversed", "span", "nowrap", "scope",
+    "headers", "abbr", "datetime", "hspace", "vspace", "frame", "rules", "summary", "clear", "noshade", "compact", "open"];
+
+#[derive(Default)]
+struct Clean {
+    out: String,
+    open: Vec<String>,
+    /// Inside a dropped element: its name and how deep.
+    skip: Option<(String, usize)>,
+    parts: Option<Vec<crate::inline::InlinePart>>,
+}
+
+struct CleanSink(std::cell::RefCell<Clean>);
+
+fn clean(html: &str, parts: Option<Vec<crate::inline::InlinePart>>) -> (String, Vec<crate::inline::InlinePart>) {
+    use html5ever::tokenizer::{BufferQueue, Tokenizer};
+    let queue = BufferQueue::default();
+    queue.push_back(html.into());
+    let tokenizer = Tokenizer::new(CleanSink(Clean { parts, ..Default::default() }.into()), Default::default());
+    let _ = tokenizer.feed(&queue);
+    tokenizer.end();
+    let state = tokenizer.sink.0.into_inner();
+    (state.out, state.parts.unwrap_or_default())
+}
+
+impl html5ever::tokenizer::TokenSink for CleanSink {
+    type Handle = ();
+    fn process_token(&self, token: html5ever::tokenizer::Token, _line: u64) -> html5ever::tokenizer::TokenSinkResult<()> {
+        use html5ever::tokenizer::{Token, TokenSinkResult};
+        let mut state = self.0.borrow_mut();
+        match token {
+            Token::TagToken(tag) => return state.tag(tag),
+            Token::CharacterTokens(text) if state.skip.is_none() => {
+                let text = escape(&text);
+                state.out.push_str(&text);
+            }
+            Token::EOFToken => {
+                while let Some(name) = state.open.pop() { state.out.push_str(&format!("</{name}>")); }
+            }
+            // Comments (IE conditional comments too), doctypes, NUL.
+            _ => {}
+        }
+        TokenSinkResult::Continue
+    }
+}
+
+impl Clean {
+    fn tag(&mut self, tag: html5ever::tokenizer::Tag) -> html5ever::tokenizer::TokenSinkResult<()> {
+        use html5ever::tokenizer::{TagKind, TokenSinkResult};
+        let name: &str = &tag.name;
+        let start = tag.kind == TagKind::StartTag;
+        if let Some((skip, depth)) = &mut self.skip {
+            if skip == name {
+                if start { *depth += 1 } else { *depth -= 1 }
+                if *depth == 0 { self.skip = None; }
+            }
+            return TokenSinkResult::Continue;
+        }
+        if DROP.contains(&name) {
+            // `<svg/>` closes itself; `<script/>` does not, in HTML.
+            if start && !(tag.self_closing && matches!(name, "svg" | "math")) {
+                self.skip = Some((name.to_owned(), 1));
+                return match crate::mime::raw_kind(&tag.name) {
+                    Some(Some(kind)) => TokenSinkResult::RawData(kind),
+                    Some(None) => TokenSinkResult::Plaintext,
+                    None => TokenSinkResult::Continue,
+                };
+            }
+            return TokenSinkResult::Continue;
+        }
+        if !KEEP.contains(&name) { return TokenSinkResult::Continue; }
+        if !start {
+            if let Some(at) = self.open.iter().rposition(|n| n == name) {
+                for open in self.open.drain(at..).rev() { self.out.push_str(&format!("</{open}>")); }
+            }
+            return TokenSinkResult::Continue;
+        }
+        let mut attrs = String::new();
+        let mut has_src = false;
+        for attr in &tag.attrs {
+            if !attr.name.ns.is_empty() { continue; }
+            let (key, value): (&str, &str) = (&attr.name.local, &attr.value);
+            let value = match key {
+                "href" if name == "a" => Some(value.trim()).filter(|v| link_allowed(v)).map(str::to_owned),
+                "src" if name == "img" => self.image(value.trim()),
+                "background" => web_url(value.trim()),
+                "style" => style(value),
+                _ if ATTRS.contains(&key) => Some(value.to_owned()),
+                _ => None,
+            };
+            if let Some(value) = value {
+                has_src |= key == "src";
+                attrs.push_str(&format!(" {key}=\"{}\"", escape(&value)));
+            }
+        }
+        // An image with nothing safe to show goes, rather than a broken-image box.
+        if name == "img" && !has_src { return TokenSinkResult::Continue; }
+        self.out.push_str(&format!("<{name}{attrs}>"));
+        if !VOID.contains(&name) { self.open.push(name.to_owned()); }
+        TokenSinkResult::Continue
+    }
+
+    fn image(&mut self, src: &str) -> Option<String> {
+        if src.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
+            let data = data_image(src)?;
+            let mime = image_type(&data)?;
+            return Some(match &mut self.parts {
+                Some(parts) => {
+                    let cid = format!("quote{}@lagommail.app", parts.len() + 1);
+                    parts.push(crate::inline::InlinePart { cid: cid.clone(), mime_type: mime.into(), data });
+                    format!("cid:{cid}")
+                }
+                None => src.to_owned(),
+            });
+        }
+        web_url(src)
+    }
+}
+
+/// An absolute http or https URL, as written.
+fn web_url(url: &str) -> Option<String> {
+    let scheme = url.split_once(':').map_or("", |s| s.0);
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")).then(|| url.to_owned())
+}
+
+/// Inline CSS without script hooks (`expression`, `behavior`, bindings, escapes) or `position`,
+/// which would let the quote paint over the reply in the recipient's mail.
+fn style(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains('\\') || ["expression", "javascript:", "vbscript:", "behavior", "-moz-binding", "@import", "/*"].iter().any(|b| lower.contains(b)) {
+        return None;
+    }
+    let kept: Vec<_> = value.split(';').filter(|d| d.split_once(':').is_some_and(|(p, _)| {
+        let p = p.trim().to_ascii_lowercase();
+        !p.is_empty() && p != "position"
+    })).map(str::trim).collect();
+    (!kept.is_empty()).then(|| kept.join(";"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{data_image, image_type, image_url_allowed, inert_tags, public_ip, redirect_allowed, remote_image};
+    use super::{data_image, image_type, image_url_allowed, inert_tags, public_ip, redirect_allowed, remote_image, sanitize, sanitize_parts};
+
+    #[test]
+    fn sanitize_drops_scripts_handlers_frames_forms_and_refresh() {
+        let evil = r#"<html><head><meta http-equiv="refresh" content="0;url=https://evil.example"><title>T</title><style>p{color:red}</style><base href="https://evil.example/"></head>
+<body onload="alert(1)"><script>alert(2)</script><p onclick="x()" id="a" class="b" style="color:#333;position:fixed">Hi <b>there</b></p>
+<iframe src="https://evil.example"></iframe><iframe srcdoc="&lt;script&gt;"></iframe><form action="https://evil.example"><input name=q><button>Go</button></form>
+<a href="javascript:alert(3)">js</a><a href=" https://ok.example/x?a=1&amp;b=2 ">ok</a><a href="java&#x09;script:alert(4)">tab</a>
+<img src="x" onerror="alert(5)"><img src="https://img.example/a.png" alt="A"><svg><script>alert(6)</script></svg><object data="x"></object><embed src="x">
+<div style="background:url(javascript:alert(7))">bg</div><div style="width:expression(alert(8))">ie</div><script/>alert(9)</script>after"#;
+        let out = sanitize(evil);
+        let lower = out.to_ascii_lowercase();
+        for bad in ["<script", "alert(", "onload", "onclick", "onerror", "<iframe", "srcdoc", "<form", "<input", "<meta", "refresh", "<base",
+            "<style", "<object", "<embed", "<svg", "javascript", "expression", "position", " id=", " class=", "<title", "action="] {
+            assert!(!lower.contains(bad), "{bad} in {out}");
+        }
+        for good in ["<p style=\"color:#333\">Hi <b>there</b></p>", "<a href=\"https://ok.example/x?a=1&amp;b=2\">ok</a>",
+            "<img src=\"https://img.example/a.png\" alt=\"A\">", "Go", "after", "<div>bg</div>"] {
+            assert!(out.contains(good), "{good} missing from {out}");
+        }
+        assert!(!out.contains("src=\"x\""), "a relative image goes: {out}");
+    }
+
+    #[test]
+    fn sanitize_keeps_tables_and_closes_what_it_opens() {
+        let table = r##"<table width="600" cellpadding="0" style="border-collapse:collapse"><tr><td bgcolor="#f4f4f4" align="center" colspan="2">Cell &lt;1&gt;</td></tr></table>"##;
+        assert_eq!(sanitize(table), r##"<table width="600" cellpadding="0" style="border-collapse:collapse"><tr><td bgcolor="#f4f4f4" align="center" colspan="2">Cell &lt;1&gt;</td></tr></table>"##);
+        // A quote cannot close the blockquote it is placed in, nor leave an element open after it.
+        assert_eq!(sanitize("</blockquote></div><div><b>open"), "<div><b>open</b></div>");
+        assert_eq!(sanitize("<p title='\"><script>x</script>'>t</p>"), "<p title=\"&quot;&gt;&lt;script&gt;x&lt;/script&gt;\">t</p>");
+        assert_eq!(sanitize(&sanitize(table)), sanitize(table), "sanitizing twice changes nothing");
+    }
+
+    #[test]
+    fn sanitize_moves_data_images_to_parts() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let html = format!("<img src=\"data:image/png;base64,{png}\" alt=logo><img src=\"data:image/svg+xml;base64,PHN2Zy8+\">");
+        assert_eq!(sanitize(&html), format!("<img src=\"data:image/png;base64,{png}\" alt=\"logo\">"), "SVG data goes");
+        let (out, parts) = sanitize_parts(&html);
+        assert_eq!(out, "<img src=\"cid:quote1@lagommail.app\" alt=\"logo\">");
+        assert_eq!((parts.len(), parts[0].mime_type.as_str(), parts[0].data[..4].to_vec()), (1, "image/png", vec![0x89, b'P', b'N', b'G']));
+        assert_eq!(sanitize("<img src=\"cid:logo@x\">"), "", "an unresolved inline image goes");
+    }
     use std::borrow::Cow;
 
     #[test]

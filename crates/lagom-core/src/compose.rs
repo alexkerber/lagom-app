@@ -28,14 +28,45 @@ pub fn compose_body(signature: &str, original: Option<Original<'_>>, kind: Compo
     let mut body = if signature.trim().is_empty() { String::new() } else { format!("-- \n{signature}") };
     if let Some(m) = original {
         if !body.is_empty() { body.push_str("\n\n"); }
-        let header = if kind == ComposeKind::Forward {
-            format!("Forwarded message\nFrom: {} <{}>\nDate: {}\nSubject: {}\nTo: {}\n\n", m.from, m.address, m.date, m.subject, m.to)
-        } else { format!("On {}, {} wrote:\n\n", m.date, m.address) };
-        let quote = crate::mime::clean_lines(&format!("{header}{}", crate::mime::clean_lines(m.text)));
-        body.push_str(&quote.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"));
+        body.push_str(&quote_text(&m, kind));
     }
     if !body.is_empty() { body.insert_str(0, "\n\n"); }
     body
+}
+
+/// The original as "> " lines under its attribution or forward header.
+fn quote_text(m: &Original<'_>, kind: ComposeKind) -> String {
+    let header = if kind == ComposeKind::Forward {
+        format!("Forwarded message\nFrom: {} <{}>\nDate: {}\nSubject: {}\nTo: {}\n\n", m.from, m.address, m.date, m.subject, m.to)
+    } else { format!("On {}, {} wrote:\n\n", m.date, m.address) };
+    let quote = crate::mime::clean_lines(&format!("{header}{}", crate::mime::clean_lines(m.text)));
+    quote.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n")
+}
+
+/// An HTML original, quoted as Apple Mail and Gmail do: kept out of the editable body and sent
+/// after it. `text` is the plain-text part's "> " quote; `html` the attribution (or forward
+/// header) and the sanitized original, its inline images as `data:` URIs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Quoted {
+    pub text: String,
+    pub html: String,
+}
+
+/// `inline`: the original's cached inline parts. A `cid:` image without one is left out.
+pub fn quote(m: Original<'_>, html: &str, inline: &[crate::inline::InlinePart], kind: ComposeKind) -> Quoted {
+    use base64::Engine;
+    let html = crate::inline::rewrite_with(html, |cid| inline.iter().find(|p| p.cid == cid).map_or_else(String::new, |p|
+        format!("data:{};base64,{}", p.mime_type, base64::engine::general_purpose::STANDARD.encode(&p.data))));
+    let body = crate::html::sanitize(&html);
+    let e = crate::html::escape;
+    let html = if kind == ComposeKind::Forward {
+        format!("<div>Forwarded message<br>From: {} &lt;{}&gt;<br>Date: {}<br>Subject: {}<br>To: {}</div><br>{body}",
+            e(m.from), e(m.address), e(m.date), e(m.subject), e(m.to))
+    } else {
+        format!("<div>On {}, {} wrote:</div><blockquote type=\"cite\" style=\"margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex\">{body}</blockquote>",
+            e(m.date), e(m.address))
+    };
+    Quoted { text: quote_text(&m, kind), html }
 }
 
 /// A new message from a `mailto:` link (RFC 6068). Bcc is visible in Compose, so a link cannot add a hidden recipient.
@@ -127,6 +158,28 @@ mod tests {
         assert_eq!(reply_subject("日"), "Re: 日");
         assert_eq!(forward_subject("日"), "Fwd: 日");
     }
+
+    #[test]
+    fn html_quotes_keep_attribution_forward_header_and_inline_images() {
+        let m = || Original { from: "App <Store>", address: "no_reply@email.apple.com", date: "2026-11-20 09:00",
+            subject: "Status & more", to: "me@example.test", text: "Ready for Sale" };
+        let html = r#"<html><body onload="x()"><table><tr><td>Ready <b>for</b> Sale</td></tr></table><img src="cid:logo@apple"><img src="cid:gone"><script>x()</script></body></html>"#;
+        let logo = crate::inline::InlinePart { cid: "logo@apple".into(), mime_type: "image/png".into(), data: vec![0x89, b'P', b'N', b'G', 0, 1] };
+        let reply = quote(m(), html, std::slice::from_ref(&logo), ComposeKind::Reply);
+        assert_eq!(reply.text, "> On 2026-11-20 09:00, no_reply@email.apple.com wrote:\n> \n> Ready for Sale");
+        assert!(reply.html.starts_with("<div>On 2026-11-20 09:00, no_reply@email.apple.com wrote:</div><blockquote type=\"cite\""), "{}", reply.html);
+        assert!(reply.html.contains("<table><tr><td>Ready <b>for</b> Sale</td></tr></table>"));
+        assert!(reply.html.contains("<img src=\"data:image/png;base64,iVBORwAB\">"), "{}", reply.html);
+        assert!(!reply.html.contains("cid:") && !reply.html.contains("script") && !reply.html.contains("onload"));
+        assert!(reply.html.ends_with("</blockquote>"));
+        let forward = quote(m(), html, &[], ComposeKind::Forward);
+        assert!(forward.html.starts_with("<div>Forwarded message<br>From: App &lt;Store&gt; &lt;no_reply@email.apple.com&gt;<br>Date: 2026-11-20 09:00<br>Subject: Status &amp; more<br>To: me@example.test</div><br><table>"), "{}", forward.html);
+        assert!(!forward.html.contains("<blockquote") && !forward.html.contains("<img"));
+        assert!(forward.text.starts_with("> Forwarded message\n> From: App <Store> <no_reply@email.apple.com>"));
+        // The editable body holds only the signature; a plain original still quotes into it.
+        assert_eq!(compose_body("Alex", None, ComposeKind::Reply), "\n\n-- \nAlex");
+    }
+
     #[test]
     fn mailto_follows_rfc_6068_examples() {
         let m = |url: &str| parse_mailto(url).unwrap();

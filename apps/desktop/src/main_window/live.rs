@@ -2117,7 +2117,8 @@ mod tests {
             v.reload(cx);
         });
         cx.simulate_keystrokes("r");
-        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        // The HTML original is quoted apart from the body, with the prepared text in its "> " part.
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx).quoted.map(|q| q.text).unwrap_or_default());
         assert!(quote.ends_with("> Full reply text"), "{quote:?}");
     }
 
@@ -2148,7 +2149,7 @@ mod tests {
             view.read_with(cx, |v, cx| {
                 match action {
                     "reply" | "forward" => {
-                        let body = v.compose.as_ref().unwrap().read(cx).body_text(cx);
+                        let body = v.compose.as_ref().unwrap().read(cx).outgoing(cx).quoted.map(|q| q.text).unwrap_or_default();
                         assert!(body.ends_with("> Quote tail"), "compose must keep text beyond the reading cap");
                         assert!(!v.inbox.mail[v.inbox.single().unwrap()].body.join("\n").contains("Quote tail"));
                     }
@@ -2181,7 +2182,7 @@ mod tests {
             assert_eq!(mail.rich.is_some(), cfg!(target_os = "linux"), "GPUI draws the HTML only without a web view");
         });
         cx.simulate_keystrokes("r");
-        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).body_text(cx));
+        let quote = view.read_with(cx, |v, cx| v.compose.as_ref().unwrap().read(cx).outgoing(cx).quoted.map(|q| q.text).unwrap_or_default());
         assert!(quote.ends_with("> Hello & welcome\n> \n> Read the news"), "{quote:?}");
         assert!(!quote.contains("font-size") && !quote.contains("tracking.example.test"));
     }

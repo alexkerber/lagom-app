@@ -23,6 +23,9 @@ pub struct Draft {
     pub attachments: Vec<crate::smtp::OutgoingAttachment>,
     #[serde(default)]
     pub forward_source: Option<i64>,
+    /// An HTML original, kept out of `text`. Older drafts have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<crate::compose::Quoted>,
 }
 
 pub struct DraftSummary {

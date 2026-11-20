@@ -175,11 +175,16 @@ pub fn url(message: i64, cid: &str, windows: bool) -> String {
 }
 
 pub fn rewrite(html: &str, message: i64, windows: bool) -> String {
+    rewrite_with(html, |cid| url(message, cid, windows))
+}
+
+/// Each `cid:` reference replaced by what `to` makes of its Content-ID.
+pub(crate) fn rewrite_with(html: &str, to: impl Fn(&str) -> String) -> String {
     let mut out = String::with_capacity(html.len());
     let mut last = 0;
     for (range, cid) in references(html) {
         out.push_str(&html[last..range.start]);
-        out.push_str(&url(message, &cid, windows));
+        out.push_str(&to(&cid));
         last = range.end;
     }
     out.push_str(&html[last..]);

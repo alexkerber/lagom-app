@@ -164,6 +164,15 @@ pub fn compose_body(signature: &str, original: Option<(&Mail, &str)>, kind: Comp
     }), kind)
 }
 
+/// An HTML original's quote, kept out of the editable body. `None` for plain-text mail.
+pub fn quote(m: &Mail, text: &str, kind: ComposeKind) -> Option<lagom_core::compose::Quoted> {
+    let html = m.html.as_ref().filter(|html| !html.trim().is_empty())?;
+    let date = full_date(m.date);
+    Some(lagom_core::compose::quote(lagom_core::compose::Original {
+        from: &m.from, address: &m.address, date: &date, subject: &m.subject, to: &m.to, text,
+    }, html, &m.inline, kind))
+}
+
 /// In-Reply-To and References for a reply.
 // shortcut: References holds the thread root and the parent only, as the store keeps no full
 // References chain. Store the chain when threading lands.

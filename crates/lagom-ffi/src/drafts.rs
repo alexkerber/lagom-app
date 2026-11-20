@@ -7,6 +7,7 @@ pub struct LocalDraft {
     pub subject: String, pub body: String, pub in_reply_to: Option<String>, pub references: Vec<String>,
     pub attachments: Vec<SendAttachment>,
     #[uniffi(default = "")] pub bcc: String,
+    #[uniffi(default = None)] pub quoted: Option<QuotedMail>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -27,7 +28,7 @@ fn record(draft: Draft) -> LocalDraft {
     LocalDraft { id: draft.id, account: draft.account, to: draft.to, cc: draft.cc,
         subject: draft.subject, body: draft.text, in_reply_to, references,
         attachments: draft.attachments.into_iter().map(|a| SendAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect(),
-        bcc: draft.bcc }
+        bcc: draft.bcc, quoted: draft.quoted.map(Into::into) }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -52,8 +53,10 @@ impl LagomCore {
     }
 
     /// Incomplete recipient text is valid in a draft. Validation belongs to enqueue.
+    /// `quoted`: the HTML original from `compose_draft` or the saved draft; `None` once removed.
+    #[uniffi::method(default(quoted = None))]
     pub async fn save_draft(&self, id: String, account_id: String, to: String, cc: String, bcc: String, subject: String,
-        body: String, reply_to: Option<i64>, attachments: Vec<SendAttachment>) -> Result<DraftRow> {
+        body: String, reply_to: Option<i64>, attachments: Vec<SendAttachment>, quoted: Option<QuotedMail>) -> Result<DraftRow> {
         self.run(move |s| {
             account(s, &account_id)?;
             if id.is_empty() || id.contains(['\r', '\n']) { return Err(lagom_core::Error::Invalid("invalid draft Message-ID")); }
@@ -97,6 +100,7 @@ impl LagomCore {
             ]);
             draft.to = to; draft.cc = cc; draft.bcc = bcc; draft.subject = subject; draft.text = body;
             draft.attachments = attachments.into_iter().map(|a| smtp::OutgoingAttachment { filename: a.filename, mime_type: a.mime_type, data: a.data }).collect();
+            draft.quoted = quoted.map(Into::into);
             s.save_draft(&draft)?;
             Ok(s.draft_row(&draft.id)?.into())
         }).await
@@ -119,7 +123,7 @@ impl LagomCore {
             let [to, cc] = draft.recipient_tokens.unwrap_or_else(|| [split_recipients(draft.to), split_recipients(draft.cc)]);
             let (in_reply_to, references) = draft.reply.unwrap_or_default();
             s.enqueue(&a, &Outgoing { to, cc, bcc: split_recipients(draft.bcc), subject: draft.subject, text: draft.text,
-                message_id: Some(id), in_reply_to, references, attachments: draft.attachments }, milliseconds() + 5000)
+                message_id: Some(id), in_reply_to, references, attachments: draft.attachments, quoted: draft.quoted }, milliseconds() + 5000)
         }).await
     }
 }

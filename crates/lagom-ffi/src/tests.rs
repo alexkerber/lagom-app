@@ -129,7 +129,23 @@ async fn replies_queue_markdown_durably_without_network_or_cross_account_sends()
     let reply = core.reply_draft(id).await.unwrap();
     assert_eq!(reply.account, a.id);
     assert_eq!(reply.subject, "Re: Hello");
-    assert!(reply.body.contains("> line two"));
+    let quoted = reply.quoted.clone().unwrap();
+    assert!(quoted.text.ends_with("> line two") && quoted.html.contains("<p>Hello</p>") && !reply.body.contains("> line two"));
+    // The quote is saved, reopened and sent with the draft.
+    let draft_id = "<quoted@example.test>".to_string();
+    core.save_draft(draft_id.clone(), a.id.clone(), "sender@example.test".into(), "".into(), "".into(), reply.subject.clone(),
+        "Thanks".into(), Some(id), vec![], reply.quoted.clone()).await.unwrap();
+    assert_eq!(core.local_draft(draft_id.clone()).await.unwrap().quoted, Some(quoted.clone()));
+    let queued = core.send_draft(draft_id.clone()).await.unwrap();
+    let pending = core.stores.local.lock().unwrap().pending(&queued).unwrap();
+    assert_eq!(pending.mail.quoted, Some(quoted.clone().into()));
+    let sent = lagom_core::mime::parse(&pending.raw).unwrap();
+    assert!(sent.body_text.replace("\r\n", "\n").starts_with("Thanks\n\n> On "));
+    assert!(sent.body_html.unwrap().contains("<blockquote type=\"cite\" style=\"margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex\"><p>Hello</p></blockquote>"));
+    assert!(core.undo_send(queued).await.unwrap());
+    // Removing the quote: a save without it.
+    core.save_draft(draft_id.clone(), a.id.clone(), "".into(), "".into(), "".into(), "".into(), "Thanks".into(), Some(id), vec![], None).await.unwrap();
+    assert_eq!(core.local_draft(draft_id).await.unwrap().quoted, None);
     assert!(core.send(b.id, vec![reply.to.clone()], vec![], reply.subject.clone(), "body".into(), Some(id), vec![]).await.is_err());
     assert!(core.send(a.id.clone(), vec!["invalid".into()], vec![], "subject".into(), "body".into(), None, vec![]).await.is_err());
     let queued = core.send(a.id.clone(), vec![reply.to], vec![], reply.subject, "**bold**".into(), Some(id), vec![]).await.unwrap();
@@ -642,9 +658,20 @@ async fn reply_all_uses_source_identity_cc_signature_and_thread() {
     assert_eq!(reply.to, "sender@example.test, Other <other@example.test>");
     assert_eq!(reply.cc, "Copy <copy@example.test>");
     assert_eq!(reply.reply_to, Some(id));
-    assert!(reply.body.starts_with("\n\n-- \nTeam\n\n> On "));
-    assert!(reply.body.ends_with("> line one\n> line two"));
+    assert_eq!(reply.body, "\n\n-- \nTeam");
+    let quoted = reply.quoted.clone().unwrap();
+    assert!(quoted.text.starts_with("> On ") && quoted.text.ends_with("> line one\n> line two"));
+    assert!(quoted.html.contains("wrote:</div><blockquote type=\"cite\"") && quoted.html.contains("<p>Hello</p>"));
     assert!(reply.attachments.is_empty());
+    {
+        // A plain-text original quotes into the body, as before.
+        let s = core.stores.local.lock().unwrap();
+        let mut message = s.message(id).unwrap();
+        message.body_html = None;
+        s.save_message(&message).unwrap();
+    }
+    let plain = core.compose_draft(id, ComposeKind::ReplyAll).await.unwrap();
+    assert!(plain.quoted.is_none() && plain.body.starts_with("\n\n-- \nTeam\n\n> On ") && plain.body.ends_with("> line one\n> line two"));
     let queued = core.send(reply.account, split_recipients(reply.to), split_recipients(reply.cc), reply.subject,
         reply.body, reply.reply_to, reply.attachments).await.unwrap();
     let pending = core.stores.local.lock().unwrap().pending(&queued).unwrap();
@@ -691,8 +718,9 @@ async fn forward_preserves_cached_attachments_offline_and_starts_a_new_thread() 
     assert!(forward.to.is_empty() && forward.cc.is_empty());
     assert_eq!(forward.subject, "Fwd: Hello");
     assert!(forward.reply_to.is_none());
-    assert!(forward.body.contains("> Forwarded message\n> From: "));
-    assert!(forward.body.ends_with("> line one\n> line two"));
+    let quoted = forward.quoted.clone().unwrap();
+    assert!(quoted.text.contains("> Forwarded message\n> From: ") && quoted.text.ends_with("> line one\n> line two"));
+    assert!(quoted.html.starts_with("<div>Forwarded message<br>From: ") && !quoted.html.contains("<blockquote"));
     assert_eq!(forward.attachments.len(), 1);
     assert_eq!(forward.attachments[0].data, b"file");
     let queued = core.send(forward.account, vec!["next@example.test".into()], vec![], forward.subject,
@@ -931,7 +959,7 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     let id = smtp::message_id(&a.email);
     let save = |body: &str, reply| core.save_draft(id.clone(), a.id.clone(), "\"Doe, Jo\" <jo@example.test>".into(),
         "copy@example.test".into(), "hidden@example.test".into(), "Re: Hello".into(), body.into(), reply,
-        vec![SendAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }]);
+        vec![SendAttachment { filename: "data.bin".into(), mime_type: "application/octet-stream".into(), data: vec![0, 255] }], None);
     let first = save("unfinished", Some(source)).await.unwrap();
     assert!(first.updated_unix >= now() - 1);
     let first = core.local_draft(id.clone()).await.unwrap();
@@ -939,7 +967,7 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     assert_eq!(first.references, ["<root@example.test>", "<m1@example.test>"]);
     assert_eq!(core.saved_reply(source).await.unwrap().unwrap().id, id);
     assert!(core.saved_reply(other).await.unwrap().is_none());
-    assert!(core.save_draft(id.clone(), b.id, "".into(), "".into(), "".into(), "".into(), "wrong account".into(), None, vec![]).await.is_err());
+    assert!(core.save_draft(id.clone(), b.id, "".into(), "".into(), "".into(), "".into(), "wrong account".into(), None, vec![], None).await.is_err());
     core.stores.local.lock().unwrap().delete_message(source).unwrap();
     save("latest edits", Some(source)).await.unwrap();
     let last = core.local_draft(id.clone()).await.unwrap();
@@ -964,7 +992,7 @@ async fn local_drafts_restore_headers_tokens_attachments_and_queue_atomically() 
     assert_eq!(pending.mail.references, first.references);
     assert_eq!(pending.mail.attachments[0].data, [0, 255]);
     assert!(core.send_draft(id.clone()).await.is_err());
-    assert!(core.save_draft(id.clone(), a.id.clone(), "".into(), "".into(), "".into(), "".into(), "late".into(), None, vec![]).await.is_err());
+    assert!(core.save_draft(id.clone(), a.id.clone(), "".into(), "".into(), "".into(), "".into(), "late".into(), None, vec![], None).await.is_err());
     {
         let s = core.stores.local.lock().unwrap();
         assert!(s.due_outbox(&a.id, milliseconds()).unwrap().is_empty());
@@ -990,7 +1018,7 @@ async fn draft_invalid_tokens_and_failed_enqueue_preserve_edits_and_discard_is_d
     let mut draft = lagom_core::outbox::Draft { id: id.clone(), account: a.id.clone(), to: "Name, <valid@example.test>".into(),
         recipient_tokens: Some([vec!["Name".into(), "<valid@example.test>".into()], vec![]]), text: "keep me".into(), ..Default::default() };
     core.stores.local.lock().unwrap().save_draft(&draft).unwrap();
-    core.save_draft(id.clone(), a.id, draft.to.clone(), "".into(), "".into(), "edited".into(), draft.text.clone(), None, vec![]).await.unwrap();
+    core.save_draft(id.clone(), a.id, draft.to.clone(), "".into(), "".into(), "edited".into(), draft.text.clone(), None, vec![], None).await.unwrap();
     draft.subject = "edited".into();
     assert!(core.send_draft(id.clone()).await.is_err());
     assert_eq!(core.stores.local.lock().unwrap().draft(&id).unwrap(), draft);
@@ -1009,7 +1037,7 @@ async fn mobile_sync_all_keeps_local_drafts_off_the_server() {
         let a = fixture_account(&core.stores.local.lock().unwrap(), "a@example.test", listener.local_addr().unwrap().port());
         let id = smtp::message_id(&a.email);
         // Even an invalid recipient is a valid local draft and must not break refresh.
-        core.save_draft(id.clone(), a.id.clone(), "unfinished".into(), "".into(), "".into(), "".into(), "local".into(), None, vec![]).await.unwrap();
+        core.save_draft(id.clone(), a.id.clone(), "unfinished".into(), "".into(), "".into(), "".into(), "local".into(), None, vec![], None).await.unwrap();
         assert_eq!(core.stores.local.lock().unwrap().due_drafts(&a.id, milliseconds()).unwrap(), [id.clone()]);
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
@@ -1046,7 +1074,7 @@ async fn mobile_draft_list_and_reply_resume_only_offer_locally_owned_drafts() {
         (a, source)
     };
     let id = smtp::message_id(&a.email);
-    core.save_draft(id.clone(), a.id, "sender@example.test".into(), "".into(), "".into(), "".into(), "local".into(), Some(source), vec![]).await.unwrap();
+    core.save_draft(id.clone(), a.id, "sender@example.test".into(), "".into(), "".into(), "".into(), "local".into(), Some(source), vec![], None).await.unwrap();
     assert_eq!(core.local_drafts().await.unwrap().len(), 1);
     assert!(core.saved_reply(source).await.unwrap().is_some());
     // The existing folder reader marks imported server drafts as unowned. Server editing is outside this API.
@@ -1069,7 +1097,7 @@ async fn first_reply_save_survives_deleted_parent() {
     };
     let id = smtp::message_id(&a.email);
     let row = core.save_draft(id.clone(), a.id, "unfinished".into(), "".into(), "".into(), "Reply".into(),
-        "keep edits".into(), Some(source), vec![]).await.unwrap();
+        "keep edits".into(), Some(source), vec![], None).await.unwrap();
     assert_eq!(row.id, id);
     let draft = core.local_draft(id.clone()).await.unwrap();
     assert_eq!(draft.body, "keep edits");

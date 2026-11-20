@@ -38,6 +38,9 @@ pub struct Outgoing {
     /// Kept by the caller across retries, so clients can spot a duplicate after `MaybeSent`; it
     /// does not prevent one. `None`: a new one from `message_id`.
     pub message_id: Option<String>,
+    /// An HTML original, sent after `text`: its "> " quote in the plain part, its HTML in the HTML part.
+    #[serde(default)]
+    pub quoted: Option<crate::compose::Quoted>,
 }
 /// A new Message-ID on the sender's domain.
 pub fn message_id(email: &str) -> String {
@@ -64,7 +67,7 @@ pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, tok
     let (in_reply_to, references) = draft.reply.clone().unwrap_or_default();
     let outgoing = Outgoing { subject: draft.subject.clone(), text: draft.text.clone(),
         attachments: draft.attachments.clone(), in_reply_to, references, message_id: Some(format!("<{token}@draft.lagommail.app>")),
-        ..Default::default() };
+        quoted: draft.quoted.clone(), ..Default::default() };
     Ok(compose_message(account, &outgoing, Some(draft))?.formatted())
 }
 
@@ -133,18 +136,31 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
     if !outgoing.references.is_empty() {
         message = message.references(outgoing.references.join(" "));
     }
-    let html = markdown_html(&outgoing.text);
-    let alternative = || MultiPart::alternative()
-        .singlepart(SinglePart::plain(outgoing.text.clone()))
-        .singlepart(SinglePart::html(html.clone().unwrap_or_default()));
+    // The quote is sanitized again here: a draft from the server's Drafts folder is input too.
+    let (quote, images) = outgoing.quoted.as_ref().map(|q| crate::html::sanitize_parts(&q.html)).unzip();
+    let images = images.unwrap_or_default();
+    let text = match &outgoing.quoted {
+        Some(q) => format!("{}{QUOTE_BREAK}{}", outgoing.text, q.text),
+        None => outgoing.text.clone(),
+    };
+    let html = markdown_html(&outgoing.text, quote.as_deref());
+    let alternative = || {
+        let html = SinglePart::html(html.clone().unwrap_or_default());
+        let alternative = MultiPart::alternative().singlepart(SinglePart::plain(text.clone()));
+        if images.is_empty() { return alternative.singlepart(html); }
+        // Inline images travel with the HTML that names them.
+        let related = images.iter().fold(MultiPart::related().singlepart(html), |related, part| related.singlepart(
+            lettre::message::Attachment::new_inline(part.cid.clone()).body(part.data.clone(), part.mime_type.parse().unwrap_or(header::ContentType::TEXT_PLAIN))));
+        alternative.multipart(related)
+    };
     let result = if outgoing.attachments.is_empty() {
         match html {
             Some(_) => message.multipart(alternative()),
-            None => message.header(header::ContentType::TEXT_PLAIN).body(outgoing.text.clone()),
+            None => message.header(header::ContentType::TEXT_PLAIN).body(text.clone()),
         }
     } else {
         let mut mixed = if html.is_some() { MultiPart::mixed().multipart(alternative()) }
-            else { MultiPart::mixed().singlepart(SinglePart::plain(outgoing.text.clone())) };
+            else { MultiPart::mixed().singlepart(SinglePart::plain(text.clone())) };
         for part in &outgoing.attachments {
             header_value(&part.filename)?;
             let mime = part.mime_type.parse().map_err(|_| Error::Invalid("invalid attachment MIME type"))?;
@@ -154,8 +170,15 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
     };
     result.map_err(|_| Error::Invalid("could not construct message"))
 }
+/// Between the reply and its "> " quote in the plain part.
+pub(crate) const QUOTE_BREAK: &str = "\n\n";
+/// Around the quoted original in the HTML part; drafts find the quote again by it.
+pub(crate) const QUOTE_OPEN: &str = "<div class=\"lagom_quote\">";
+pub(crate) const QUOTE_CLOSE: &str = "</div></body></html>";
+
 /// Render only parser-generated markup; images become their labels so mail loads no resources.
-fn markdown_html(source: &str) -> Option<String> {
+/// `quote`: sanitized HTML to send after the text; then there is always an HTML part.
+fn markdown_html(source: &str, quoted: Option<&str>) -> Option<String> {
     use pulldown_cmark::{html, Event, LinkType, Parser, Tag, TagEnd};
     let mut formatted = false;
     let mut links = Vec::new();
@@ -195,10 +218,12 @@ fn markdown_html(source: &str) -> Option<String> {
     });
     let mut body = String::new();
     html::push_html(&mut body, events);
-    formatted.then(|| format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.45\">{}</body></html>",
-        body.replace("<blockquote>", "<blockquote style=\"margin:0 0 0 12px;padding-left:12px;border-left:3px solid #ccc\">")
-    ))
+    let body = body.replace("<blockquote>", "<blockquote style=\"margin:0 0 0 12px;padding-left:12px;border-left:3px solid #ccc\">");
+    let head = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.45\">";
+    match quoted {
+        Some(quote) => Some(format!("{head}{body}<br>{QUOTE_OPEN}{quote}{QUOTE_CLOSE}")),
+        None => formatted.then(|| format!("{head}{body}</body></html>")),
+    }
 }
 /// Whole-step deadlines. lettre's own timeout bounds the TCP connect, not a server that
 /// answers and then stalls; without these the worker would hang.
@@ -424,8 +449,35 @@ mod tests {
     }
 
     #[test]
+    fn quoted_html_goes_after_the_reply_with_its_images_related() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let quoted = crate::compose::Quoted { text: "> On 2026-11-20, a@example.com wrote:\n> \n> Ready".into(),
+            // A tampered draft: send sanitizes again.
+            html: format!("<div>On 2026-11-20, a@example.com wrote:</div><blockquote type=\"cite\"><p onclick=\"x()\">Ready</p><img src=\"data:image/png;base64,{png}\"><iframe src=\"https://x.example\"></iframe></blockquote>") };
+        let part = OutgoingAttachment { filename: "a.bin".into(), mime_type: "application/octet-stream".into(), data: vec![1, 2] };
+        for attachments in [vec![], vec![part]] {
+            let mail = Outgoing { to: vec!["b@example.com".into()], text: "Thanks\n\n-- \nAlex".into(), quoted: Some(quoted.clone()), attachments: attachments.clone(), ..Default::default() };
+            let raw = compose(&account(), &mail).unwrap().formatted();
+            let wire = String::from_utf8_lossy(&raw);
+            assert!(wire.contains("multipart/alternative") && wire.contains("multipart/related"), "{wire}");
+            let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+            assert_eq!(parsed.body_text(0).unwrap().replace("\r\n", "\n"), "Thanks\n\n-- \nAlex\n\n> On 2026-11-20, a@example.com wrote:\n> \n> Ready");
+            let html = parsed.body_html(0).unwrap().replace("\r\n", "\n");
+            assert!(html.contains("<p>Thanks</p>") && html.find("Thanks").unwrap() < html.find(QUOTE_OPEN).unwrap(), "{html}");
+            assert!(html.contains("<blockquote type=\"cite\"><p>Ready</p><img src=\"cid:quote1@lagommail.app\"></blockquote>"), "{html}");
+            assert!(!html.contains("onclick") && !html.contains("iframe") && html.ends_with(QUOTE_CLOSE));
+            let image = parsed.parts().find(|p| p.content_id() == Some("quote1@lagommail.app")).unwrap();
+            assert_eq!(&image.decoded()[..4], &[0x89, b'P', b'N', b'G']);
+            assert_eq!(parsed.attachments().filter(|a| a.attachment_name() == Some("a.bin")).count(), attachments.len());
+        }
+        // Without a quote nothing changes: unformatted text stays a single text/plain part.
+        let raw = compose(&account(), &Outgoing { to: vec!["b@example.com".into()], text: "Plain".into(), ..Default::default() }).unwrap().formatted();
+        assert!(!String::from_utf8_lossy(&raw).contains("multipart"));
+    }
+
+    #[test]
     fn markdown_styles_and_plain_source() {
-        assert!(markdown_html("**test **").is_none());
+        assert!(markdown_html("**test **", None).is_none());
         let (_, html) = parts("**test **\n\n> Original message");
         assert!(html.unwrap().contains("<p>**test **</p>"));
         for (source, expected) in [
@@ -447,19 +499,19 @@ mod tests {
     }
     #[test]
     fn markdown_escapes_html_and_drops_unsafe_links_and_images() {
-        let html = markdown_html("<script>alert(1)</script>\n\n<b>hej</b>").unwrap();
+        let html = markdown_html("<script>alert(1)</script>\n\n<b>hej</b>", None).unwrap();
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains("&lt;b&gt;hej&lt;/b&gt;"));
         assert!(!html.contains("<script>"));
         for target in ["javascript:alert(1)", "data:text/html,evil", "file:///tmp/a", "//example.com", "/relative"] {
-            let html = markdown_html(&format!("[etikett]({target})")).unwrap();
+            let html = markdown_html(&format!("[etikett]({target})"), None).unwrap();
             assert!(html.contains("etikett"));
             assert!(!html.contains("<a "), "{html}");
         }
         for target in ["http://example.com", "HTTPS://example.com", "mailto:a@example.com"] {
-            assert!(markdown_html(&format!("[etikett]({target})")).unwrap().contains("<a "));
+            assert!(markdown_html(&format!("[etikett]({target})"), None).unwrap().contains("<a "));
         }
-        assert!(!markdown_html("![bild](https://example.com/pixel)").unwrap().contains("<img"));
+        assert!(!markdown_html("![bild](https://example.com/pixel)", None).unwrap().contains("<img"));
     }
     #[test]
     fn quoted_text_stays_literal() {
@@ -478,7 +530,7 @@ mod tests {
     #[test]
     fn plain_body_stays_single_part() {
         let source = "Hej Åsa!\nEn rad till.\n\nHälsningar, Örjan";
-        assert!(markdown_html(source).is_none());
+        assert!(markdown_html(source, None).is_none());
         let message = compose(&account(), &Outgoing { to: vec!["b@example.com".into()], text: source.into(), ..Default::default() }).unwrap();
         let raw = message.formatted();
         assert!(!String::from_utf8_lossy(&raw).contains("multipart/alternative"));
@@ -598,6 +650,7 @@ mod tests {
                 references: vec!["<root@test>".into(), "<parent@test>".into()],
                 message_id: Some("<kept@gmail.com>".into()),
                 attachments: Vec::new(),
+                quoted: None,
             },
         )
         .unwrap();
