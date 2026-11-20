@@ -134,7 +134,8 @@ internal class PlannerModel : ViewModel() {
             val connected = core.calendarConnected()
             val access = core.calendarAccessNeeded()
             val granted = core.calendarGranted()
-            val calendars = if (demo) listOf(EventCalendar("", "demo", "Demo calendar")) else core.eventCalendars()
+            // The demo calendar only in the store that has one, not in the demo's empty states.
+            val calendars = if (demo) (if (connected) listOf(EventCalendar("", "demo", "Demo calendar")) else emptyList()) else core.eventCalendars()
             if (request != agendaRevision) return@guard
             eventCalendars = calendars
             calendarConnected = connected
@@ -226,6 +227,9 @@ internal fun eventForm(title: String, start: LocalDateTime, end: LocalDateTime, 
     meet: Boolean, zone: ZoneId = ZoneId.systemDefault()): EventForm =
     EventForm(title, allDay, start.atZone(zone).toEpochSecond(), end.atZone(zone).toEpochSecond(), start.toLocalDate().toString(),
         end.toLocalDate().toString(), zone.id, guests, description, meet)
+
+/** Desktop `interval`: a wall-clock time that daylight saving skips or repeats has no single instant. */
+internal fun unambiguous(at: LocalDateTime, zone: ZoneId = ZoneId.systemDefault()) = zone.rules.getValidOffsets(at).size == 1
 
 /** A timed event placed on the week grid, desktop `week::layout`: minutes from midnight, and its lane among overlaps. */
 internal data class WeekBlock(val index: Int, val start: Double, val end: Double, val lane: Int = 0, val lanes: Int = 1)

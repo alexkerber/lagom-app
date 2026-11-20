@@ -205,6 +205,10 @@ class OpenInboxTest {
         assertEquals("a quarter hour stays", at(10, 15) to at(11, 15), newEventTimes(day, at(10, 15)))
         assertEquals("never past 23:45, and the hour runs into tomorrow", at(23, 45) to day.plusDays(1).atTime(0, 45), newEventTimes(day, at(23, 50)))
         assertEquals("another day opens at 09:00", day.plusDays(1).atTime(9, 0) to day.plusDays(1).atTime(10, 0), newEventTimes(day.plusDays(1), at(16, 0)))
+        val stockholm = java.time.ZoneId.of("Europe/Stockholm")
+        assertTrue(unambiguous(at(9, 0), stockholm))
+        assertFalse("skipped in spring", unambiguous(LocalDate.of(2026, 3, 29).atTime(2, 30), stockholm))
+        assertFalse("repeated in autumn", unambiguous(LocalDate.of(2026, 10, 25).atTime(2, 30), stockholm))
     }
 
     @Test fun eventFormSendsInstantsAndDaysAndCreateReportsCoreWords() = runTest(dispatcher) {

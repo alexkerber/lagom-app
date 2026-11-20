@@ -95,7 +95,8 @@ internal val AppSection.icon: Int get() = when (this) {
     val measurer = rememberTextMeasurer()
     return remember(context, density, style) {
         val format = android.text.format.DateFormat.getTimeFormat(context)
-        val hour = java.util.Calendar.getInstance()
+        // A fixed date: on a daylight-saving day one hour is missing or repeated.
+        val hour = java.util.Calendar.getInstance().apply { set(2026, 0, 1) }
         val labels = (0..23).map { hour.set(java.util.Calendar.HOUR_OF_DAY, it); hour.set(java.util.Calendar.MINUTE, 0); format.format(hour.time) }
         with(density) { labels.maxOf { measurer.measure(it, style, maxLines = 1).size.width }.toDp() }
     }
@@ -491,7 +492,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
     val days = if (oneDay) listOf(selected) else week
     val byDay = planner.week.groupBy { it.day }
     var shown by remember { mutableStateOf<AgendaItem?>(null) }
-    var creating by remember { mutableStateOf<LocalDate?>(null) }
+    var creating by rememberSaveable { mutableStateOf<LocalDate?>(null) }
     // 16 dp as Today and To-do, on phones and tablets alike.
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3), compact = oneDay,
@@ -558,13 +559,14 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
 @Composable private fun NewEventDialog(planner: PlannerModel, day: LocalDate, close: () -> Unit) {
     val defaults = remember(day) { newEventTimes(day, LocalDateTime.now()) }
     var title by rememberSaveable { mutableStateOf("") }
-    var start by remember { mutableStateOf(defaults.first) }
-    var end by remember { mutableStateOf(defaults.second) }
+    var start by rememberSaveable { mutableStateOf(defaults.first) }
+    var end by rememberSaveable { mutableStateOf(defaults.second) }
     var allDay by rememberSaveable { mutableStateOf(false) }
     var meet by rememberSaveable { mutableStateOf(false) }
     var guests by rememberSaveable { mutableStateOf("") }
     var description by rememberSaveable { mutableStateOf("") }
-    var calendar by rememberSaveable { mutableStateOf(0) }
+    // The chosen (account, calendar), not its position: a sync may reload the list. Null is the first.
+    var calendar by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     // The open picker: "date", "start", "endDate" or "end".
@@ -573,9 +575,15 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
     val focus = remember { FocusRequester() }
     // Moving the start keeps the length, as the system calendars do.
     fun moveStart(to: LocalDateTime) { end = end.plus(java.time.Duration.between(start, to)); start = to }
+    val chosen = calendar ?: calendars.firstOrNull()?.let { it.account to it.calendar }
     fun save() {
-        val target = calendars.getOrNull(calendar) ?: return
         if (saving) return
+        val target = calendars.firstOrNull { it.account to it.calendar == chosen }
+        if (target == null) { error = "choose a writable calendar"; return }
+        if (!allDay && !(unambiguous(start) && unambiguous(end))) {
+            error = "This local time is skipped or repeated by daylight saving; choose an unambiguous time"
+            return
+        }
         saving = true
         error = null
         planner.perform {
@@ -595,10 +603,11 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
             PickerRow(if (allDay) "Last day" else "End date", words(end.toLocalDate()), !saving) { picking = "endDate" }
             if (!allDay) PickerRow("End", time(end), !saving) { picking = "end" }
             SwitchRow("All day", R.drawable.ic_all_day, allDay, !saving) { allDay = it }
-            if (calendars.size > 1) calendars.forEachIndexed { index, option ->
+            if (calendars.size > 1) calendars.forEach { option ->
+                val key = option.account to option.calendar
                 Text(option.label, Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(8.dp))
-                    .background(if (index == calendar) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                    .selectable(index == calendar, enabled = !saving, role = Role.RadioButton) { calendar = index }
+                    .background(if (key == chosen) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                    .selectable(key == chosen, enabled = !saving, role = Role.RadioButton) { calendar = key }
                     .wrapContentHeight().padding(horizontal = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
             } else calendars.firstOrNull()?.let { Text(it.label, color = lagom.ink2, style = timeStyle()) }
             SwitchRow("Add Google Meet", R.drawable.ic_camera, meet, !saving) { meet = it }
@@ -610,7 +619,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
             if (planner.demo && meet) Text("Demo: no meeting link or invitations will be created", color = lagom.ink2, style = timeStyle())
             error?.let { Text(it, color = lagom.danger, style = MaterialTheme.typography.bodySmall) }
         }
-    }, confirmButton = { TextButton(enabled = !saving && calendars.isNotEmpty(), onClick = ::save) { Text(if (saving) "Saving…" else "Save event") } },
+    }, confirmButton = { TextButton(enabled = !saving, onClick = ::save) { Text(if (saving) "Saving…" else "Save event") } },
         dismissButton = { TextButton(enabled = !saving, onClick = close) { Text("Cancel") } })
     LaunchedEffect(Unit) { focus.requestFocus() }
     when (val which = picking) {
@@ -708,7 +717,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
     val context = LocalContext.current
     val hours = remember(context) {
         val format = android.text.format.DateFormat.getTimeFormat(context)
-        val at = java.util.Calendar.getInstance().apply { set(java.util.Calendar.MINUTE, 0) }
+        val at = java.util.Calendar.getInstance().apply { set(2026, 0, 1, 0, 0) } // a fixed date, as `timeColumn`
         (0..23).map { at.set(java.util.Calendar.HOUR_OF_DAY, it); format.format(at.time) }
     }
     Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(top = 12.dp)) {

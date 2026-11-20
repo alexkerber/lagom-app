@@ -85,7 +85,9 @@ final class PlannerModel {
             calendarConnected = try await core.calendarConnected()
             calendarAccess = try await core.calendarAccessNeeded()
             calendarGranted = try await core.calendarGranted()
-            eventCalendars = Storage.demo ? [EventCalendar(account: "", calendar: "demo", label: "Demo calendar")] : try await core.eventCalendars()
+            // The demo's calendar only in the store that has one, not in `-LagomDemoCalendar`'s empty states.
+            eventCalendars = Storage.demo ? (calendarConnected ? [EventCalendar(account: "", calendar: "demo", label: "Demo calendar")] : [])
+                : try await core.eventCalendars()
             self.agenda = agenda
         } catch { self.error = error.localizedDescription }
         await reloadWeek()

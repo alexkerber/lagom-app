@@ -96,7 +96,10 @@ fn create_cached(stores: &Stores, s: &Store, account_id: &str, calendar: &str,
     let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // shortcut: a Meet link Google is still making arrives with the next sync; the Mac fetches it again after 5 s.
     let created = network(create)?;
-    s.insert_calendar_event(account_id, calendar, &created.event)
+    // Google has the event: a failed cache write must not read as a failed save, or a retry makes a second one.
+    // The next sync fetches it, as on the Mac (`event_created` reports only Google's result).
+    if let Err(error) = s.insert_calendar_event(account_id, calendar, &created.event) { eprintln!("lagom: new event not cached: {error:?}"); }
+    Ok(())
 }
 
 fn item(day: &str, e: AgendaEvent) -> AgendaItem {
@@ -221,8 +224,9 @@ impl LagomCore {
     pub async fn create_event(&self, account_id: String, calendar: String, form: EventForm) -> Result<()> {
         let stores = self.stores.clone();
         self.run_own(move |s| {
-            let a = writable(s, &account_id, &calendar)?;
+            // The form first, then the account, in the Mac's order.
             let draft = new_event(form)?;
+            let a = writable(s, &account_id, &calendar)?;
             create_cached(&stores, s, &account_id, &calendar, lagom_core::google::create_event(&a, &calendar, &draft))
         }).await
     }
@@ -464,6 +468,7 @@ mod tests {
         assert_eq!(core.event_calendars().await.unwrap(),
             [EventCalendar { account: google.id.clone(), calendar: "primary".into(), label: "Personal · you@gmail.com".into() }]);
         let refused = |result: Result<()>| match result { Err(MailError::Failed { reason }) => reason, other => panic!("{other:?}") };
+        assert_eq!(refused(core.create_event(password.id.clone(), "primary".into(), form("Lunch", nine, 0)).await), "End must be later than start", "the form first, as the Mac");
         assert_eq!(refused(core.create_event(password.id, "primary".into(), form("Lunch", nine, 60)).await), "choose a Google calendar");
         assert_eq!(refused(core.create_event(google.id.clone(), "holidays".into(), form("Lunch", nine, 60)).await), "choose a writable calendar");
         assert_eq!(refused(core.create_event(google.id.clone(), "primary".into(), form("Lunch", nine, 0)).await), "End must be later than start");
@@ -486,6 +491,8 @@ mod tests {
         let (stores, id) = (core.stores.clone(), google.id.clone());
         tokio::task::spawn_blocking(move || {
             let s = Store::open(&stores.path).unwrap();
+            // Google saved it, so a cache that cannot take it is no failed save: a retry would make a second event.
+            create_cached(&stores, &s, &id, "gone", async { Ok(created.clone()) }).unwrap();
             create_cached(&stores, &s, &id, "primary", async { Ok(created) })
         }).await.unwrap().unwrap();
         let week = core.agenda(today.to_string(), 1).await.unwrap();

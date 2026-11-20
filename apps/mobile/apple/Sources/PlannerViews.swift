@@ -492,7 +492,8 @@ struct NewEventView: View {
     @State private var end: Date
     @State private var allDay = false
     @State private var meet = false
-    @State private var choice = 0
+    /// The chosen calendar; nil is the first.
+    @State private var choice: EventCalendar?
     @State private var guests = ""
     @State private var details = ""
     @State private var error: String?
@@ -522,8 +523,8 @@ struct NewEventView: View {
                     toggle("All day", icon: "sun", $allDay)
                     if calendars.count > 1 {
                         FieldRow(label: "Calendar", labelWidth: 84) {
-                            Picker("Calendar", selection: $choice) {
-                                ForEach(calendars.indices, id: \.self) { Text(calendars[$0].label).tag($0) }
+                            Picker("Calendar", selection: Binding(get: { choice ?? calendars[0] }, set: { choice = $0 })) {
+                                ForEach(calendars, id: \.self) { Text($0.label).tag($0) }
                             }
                             .labelsHidden().tint(Theme.ink)
                         }
@@ -589,12 +590,17 @@ struct NewEventView: View {
     }
 
     private func save() {
-        guard !saving, planner.eventCalendars.indices.contains(choice) else { return }
+        guard !saving else { return }
+        // By identity, not position: a sync may reload the list while the sheet is open.
+        guard let target = choice.map({ planner.eventCalendars.contains($0) ? $0 : nil }) ?? planner.eventCalendars.first else {
+            error = "choose a writable calendar"
+            return
+        }
         saving = true
         error = nil
         let form = PlannerModel.eventForm(title: title, allDay: allDay, start: start, end: end, guests: guests, description: details, meet: meet)
         Task {
-            error = await planner.createEvent(form, in: planner.eventCalendars[choice])
+            error = await planner.createEvent(form, in: target)
             saving = false
             if error == nil { dismiss() }
         }
@@ -772,7 +778,8 @@ private struct WeekGrid: View {
                     VStack(spacing: 0) {
                         // One plain "13:00" in the "All day" label's face and colour, in this device's clock.
                         ForEach(0..<24, id: \.self) { hour in
-                            Text(calendar.date(bySettingHour: hour, minute: 0, second: 0, of: .now) ?? .now, format: .dateTime.hour().minute())
+                            // A fixed date: on a daylight-saving day one hour is missing or repeated.
+                            Text(calendar.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: hour)) ?? .now, format: .dateTime.hour().minute())
                                 .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
                                 .lineLimit(1).minimumScaleFactor(0.6) // "12:00 PM" must fit the gutter on one line
                                 .padding(.trailing, 8)
