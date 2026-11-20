@@ -14,6 +14,20 @@ pub enum Kind {
     Later,
 }
 
+impl Kind {
+    /// The empty mailbox: icon, title and line, the same words as on iOS and Android. A custom
+    /// folder has none and keeps "No messages".
+    pub fn empty(self) -> Option<(&'static str, &'static str, &'static str)> {
+        match self {
+            Kind::Later => Some(("icons/later.svg", "Nothing waiting.", "Mail you put off waits here.")),
+            Kind::Sent => Some(("icons/sent.svg", "Nothing sent.", "Mail you send lands here.")),
+            Kind::Done => Some(("icons/done.svg", "Nothing done yet.", "Mail you mark Done lands here.")),
+            Kind::Trash => Some(("icons/trash.svg", "Trash is empty.", "Deleted mail lands here.")),
+            Kind::Custom => None,
+        }
+    }
+}
+
 pub struct Folder {
     pub name: String,
     pub parent: Option<usize>,
@@ -138,6 +152,20 @@ pub fn shown(rows: usize, expanded: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_mailboxes_use_the_mobile_words() {
+        use gpui::AssetSource;
+        // apps/mobile: MailboxChoice.empty (iOS) and EmptyInbox (Android).
+        assert_eq!(Kind::Later.empty(), Some(("icons/later.svg", "Nothing waiting.", "Mail you put off waits here.")));
+        assert_eq!(Kind::Trash.empty().map(|m| (m.1, m.2)), Some(("Trash is empty.", "Deleted mail lands here.")));
+        assert_eq!(Kind::Custom.empty(), None);
+        for kind in [Kind::Later, Kind::Sent, Kind::Done, Kind::Trash] {
+            let (path, _, line) = kind.empty().unwrap();
+            assert!(crate::Assets.load(path).is_ok_and(|b| b.is_some()), "{path}");
+            assert!(!line.contains("refresh"), "{kind:?} fills from your own actions or the server, not a pull");
+        }
+    }
 
     #[test]
     fn validates_folder_names_against_the_account_namespace() {
