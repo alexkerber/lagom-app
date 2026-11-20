@@ -134,6 +134,7 @@ struct MailView: View {
     @State private var syncShown = false
     /// Search is a button until tapped; the field stays while it holds text.
     @State private var searching = false
+    @State private var focusOnOpen = false
     @FocusState private var searchFocused: Bool
 
     private var regular: Bool { width == .regular && height == .regular }
@@ -324,8 +325,8 @@ struct MailView: View {
                     SearchField(text: $model.searchText).focused($searchFocused)
                     Button("Cancel") { model.searchText = ""; searching = false }.frame(minHeight: 44)
                 }
-                // The keyboard rises with the field the button opened, not with a search that is only kept.
-                .onAppear { searchFocused = searching }
+                // The keyboard rises once, with the field the button opened, not each time a kept search reappears.
+                .onAppear { if focusOnOpen { searchFocused = true; focusOnOpen = false } }
             } else {
                 // At the largest text sizes the buttons go under the filter, so nothing collapses to "…".
                 ViewThatFits(in: .horizontal) {
@@ -336,6 +337,9 @@ struct MailView: View {
         }
         .pageEdges().padding(.bottom, 6)
         .animation(Motion.move(reduceMotion), value: searchOpen)
+        // An empty field closes when it loses focus, or when a jump to the Inbox or a folder clears the search.
+        .onChange(of: searchFocused) { _, focused in if !focused && model.searchText.isEmpty { searching = false } }
+        .onChange(of: model.searchText) { _, text in if text.isEmpty && !searchFocused { searching = false } }
     }
 
     /// The filter, or Empty Trash in Trash, as on desktop.
@@ -351,7 +355,7 @@ struct MailView: View {
     @ViewBuilder private var headerButtons: some View {
         HStack(spacing: 0) {
             if model.mailbox != .drafts {
-                IconButton(title: "Search", icon: "search") { searching = true }
+                IconButton(title: "Search", icon: "search") { searching = true; focusOnOpen = true }
             }
             if railInset == 0 { composeButton }
         }

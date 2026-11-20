@@ -62,7 +62,6 @@ struct RootView: View {
             }
         }
         .foregroundStyle(Theme.ink)
-        .readsPageMargin()
         .sheet(isPresented: $addAccount) { AddAccountView(model: model).duoRail() }
         .confirmationDialog("Remove account and its local mail?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             if let account = removing {
@@ -100,6 +99,8 @@ struct RootView: View {
             if section == .calendar { Task { await planner.reloadAgenda() } }
             if section == .today { Task { await planner.reloadMail() } }
         }
+        // Last, so the sheets above read it too.
+        .readsPageMargin()
     }
 
     /// Shows the unified Inbox, and a message in it when given.

@@ -16,6 +16,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clip
@@ -348,24 +349,31 @@ internal fun Mailbox.label(): String = when (this) {
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!drafts && (searching || model.searchText.isNotEmpty())) {
             val focus = remember { FocusRequester() }
-            SearchField(model.searchText, focus, Modifier.weight(1f)) { model.perform { model.changeSearch(it) } }
+            // False only once the field has had focus and lost it; an empty field then closes, as on iOS.
+            var focused by remember { mutableStateOf<Boolean?>(null) }
+            SearchField(model.searchText, focus, Modifier.weight(1f).onFocusChanged {
+                focused = if (it.hasFocus) true else if (focused == true) false else focused
+            }) { model.perform { model.changeSearch(it) } }
             // The keyboard rises with the field the button opened, not with a search that is only kept.
             LaunchedEffect(Unit) { if (searching) focus.requestFocus() }
+            LaunchedEffect(focused, model.searchText) { if (focused == false && model.searchText.isEmpty()) searching = false }
             // Ink, as on iOS; its text ends on the same 16 dp line as the title above.
             TextButton(onClick = { searching = false; model.perform { model.changeSearch("") } }, Modifier.heightIn(min = 48.dp).padding(end = 2.dp),
                 colors = ButtonDefaults.textButtonColors(contentColor = lagom.ink)) { Text("Cancel") }
         } else {
-            if (!drafts && model.mailbox == Mailbox.TRASH && model.folder == null) {
-                // In Trash the filter makes way for Empty Trash, as on desktop.
-                var confirm by remember { mutableStateOf(false) }
-                HouseButton(if (model.emptyingTrash) "Emptying…" else "Empty Trash", R.drawable.ic_empty_trash,
-                    enabled = model.rows.isNotEmpty() && !model.working) { confirm = true }
-                if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete all permanently?") },
-                    confirmButton = { TextButton(onClick = { confirm = false; model.perform { model.emptyTrash() } },
-                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
-                    dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
-            } else if (!drafts) FilterControl(model.unreadOnly) { model.unreadOnly = it }
-            Spacer(Modifier.weight(1f))
+            // The buttons measure first; the filter takes what is left, so large text cannot push them off.
+            Box(Modifier.weight(1f)) {
+                if (!drafts && model.mailbox == Mailbox.TRASH && model.folder == null) {
+                    // In Trash the filter makes way for Empty Trash, as on desktop.
+                    var confirm by remember { mutableStateOf(false) }
+                    HouseButton(if (model.emptyingTrash) "Emptying…" else "Empty Trash", R.drawable.ic_empty_trash,
+                        enabled = model.rows.isNotEmpty() && !model.working) { confirm = true }
+                    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Delete all permanently?") },
+                        confirmButton = { TextButton(onClick = { confirm = false; model.perform { model.emptyTrash() } },
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
+                        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
+                } else if (!drafts) FilterControl(model.unreadOnly) { model.unreadOnly = it }
+            }
             Row {
                 if (!drafts) LagomIconButton("Search", R.drawable.ic_search) { searching = true }
                 LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
@@ -377,7 +385,7 @@ internal fun Mailbox.label(): String = when (this) {
     }
 }
 
-/** The desktop sidebar's Search field: an icon, the text, and Clear once there is some. */
+/** The Search field, which the list's search button opens: an icon, the text, and Clear once there is some. */
 @Composable private fun SearchField(text: String, focus: FocusRequester, modifier: Modifier = Modifier, change: (String) -> Unit) {
     val c = lagom
     // A subtle fill and no outline, as desktop and iOS (Alex 2026-11-15: one look on every platform).

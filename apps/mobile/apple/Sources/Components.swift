@@ -482,7 +482,7 @@ extension View {
     /// A page's header and content edges; `top: false` for a page's later blocks.
     func pageEdges(top: Bool = true) -> some View { modifier(PageEdges(top: top)) }
 
-    /// Reads the system's layout margin once at the root; sheets inherit it.
+    /// Reads the system's layout margin at the root; views and sheets under it inherit it.
     func readsPageMargin() -> some View { modifier(PageMarginReader()) }
 }
 
@@ -505,8 +505,9 @@ private struct SystemMargin: UIViewRepresentable {
         let changed: (CGFloat) -> Void
         init(changed: @escaping (CGFloat) -> Void) { self.changed = changed; super.init(frame: .zero) }
         required init?(coder: NSCoder) { nil }
-        override func layoutSubviews() {
-            super.layoutSubviews()
+        override func didMoveToWindow() { super.didMoveToWindow(); read() }
+        override func layoutSubviews() { super.layoutSubviews(); read() }
+        private func read() {
             guard let margin = window?.rootViewController?.systemMinimumLayoutMargins.leading else { return }
             DispatchQueue.main.async { [changed] in changed(margin) }
         }
