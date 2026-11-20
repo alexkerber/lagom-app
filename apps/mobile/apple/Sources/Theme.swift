@@ -26,8 +26,9 @@ extension Theme {
         static let card: CGFloat = 16
     }
 
-    /// PostScript names of the bundled faces; tracking in ems.
+    /// The text family (SwiftUI picks the weight), PostScript names of the other faces; tracking in ems.
     enum Face {
+        static let text = "Hauora"
         static let display = "Hauora-Bold"
         static let label = "GeistMono-Medium"
         static let displayTracking: CGFloat = -0.045
@@ -86,7 +87,7 @@ enum Motion {
     static var calmIn: AnyTransition { .asymmetric(insertion: .opacity.animation(fade.delay(calmSeconds)), removal: .identity) }
 }
 
-/// The desktop type scale, `theme::size`, in the system font as on desktop. A macOS point reads
+/// The desktop type scale, `theme::size`, in Hauora as on desktop. A macOS point reads
 /// smaller than an iOS point at phone distance, so every size is the desktop's × 1.15 (body 13 → 15),
 /// which keeps the desktop's ratios. Each size scales with Dynamic Type from its text style.
 enum TextSize {
@@ -103,21 +104,16 @@ enum TextSize {
     }
 }
 
-private struct LagomFont: ViewModifier {
-    @ScaledMetric private var points: CGFloat
-    let weight: Font.Weight
-
-    init(_ size: TextSize, weight: Font.Weight) {
-        _points = ScaledMetric(wrappedValue: size.points, relativeTo: size.style)
-        self.weight = weight
+extension Font {
+    /// The text face at a lagom size; it scales with Dynamic Type from the size's text style.
+    static func lagom(_ size: TextSize, _ weight: Font.Weight = .regular) -> Font {
+        .custom(Theme.Face.text, size: size.points, relativeTo: size.style).weight(weight)
     }
-
-    func body(content: Content) -> some View { content.font(.system(size: points, weight: weight)) }
 }
 
 extension View {
     func lagomFont(_ size: TextSize, _ weight: Font.Weight = .regular) -> some View {
-        modifier(LagomFont(size, weight: weight))
+        font(.lagom(size, weight))
     }
 }
 

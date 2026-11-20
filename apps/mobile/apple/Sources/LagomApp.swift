@@ -47,6 +47,8 @@ struct LagomApp: App {
                 Button("OK") { model.error = nil; planner.error = nil }
             } message: { Text(model.error ?? planner.error ?? "") }
             .tint(Theme.accent)
+            // Text without its own size gets the text face at the system's body size.
+            .font(.custom(Theme.Face.text, size: 17, relativeTo: .body))
             .preferredColorScheme(Self.debugScheme)
             .task(id: phase) {
                 guard phase == .active else { return }
@@ -390,7 +392,7 @@ struct MailView: View {
                             Text(draft.to).foregroundStyle(Theme.secondary).lineLimit(1)
                             Text(model.accounts.first { $0.id == draft.account }?.email ?? "").foregroundStyle(Theme.secondary)
                             if draft.updatedUnix > 0 {
-                                Text(Date(timeIntervalSince1970: Double(draft.updatedUnix)), style: .date).font(.caption)
+                                Text(Date(timeIntervalSince1970: Double(draft.updatedUnix)), style: .date).lagomFont(.small)
                             }
                         }
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())

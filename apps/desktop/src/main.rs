@@ -36,9 +36,11 @@ use main_window::MainWindow;
 /// Icons and fonts compiled into the binary.
 struct Assets;
 
-/// Bundled faces, all OFL; licences sit next to them. Text stays the system font.
-const FONTS: [&[u8]; 5] = [
+/// Bundled faces, all OFL; licences sit next to them.
+const FONTS: [&[u8]; 7] = [
+    include_bytes!("../assets/fonts/Hauora-Regular.ttf"),
     include_bytes!("../assets/fonts/Hauora-Medium.ttf"),
+    include_bytes!("../assets/fonts/Hauora-SemiBold.ttf"),
     include_bytes!("../assets/fonts/Hauora-Bold.ttf"),
     include_bytes!("../assets/fonts/Hauora-ExtraBold.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
@@ -226,7 +228,7 @@ fn main() {
     for url in mailto_args(std::env::args()) { links.send(url).ok(); }
     app.on_open_urls(move |urls| for url in urls { links.send(url).ok(); });
     app.run(move |cx: &mut App| {
-        // Text is the system font; Hauora (Today's sentence) and Geist Mono (labels, key caps) are bundled.
+        // Hauora for all text, Geist Mono for labels and key caps; both bundled.
         cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load");
         main_window::bind_keys(cx);
         text_input::bind_keys(cx);
