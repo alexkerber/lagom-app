@@ -94,6 +94,7 @@ internal object TextSize {
     val display = 30.sp
 }
 
+internal val TextFace = FontFamily(Font(R.font.hauora_regular, FontWeight.Normal), Font(R.font.hauora_medium, FontWeight.Medium), Font(R.font.hauora_semibold, FontWeight.SemiBold), Font(R.font.hauora_bold, FontWeight.Bold))
 internal val DisplayFace = FontFamily(Font(R.font.hauora_bold, FontWeight.Bold))
 internal val LabelFace = FontFamily(Font(R.font.geist_mono_medium, FontWeight.Medium))
 internal const val DisplayTracking = -0.045f
@@ -128,9 +129,9 @@ internal val lagom: LagomColors @Composable @ReadOnlyComposable get() = LocalLag
 /** Every bar on every page is this tall, so moving between pages never shifts the title. */
 internal val BarHeight = 56.dp
 
-// The platform's system font, with Android's existing line-height override.
+// Hauora for all text (Alex 2026-11-20: "samma typsnitt överallt"), with Android's existing line-height override.
 private fun style(size: TextUnit, weight: FontWeight = FontWeight.Normal) =
-    TextStyle(fontSize = size, lineHeight = size * Leading, fontWeight = weight, letterSpacing = 0.sp)
+    TextStyle(fontFamily = TextFace, fontSize = size, lineHeight = size * Leading, fontWeight = weight, letterSpacing = 0.sp)
 
 private val LagomType = Typography(
     displayLarge = style(TextSize.display, FontWeight.SemiBold), displayMedium = style(TextSize.display, FontWeight.SemiBold),

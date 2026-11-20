@@ -26,7 +26,13 @@ targets:
       - Sources
       - Assets.xcassets
       - PrivacyInfo.xcprivacy
-      # The desktop's bundled faces (OFL, licences beside them): Today's sentence and labels.
+      # The desktop's bundled faces (OFL, licences beside them): all text, titles and labels.
+      - path: ../../desktop/assets/fonts/Hauora-Regular.ttf
+        buildPhase: resources
+      - path: ../../desktop/assets/fonts/Hauora-Medium.ttf
+        buildPhase: resources
+      - path: ../../desktop/assets/fonts/Hauora-SemiBold.ttf
+        buildPhase: resources
       - path: ../../desktop/assets/fonts/Hauora-Bold.ttf
         buildPhase: resources
       - path: ../../desktop/assets/fonts/GeistMono-Medium.ttf
@@ -45,7 +51,7 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: lagom
-        UIAppFonts: [Hauora-Bold.ttf, GeistMono-Medium.ttf]
+        UIAppFonts: [Hauora-Regular.ttf, Hauora-Medium.ttf, Hauora-SemiBold.ttf, Hauora-Bold.ttf, GeistMono-Medium.ttf]
         # XcodeGen writes 1.0 and 1 here otherwise, and the build settings never reach the app.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
