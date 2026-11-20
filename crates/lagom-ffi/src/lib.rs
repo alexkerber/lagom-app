@@ -208,7 +208,10 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     calls: std::sync::atomic::AtomicU64,
     contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>>,
     // shortcut: one browser sign-in at a time, lost if the app is killed in the browser; the user starts again.
-    sign_in: Mutex<Option<lagom_core::oauth::Pending>> }
+    sign_in: Mutex<Option<lagom_core::oauth::Pending>>,
+    // A calendar fetch, or a new event and its cache write: a fetch that began before Google stored the
+    // event must not replace the window without it. After removal in the lock order.
+    calendar: Mutex<()> }
 
 impl LagomCore {
     async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
@@ -384,7 +387,10 @@ fn sync_google(stores: &Stores, a: &Account) {
     if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return; }
     let log = |what: &str, result: lagom_core::Result<()>| if let Err(error) = result { eprintln!("lagom: Google {what} sync failed: {error:?}"); };
     let mut store = match Store::open(&stores.path) { Ok(store) => store, Err(error) => return log("Calendar", Err(error)) };
-    log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
+    {
+        let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
+    }
     match store.account_scopes(&a.id) {
         Ok(scopes) if lagom_core::oauth::tasks_allowed(&scopes) => log("Tasks", network(lagom_core::google::sync_tasks(&mut store, a))),
         Ok(_) => {}
@@ -408,7 +414,7 @@ impl LagomCore {
         let store = Store::open(&path)?;
         store.recover_outbox()?;
         let local = Store::open(&path)?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
+        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None), calendar: Mutex::new(()) }), background_cancel: Arc::default() });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
