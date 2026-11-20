@@ -42,6 +42,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
@@ -368,10 +370,15 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
                 icon = {
                     BadgedBox(badge = {
                         // Quiet, as on desktop and iOS: grey, not the Material red.
-                        if (page == AppSection.MAIL && unread > 0) Badge(containerColor = c.ink2, contentColor = c.sidebar) { Text("$unread") }
+                        // A fixed size, as iOS's tab badge: scaled with the font it covered the icon. TalkBack reads the stateDescription.
+                        if (page == AppSection.MAIL && unread > 0) Badge(containerColor = c.ink2, contentColor = c.sidebar) {
+                            val size = with(LocalDensity.current) { 11.dp.toSp() }
+                            Text("$unread", fontSize = size, lineHeight = size)
+                        }
                     }) { LagomIcon(page.icon, tint = if (active) c.selIcon else c.ink2, size = 24.dp) }
                 },
-                label = { Text(page.title, maxLines = 1) },
+                // Large font scales shrink the label to fit its tab instead of cutting it ("Calenda").
+                label = { Text(page.title, maxLines = 1, autoSize = TextAutoSize.StepBased(minFontSize = LocalTextStyle.current.fontSize / 2, maxFontSize = LocalTextStyle.current.fontSize)) },
                 colors = NavigationBarItemDefaults.colors(indicatorColor = c.sel, selectedTextColor = c.ink, unselectedTextColor = c.ink2))
         }
     }
