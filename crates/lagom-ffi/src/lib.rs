@@ -362,6 +362,14 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     if let Some(error) = first { return Err(error); }
     match error { Some(error) => Err(error), None => Ok(()) }
 }
+/// After a calendar grant, which already replaced this account's refresh token: keep the scopes Google granted this time.
+fn save_grant(s: &Store, id: &str, account: Account, scopes: &str) -> lagom_core::Result<MailAccount> {
+    match s.set_account_scopes(id, scopes) {
+        // Removed while the browser was open: its new secret must not stay behind.
+        Err(lagom_core::Error::NotFound) => { let _ = account.delete_password(); Err(lagom_core::Error::NotFound) }
+        other => other.map(|()| account.into()),
+    }
+}
 /// Mail, then Calendar and Google Tasks, which run even when mail failed.
 fn sync_with_google(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     let mail = sync_account(stores, a);
@@ -481,14 +489,7 @@ impl LagomCore {
         self.run_network(move |s| network(async {
             let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
             let account = signed.account;
-            if let Some(id) = grant {
-                // The grant replaced this account's refresh token. Keep the scopes Google granted this time.
-                return match s.set_account_scopes(&id, &signed.scopes) {
-                    // Removed while the browser was open: its new secret must not stay behind.
-                    Err(lagom_core::Error::NotFound) => { let _ = account.delete_password(); Err(lagom_core::Error::NotFound) }
-                    other => other.map(|()| account.into()),
-                };
-            }
+            if let Some(id) = grant { return save_grant(s, &id, account, &signed.scopes); }
             let saved = s.accounts().and_then(|all| {
                 if all.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
                     return Err(lagom_core::Error::Invalid("This account is already in lagom."));
