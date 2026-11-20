@@ -67,7 +67,9 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import java.time.LocalTime
 import app.lagommail.core.*
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -237,7 +239,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
                     MonoLabel("To-do", Modifier.padding(bottom = 8.dp))
                     val tasks = planner.today?.tasks.orEmpty()
                     if (tasks.isEmpty()) Quiet("Nothing due today.")
-                    tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { delay(TICK_MILLIS); planner.toggle(todo) } } }
+                    tasks.forEach { todo -> TodoRow(todo, words) { planner.perform { planner.toggle(todo, TICK_MILLIS) } } }
                     AddRow("New task", enabled = planner.lists.isNotEmpty()) { newTask = true }
                 }
                 Column {
@@ -300,18 +302,20 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 }
 
 /** A task, desktop `task_row`: a completion circle, its title, a mail mark, and the due chip. A tap ticks the circle at
- *  once; [toggle] moves the task a moment later (TICK_MILLIS), so the tick is seen. */
-@Composable private fun TodoRow(todo: Todo, words: DateWords, modifier: Modifier = Modifier, toggle: () -> Unit) {
+ *  once; [toggle] saves and reloads a moment later (TICK_MILLIS), so the tick is seen before the row moves. */
+@Composable private fun TodoRow(todo: Todo, words: DateWords, modifier: Modifier = Modifier, toggle: () -> Job) {
     val colors = MaterialTheme.colorScheme
     val haptics = LocalHapticFeedback.current
-    // Cleared when the task itself changes.
-    var ticked by remember(todo.id, todo.done) { mutableStateOf<Boolean?>(null) }
+    val scope = rememberCoroutineScope()
+    var ticked by remember(todo.id) { mutableStateOf<Boolean?>(null) }
     val done = ticked ?: todo.done
     fun tap() {
-        if (ticked != null) return // one change at a time; the reload clears it
+        if (ticked != null) return // one change at a time
         ticked = !todo.done
         if (!todo.done) haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
-        toggle()
+        // The model's job outlives the row; the reload clears the tick, or brings the circle back if core refused.
+        val job = toggle()
+        scope.launch { job.join(); ticked = null }
     }
     Row(modifier.fillMaxWidth().heightIn(min = 48.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -385,8 +389,8 @@ private const val NEW_LIST = Long.MIN_VALUE
     Column(Modifier.fillMaxSize().imePadding()) {
         PageTitle(AppSection.TODO.title)
         Refreshable(planner, { planner.reloadTodos() }, Modifier.weight(1f)) {
-            // 4 dp in, so the circles' column lines up under the page title.
-            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+            // The circles' column lines up under the page title; the due chips end on its 16 dp margin.
+            LazyColumn(Modifier.fillMaxSize().padding(start = 4.dp, end = 8.dp)) {
                 if (planner.lists.isEmpty() && adding != NEW_LIST) item(key = "empty") {
                     EmptyState(R.drawable.ic_todo, "No lists yet", Modifier.fillParentMaxSize(), "A list holds what there is to do.") {
                         HouseButton("New list", R.drawable.ic_plus) { open(NEW_LIST) }
@@ -394,7 +398,7 @@ private const val NEW_LIST = Long.MIN_VALUE
                 }
                 // The lists and their New task lines stay below, so adding is still one tap away.
                 else if (planner.lists.isNotEmpty() && planner.lists.all { planner.openCount(it.id) == 0 }) item(key = "clear") {
-                    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 24.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         DisplaySentence(AnnotatedString("Nothing to do.\nA clear day."), color = lagom.ink)
                         Quiet("Add a task below when something comes up.")
                     }
@@ -415,17 +419,17 @@ private const val NEW_LIST = Long.MIN_VALUE
                         else AddRow("New task") { open(list.id) }
                     }
                     if (done.isNotEmpty()) {
-                        val open = list.id in showDone
+                        val expanded = list.id in showDone
                         item(key = "done-${list.id}") {
                             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
-                                showDone = if (open) showDone - list.id else showDone + list.id
-                            }.semantics { stateDescription = if (open) "Expanded" else "Collapsed" },
+                                showDone = if (expanded) showDone - list.id else showDone + list.id
+                            }.semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" },
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Lead { LagomIcon(if (open) R.drawable.ic_chevron else R.drawable.ic_chevron_right, size = 16.dp) }
+                                Lead { LagomIcon(if (expanded) R.drawable.ic_chevron else R.drawable.ic_chevron_right, size = 16.dp) }
                                 Text("Completed (${done.size})", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                        if (open) items(done, key = { it.id }) { SwipeTodoRow(planner, it, words, Modifier.animateItem()) }
+                        if (expanded) items(done, key = { it.id }) { SwipeTodoRow(planner, it, words, Modifier.animateItem()) }
                     }
                 }
                 item(key = "new-list") {
@@ -533,7 +537,7 @@ private const val NEW_LIST = Long.MIN_VALUE
         }
         state.reset()
     }
-    SwipeToDismissBox(state, modifier, backgroundContent = {
+    SwipeToDismissBox(state, modifier = modifier, backgroundContent = {
         val c = lagom
         val right = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
         val acting = state.targetValue != SwipeToDismissBoxValue.Settled
@@ -549,7 +553,7 @@ private const val NEW_LIST = Long.MIN_VALUE
         Surface(color = lagom.bg) {
             TodoRow(todo, words, Modifier.semantics {
                 customActions = listOf(CustomAccessibilityAction("Delete") { planner.perform { planner.delete(todo) }; true })
-            }) { planner.perform { delay(TICK_MILLIS); planner.toggle(todo) } }
+            }) { planner.perform { planner.toggle(todo, TICK_MILLIS) } }
         }
     }
 }

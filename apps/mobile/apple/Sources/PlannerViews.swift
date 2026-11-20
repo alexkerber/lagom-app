@@ -108,7 +108,7 @@ struct TodayView: View {
             let tasks = planner.today?.tasks ?? []
             if tasks.isEmpty { quiet("Nothing due today.", icon: "todo").padding(.bottom, 6) }
             ForEach(tasks, id: \.id) { todo in
-                TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
+                TodoRow(todo: todo, toggle: { await planner.toggle(todo, settle: tickSettle) },
                         openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
             }
             AddRow(title: "New task") { newTask = true }.disabled(planner.lists.isEmpty)
@@ -262,14 +262,18 @@ struct EventRow: View {
     }
 }
 
+/// How long a tapped tick shows before its task moves to Completed: within motion.md's 300 ms.
+private let tickSettle = Duration.milliseconds(280)
+
 /// A task, desktop `task_row`: a completion circle, its title over the source mail's subject, and the due chip.
 struct TodoRow: View {
     let todo: Todo
-    let toggle: () -> Void
+    /// Saves the change; returns once the lists have reloaded.
+    let toggle: () async -> Void
     /// Opens the source mail; the subject line is its button.
     let openMail: () -> Void
     var words = DateWords()
-    /// The tick a tap draws at once; the list moves the row a moment later, so the tick is seen.
+    /// The tick a tap draws at once, before the row moves (`PlannerModel.toggle`'s settle).
     @State private var ticked: Bool?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -307,16 +311,13 @@ struct TodoRow: View {
         .frame(minHeight: 46)
         .accessibilityElement(children: .contain)
         .sensoryFeedback(.impact(weight: .light), trigger: ticked) { _, new in new == true }
-        .onChange(of: todo.done) { ticked = nil }
     }
 
     private func tap() {
-        guard ticked == nil else { return } // one change at a time; the reload clears it
+        guard ticked == nil else { return } // one change at a time
         withAnimation(Motion.move(reduceMotion)) { ticked = !todo.done }
-        Task {
-            try? await Task.sleep(for: .milliseconds(reduceMotion ? 150 : 280))
-            toggle()
-        }
+        // Saved at once; the reload after the settle clears the tick, or brings the circle back if core refused.
+        Task { await toggle(); ticked = nil }
     }
 }
 
@@ -471,13 +472,12 @@ struct TodoView: View {
                 else { Circle().strokeBorder(Theme.line, lineWidth: 1).frame(width: 21, height: 21) }
             }
             .frame(width: 21)
-            // Vertical, so Return arrives as a newline and the keyboard stays up for the next task.
-            TextField(target == .list ? "List name" : "New task", text: $title, axis: .vertical)
+            TextField(target == .list ? "List name" : "New task", text: $title)
                 .lagomFont(.base, target == .list ? .bold : .regular)
                 .foregroundStyle(Theme.ink).tint(Theme.accent)
                 .focused($focus, equals: target)
                 .submitLabel(target == .list ? .done : .next)
-                .onChange(of: title) { if title.contains(where: \.isNewline) { submit() } }
+                .onSubmit(submit)
                 .onAppear { focus = target }
                 .accessibilityLabel(target == .list ? "New list name" : "New task")
             if target != .list, let due, let chip = DateWords().due(DateWords().coreDay(due)) {
@@ -498,12 +498,15 @@ struct TodoView: View {
             chip("Today", on: due == today) { due = due == today ? nil : today }
             chip("Tomorrow", on: due == tomorrow) { due = due == tomorrow ? nil : tomorrow }
             chip(other ? DateWords().due(DateWords().coreDay(due!))?.label ?? "Date" : "Date", icon: "calendar", on: other) { picking = true }
-                .popover(isPresented: $picking) {
+                // A paper sheet, not a glass popover: the calendar needs more room than the folded Duo has above the keyboard.
+                .sheet(isPresented: $picking) {
                     DatePicker("Due", selection: Binding(get: { due ?? tomorrow }, set: { due = calendar.startOfDay(for: $0); picking = false }),
                                in: today..., displayedComponents: .date)
-                        .datePickerStyle(.graphical).tint(Theme.accent)
-                        .frame(width: 320).padding(8)
-                        .presentationCompactAdaptation(.popover)
+                        .datePickerStyle(.graphical).tint(Theme.accent).labelsHidden()
+                        .padding(.horizontal, 16)
+                        .presentationDetents([.medium])
+                        .presentationBackground(Theme.background)
+                        .duoRail()
                 }
             Spacer(minLength: 0)
             IconButton(title: "Close", icon: "close") { focus = nil }
@@ -535,17 +538,18 @@ struct TodoView: View {
         focus = target
     }
 
-    /// Return: each typed line becomes a task and the field stays for the next; an empty Return closes it.
+    /// Return: the task is added and the field stays for the next; an empty Return, or a list name, closes it.
     private func submit() {
-        let lines = title.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        title = ""
-        guard case .task(let list)? = adding, !lines.isEmpty else {
-            if adding == .list, let name = lines.first { Task { await planner.addList(name: name) } }
-            close()
+        guard case .task(let list)? = adding, !title.trimmingCharacters(in: .whitespaces).isEmpty else {
+            commit()
+            focus = nil
             return
         }
-        let due = due
-        Task { for line in lines { await planner.add(title: line, list: list, due: due) } }
+        let text = title, due = due
+        title = ""
+        Task { await planner.add(title: text, list: list, due: due) }
+        // Return gives up focus; taking it back in the same turn keeps the keyboard up.
+        focus = .task(list)
     }
 
     /// Saves what the field holds and closes it.
@@ -563,14 +567,8 @@ struct TodoView: View {
         due = nil
     }
 
-    private func close() {
-        adding = nil
-        due = nil
-        focus = nil
-    }
-
     private func row(_ todo: Todo) -> some View {
-        TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
+        TodoRow(todo: todo, toggle: { await planner.toggle(todo, settle: tickSettle) },
                 openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
             // Right is Done (Not done in Completed), a long left is Delete, as in Mail; tasks have no Later.
             .modifier(StageSwipe(canDelete: true, enabled: true, canLater: false, doneTitle: todo.done ? "Not done" : "Done") { stage in

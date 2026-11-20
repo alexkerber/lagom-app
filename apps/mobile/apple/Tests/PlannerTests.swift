@@ -119,6 +119,13 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(MailboxChoice.trash.mailbox, .trash)
     }
 
+    func testTaskSwipeHasNoLaterAndDeletesOnlyAtMailsReach() {
+        XCTAssertEqual(SwipeStage(dx: 120, width: 400, canDelete: true, canLater: false), .done)
+        XCTAssertNil(SwipeStage(dx: -200, width: 400, canDelete: true, canLater: false))
+        XCTAssertEqual(SwipeStage(dx: -240, width: 400, canDelete: true, canLater: false), .delete)
+        XCTAssertEqual(SwipeStage(dx: -200, width: 400, canDelete: true), .later)
+    }
+
     func testDueTasksCountOnlyTodayAndEarlier() {
         // Today's list also shows a few undated and future tasks; the sentence counts only the due ones, as desktop.
         func todo(_ due: String?) -> Todo { Todo(id: 1, list: 1, title: "t", due: due, done: false, fromMail: false, mailSubject: nil) }
