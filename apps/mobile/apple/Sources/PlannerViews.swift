@@ -1,11 +1,5 @@
 import SwiftUI
 
-/// Page padding: the desktop's 24 on iPad, 16 at phone width.
-private struct PagePadding: ViewModifier {
-    @Environment(\.horizontalSizeClass) private var width
-    func body(content: Content) -> some View { content.padding(.horizontal, width == .regular ? 24 : 16) }
-}
-
 /// The desktop's calm Today page: schedule, what is due, and a short look at unread mail.
 struct TodayView: View {
     let planner: PlannerModel
@@ -29,7 +23,7 @@ struct TodayView: View {
                 }
                 mail
             }
-            .modifier(PagePadding()).padding(.vertical, 16)
+            .pageEdges().padding(.bottom, 16)
         }
         .refreshable { await planner.reload() }
         .background(Theme.background)
@@ -58,7 +52,8 @@ struct TodayView: View {
         line += part(count(planner.today?.events.count ?? 0, "event", "events", "no events"), "calendar") + part(" and ")
         line += part(count(dueCount(planner.today?.tasks ?? [], day: planner.today?.day ?? ""), "task due", "tasks due", "nothing due"), "todo") + part(".")
         return VStack(alignment: .leading, spacing: 12) {
-            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
+            // A 44 pt first row, as every page title, so it shares the row the page edges place.
+            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide))).frame(minHeight: 44)
             Text(line)
                 .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
                 .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
@@ -108,7 +103,7 @@ struct TodayView: View {
             let tasks = planner.today?.tasks ?? []
             if tasks.isEmpty { quiet("Nothing due today.", icon: "todo").padding(.bottom, 6) }
             ForEach(tasks, id: \.id) { todo in
-                TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
+                TodoRow(todo: todo, toggle: { await planner.toggle(todo, settle: tickSettle) },
                         openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
             }
             AddRow(title: "New task") { newTask = true }.disabled(planner.lists.isEmpty)
@@ -168,7 +163,7 @@ private struct CalendarAccessButton: View {
     var body: some View {
         Button { Task { await allow() } } label: {
             HStack(spacing: 6) {
-                if connecting { ProgressView().controlSize(.small).tint(Theme.accentInk) } else { Icon("calendar").foregroundStyle(Theme.accentInk) }
+                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) } else { Icon("calendar").foregroundStyle(Theme.accentFillInk) }
                 Text(connecting ? "Connecting…" : "Show your Google Calendar").lineLimit(1)
             }
         }
@@ -195,7 +190,8 @@ private struct AddRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                Icon("plus").frame(width: 22)
+                // The task circles' column, so the plus sits over them and the words over the titles.
+                Icon("plus").frame(width: 21)
                 Text(title).lagomFont(.base)
             }
             .foregroundStyle(Theme.secondary).padding(.horizontal, 8)
@@ -261,27 +257,32 @@ struct EventRow: View {
     }
 }
 
+/// How long a tapped tick shows before its task moves to Completed: within motion.md's 300 ms.
+private let tickSettle = Duration.milliseconds(280)
+
 /// A task, desktop `task_row`: a completion circle, its title over the source mail's subject, and the due chip.
 struct TodoRow: View {
     let todo: Todo
-    let toggle: () -> Void
+    /// Saves the change; returns once the lists have reloaded.
+    let toggle: () async -> Void
     /// Opens the source mail; the subject line is its button.
     let openMail: () -> Void
     var words = DateWords()
+    /// The tick a tap draws at once, before the row moves (`PlannerModel.toggle`'s settle).
+    @State private var ticked: Bool?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        let done = ticked ?? todo.done
         HStack(spacing: 10) {
-            Button(action: toggle) {
-                Circle().strokeBorder(Theme.secondary, lineWidth: 1)
-                    .frame(width: 21, height: 21)
-                    .overlay { if todo.done { Icon("done", size: 16).foregroundStyle(Theme.secondary) } }
-                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            Button(action: tap) {
+                CheckCircle(done: done).frame(width: 44, height: 44).contentShape(Rectangle())
             }
             .buttonStyle(.plain).padding(.horizontal, -11)
-            .accessibilityLabel(todo.done ? "Mark as not done" : "Mark as done")
+            .accessibilityLabel(done ? "Mark as not done" : "Mark as done")
             VStack(alignment: .leading, spacing: 2) {
                 Text(todo.title).lagomFont(.base)
-                    .strikethrough(todo.done).foregroundStyle(todo.done ? Theme.secondary : Theme.ink)
+                    .strikethrough(done).foregroundStyle(done ? Theme.secondary : Theme.ink)
                 if let subject = todo.mailSubject {
                     Button(action: openMail) {
                         HStack(spacing: 4) {
@@ -299,122 +300,291 @@ struct TodoRow: View {
             if todo.fromMail, todo.mailSubject == nil {
                 Icon("mail", label: "From mail").foregroundStyle(Theme.secondary)
             }
-            if !todo.done, let due = todo.due.flatMap(words.due) {
-                Text(due.label).lagomFont(.small)
-                    .foregroundStyle(due.overdue ? Theme.danger : Theme.secondary)
-                    .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(due.overdue ? Theme.danger.opacity(0.12) : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.key))
-                    .accessibilityLabel(due.overdue ? "Overdue, due \(due.label)" : "Due \(due.label)")
-            }
+            if !done, let due = todo.due.flatMap(words.due) { DueChip(label: due.label, overdue: due.overdue) }
         }
         .padding(.horizontal, 8)
         .frame(minHeight: 46)
         .accessibilityElement(children: .contain)
+        .sensoryFeedback(.impact(weight: .light), trigger: ticked) { _, new in new == true }
+    }
+
+    private func tap() {
+        guard ticked == nil else { return } // one change at a time
+        withAnimation(Motion.move(reduceMotion)) { ticked = !todo.done }
+        // Saved at once; the reload after the settle clears the tick, or brings the circle back if core refused.
+        Task { await toggle(); ticked = nil }
     }
 }
 
-/// Local task lists, as on the desktop's To-do page.
+/// The completion circle: a hairline ring that fills with Done's pine green and a tick, springing in.
+private struct CheckCircle: View {
+    let done: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(Theme.secondary, lineWidth: 1).opacity(done ? 0 : 1)
+            Circle().fill(Theme.done)
+                .overlay { Icon("done", size: 15).foregroundStyle(Theme.accentInk) }
+                // Under Reduce Motion it only fades.
+                .scaleEffect(done || reduceMotion ? 1 : 0.5)
+                .opacity(done ? 1 : 0)
+        }
+        .frame(width: 21, height: 21)
+    }
+}
+
+/// A due date, desktop's chip: quiet, or red once overdue.
+struct DueChip: View {
+    let label: String
+    var overdue = false
+
+    var body: some View {
+        Text(label).lagomFont(.small)
+            .foregroundStyle(overdue ? Theme.danger : Theme.secondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(overdue ? Theme.danger.opacity(0.12) : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.key))
+            .accessibilityLabel(overdue ? "Overdue, due \(label)" : "Due \(label)")
+    }
+}
+
+/// What the inline field adds: a task to a list, or a new list.
+private enum AddField: Hashable { case task(Int64), list }
+
+/// Local task lists, as on the desktop's To-do page. Adding happens where the eye is (Alex 2026-11-20, "plus
+/// uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips
+/// above the keyboard. Return adds and keeps the field open for the next task; leaving the field keeps its text.
 struct TodoView: View {
     let planner: PlannerModel
     let openMail: (Int64?) -> Void
-    @State private var adding: Int64?
-    @State private var newList = false
-    @State private var listName = ""
     @State private var showDone: Set<Int64> = []
-    @Environment(\.railInset) private var railInset
+    /// Rows a swipe just completed or deleted: gone at once, back only if core refuses.
+    @State private var leaving: Set<Int64> = []
+    @State private var adding: AddField?
+    @State private var title = ""
+    @State private var due: Date?
+    @State private var picking = false
+    @FocusState private var focus: AddField?
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PageTitle(title: "To-do") {
-                Menu {
-                    // On the Duo, New task is in the right column.
-                    if railInset == 0 { Button("New task") { adding = planner.defaultList }.disabled(planner.lists.isEmpty) }
-                    Button("New list") { listName = ""; newList = true }
-                } label: { Icon("plus") }
-                    .menuStyle(.button).buttonStyle(IconButtonStyle())
-                    .accessibilityLabel("Add")
-                    .padding(.trailing, -6)
-            }
-            .modifier(PagePadding()).padding(.top, 8)
+            PageTitle(title: "To-do") { EmptyView() }
+                .pageEdges()
             List {
-                if planner.allClear {
-                    Text("Nothing to do. A clear day.")
-                        .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
-                        .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
-                        .foregroundStyle(Theme.ink).multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity).padding(.vertical, 48)
-                        .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
-                }
+                if planner.allClear { clearDay.plainRow() }
                 ForEach(Array(planner.lists.enumerated()), id: \.element.id) { index, list in
-                    let all = planner.todos[list.id] ?? []
-                    let done = all.filter(\.done)
-                    Group {
-                        ListHeading(name: list.name, color: Theme.account(index), open: planner.openCount(list: list.id))
-                            .padding(.top, 16).padding(.bottom, 4)
-                        ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
-                        AddRow(title: "New task") { adding = list.id }
-                        if !done.isEmpty {
-                            let open = showDone.contains(list.id)
-                            Button {
-                                if open { showDone.remove(list.id) } else { showDone.insert(list.id) }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Icon(open ? "chevron" : "chevron-right")
-                                    Text("Completed (\(done.count))").lagomFont(.base)
-                                }
-                                .foregroundStyle(Theme.secondary)
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityValue(open ? "Expanded" : "Collapsed")
-                            if open { ForEach(done, id: \.id) { row($0) } }
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
+                    section(list, index: index)
                 }
+                newList.padding(.top, 16).plainRow()
             }
             .listStyle(.plain)
             .environment(\.defaultMinListRowHeight, 0)
             .scrollContentBackground(.hidden)
-            .modifier(PagePadding())
+            .scrollDismissesKeyboard(.interactively)
+            .pageEdges(top: false)
+            // Rows close the gap as they leave for Completed; under Reduce Motion they fade.
+            .animation(Motion.move(reduceMotion), value: planner.todos)
             .overlay {
-                if planner.lists.isEmpty { EmptyState(icon: "todo", title: "No lists", detail: "Add a list to start.") }
+                if planner.lists.isEmpty && adding != .list {
+                    EmptyState(icon: "todo", title: "No lists yet", detail: "A list holds what there is to do.") {
+                        HouseButton(title: "New list", icon: "plus") { open(.list) }
+                    }
+                }
             }
             .refreshable { await planner.reloadTodos() }
         }
         .background(Theme.background)
-        // The Duo column: New task at the top, as New message in Mail; the tab bar holds the bottom.
-        .railColumn(top: {
-            RailButton(title: "New task", icon: "plus", primary: true) { adding = planner.defaultList }.disabled(planner.lists.isEmpty)
-        }, bottom: { EmptyView() })
-        .sheet(item: Binding(get: { adding.map(ListID.init) }, set: { adding = $0?.id })) { list in
-            NewTaskView(planner: planner, list: list.id, due: nil).duoRail()
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if case .task = adding { dueBar }
         }
-        .alert("New list", isPresented: $newList) {
-            TextField("Name", text: $listName)
-            Button("Cancel", role: .cancel) {}
-            Button("Add") { Task { await planner.addList(name: listName) } }
+        .onChange(of: focus) { old, new in
+            // Leaving the field, by a tap elsewhere or the keyboard going down, keeps what was typed. Checked a turn
+            // later, and only for the field that lost focus: moving to another list's field passes through nil.
+            guard new == nil, let old, old == adding else { return }
+            Task { @MainActor in if focus == nil, !picking, adding == old { commit() } }
+        }
+        .onChange(of: picking) { _, now in if !now, let adding { focus = adding } }
+    }
+
+    private func section(_ list: TodoList, index: Int) -> some View {
+        let all = (planner.todos[list.id] ?? []).filter { !leaving.contains($0.id) }
+        let done = all.filter(\.done)
+        let expanded = showDone.contains(list.id)
+        return Group {
+            ListHeading(name: list.name, color: Theme.account(index), open: all.count - done.count)
+                .padding(.top, index == 0 && !planner.allClear ? 8 : 24).padding(.bottom, 2)
+            ForEach(all.filter { !$0.done }, id: \.id) { row($0) }
+            if adding == .task(list.id) { field(.task(list.id)) } else {
+                AddRow(title: "New task") { open(.task(list.id)) }
+            }
+            if !done.isEmpty {
+                Button {
+                    if expanded { showDone.remove(list.id) } else { showDone.insert(list.id) }
+                } label: {
+                    HStack(spacing: 10) {
+                        Icon(expanded ? "chevron" : "chevron-right", size: 16).frame(width: 21)
+                        Text("Completed (\(done.count))").lagomFont(.base)
+                    }
+                    .foregroundStyle(Theme.secondary).padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                if expanded { ForEach(done, id: \.id) { row($0) } }
+            }
+        }
+        .plainRow()
+    }
+
+    /// The clear day in lagom's voice, as the desktop: the lists and their New task lines stay below.
+    private var clearDay: some View {
+        let size: CGFloat = width == .regular ? 48 : 34
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Nothing to do.\nA clear day.")
+                .font(.custom(Theme.Face.display, size: size, relativeTo: .largeTitle))
+                .tracking(size * typeScale * Theme.Face.displayTracking).lineSpacing(-2)
+                .foregroundStyle(Theme.ink).accessibilityAddTraits(.isHeader)
+            Text("Add a task below when something comes up.").lagomFont(.snippet).foregroundStyle(Theme.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 24).padding(.bottom, 8)
+    }
+
+    @ViewBuilder private var newList: some View {
+        if adding == .list { field(.list) } else if !planner.lists.isEmpty {
+            AddRow(title: "New list") { open(.list) }
         }
     }
 
-    private func row(_ todo: Todo) -> some View {
-        TodoRow(todo: todo, toggle: { Task { await planner.toggle(todo) } },
-                openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
-            .swipeActions {
-                Button(role: .destructive) { Task { await planner.delete(todo) } } label: { Label("Delete", image: "trash") }
-                    .tint(Theme.danger)
+    /// "New task" (or "New list") as a field in place: the circle (or the list dot) where the row will be.
+    private func field(_ target: AddField) -> some View {
+        HStack(spacing: 10) {
+            Group {
+                if target == .list { Circle().fill(Theme.line).frame(width: 8, height: 8) }
+                else { Circle().strokeBorder(Theme.line, lineWidth: 1).frame(width: 21, height: 21) }
             }
+            .frame(width: 21)
+            TextField(target == .list ? "List name" : "New task", text: $title)
+                .lagomFont(.base, target == .list ? .bold : .regular)
+                .foregroundStyle(Theme.ink).tint(Theme.accent)
+                .focused($focus, equals: target)
+                .submitLabel(target == .list ? .done : .next)
+                .onSubmit(submit)
+                .onAppear { focus = target }
+                .accessibilityLabel(target == .list ? "New list name" : "New task")
+            if target != .list, let due, let chip = DateWords().due(DateWords().coreDay(due)) {
+                DueChip(label: chip.label)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 46)
+    }
+
+    /// Due chips above the keyboard while a task is typed: Today, Tomorrow, or a date.
+    private var dueBar: some View {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+        let other = due.map { $0 != today && $0 != tomorrow } ?? false
+        return HStack(spacing: 8) {
+            chip("Today", on: due == today) { due = due == today ? nil : today }
+            chip("Tomorrow", on: due == tomorrow) { due = due == tomorrow ? nil : tomorrow }
+            chip(other ? DateWords().due(DateWords().coreDay(due!))?.label ?? "Date" : "Date", icon: "calendar", on: other) { picking = true }
+                // A paper sheet, not a glass popover: the calendar needs more room than the folded Duo has above the keyboard.
+                .sheet(isPresented: $picking) {
+                    DatePicker("Due", selection: Binding(get: { due ?? tomorrow }, set: { due = calendar.startOfDay(for: $0); picking = false }),
+                               in: today..., displayedComponents: .date)
+                        .datePickerStyle(.graphical).tint(Theme.accent).labelsHidden()
+                        .padding(.horizontal, 16)
+                        .presentationDetents([.medium])
+                        .presentationBackground(Theme.background)
+                        .duoRail()
+                }
+            Spacer(minLength: 0)
+            IconButton(title: "Close", icon: "close") { focus = nil }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 4)
+        .background(Theme.background)
+        .overlay(alignment: .top) { Theme.line.frame(height: 1) }
+    }
+
+    private func chip(_ title: String, icon: String? = nil, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon { Icon(icon, size: 16) }
+                Text(title).lagomFont(.small, .medium).lineLimit(1)
+            }
+            .foregroundStyle(on ? Theme.accentFillInk : Theme.ink)
+            .padding(.horizontal, 10).frame(minHeight: 32)
+            .background(on ? Theme.accentFill : Theme.subtle, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Due \(title)")
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    private func open(_ target: AddField) {
+        commit()
+        adding = target
+        focus = target
+    }
+
+    /// Return: the task is added and the field stays for the next; an empty Return, or a list name, closes it.
+    private func submit() {
+        guard case .task(let list)? = adding, !title.trimmingCharacters(in: .whitespaces).isEmpty else {
+            commit()
+            focus = nil
+            return
+        }
+        let text = title, due = due
+        title = ""
+        Task { await planner.add(title: text, list: list, due: due) }
+        // Return gives up focus; taking it back in the same turn keeps the keyboard up.
+        focus = .task(list)
+    }
+
+    /// Saves what the field holds and closes it.
+    private func commit() {
+        let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch adding {
+        case .task(let list)? where !text.isEmpty:
+            let due = due
+            Task { await planner.add(title: text, list: list, due: due) }
+        case .list? where !text.isEmpty: Task { await planner.addList(name: text) }
+        default: break
+        }
+        title = ""
+        adding = nil
+        due = nil
+    }
+
+    private func row(_ todo: Todo) -> some View {
+        TodoRow(todo: todo, toggle: { await planner.toggle(todo, settle: tickSettle) },
+                openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
+            // Right is Done (Not done in Completed), a long left is Delete, as in Mail; tasks have no Later.
+            .modifier(StageSwipe(canDelete: true, enabled: true, canLater: false, doneTitle: todo.done ? "Not done" : "Done") { stage in
+                leaving.insert(todo.id)
+                Task {
+                    if stage == .delete { await planner.delete(todo) } else { await planner.toggle(todo) }
+                    leaving.remove(todo.id)
+                }
+            })
             .accessibilityAction(named: "Delete") { Task { await planner.delete(todo) } }
     }
 }
 
-private struct ListID: Identifiable { let id: Int64 }
+private extension View {
+    /// A List row drawn by the page itself: no insets, separator or row background.
+    func plainRow() -> some View {
+        listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
+    }
+}
 
-/// A list's heading on To-do: `● Work  4`.
+/// A list's heading on To-do: `● Work  4`, the dot over the task circles and the name over their titles.
 // shortcut: the dot colour follows list order; store a colour per list if people ask to choose one.
 private struct ListHeading: View {
     let name: String
@@ -422,19 +592,24 @@ private struct ListHeading: View {
     let open: Int
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).foregroundStyle(Theme.ink)
-            if open > 0 {
-                Text(String(open)).font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .footnote)).foregroundStyle(Theme.secondary)
+        HStack(spacing: 10) {
+            Circle().fill(color).frame(width: 8, height: 8).frame(width: 21)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).foregroundStyle(Theme.ink)
+                if open > 0 {
+                    Text(String(open)).font(.custom(Theme.Face.label, size: TextSize.small.points, relativeTo: .footnote)).foregroundStyle(Theme.secondary)
+                }
             }
         }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 36)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(open > 0 ? "\(name), \(open) open" : name)
         .accessibilityAddTraits(.isHeader)
     }
 }
 
+/// Today's New task sheet; To-do adds in place.
 struct NewTaskView: View {
     let planner: PlannerModel
     @State var list: Int64?
@@ -489,6 +664,129 @@ struct NewTaskView: View {
     }
 }
 
+/// The Mac's New event sheet (`new_event.rs`): the same fields, words and defaults, with the system date and time pickers.
+struct NewEventView: View {
+    let planner: PlannerModel
+    @State private var title = ""
+    @State private var start: Date
+    @State private var end: Date
+    @State private var allDay = false
+    @State private var meet = false
+    /// The chosen calendar; nil is the first.
+    @State private var choice: EventCalendar?
+    @State private var guests = ""
+    @State private var details = ""
+    @State private var error: String?
+    @State private var saving = false
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var focused: Bool
+
+    init(planner: PlannerModel, day: Date) {
+        self.planner = planner
+        let times = PlannerModel.newEventTimes(day: day)
+        _start = State(initialValue: times.start)
+        _end = State(initialValue: times.end)
+    }
+
+    var body: some View {
+        let calendars = planner.eventCalendars
+        SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() }) {
+            ScrollView {
+                VStack(spacing: 0) {
+                    FieldRow(label: "Title", labelWidth: 84) {
+                        TextField("Event title", text: $title).focused($focused).submitLabel(.done).accessibilityLabel("Title")
+                    }
+                    FieldRow(label: "Date", labelWidth: 84) { picker("Date", $start, .date) }
+                    if !allDay { FieldRow(label: "Start", labelWidth: 84) { picker("Start", $start, .hourAndMinute) } }
+                    FieldRow(label: allDay ? "Last day" : "End date", labelWidth: 84) { picker(allDay ? "Last day" : "End date", $end, .date) }
+                    if !allDay { FieldRow(label: "End", labelWidth: 84) { picker("End", $end, .hourAndMinute) } }
+                    toggle("All day", icon: "sun", $allDay)
+                    if calendars.count > 1 {
+                        FieldRow(label: "Calendar", labelWidth: 84) {
+                            Picker("Calendar", selection: Binding(get: { choice ?? calendars[0] }, set: { choice = $0 })) {
+                                ForEach(calendars, id: \.self) { Text($0.label).tag($0) }
+                            }
+                            .labelsHidden().tint(Theme.ink)
+                        }
+                    } else if let only = calendars.first {
+                        FieldRow(label: "Calendar", labelWidth: 84) { Text(only.label).foregroundStyle(Theme.secondary).lineLimit(1) }
+                    }
+                    toggle("Add Google Meet", icon: "video", $meet)
+                    FieldRow(label: "Guests", labelWidth: 84) {
+                        TextField("Email addresses (optional)", text: $guests)
+                            .keyboardType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityLabel("Guests, email addresses (optional)")
+                    }
+                    FieldRow(label: "Description", labelWidth: 84) {
+                        TextField("Description (optional)", text: $details, axis: .vertical).lineLimit(1...6).accessibilityLabel("Description")
+                    }
+                    if Storage.demo && meet {
+                        Text("Demo: no meeting link or invitations will be created").lagomFont(.small).foregroundStyle(Theme.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
+                    }
+                    if let error {
+                        Text(error).lagomFont(.base).foregroundStyle(Theme.danger)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .disabled(saving)
+            }
+            .scrollDismissesKeyboard(.interactively)
+        } footer: {
+            Button(saving ? "Saving…" : "Save event", action: save).buttonStyle(HouseButtonStyle(primary: true))
+                .disabled(saving || calendars.isEmpty)
+            Spacer(minLength: 0)
+        }
+        // An event moves as a whole: a later start keeps its length, as Apple's Calendar does.
+        .onChange(of: start) { old, new in end = end.addingTimeInterval(new.timeIntervalSince(old)) }
+        .onAppear {
+            focused = Storage.newEventScreen == nil
+            if Storage.newEventScreen == "filled" || Storage.newEventScreen == "saved" {
+                (title, guests, details) = ("Coffee with Johan", "johan@ek.example", "The invoice, and the coffee machine.")
+                start = Calendar.current.date(bySettingHour: 12, minute: 15, second: 0, of: start) ?? start
+                if Storage.newEventScreen == "saved" { Task { try? await Task.sleep(for: .seconds(1)); save() } }
+            }
+        }
+        .interactiveDismissDisabled(saving)
+        .presentationDetents([.large])
+    }
+
+    private func picker(_ label: String, _ value: Binding<Date>, _ parts: DatePickerComponents) -> some View {
+        DatePicker(label, selection: value, displayedComponents: parts).labelsHidden().accessibilityLabel(label)
+    }
+
+    /// Desktop `toggle_row`: the label, its icon, and the switch.
+    private func toggle(_ label: String, icon: String, _ isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 8) {
+                Icon(icon).foregroundStyle(Theme.secondary)
+                Text(label).lagomFont(.base).foregroundStyle(Theme.ink)
+            }
+        }
+        .tint(Theme.accentFill)
+        .frame(minHeight: 50)
+        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+    }
+
+    private func save() {
+        guard !saving else { return }
+        // By identity, not position: a sync may reload the list while the sheet is open.
+        guard let target = choice.map({ planner.eventCalendars.contains($0) ? $0 : nil }) ?? planner.eventCalendars.first else {
+            error = "choose a writable calendar"
+            return
+        }
+        saving = true
+        error = nil
+        let form = PlannerModel.eventForm(title: title, allDay: allDay, start: start, end: end, guests: guests, description: details, meet: meet)
+        Task {
+            error = await planner.createEvent(form, in: target)
+            saving = false
+            if error == nil { dismiss() }
+        }
+    }
+}
+
 /// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo (Alex 2026-11-17).
 struct CalendarView: View {
     let planner: PlannerModel
@@ -513,6 +811,8 @@ private struct WeekGrid: View {
     private let calendar = Calendar.current
     @State private var position = ScrollPosition(edge: .top)
     @State private var allDayHeight: CGFloat = 0
+    @State private var newEvent = false
+    @State private var demoSheetShown = false
 
     var body: some View {
         let week = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: planner.weekStart) }
@@ -564,22 +864,39 @@ private struct WeekGrid: View {
                 grid(days: days, byDay: byDay)
             }
         }
-        .padding(.horizontal, oneDay ? 16 : 24).padding(.top, 8)
+        .pageEdges()
         .background(Theme.background)
         .task { await planner.reloadWeek() }
         // A new week opens on today when it holds today, else on its Monday.
         .onChange(of: planner.weekStart, initial: true) { _, start in
             selected = calendar.isDate(PlannerModel.monday(.now), inSameDayAs: start) ? calendar.startOfDay(for: .now) : start
         }
+        .sheet(isPresented: $newEvent) { NewEventView(planner: planner, day: newEventDay(week)).duoRail() }
+        .task(id: planner.eventCalendars.isEmpty) {
+            guard !planner.eventCalendars.isEmpty, Storage.newEventScreen != nil, !demoSheetShown else { return }
+            demoSheetShown = true
+            try? await Task.sleep(for: .seconds(2.5)) // a sheet asked for during the launch hand-over is dropped
+            newEvent = true
+        }
         .railColumn(top: {
             if oneDay {
                 VStack(spacing: 8) {
+                    // New event at the top, as New task on To-do and New message in Mail.
+                    if !planner.eventCalendars.isEmpty {
+                        RailButton(title: "New event", icon: "plus", primary: true) { newEvent = true }.padding(.bottom, 8)
+                    }
                     RailButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
                     RailButton(title: "Today", icon: "calendar") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }
                     RailButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
                 }
             }
         }, bottom: { EmptyView() })
+    }
+
+    /// Desktop `new_event_default`: the day shown, or in a week today when it is in the week, else its Monday.
+    private func newEventDay(_ week: [Date]) -> Date {
+        if oneDay { return selected }
+        return week.contains { calendar.isDateInToday($0) } ? .now : planner.weekStart
     }
 
     /// The week as seven tappable days, Spark's strip: the chosen day in the accent circle, today in the accent.
@@ -609,17 +926,23 @@ private struct WeekGrid: View {
         // The month a week belongs to is its Thursday's, as ISO weeks count.
         let thursday = calendar.date(byAdding: .day, value: 3, to: planner.weekStart) ?? planner.weekStart
         let month = oneDay ? selected : thursday
+        let title = DateWords().monthTitle(month)
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(month, format: .dateTime.month(.wide)).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
-                Text(month, format: .dateTime.year()).lagomFont(.subject).foregroundStyle(Theme.secondary)
+                Text(title.month).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
+                if let year = title.year { Text(year).lagomFont(.subject).foregroundStyle(Theme.secondary) }
             }
+            .lineLimit(1).layoutPriority(1)
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             if !(oneDay && railInset > 0) {
                 IconButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
                 Button("Today") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
                 IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+            }
+            // The Mac's accent New event after the week buttons; a phone shows only its plus. On the Duo it is in the column.
+            if railInset == 0 && !planner.eventCalendars.isEmpty {
+                HouseButton(title: "New event", icon: "plus", primary: true, iconOnly: oneDay) { newEvent = true }
             }
         }
         .frame(minHeight: 44)
@@ -633,13 +956,14 @@ private struct WeekGrid: View {
         return ScrollView {
                 HStack(alignment: .top, spacing: 0) {
                     VStack(spacing: 0) {
+                        // One plain "13:00" in the "All day" label's face and colour, in this device's clock.
                         ForEach(0..<24, id: \.self) { hour in
-                            HStack(alignment: .firstTextBaseline, spacing: 1) {
-                                Text(String(format: "%02d", hour)).lagomFont(.base).foregroundStyle(Theme.ink)
-                                Text("00").lagomFont(.small).foregroundStyle(Theme.secondary)
-                            }
-                            .monospacedDigit().padding(.trailing, 8)
-                            .frame(width: Self.gutter, height: Self.hour, alignment: .topTrailing).offset(y: -8)
+                            // A fixed date: on a daylight-saving day one hour is missing or repeated.
+                            Text(calendar.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: hour)) ?? .now, format: .dateTime.hour().minute())
+                                .lagomFont(.small).monospacedDigit().foregroundStyle(Theme.secondary)
+                                .lineLimit(1).minimumScaleFactor(0.6) // "12:00 PM" must fit the gutter on one line
+                                .padding(.trailing, 8)
+                                .frame(width: Self.gutter, height: Self.hour, alignment: .topTrailing).offset(y: -8)
                         }
                     }
                     .accessibilityHidden(true)

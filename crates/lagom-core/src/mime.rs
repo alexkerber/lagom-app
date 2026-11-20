@@ -747,7 +747,7 @@ fn closes_p(name: &LocalName) -> bool {
 }
 
 /// The tokenizer state the tree builder sets after this start tag; `Some(None)` is plaintext.
-fn raw_kind(name: &LocalName) -> Option<Option<RawKind>> {
+pub(crate) fn raw_kind(name: &LocalName) -> Option<Option<RawKind>> {
     match *name {
         local_name!("title") | local_name!("textarea") => Some(Some(RawKind::Rcdata)),
         local_name!("style") | local_name!("xmp") | local_name!("iframe") | local_name!("noembed") | local_name!("noframes") => Some(Some(RawKind::Rawtext)),

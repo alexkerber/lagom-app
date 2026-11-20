@@ -481,6 +481,7 @@ async fn main() -> Result<()> {
                     references,
                     message_id: None,
                     attachments: Vec::new(),
+                    quoted: None,
                 },
                 &mut store,
             )

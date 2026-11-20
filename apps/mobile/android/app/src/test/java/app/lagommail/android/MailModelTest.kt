@@ -537,6 +537,21 @@ class MailModelTest {
         assertEquals(42L, core.sent.single().replyTo)
         assertEquals(setOf("other"), core.saved.keys)
     }
+    @Test fun htmlQuoteSurvivesSaveRestoreAndRemoval() = runTest(dispatcher) {
+        val quote = QuotedMail("> Ready", "<blockquote type=\"cite\"><p>Ready</p></blockquote>")
+        val core = FakeCore().apply { mail = listOf(row(42)); preparedQuote = quote }
+        val model = model(core); model.start()
+        model.reply(42)
+        assertEquals(quote, model.draft?.quoted)
+        model.closeCompose(discard = false)
+        assertEquals(quote, core.saved.values.single().quoted)
+        model.reply(42)
+        assertTrue(model.draft!!.restored)
+        assertEquals(quote, model.draft?.quoted)
+        model.draft = model.draft!!.copy(quoted = null)
+        model.closeCompose(discard = false)
+        assertNull(core.saved.values.single().quoted)
+    }
     @Test fun openingStaleDraftRowReadsLatestSavedBody() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.start()
         model.draft = ComposeDraft("fixture", body = "before")
@@ -1126,6 +1141,16 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun calendarAccessNeeded(): List<MailAccount> = calendarAccess
     var granted = false
     override suspend fun calendarGranted(): Boolean = granted
+    var calendars = emptyList<EventCalendar>()
+    override suspend fun eventCalendars(): List<EventCalendar> = calendars
+    val createdEvents = mutableListOf<Triple<String, String, EventForm>>()
+    val demoEvents = mutableListOf<EventForm>()
+    var rejectEvent: String? = null
+    override suspend fun createEvent(accountId: String, calendar: String, form: EventForm) {
+        rejectEvent?.let { throw MailException.Failed(it) }
+        createdEvents += Triple(accountId, calendar, form)
+    }
+    override suspend fun addDemoEvent(form: EventForm) { demoEvents += form }
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
     override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
@@ -1176,12 +1201,12 @@ internal class FakeCore : LagomCoreInterface {
         it.account == mail.first { row -> row.id == id }.account && it.inReplyTo == "<${id}>"
     }
     override suspend fun saveDraft(id: String, accountId: String, to: String, cc: String, bcc: String, subject: String, body: String,
-        replyTo: Long?, attachments: List<SendAttachment>): DraftRow {
+        replyTo: Long?, attachments: List<SendAttachment>, quoted: QuotedMail?): DraftRow {
         saveCalls++
         saveGate?.await()
         check(!rejectSave) { "Fixture save refused" }
         replyIds[id] = replyTo ?: replyIds[id]
-        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments, bcc)
+        val value = LocalDraft(id, accountId, to, cc, subject, body, replyIds[id]?.let { "<${it}>" }, emptyList(), attachments, bcc, quoted)
         saved[id] = value
         return value.row()
     }
@@ -1208,6 +1233,7 @@ internal class FakeCore : LagomCoreInterface {
     var laterThread: Thread? = null
     var replyGate: CompletableDeferred<Unit>? = null
     var preparedAttachments = emptyList<SendAttachment>()
+    var preparedQuote: QuotedMail? = null
     val composeKinds = mutableListOf<ComposeKind>()
     var rejectCompose = false
     var syncGate: CompletableDeferred<Unit>? = null
@@ -1323,7 +1349,7 @@ internal class FakeCore : LagomCoreInterface {
             if (kind == ComposeKind.FORWARD) "" else "sender@example.test",
             if (kind == ComposeKind.REPLY_ALL) "copy@example.test" else "",
             if (kind == ComposeKind.FORWARD) "Fwd: Subject" else "Re: Subject",
-            "\n\n-- \nSignature\n\n> body", if (kind == ComposeKind.FORWARD) null else id, preparedAttachments)
+            "\n\n-- \nSignature\n\n> body", if (kind == ComposeKind.FORWARD) null else id, preparedAttachments, preparedQuote)
     }
     override suspend fun addAccount(email: String, password: String) = error("unused fixture operation")
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")

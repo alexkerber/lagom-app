@@ -104,11 +104,11 @@ class LagomApplication : Application() {
 
 /**
  * Debug-only launch extras for screenshots without real accounts, as desktop's `LAGOM_DEMO` and `LAGOM_THEME`:
- * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-granted|calendar-none` and `--es lagomTheme light|dark`. A release build ignores both.
+ * `--es lagomDemo mail|welcome|notifications|calendar-google|calendar-granted|calendar-none|compose-quote|compose-quote-open` and `--es lagomTheme light|dark`. A release build ignores both.
  */
 internal data class DebugLaunch(val demo: String? = null, val dark: Boolean? = null)
 internal fun debugLaunch(debug: Boolean, demo: String?, theme: String?): DebugLaunch =
-    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none") },
+    if (!debug) DebugLaunch() else DebugLaunch(demo?.takeIf { it in setOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none", "compose-quote", "compose-quote-open") },
         when (theme) { "light" -> false; "dark" -> true; else -> null })
 
 /** The redirect of a browser sign-in, or null for any other link. The core then checks the exact URI and state. */
@@ -255,6 +255,14 @@ class MainActivity : ComponentActivity() {
                 // Clearing the key earlier would cancel this effect mid-read; a newer share has its own run.
                 finally { if (shareIntent == intent) shareIntent = null }
             }
+            // compose-quote: a reply to the demo's HTML ticket, its quote closed or open.
+            LaunchedEffect(model.rows) {
+                val ticket = model.rows.firstOrNull { it.subject.startsWith("Stockholm C") }
+                if (launch.demo?.startsWith("compose-quote") == true && ticket != null && model.draft == null) {
+                    model.demoQuoteOpen = launch.demo == "compose-quote-open"
+                    model.perform { model.reply(ticket.id) }
+                }
+            }
             val size = calculateWindowSizeClass(this)
             LagomTheme(launch.dark ?: isSystemInDarkTheme()) {
                 // Without an account there is no app shell yet: the welcome steps lead to adding one, then to notifications.
@@ -304,7 +312,7 @@ class MainActivity : ComponentActivity() {
             .collect { (open, selected) -> if (open || selected != null) show(AppSection.MAIL) }
     }
     // Local tasks and events load as soon as the store opens, not after the first sync.
-    LaunchedEffect(model.core) { model.core?.let { planner.core = it; planner.reload() } }
+    LaunchedEffect(model.core) { model.core?.let { planner.core = it; planner.demo = model.demo; planner.reload() } }
     // A page left open past midnight moves to the new day.
     LaunchedEffect(Unit) {
         var day = LocalDate.now()

@@ -23,10 +23,10 @@ mod native;
 
 /// Whether this machine renders HTML mail: macOS always, Windows with the WebView2 runtime.
 #[cfg(not(target_os = "windows"))]
-pub(super) fn supported() -> bool { cfg!(target_os = "macos") }
+pub(crate) fn supported() -> bool { cfg!(target_os = "macos") }
 
 #[cfg(target_os = "windows")]
-pub(super) fn supported() -> bool {
+pub(crate) fn supported() -> bool {
     static RUNTIME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *RUNTIME.get_or_init(webview2_installed)
 }
@@ -63,7 +63,7 @@ fn css(c: Rgba) -> String {
 /// The web view's document for one mail: the CSP first, then the theme CSS, then the mail as
 /// sent. The mail's own `<html>`, `<head>` and `<body>` merge into this document, as in a
 /// browser; its CSS may restyle anything here, as nothing here is trusted UI.
-pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
+pub(crate) fn document(html: &str, t: &Theme, remote: bool) -> String {
     let (bg, ink, accent) = (css(t.raised), css(t.ink), css(t.accent));
     let scheme = if t.dark { "dark" } else { "light" };
     let base = format!("html{{background:{bg}}}body{{margin:0;font:14px/1.4 -apple-system,system-ui,\"Segoe UI\",sans-serif;overflow-wrap:break-word}}");
@@ -83,7 +83,7 @@ pub(super) fn document(html: &str, t: &Theme, remote: bool) -> String {
 
 /// What the web view received: a finished load, a link click, Esc.
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-pub(super) enum Msg {
+pub(crate) enum Msg {
     Loaded,
     Open(String),
     Escape,
@@ -158,7 +158,7 @@ type Placement = (Bounds<Pixels>, Bounds<Pixels>, f32);
 
 /// The window's web view and what it shows.
 #[derive(Default)]
-pub(super) struct Web {
+pub(crate) struct Web {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     view: Option<Rc<native::View>>,
     /// Set just before the app loads a document: the one navigation the web view may make.
@@ -169,11 +169,11 @@ pub(super) struct Web {
     /// A document finished loading since the view was last hidden for plain text.
     ready: bool,
     /// The document asked for last did not load: the reading view shows the text part.
-    pub(super) failed: bool,
+    pub(crate) failed: bool,
     visible: Rc<std::cell::Cell<bool>>,
     drawable: Rc<std::cell::Cell<bool>>,
     /// The shown mail has remote images.
-    pub(super) has_remote: bool,
+    pub(crate) has_remote: bool,
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
     place: Rc<std::cell::Cell<Option<Placement>>>,
@@ -191,7 +191,7 @@ pub(super) struct Web {
 }
 
 /// What stands in for the web view while an overlay hides it.
-pub(super) enum Cover {
+pub(crate) enum Cover {
     /// A picture of the page, so the mail looks unchanged under the overlay.
     Picture(Arc<gpui::Image>),
     /// The picture is on its way; draw nothing rather than switch to text for a frame.
@@ -199,7 +199,7 @@ pub(super) enum Cover {
 }
 
 /// A window with a mail web view: the main window and each message window.
-pub(super) trait WebHost: 'static + Sized {
+pub(crate) trait WebHost: 'static + Sized {
     fn web(&mut self) -> &mut Web;
     /// Where the keys go when Esc leaves the web view.
     fn keys(&self) -> FocusHandle;
@@ -230,7 +230,7 @@ impl WebHost for MainWindow {
 impl MainWindow {
     /// Before a frame: the selected HTML message. Overlays draw in GPUI, under any native view,
     /// so the web view hides while one is open.
-    pub(super) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
         let want = self.inbox.single().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
         let overlay = self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
@@ -252,7 +252,7 @@ impl Web {
     /// Before a frame: load `want` if it is HTML, and show the web view once it has loaded.
     /// `overlay`: something in GPUI covers the body, so the web view hides.
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
-    pub(super) fn frame<T: WebHost>(&mut self, want: Option<(usize, &Mail)>, theme: &Theme, overlay: bool, window: &mut Window, cx: &mut Context<T>) {
+    pub(crate) fn frame<T: WebHost>(&mut self, want: Option<(usize, &Mail)>, theme: &Theme, overlay: bool, window: &mut Window, cx: &mut Context<T>) {
         if !supported() {
             // GPUI draws the HTML (`rich`); only the "Load remote images" button needs this.
             self.has_remote = want.and_then(|(_, m)| m.rich.as_ref()).is_some_and(|rich| rich.has_remote);
@@ -345,7 +345,7 @@ impl Web {
     }
 
     /// The body area: the web view's slot, or its picture while an overlay hides it.
-    pub(super) fn surface(&self) -> gpui::AnyElement {
+    pub(crate) fn surface(&self) -> gpui::AnyElement {
         match self.cover() {
             Some(Cover::Picture(picture)) => gpui::img(picture).size_full().into_any_element(),
             Some(Cover::Pending) => div().into_any_element(),
@@ -354,7 +354,7 @@ impl Web {
     }
 
     /// What to draw in the web view's place while an overlay hides it; `None` means the text part.
-    pub(super) fn cover(&self) -> Option<Cover> {
+    pub(crate) fn cover(&self) -> Option<Cover> {
         let (key, ask) = self.asked?;
         // Another message or theme under the same overlay: no picture of it exists, so the text.
         if self.shown != Some(key) { return None; }
@@ -362,6 +362,12 @@ impl Web {
             Some((answer, picture)) if *answer == ask => Cover::Picture(picture.clone()),
             _ => Cover::Pending,
         })
+    }
+
+    /// Off screen now, for a host that may not draw again soon (a compose sheet that closed).
+    pub(crate) fn hide(&mut self) {
+        self.drawable.set(false);
+        self.set_visible(false);
     }
 
     fn set_visible(&mut self, visible: bool) {
@@ -375,7 +381,7 @@ impl Web {
     }
 
     /// The element that keeps the web view over the body area: its bounds every frame.
-    pub(super) fn slot(&self) -> impl IntoElement {
+    pub(crate) fn slot(&self) -> impl IntoElement {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let view = self.view.clone();
         let place = self.place.clone();
@@ -413,7 +419,7 @@ impl Web {
 
     /// A click anywhere in GPUI takes the keys back from the web view. GPUI's view does not take
     /// first responder on a click by itself.
-    pub(super) fn unfocus(&self) {
+    pub(crate) fn unfocus(&self) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(view) = &self.view {
             let _ = view.focus_parent();
@@ -563,6 +569,36 @@ mod tests {
         assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
         assert!(bounds.left() > card.left() && bounds.right() < card.right());
         assert!(bounds.top() > card.top() && bounds.bottom() < card.bottom());
+    }
+
+    #[gpui::test]
+    fn html_reply_keeps_the_quote_under_the_editor(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "compose-quote", window, cx));
+        cx.run_until_parked();
+        let compose = view.read_with(cx, |v, _| v.compose.clone().unwrap());
+        let (body, quoted) = compose.read_with(cx, |c, cx| (c.body_text(cx), c.outgoing(cx).quoted));
+        let quoted = quoted.expect("an HTML original is quoted apart from the body");
+        assert!(!body.contains("> "), "the editable body holds no quote: {body:?}");
+        assert!(quoted.html.contains("<blockquote type=\"cite\"") && quoted.html.contains("Version 0.4 is out"));
+        assert!(!quoted.html.contains("<style") && !quoted.html.contains("svg+xml"), "sanitized: {}", quoted.html);
+        assert!(cx.debug_bounds("quote-toggle").is_some() && cx.debug_bounds("quote-preview").is_none(), "collapsed by default");
+        let click = |cx: &mut gpui::VisualTestContext, id: &'static str| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let at = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} not shown")).center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+        };
+        click(cx, "quote-toggle");
+        assert!(cx.debug_bounds("quote-preview").is_some(), "expands in place");
+        click(cx, "remove-quote");
+        assert!(compose.read_with(cx, |c, cx| c.outgoing(cx).quoted.is_none()));
+        // A plain-text original quotes into the body, as before.
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "compose", window, cx));
+        cx.run_until_parked();
+        let compose = view.read_with(cx, |v, _| v.compose.clone().unwrap());
+        let (body, quoted) = compose.read_with(cx, |c, cx| (c.body_text(cx), c.outgoing(cx).quoted));
+        assert!(quoted.is_none() && body.contains("\n> "), "{body:?}");
     }
 
     #[test]

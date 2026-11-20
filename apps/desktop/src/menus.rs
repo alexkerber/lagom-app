@@ -14,7 +14,7 @@ actions!(
 #[cfg(lagom_sparkle)]
 actions!(lagom, [CheckForUpdates]);
 
-const REPOSITORY: &str = "https://github.com/alexkerber/lagom-app";
+use crate::settings::REPOSITORY;
 
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| {

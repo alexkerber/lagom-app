@@ -242,7 +242,7 @@ struct FilterControl: View {
     }
 }
 
-/// The desktop sidebar's Search field.
+/// The Search field, which Mail's search button opens.
 struct SearchField: View {
     @Binding var text: String
 
@@ -296,7 +296,14 @@ struct FieldRow<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
     // Grows with the label's text style, so "Subject" never clips at large Dynamic Type sizes.
-    @ScaledMetric(relativeTo: .footnote) private var labelWidth: CGFloat = 64
+    @ScaledMetric private var labelWidth: CGFloat
+
+    /// `labelWidth` fits the sheet's longest label ("Description" needs 84).
+    init(label: String, labelWidth: CGFloat = 64, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+        _labelWidth = ScaledMetric(wrappedValue: labelWidth, relativeTo: .footnote)
+    }
 
     var body: some View {
         HStack(spacing: 16) {
@@ -363,13 +370,17 @@ extension SidebarRow where Leading == AnyView {
 struct StageSwipe: ViewModifier {
     let canDelete: Bool
     let enabled: Bool
+    /// False on a task: right is Done, left is Delete only.
+    var canLater = true
+    /// The right swipe's word; "Not done" on a completed task.
+    var doneTitle = "Done"
     let act: (SwipeStage) -> Void
     @State private var dx: CGFloat = 0
     @State private var width: CGFloat = 1
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        let stage = SwipeStage(dx: dx, width: width, canDelete: canDelete)
+        let stage = SwipeStage(dx: dx, width: width, canDelete: canDelete, canLater: canLater)
         content
             // Opaque, so the colour behind never shows through the text.
             .background(Theme.background)
@@ -381,7 +392,7 @@ struct StageSwipe: ViewModifier {
     }
 
     private func release(_ x: CGFloat) {
-        guard let stage = SwipeStage(dx: x, width: width, canDelete: canDelete) else {
+        guard let stage = SwipeStage(dx: x, width: width, canDelete: canDelete, canLater: canLater) else {
             withAnimation(Motion.move(reduceMotion)) { dx = 0 }
             return
         }
@@ -394,9 +405,9 @@ struct StageSwipe: ViewModifier {
 
     private func backdrop(_ stage: SwipeStage?) -> some View {
         let right = dx > 0
-        let shown = stage ?? (right ? .done : .later)
+        let shown = stage ?? (right ? .done : canLater ? .later : .delete)
         let (fill, icon, title): (Color, String, String) = switch shown {
-        case .done: (Theme.done, "done", "Done")
+        case .done: (Theme.done, "done", doneTitle)
         case .later: (Theme.later, "later", "Later")
         case .delete: (Theme.danger, "trash", "Delete")
         }
@@ -455,6 +466,62 @@ extension EnvironmentValues {
     var railInset: CGFloat {
         get { self[RailInsetKey.self] }
         set { self[RailInsetKey.self] = newValue }
+    }
+    /// UIKit's minimum layout margin for this window: 16 or 20 pt on a phone, 20 on iPad. Every page's side edge.
+    var pageMargin: CGFloat {
+        get { self[PageMarginKey.self] }
+        set { self[PageMarginKey.self] = newValue }
+    }
+}
+private struct PageMarginKey: EnvironmentKey { static let defaultValue: CGFloat = 16 }
+
+/// The page edges every page shares (Alex 2026-11-20: "Apple best practice"), so titles and the content under them
+/// start on one line. Sides: the system's layout margin. Top: 8 pt under the safe area; on the Duo, whose status bar
+/// sits in the right column and leaves no top inset, a 44 pt first row centres on that status bar's clock (92 pt,
+/// measured on the cover display), which also keeps it clear of the inner display's 55 pt corners.
+struct PageEdges: ViewModifier {
+    var top = true
+    @Environment(\.pageMargin) private var margin
+    @Environment(\.railInset) private var railInset
+
+    func body(content: Content) -> some View {
+        content.padding(.horizontal, margin).padding(.top, top ? (railInset > 0 ? 92 - 22 : 8) : 0)
+    }
+}
+
+extension View {
+    /// A page's header and content edges; `top: false` for a page's later blocks.
+    func pageEdges(top: Bool = true) -> some View { modifier(PageEdges(top: top)) }
+
+    /// Reads the system's layout margin at the root; views and sheets under it inherit it.
+    func readsPageMargin() -> some View { modifier(PageMarginReader()) }
+}
+
+private struct PageMarginReader: ViewModifier {
+    @State private var margin: CGFloat = 16
+
+    func body(content: Content) -> some View {
+        content.environment(\.pageMargin, margin)
+            .background(SystemMargin { if margin != $0 { margin = $0 } }.allowsHitTesting(false))
+    }
+}
+
+/// The window's root view controller knows the system margin; a size or idiom change lays this view out again.
+private struct SystemMargin: UIViewRepresentable {
+    let changed: (CGFloat) -> Void
+    func makeUIView(context: Context) -> Probe { Probe(changed: changed) }
+    func updateUIView(_ view: Probe, context: Context) {}
+
+    final class Probe: UIView {
+        let changed: (CGFloat) -> Void
+        init(changed: @escaping (CGFloat) -> Void) { self.changed = changed; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { nil }
+        override func didMoveToWindow() { super.didMoveToWindow(); read() }
+        override func layoutSubviews() { super.layoutSubviews(); read() }
+        private func read() {
+            guard let margin = window?.rootViewController?.systemMinimumLayoutMargins.leading else { return }
+            DispatchQueue.main.async { [changed] in changed(margin) }
+        }
     }
 }
 

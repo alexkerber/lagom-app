@@ -1,7 +1,7 @@
-//! Today, Todo and Calendar for mobile: local tasks and read-only cached events from core.
+//! Today, Todo and Calendar for mobile: local tasks, cached events from core and the Mac's New event.
 use super::*;
 use chrono::{Local, NaiveDate, TimeZone};
-use lagom_core::{calendar::AgendaEvent, tasks::{Task, TaskList}};
+use lagom_core::{calendar::{AgendaEvent, NewEvent}, tasks::{Task, TaskList}};
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct TodoList { pub id: i64, pub name: String, pub is_default: bool }
@@ -31,6 +31,76 @@ pub struct TodaySummary {
 }
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct MailCounts { pub account: String, pub inbox: u64, pub later: u64 }
+
+/// A writable Google calendar for New event, labelled as on the Mac: "Personal · you@gmail.com".
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct EventCalendar { pub account: String, pub calendar: String, pub label: String }
+/// The Mac's New event form. Times come from the system pickers, so they arrive as instants.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct EventForm {
+    pub title: String,
+    pub all_day: bool,
+    /// A timed event's start and end.
+    pub start_unix: i64, pub end_unix: i64,
+    /// An all-day event's first and last day, `YYYY-MM-DD`.
+    pub first_day: String, pub last_day: String,
+    /// The device's IANA zone, such as `Europe/Stockholm`, which Google needs beside a timed event.
+    pub time_zone: String,
+    /// Addresses as typed, separated by commas.
+    pub guests: String,
+    pub description: String,
+    pub meet: bool,
+}
+
+/// Desktop `event_draft`, with the Mac's words for each mistake.
+fn new_event(form: EventForm) -> lagom_core::Result<NewEvent> {
+    use lagom_core::Error::Invalid;
+    let (start, end) = if form.all_day {
+        let day = |value: &str| NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| Invalid("Enter a date such as 9 Nov or YYYY-MM-DD"));
+        let (first, last) = (day(&form.first_day)?, day(&form.last_day)?);
+        if last < first { return Err(Invalid("Last day must be on or after the first day")); }
+        (first.to_string(), last.succ_opt().ok_or(Invalid("End date is out of range"))?.to_string())
+    } else {
+        if form.end_unix <= form.start_unix { return Err(Invalid("End must be later than start")); }
+        let at = |unix| Local.timestamp_opt(unix, 0).single().map(|t| t.to_rfc3339()).ok_or(Invalid("End date is out of range"));
+        (at(form.start_unix)?, at(form.end_unix)?)
+    };
+    let attendees = lagom_core::contacts::split_recipients(&form.guests).iter()
+        .map(|guest| lagom_core::contacts::recipient_address(guest).ok_or(Invalid("Enter valid guest email addresses")))
+        .collect::<lagom_core::Result<Vec<_>>>()?;
+    let draft = NewEvent {
+        title: form.title.trim().into(), start, end, all_day: form.all_day,
+        time_zone: if form.all_day { String::new() } else { form.time_zone },
+        description: (!form.description.trim().is_empty()).then_some(form.description), attendees, meet: form.meet,
+    };
+    draft.event("validation".into())?;
+    Ok(draft)
+}
+
+/// The account and calendar checks of desktop `Worker::create_event`, before anything reaches Google.
+fn writable(s: &Store, account_id: &str, calendar: &str) -> lagom_core::Result<Account> {
+    let a = account(s, account_id)?;
+    if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) {
+        return Err(lagom_core::Error::Invalid("choose a Google calendar"));
+    }
+    if !lagom_core::oauth::calendar_writable(&s.account_scopes(account_id)?) { return Err(lagom_core::Error::CalendarConsent); }
+    if !s.calendars(account_id)?.iter().any(|c| c.remote_id == calendar && c.writable) {
+        return Err(lagom_core::Error::Invalid("choose a writable calendar"));
+    }
+    Ok(a)
+}
+
+/// Google's answer goes into the cache at once, so the week shows the event before the next sync fetches it.
+fn create_cached(stores: &Stores, s: &Store, account_id: &str, calendar: &str,
+    create: impl Future<Output = lagom_core::Result<lagom_core::google::CreatedEvent>>) -> lagom_core::Result<()> {
+    let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // shortcut: a Meet link Google is still making arrives with the next sync; the Mac fetches it again after 5 s.
+    let created = network(create)?;
+    // Google has the event: a failed cache write must not read as a failed save, or a retry makes a second one.
+    // The next sync fetches it, as on the Mac (`event_created` reports only Google's result).
+    if let Err(error) = s.insert_calendar_event(account_id, calendar, &created.event) { eprintln!("lagom: new event not cached: {error:?}"); }
+    Ok(())
+}
 
 fn item(day: &str, e: AgendaEvent) -> AgendaItem {
     AgendaItem { day: day.into(), account: e.account, calendar: e.calendar, title: e.event.title, start_unix: e.event.start_utc,
@@ -135,6 +205,39 @@ impl LagomCore {
             })
         }).await
     }
+    /// Writable calendars of Google accounts that allow calendar changes; empty hides New event.
+    pub async fn event_calendars(&self) -> Result<Vec<EventCalendar>> {
+        self.run(|s| {
+            let mut calendars = Vec::new();
+            for a in s.accounts()? {
+                if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google)
+                    || !lagom_core::oauth::calendar_writable(&s.account_scopes(&a.id)?) { continue; }
+                for c in s.calendars(&a.id)?.into_iter().filter(|c| c.writable) {
+                    calendars.push(EventCalendar { label: format!("{} · {}", c.name, a.email), account: a.id.clone(), calendar: c.remote_id });
+                }
+            }
+            Ok(calendars)
+        }).await
+    }
+    /// Creates the event in Google Calendar and caches Google's copy. After a network error the event may
+    /// exist anyway; the error says to check the calendar before retrying.
+    pub async fn create_event(&self, account_id: String, calendar: String, form: EventForm) -> Result<()> {
+        let stores = self.stores.clone();
+        self.run_own(move |s| {
+            // The form first, then the account, in the Mac's order.
+            let draft = new_event(form)?;
+            let a = writable(s, &account_id, &calendar)?;
+            create_cached(&stores, s, &account_id, &calendar, lagom_core::google::create_event(&a, &calendar, &draft))
+        }).await
+    }
+    /// Demo mode, as the Mac's demo calendar: the event goes into the fixture store, never to Google.
+    pub async fn add_demo_event(&self, form: EventForm) -> Result<()> {
+        self.run(move |s| {
+            let draft = new_event(form)?;
+            let a = s.accounts()?.into_iter().next().ok_or(lagom_core::Error::NotFound)?;
+            s.insert_calendar_event(&a.id, "primary", &draft.event(format!("demo-created-{}", milliseconds()))?)
+        }).await
+    }
     pub async fn mail_counts(&self) -> Result<Vec<MailCounts>> {
         self.run(|s| {
             let now = now();
@@ -160,6 +263,18 @@ pub fn seed_demo_without_calendar(data_dir: String, state: String) -> Result<()>
     };
     seed(data_dir, Some(scopes))
 }
+/// The demo's HTML mail: a table layout with inline styles, as booking mail is.
+const TICKET_HTML: &str = r##"<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f2ee;font-family:Helvetica,Arial,sans-serif;color:#1d1d1b"><tr><td style="padding:20px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:12px">
+<tr><td style="padding:24px 24px 4px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#8a877f">Your ticket</td></tr>
+<tr><td style="padding:0 24px;font-size:24px;line-height:30px;font-weight:bold">Stockholm C → Göteborg C</td></tr>
+<tr><td style="padding:4px 24px 16px;font-size:15px;color:#4a4a46">Friday 14 November, 07:10–10:05</td></tr>
+<tr><td style="padding:0 24px 20px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e6e4df;font-size:14px;line-height:22px">
+<tr><td style="padding-top:12px;color:#8a877f">Coach</td><td style="padding-top:12px;color:#8a877f">Seat</td><td style="padding-top:12px;color:#8a877f">Carriage</td></tr>
+<tr><td><b>3</b></td><td><b>41</b></td><td><b>Quiet</b></td></tr></table></td></tr>
+<tr><td style="padding:0 24px 24px"><a href="https://tickets.example/booking" style="display:inline-block;background:#2a5bb8;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;font-size:14px">Show booking</a></td></tr>
+</table></td></tr></table>"##;
+
 fn seed(data_dir: String, without_calendar: Option<Option<String>>) -> Result<()> {
     std::fs::create_dir_all(&data_dir).map_err(lagom_core::Error::from)?;
     let mut s = Store::open(std::path::Path::new(&data_dir).join("lagom.sqlite3"))?;
@@ -197,7 +312,9 @@ fn seed(data_dir: String, without_calendar: Option<Option<String>>) -> Result<()
             from_name: name.into(), from_address: address.into(), to: accounts[account].email.clone(), subject: subject.into(),
             snippet: snippet.into(), seen, has_attachments: attachment, message_id: format!("demo{uid}@lagom.example"), ..Default::default() };
         first_mail.get_or_insert_with(|| summary.clone());
-        s.save_message(&lagom_core::store::Message { summary, body_text: format!("{snippet}\n\n{name}"), body_html: None })?;
+        // The ticket is HTML, as such mail is: replies show its quote under the editor.
+        let body_html = (address == "no-reply@tickets.example").then(|| TICKET_HTML.to_owned());
+        s.save_message(&lagom_core::store::Message { summary, body_text: format!("{snippet}\n\n{name}"), body_html })?;
     }
     let lists = s.task_lists()?;
     let date = |offset: i64| Some((today + chrono::Duration::days(offset)).to_string());
@@ -313,6 +430,9 @@ mod tests {
         let offered = core.calendar_access_needed().await.unwrap();
         assert_eq!(offered.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), [google.id.as_str()]);
         let password = core.accounts().await.unwrap().into_iter().find(|a| a.email == "p@example.test").unwrap();
+        // Settings names how each account signs in, in the Mac's words.
+        assert_eq!(password.kind, "Email and password");
+        assert!(core.accounts().await.unwrap().iter().any(|a| a.id == google.id && a.kind == "Google account"));
         assert!(core.begin_calendar_access(password.id).is_err(), "a password account has no Google grant");
         assert!(core.begin_calendar_access("missing".into()).is_err());
         // Google took the grant back: access is offered again and mail keeps its scope.
@@ -333,6 +453,77 @@ mod tests {
             assert_eq!(core.calendar_granted().await.unwrap(), granted, "{state}");
             assert!(!core.today(3).await.unwrap().tasks.is_empty(), "the rest of the fixtures stay");
         }
+    }
+
+    fn form(title: &str, start: i64, minutes: i64) -> EventForm {
+        EventForm { title: title.into(), all_day: false, start_unix: start, end_unix: start + minutes * 60, first_day: String::new(),
+            last_day: String::new(), time_zone: "Europe/Stockholm".into(), guests: String::new(), description: String::new(), meet: false }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_event_offers_writable_google_calendars_checks_the_form_and_caches_the_result() {
+        let (_dir, core) = open();
+        let today = Local::now().date_naive();
+        let nine = day_start(today) + 9 * 3600;
+        let (google, password) = {
+            let s = core.stores.local.lock().unwrap();
+            let server = ServerConfig { host: "127.0.0.1".into(), port: 1, username: "p@example.test".into(), security: Security::Plain };
+            let password = Account::new("p@example.test".into(), server.clone(), server).unwrap();
+            s.save_account(&password).unwrap();
+            let (imap, smtp) = lagom_core::presets::servers("you@gmail.com").unwrap();
+            let mut google = Account::new("you@gmail.com".into(), imap, smtp).unwrap();
+            google.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+            s.save_authorized_account(&google, &format!("https://mail.google.com/ {}", lagom_core::oauth::GOOGLE_CALENDAR_SCOPES)).unwrap();
+            let calendar = |id: &str, name: &str, writable| lagom_core::calendar::Calendar { remote_id: id.into(), name: name.into(), color: None, shown: true, writable };
+            s.replace_calendar_window(&google.id, nine - 7 * 86_400, nine + 30 * 86_400,
+                &[(calendar("primary", "Personal", true), vec![]), (calendar("holidays", "Holidays", false), vec![])]).unwrap();
+            (google, password)
+        };
+        assert_eq!(core.event_calendars().await.unwrap(),
+            [EventCalendar { account: google.id.clone(), calendar: "primary".into(), label: "Personal · you@gmail.com".into() }]);
+        let refused = |result: Result<()>| match result { Err(MailError::Failed { reason }) => reason, other => panic!("{other:?}") };
+        assert_eq!(refused(core.create_event(password.id.clone(), "primary".into(), form("Lunch", nine, 0)).await), "End must be later than start", "the form first, as the Mac");
+        assert_eq!(refused(core.create_event(password.id, "primary".into(), form("Lunch", nine, 60)).await), "choose a Google calendar");
+        assert_eq!(refused(core.create_event(google.id.clone(), "holidays".into(), form("Lunch", nine, 60)).await), "choose a writable calendar");
+        assert_eq!(refused(core.create_event(google.id.clone(), "primary".into(), form("Lunch", nine, 0)).await), "End must be later than start");
+        assert_eq!(refused(core.create_event(google.id.clone(), "primary".into(), form("  ", nine, 60)).await), "enter an event title");
+        let mut guests = form("Lunch", nine, 60);
+        guests.guests = "maja@lind.example, not an address".into();
+        assert_eq!(refused(core.create_event(google.id.clone(), "primary".into(), guests).await), "Enter valid guest email addresses");
+        let mut days = form("Trip", 0, 0);
+        (days.all_day, days.first_day, days.last_day) = (true, "2026-11-20".into(), "2026-11-19".into());
+        assert_eq!(refused(core.create_event(google.id.clone(), "primary".into(), days.clone()).await), "Last day must be on or after the first day");
+        days.last_day = "2026-11-22".into();
+        let draft = new_event(days).unwrap();
+        assert_eq!((draft.start.as_str(), draft.end.as_str(), draft.time_zone.as_str()), ("2026-11-20", "2026-11-23", ""), "Google ends all-day events the day after");
+
+        // Google's copy lands in the cache, so the week shows it before the next sync.
+        let draft = new_event(form("Lunch with Maja", nine, 60)).unwrap();
+        assert_eq!(draft.time_zone, "Europe/Stockholm");
+        let event = draft.event("created-1".into()).unwrap();
+        let created = lagom_core::google::CreatedEvent { event, conference_pending: false };
+        let (stores, id) = (core.stores.clone(), google.id.clone());
+        tokio::task::spawn_blocking(move || {
+            let s = Store::open(&stores.path).unwrap();
+            // Google saved it, so a cache that cannot take it is no failed save: a retry would make a second event.
+            create_cached(&stores, &s, &id, "gone", async { Ok(created.clone()) }).unwrap();
+            create_cached(&stores, &s, &id, "primary", async { Ok(created) })
+        }).await.unwrap().unwrap();
+        let week = core.agenda(today.to_string(), 1).await.unwrap();
+        assert_eq!(week.iter().map(|e| (e.title.as_str(), e.start_unix, e.end_unix)).collect::<Vec<_>>(), [("Lunch with Maja", nine, nine + 3600)]);
+    }
+
+    #[tokio::test]
+    async fn demo_events_go_into_the_fixture_calendar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path: String = dir.path().to_string_lossy().into();
+        seed_demo(path.clone()).unwrap();
+        let core = LagomCore::open(path).unwrap();
+        assert!(core.event_calendars().await.unwrap().is_empty(), "demo accounts have no Google calendar");
+        let today = Local::now().date_naive();
+        core.add_demo_event(form("Coffee with Johan", day_start(today) + 16 * 3600, 30)).await.unwrap();
+        assert!(core.agenda(today.to_string(), 1).await.unwrap().iter().any(|e| e.title == "Coffee with Johan"));
+        assert!(core.add_demo_event(form("", day_start(today), 30)).await.is_err());
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent, PathPromptOptions, Rgba, Subscription, Task, Window,
 };
 
-use crate::main_window::{button, icon_button, mono, pressable};
+use crate::main_window::{button, icon_button, mono, pressable, html::{Web, WebHost}};
 use crate::motion::spring;
 use crate::mail::recipients;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -41,6 +41,15 @@ enum Phase {
 
 pub struct Compose {
     store: Option<(Rc<Store>, Account)>,
+    /// An HTML original, kept out of the body and sent after it.
+    quoted: Option<lagom_core::compose::Quoted>,
+    /// The quote as the reading pane shows mail: its HTML for the web view, or `rich` on Linux.
+    quote_mail: Option<crate::mail::Mail>,
+    /// The quote is expanded under the editor.
+    quote_open: bool,
+    /// The quote's own web view, as in a message window; made the first time the quote opens.
+    web: Web,
+    web_used: bool,
     attachments: Vec<lagom_core::smtp::OutgoingAttachment>,
     forward_source: Option<i64>,
     _save_delay: Option<Task<()>>,
@@ -116,6 +125,11 @@ impl Compose {
         window.focus(&first.focus_handle(cx));
         let mut this = Self {
             store: None,
+            quoted: None,
+            quote_mail: None,
+            quote_open: false,
+            web: Web::default(),
+            web_used: false,
             attachments: Vec::new(),
             forward_source: None,
             _save_delay: None,
@@ -166,6 +180,30 @@ impl Compose {
         self.opened = self.outgoing(cx);
     }
 
+    /// Before `initialize`, so an untouched sheet still counts as unedited.
+    pub fn set_quote(&mut self, quoted: Option<lagom_core::compose::Quoted>, cx: &mut Context<Self>) {
+        self.quote_mail = quoted.as_ref().map(|q| crate::mail::Mail {
+            html: Some(q.html.clone().into()),
+            rich: cfg!(target_os = "linux").then(|| std::sync::Arc::new(crate::rich::Rich::new(&q.html))),
+            ..Default::default()
+        });
+        self.quoted = quoted;
+        cx.notify();
+    }
+
+    pub fn toggle_quote(&mut self, cx: &mut Context<Self>) {
+        self.quote_open = !self.quote_open;
+        cx.notify();
+    }
+
+    /// The quote goes from this message; the reply stays.
+    fn remove_quote(&mut self, cx: &mut Context<Self>) {
+        self.set_quote(None, cx);
+        self.quote_open = false;
+        self.web.hide();
+        self.save_later(cx);
+    }
+
     pub fn load_forward(&self, cx: &mut Context<Self>) {
         if let Some(id) = self.forward_source { cx.emit(ComposeEvent::LoadForward(self.message_id.clone(), id)); }
     }
@@ -204,6 +242,7 @@ impl Compose {
         this.show_cc = !draft.cc.is_empty();
         this.show_bcc = !draft.bcc.is_empty();
         this.bcc.update(cx, |input, cx| input.set_text(&draft.bcc, cx));
+        this.set_quote(draft.quoted, cx);
         this.keep = true;
         this.phase = Phase::Gone;
         this.store = Some((store, account));
@@ -221,6 +260,7 @@ impl Compose {
             reply: self.reply.clone(),
             attachments: self.attachments.clone(),
             forward_source: self.forward_source,
+            quoted: self.quoted.clone(),
         }
     }
 
@@ -451,6 +491,7 @@ impl Compose {
             references,
             message_id: Some(self.message_id.clone()),
             attachments: self.attachments.clone(),
+            quoted: self.quoted.clone(),
             ..Default::default()
         }
     }
@@ -612,10 +653,56 @@ impl Compose {
 
     fn set(&mut self, phase: Phase, cx: &mut Context<Self>) {
         self.phase = phase;
+        // A sheet that is not up may not draw again: its native web view must not stay on screen.
+        if !self.is_modal() { self.web.hide(); }
         if phase == Phase::Gone {
             cx.emit(gpui::DismissEvent);
         }
         cx.notify();
+    }
+
+    /// The quiet "··· Quoted message" row under the editor: opens the quote in place, × removes it.
+    fn quote_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = &self.theme;
+        div().flex().flex_shrink_0().items_center().gap(px(4.)).h(px(36.)).px(px(20.))
+            .child(pressable(div().id("quote-toggle"), t, false)
+                .debug_selector(|| "quote-toggle".into())
+                .flex().items_center().gap(px(8.)).h(px(28.)).px(px(8.)).rounded(px(radius::CONTROL))
+                .cursor_pointer()
+                .child(mono("···", t.ink2))
+                .child(div().text_size(px(size::SMALL)).text_color(t.ink2)
+                    .child(if self.quote_open { "Hide quoted message" } else { "Quoted message" }))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx))))
+            .child(icon_button(t, "remove-quote", "icons/close.svg", "Remove quoted message")
+                .on_click(cx.listener(|this, _, _, cx| this.remove_quote(cx))))
+    }
+
+    /// The quote, read-only, drawn as the reading pane draws mail: the web view (macOS, Windows),
+    /// GPUI's safe subset (Linux), or the text where neither runs.
+    fn quote_preview(&self) -> Option<gpui::AnyElement> {
+        let (t, m, q) = (&self.theme, self.quote_mail.as_ref()?, self.quoted.as_ref()?);
+        let frame = div().h(px(280.)).flex_shrink_0().mx(px(24.)).mb(px(12.)).rounded(px(radius::CONTROL))
+            .border_1().border_color(t.line).overflow_hidden().debug_selector(|| "quote-preview".into());
+        Some(if crate::main_window::html::supported() && !self.web.failed {
+            frame.child(self.web.surface()).into_any_element()
+        } else {
+            let body = div().id("quote-text").size_full().overflow_y_scroll().p(px(12.)).flex().flex_col().gap(px(8.))
+                .text_size(px(size::SNIPPET)).text_color(t.ink2);
+            frame.child(match &m.rich {
+                Some(rich) => body.children(rich.view(m, t)),
+                None => body.children(q.text.lines().map(|line| div().child(line.to_owned()))),
+            }).into_any_element()
+        })
+    }
+
+    /// Before a frame: the open quote in its web view; a closed one hides it.
+    fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = self.quote_mail.clone().filter(|_| self.quote_open && self.is_modal());
+        // No web view until a quote first opens: kept drafts each hold a sheet.
+        if want.is_none() && !self.web_used { return; }
+        self.web_used = true;
+        let theme = self.theme;
+        self.web.frame(want.as_ref().map(|m| (0, m)), &theme, false, window, cx);
     }
 
     /// Submit and draft commands bubble up from the focused field.
@@ -650,7 +737,9 @@ impl Compose {
             .id("compose-sheet")
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.import_paths(paths.paths(), window, cx)))
             .w(px(800.))
-            .h(px(560.))
+            .h(px(if self.quote_open { 760. } else { 560. }))
+            // The taller sheet with an open quote stays inside a short window.
+            .when(self.quote_open, |d| d.max_h(relative(0.94)))
             .flex()
             .flex_col()
             .bg(t.raised)
@@ -710,6 +799,8 @@ impl Compose {
                     .line_height(relative(READING_LEADING))
                     .child(self.body.clone()),
             )
+            .when(self.quoted.is_some(), |d| d.child(self.quote_row(cx)))
+            .when(self.quote_open, |d| d.children(self.quote_preview()))
             .child(
                 div()
                     .h(px(64.))
@@ -772,11 +863,21 @@ pub(crate) fn toast(t: &Theme, label: impl Into<gpui::SharedString>, undo: Optio
 
 impl gpui::EventEmitter<gpui::DismissEvent> for Compose {}
 
+impl WebHost for Compose {
+    fn web(&mut self) -> &mut Web { &mut self.web }
+    fn keys(&self) -> FocusHandle { self.focus.clone() }
+    // The quote is not a message to act on: mail keys in its web view do nothing.
+    fn new_task(&mut self, _: &mut Context<Self>) {}
+    fn mail_action(&mut self, _: crate::command_palette::Run, _: &mut Window, _: &mut Context<Self>) {}
+    fn hints(&mut self, _: bool, _: bool, _: bool, _: &mut Context<Self>) {}
+}
+
 impl Render for Compose {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.phase == Phase::Gone {
             return div();
         }
+        self.web_frame(window, cx);
         let t = self.theme;
         // A light veil, as AppKit sheets barely dim the window behind them.
         let scrim = Rgba { a: 0.12, ..gpui::rgb(0x000000) };

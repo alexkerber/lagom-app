@@ -168,6 +168,13 @@ class PlannerModelTest {
         assertEquals("EEEEdMMMM 2026-11-13", words.dayTitle("2026-11-13"))
         assertEquals("not a day", words.dayTitle("not a day"))
     }
+
+    @Test fun monthTitleShowsTheYearOnlyOutsideThisYear() {
+        val words = DateWords(LocalDate.of(2026, 11, 20)) { date, skeleton -> "$skeleton $date" }
+        assertEquals("MMMM 2026-11-02" to null, words.monthTitle(LocalDate.of(2026, 11, 2)))
+        assertEquals("MMMM 2027-01-04" to "yyyy 2027-01-04", words.monthTitle(LocalDate.of(2027, 1, 4)))
+        assertEquals("MMMM 2025-12-29" to "yyyy 2025-12-29", words.monthTitle(LocalDate.of(2025, 12, 29)))
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -189,5 +196,43 @@ class OpenInboxTest {
         model.clearSelection()
         model.openInbox(null)
         assertNull(model.selectedId); assertEquals(listOf(7L), model.rows.map { it.id })
+    }
+
+    @Test fun newEventDefaultsAsTheMac() {
+        val day = LocalDate.of(2026, 11, 20)
+        val at = { h: Int, m: Int -> day.atTime(h, m) }
+        assertEquals(at(10, 15) to at(11, 15), newEventTimes(day, at(10, 1)))
+        assertEquals("a quarter hour stays", at(10, 15) to at(11, 15), newEventTimes(day, at(10, 15)))
+        assertEquals("never past 23:45, and the hour runs into tomorrow", at(23, 45) to day.plusDays(1).atTime(0, 45), newEventTimes(day, at(23, 50)))
+        assertEquals("another day opens at 09:00", day.plusDays(1).atTime(9, 0) to day.plusDays(1).atTime(10, 0), newEventTimes(day.plusDays(1), at(16, 0)))
+        val stockholm = java.time.ZoneId.of("Europe/Stockholm")
+        assertTrue(unambiguous(at(9, 0), stockholm))
+        assertFalse("skipped in spring", unambiguous(LocalDate.of(2026, 3, 29).atTime(2, 30), stockholm))
+        assertFalse("repeated in autumn", unambiguous(LocalDate.of(2026, 10, 25).atTime(2, 30), stockholm))
+    }
+
+    @Test fun eventFormSendsInstantsAndDaysAndCreateReportsCoreWords() = runTest(dispatcher) {
+        val zone = java.time.ZoneId.of("Europe/Stockholm")
+        val start = LocalDate.of(2026, 11, 20).atTime(9, 0)
+        val form = eventForm("Lunch", start, start.plusDays(2), allDay = false, guests = "a@b.example", description = "", meet = true, zone = zone)
+        assertEquals(start.atZone(zone).toEpochSecond(), form.startUnix)
+        assertEquals(form.startUnix + 2 * 86_400, form.endUnix)
+        assertEquals(Triple("2026-11-20", "2026-11-22", "Europe/Stockholm"), Triple(form.firstDay, form.lastDay, form.timeZone))
+
+        val core = FakeCore().apply { connected = true; calendars = listOf(EventCalendar("acct", "primary", "Personal · you@gmail.com")) }
+        val planner = PlannerModel().apply { this.core = core }; planner.reload()
+        assertEquals(core.calendars, planner.eventCalendars)
+        core.rejectEvent = "End must be later than start"
+        assertEquals("End must be later than start", planner.createEvent(planner.eventCalendars[0], form))
+        core.rejectEvent = null
+        val loads = core.agendaCalls.size
+        assertNull(planner.createEvent(planner.eventCalendars[0], form))
+        assertEquals("acct" to "primary", core.createdEvents.single().let { it.first to it.second })
+        assertTrue("the week reloads after saving", core.agendaCalls.size > loads)
+
+        val demo = PlannerModel().apply { this.core = core; this.demo = true }; demo.reload()
+        assertEquals(listOf("Demo calendar"), demo.eventCalendars.map { it.label })
+        assertNull(demo.createEvent(demo.eventCalendars[0], form))
+        assertEquals(1, core.demoEvents.size); assertEquals(1, core.createdEvents.size)
     }
 }

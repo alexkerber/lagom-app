@@ -36,9 +36,11 @@ fn network<T>(future: impl Future<Output = lagom_core::Result<T>>) -> lagom_core
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct MailAccount { pub id: String, pub email: String, pub display_name: String }
+pub struct MailAccount { pub id: String, pub email: String, pub display_name: String,
+    /// How it signs in, in Settings' words ("Email and password", "Google account").
+    #[uniffi(default = "")] pub kind: String }
 impl From<Account> for MailAccount {
-    fn from(a: Account) -> Self { Self { id: a.id, email: a.email, display_name: a.display_name } }
+    fn from(a: Account) -> Self { Self { kind: a.auth.kind().into(), id: a.id, email: a.email, display_name: a.display_name } }
 }
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum TransportSecurity { Tls, StartTls, Plain }
@@ -137,6 +139,17 @@ pub struct InlineResource { pub mime_type: String, pub data: Vec<u8> }
 pub struct ReplyDraft {
     pub account: String, pub to: String, pub cc: String, pub subject: String, pub body: String,
     pub reply_to: Option<i64>, pub attachments: Vec<SendAttachment>,
+    /// An HTML original: shown under the editor with `mail_document`, saved and sent with the draft.
+    #[uniffi(default = None)] pub quoted: Option<QuotedMail>,
+}
+/// See `lagom_core::compose::Quoted`. `html` holds no `cid:` images, so it needs no message.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct QuotedMail { pub text: String, pub html: String }
+impl From<lagom_core::compose::Quoted> for QuotedMail {
+    fn from(q: lagom_core::compose::Quoted) -> Self { Self { text: q.text, html: q.html } }
+}
+impl From<QuotedMail> for lagom_core::compose::Quoted {
+    fn from(q: QuotedMail) -> Self { Self { text: q.text, html: q.html } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ComposeKind { Reply, ReplyAll, Forward }
@@ -206,7 +219,10 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     calls: std::sync::atomic::AtomicU64,
     contacts: Mutex<HashMap<String, lagom_core::contacts::Contacts>>,
     // shortcut: one browser sign-in at a time, lost if the app is killed in the browser; the user starts again.
-    sign_in: Mutex<Option<lagom_core::oauth::Pending>> }
+    sign_in: Mutex<Option<lagom_core::oauth::Pending>>,
+    // A calendar fetch, or a new event and its cache write: a fetch that began before Google stored the
+    // event must not replace the window without it. After removal in the lock order.
+    calendar: Mutex<()> }
 
 impl LagomCore {
     async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
@@ -382,7 +398,10 @@ fn sync_google(stores: &Stores, a: &Account) {
     if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return; }
     let log = |what: &str, result: lagom_core::Result<()>| if let Err(error) = result { eprintln!("lagom: Google {what} sync failed: {error:?}"); };
     let mut store = match Store::open(&stores.path) { Ok(store) => store, Err(error) => return log("Calendar", Err(error)) };
-    log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
+    {
+        let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
+    }
     match store.account_scopes(&a.id) {
         Ok(scopes) if lagom_core::oauth::tasks_allowed(&scopes) => log("Tasks", network(lagom_core::google::sync_tasks(&mut store, a))),
         Ok(_) => {}
@@ -406,7 +425,7 @@ impl LagomCore {
         let store = Store::open(&path)?;
         store.recover_outbox()?;
         let local = Store::open(&path)?;
-        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None) }), background_cancel: Arc::default() });
+        let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None), calendar: Mutex::new(()) }), background_cancel: Arc::default() });
         open.insert(dir, Arc::downgrade(&core.stores));
         Ok(core)
     }
@@ -773,10 +792,18 @@ impl LagomCore {
             let forward = kind == ComposeKind::Forward;
             let subject = if forward { compose::forward_subject(&m.subject) } else { compose::reply_subject(&m.subject) };
             let date = Local.timestamp_opt(m.date, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
-            let body = compose::compose_body(&s.signature(&a.id)?, Some(Original {
-                from: &m.from_name, address: &m.from_address, date: &date, subject: &m.subject, to: &m.to, text: &message.body_text,
-            }), if forward { compose::ComposeKind::Forward } else { compose::ComposeKind::Reply });
-            Ok(ReplyDraft { account: a.id, to, cc, subject, body, reply_to: (!forward).then_some(id), attachments: vec![] })
+            let original = Original { from: &m.from_name, address: &m.from_address, date: &date, subject: &m.subject, to: &m.to, text: &message.body_text };
+            let core_kind = if forward { compose::ComposeKind::Forward } else { compose::ComposeKind::Reply };
+            let signature = s.signature(&a.id)?;
+            // An HTML original stays HTML, out of the editable body; plain text quotes into it as before.
+            let (body, quoted) = match message.body_html.as_deref().filter(|html| !html.trim().is_empty()) {
+                Some(html) => {
+                    let inline = if s.inline_loaded(id)? { s.inline_parts(id)? } else { Vec::new() };
+                    (compose::compose_body(&signature, None, core_kind), Some(compose::quote(original, html, &inline, core_kind).into()))
+                }
+                None => (compose::compose_body(&signature, Some(original), core_kind), None),
+            };
+            Ok(ReplyDraft { account: a.id, to, cc, subject, body, reply_to: (!forward).then_some(id), attachments: vec![], quoted })
         }).await?;
         if kind == ComposeKind::Forward {
             let cached = self.run(move |s| s.cached_forward_attachments(id)).await?;

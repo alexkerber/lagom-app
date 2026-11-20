@@ -20,6 +20,34 @@ enum Storage {
         #endif
     }
 
+    /// DEBUG builds launched with `-LagomDemoSettings list|account` open Settings, or its first account's page, for screenshots without taps.
+    static var settingsScreen: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "LagomDemoSettings")
+        #else
+        nil
+        #endif
+    }
+
+    /// DEBUG builds launched with `-LagomDemoCompose quote|quote-open` open a reply to the demo's HTML mail, its quote closed or open.
+    static var composeScreen: String? {
+        #if DEBUG
+        demo ? UserDefaults.standard.string(forKey: "LagomDemoCompose") : nil
+        #else
+        nil
+        #endif
+    }
+
+    /// DEBUG builds launched with `-LagomDemoNewEvent empty|filled|saved` open Calendar's New event sheet, filled in,
+    /// or filled in and saved, for screenshots without taps.
+    static var newEventScreen: String? {
+        #if DEBUG
+        demo ? UserDefaults.standard.string(forKey: "LagomDemoNewEvent") : nil
+        #else
+        nil
+        #endif
+    }
+
     static func directory() throws -> URL {
         if demo {
             // `-LagomDemoCalendar google|granted|none`: Calendar's empty states, for screenshots.
