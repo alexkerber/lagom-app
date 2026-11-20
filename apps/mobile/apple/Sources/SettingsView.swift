@@ -136,7 +136,7 @@ struct SettingsView: View {
             row(title: "Signature", detail: "Added to new mail, replies and forwards.") { signing = account }
         }
         group(nil, note: nil) {
-            row(title: "Remove account", mark: Icon("remove-account"), chevron: false, tint: Theme.danger) { removing = account }
+            row(title: "Remove account", mark: Icon("remove-account").foregroundStyle(Theme.danger), chevron: false, tint: Theme.danger) { removing = account }
         } footer: {
             Text("Removes the account and its saved mail from this \(UIDevice.current.model). Your mail stays with your provider.")
                 .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.top, 8)
