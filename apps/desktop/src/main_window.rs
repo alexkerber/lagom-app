@@ -608,13 +608,10 @@ impl MainWindow {
             }
             "move" => this.open_palette("move tr", window, cx),
             "compose" => this.open_compose(true, window, cx),
-            // A reply to the HTML newsletter: the quote under the editor, collapsed or open.
-            "compose-quote" | "compose-quote-open" => {
+            // A reply to the HTML newsletter: the quote open under the editor.
+            "compose-quote" => {
                 this.inbox.select(INBOX_LEN - 1);
                 this.open_compose(true, window, cx);
-                if let Some(c) = this.compose.clone().filter(|_| screen == "compose-quote-open") {
-                    c.update(cx, |c, cx| c.toggle_quote(cx));
-                }
             }
             // A written reply with a word selected, Cc open with its focus ring, and live Markdown.
             "compose-text" | "compose-cc" | "compose-md" | "compose-md-bar" => {

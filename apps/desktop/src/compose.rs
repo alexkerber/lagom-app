@@ -45,7 +45,7 @@ pub struct Compose {
     quoted: Option<lagom_core::compose::Quoted>,
     /// The quote as the reading pane shows mail: its HTML for the web view, or `rich` on Linux.
     quote_mail: Option<crate::mail::Mail>,
-    /// The quote is expanded under the editor.
+    /// The quote is expanded under the editor: always when it is set, until Hide.
     quote_open: bool,
     /// The quote's own web view, as in a message window; made the first time the quote opens.
     web: Web,
@@ -187,6 +187,7 @@ impl Compose {
             rich: cfg!(target_os = "linux").then(|| std::sync::Arc::new(crate::rich::Rich::new(&q.html))),
             ..Default::default()
         });
+        self.quote_open = quoted.is_some();
         self.quoted = quoted;
         cx.notify();
     }
@@ -194,14 +195,6 @@ impl Compose {
     pub fn toggle_quote(&mut self, cx: &mut Context<Self>) {
         self.quote_open = !self.quote_open;
         cx.notify();
-    }
-
-    /// The quote goes from this message; the reply stays.
-    fn remove_quote(&mut self, cx: &mut Context<Self>) {
-        self.set_quote(None, cx);
-        self.quote_open = false;
-        self.web.hide();
-        self.save_later(cx);
     }
 
     pub fn load_forward(&self, cx: &mut Context<Self>) {
@@ -660,14 +653,16 @@ impl Compose {
         self.phase = phase;
         // A sheet that is not up may not draw again: its native web view must not stay on screen.
         if !self.is_modal() { self.web.hide(); }
+        // A reopened draft or an undone send shows its quote again, though it was hidden.
+        else { self.quote_open = self.quoted.is_some(); }
         if phase == Phase::Gone {
             cx.emit(gpui::DismissEvent);
         }
         cx.notify();
     }
 
-    /// The quiet "··· Quoted message" row under the editor: opens the quote in place, × removes it.
-    /// Tab reaches both after the body; Enter or Space presses them.
+    /// The quiet "··· Hide quoted message" row under the editor: hides or shows the quote in place.
+    /// Tab reaches it after the body; Enter or Space presses it.
     fn quote_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         div().flex().flex_shrink_0().items_center().gap(px(4.)).h(px(36.)).px(px(20.))
@@ -679,9 +674,6 @@ impl Compose {
                 .child(div().text_size(px(size::SMALL)).text_color(t.ink2)
                     .child(if self.quote_open { "Hide quoted message" } else { "Quoted message" }))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_quote(cx))))
-            .child(crate::settings::stop(t, icon_button(t, "remove-quote", "icons/close.svg", "Remove quoted message"))
-                // The pressed control goes with the quote: the body takes focus back.
-                .on_click(cx.listener(|this, _, window, cx| { this.remove_quote(cx); this.focus_body(window, cx); })))
     }
 
     /// The quote, read-only, drawn as the reading pane draws mail: the web view (macOS, Windows),
@@ -721,7 +713,7 @@ impl Compose {
             "enter" if crate::shortcuts::submit().matches(k) => self.send(window, cx),
             "backspace" if cmd => self.discard(cx),
             "c" if cmd && shift => self.add_cc(window, cx),
-            // The fields bind Tab themselves; this moves on from the quote's controls.
+            // The fields bind Tab themselves; this moves on from the quote's toggle.
             "tab" if shift => window.focus_prev(),
             "tab" => window.focus_next(),
             _ => return,

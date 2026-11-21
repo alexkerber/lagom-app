@@ -537,7 +537,7 @@ class MailModelTest {
         assertEquals(42L, core.sent.single().replyTo)
         assertEquals(setOf("other"), core.saved.keys)
     }
-    @Test fun htmlQuoteSurvivesSaveRestoreAndRemoval() = runTest(dispatcher) {
+    @Test fun htmlQuoteSurvivesSaveAndRestore() = runTest(dispatcher) {
         val quote = QuotedMail("> Ready", "<blockquote type=\"cite\"><p>Ready</p></blockquote>")
         val core = FakeCore().apply { mail = listOf(row(42)); preparedQuote = quote }
         val model = model(core); model.start()
@@ -548,9 +548,6 @@ class MailModelTest {
         model.reply(42)
         assertTrue(model.draft!!.restored)
         assertEquals(quote, model.draft?.quoted)
-        model.draft = model.draft!!.copy(quoted = null)
-        model.closeCompose(discard = false)
-        assertNull(core.saved.values.single().quoted)
     }
     @Test fun openingStaleDraftRowReadsLatestSavedBody() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.start()
