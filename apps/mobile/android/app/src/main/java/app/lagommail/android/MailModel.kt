@@ -126,8 +126,6 @@ internal class MailModel(
     var core: LagomCoreInterface? = null; private set
     var accounts by mutableStateOf<List<MailAccount>>(emptyList()); private set
     var rows by mutableStateOf<List<MailRow>>(emptyList()); private set
-    /** Debug demo only: the next compose opens its quote, for a screenshot without taps. */
-    var demoQuoteOpen = false
     var failures by mutableStateOf<List<SendFailure>>(emptyList()); private set
     var accountId by mutableStateOf<String?>(null); private set
     var mailbox by mutableStateOf(Mailbox.INBOX); private set

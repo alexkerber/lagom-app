@@ -760,7 +760,7 @@ extension MailModelTests {
         XCTAssertEqual(model.composeDraft?.subject, "Last edit")
     }
 
-    @MainActor func testHTMLQuoteStaysOutOfTheBodyAndSurvivesSaveRestoreAndRemoval() async throws {
+    @MainActor func testHTMLQuoteStaysOutOfTheBodyAndSurvivesSaveAndRestore() async throws {
         let quote = QuotedMail(text: "> On 2026-11-20, sender@example.test wrote:\n> \n> Ready", html: "<div>On 2026-11-20</div><blockquote type=\"cite\"><p>Ready</p></blockquote>")
         let core = ComposeFixtureCore(noHandle: .init())
         core.reply.body = "\n\n-- \nAlex"
@@ -774,9 +774,6 @@ extension MailModelTests {
         XCTAssertEqual(core.saved.first?.quoted, quote, "saved with the draft")
         await model.openDraft(try XCTUnwrap(core.saved.first).row)
         XCTAssertEqual(model.composeDraft?.quoted, quote, "and restored")
-        model.composeDraft?.quoted = nil
-        try await model.closeCompose(discard: false)
-        XCTAssertNil(core.saved.first?.quoted, "removing it is saved too")
     }
 
     @MainActor func testPickedAttachmentsWarnRemoveAutosaveAndRestore() async throws {

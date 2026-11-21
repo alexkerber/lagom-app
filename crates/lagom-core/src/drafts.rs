@@ -32,7 +32,7 @@ fn parse_draft(raw: &[u8]) -> Result<Draft> {
         let kept = crate::html::sanitize_parts(&html_quote).1;
         embedded = cids.iter().filter_map(|cid| first(cid)).filter(|p| kept.iter().any(|k| *k.data == *p.decoded())).map(|p| p.id()).collect();
         if html_only {
-            // The reply is the HTML before the marker, so removing the quote removes all of it. Other body parts stay.
+            // The reply is the HTML before the marker, so a draft saved without the quote sends none of it. Other body parts stay.
             let quote_part = parsed.html_body().next().map(|p| p.id());
             let reply = crate::mime::html_to_text(&html[..open]).trim_end().to_owned();
             text = parsed.text_body().filter_map(|p| if Some(p.id()) == quote_part { Some(reply.clone()) }

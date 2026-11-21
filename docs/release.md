@@ -174,18 +174,51 @@ Script: `scripts/package-linux.sh [version]`. Workflow: `.github/workflows/packa
 
 Workflow: `.github/workflows/package-ios.yml`. Script: `apps/mobile/apple/release.sh <version> [--upload | --unsigned]`.
 
-- The script builds the Rust library, generates the Xcode project and archives the Release build. It passes
+- The script builds the Rust library (`scripts/build-apple.sh`), generates the Xcode project and archives
+  the Release build. With `LAGOM_PREBUILT=1` it skips the Rust build and uses `Generated/` as it is. It passes
   `MARKETING_VERSION=${LAGOM_VERSION%%-*}` and `CURRENT_PROJECT_VERSION` = the UTC minute to `xcodebuild`.
   `project.yml` keeps development values. A pre-release `1.2.3-beta.4` ships as `1.2.3`, and TestFlight
   tells builds apart by the build number.
 - Signing is automatic (team `3KFU9JQ5LH`): the Apple ID in Xcode, or an App Store Connect API key when
   `LAGOM_ASC_KEY` (path to the .p8), `LAGOM_ASC_KEY_ID` and `LAGOM_ASC_ISSUER` are set.
 - Tags `v*`: archive, sign, export and upload to TestFlight.
-- `workflow_dispatch` on a tag: as a tag push. On a branch: the version is `0.0.0-dev.<sha>`, and the
-  signed .ipa is a workflow artifact. Nothing goes to TestFlight.
+- `workflow_dispatch` on a `v*` tag: as a tag push. On a branch: an unsigned archive with the version
+  `0.0.0-dev.<sha>`, as a build check. It no longer exports a signed .ipa: the key is in the `release`
+  environment, which admits only `v*` tags.
 - Pull requests that change Apple packaging: an unsigned archive, as a build check. Pull requests never
   get the signing secrets.
-- Without the signing secrets the workflow archives unsigned and warns. Nothing is uploaded.
+- When the environment lacks the App Store Connect key, a tag run fails in `upload`. Nothing is uploaded.
+
+CI jobs. No job that runs cargo, a build script or code from an artifact gets a release credential:
+
+| Job      | Runs                                                                                                                                                                                                                    | Secrets                                              |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `rust`   | rustup, cargo, `scripts/build-apple.sh`. Uploads `LagomFFI.xcframework` and `LagomCore.swift` as one tar, with its SHA-256 as a job output.                                                                             | None                                                 |
+| `check`  | Not on `v*` tags. A fresh runner, a sparse checkout of this commit, `unpack-ffi.sh`, then `LAGOM_PREBUILT=1 release.sh --unsigned`.                                                                                     | None                                                 |
+| `upload` | `environment: release`, `v*` tags only. A fresh runner, a sparse checkout of this commit. `unpack-ffi.sh` checks the hash and the entries before any key is on the runner. Then `LAGOM_PREBUILT=1 release.sh --upload`. | `APP_STORE_CONNECT_*`, `IOS_SIGNING_P12*` (optional) |
+
+`upload` runs no cargo, rustup or Rust build step. `project.yml` has no build phase scripts, no Swift
+packages and no package plugins, so `xcodebuild` runs no project code either. The artifact holds a
+static library, its headers and module map, and one Swift file. Xcode compiles and links them into
+the app; nothing from the tar runs on the runner. Tested locally 2026-11-21: the unsigned archive
+from the artifact with `cargo` and `rustup` replaced by stubs that fail.
+
+Residual risk in `upload`:
+
+- The Rust library and `LagomCore.swift` come from `rust`. A compromised dependency can change the
+  code that ships in the app. The split keeps the key away from that code at build time; it does not
+  make the app code benign.
+- `xcodebuild archive` compiles the artifact's header, module map and Swift file while the App Store
+  Connect key is on disk, because automatic signing needs the key in the same command. A module map
+  or header that names another file could compile that file into the app. So `unpack-ffi.sh` allows
+  only the files `build-apple.sh` writes, the module map uniffi writes and the three system headers
+  uniffi includes. Swift reads no file at compile time without a macro plugin, and `project.yml` loads
+  none. The key also sits in a folder with a random name. Closing this fully means archiving
+  unsigned in a job without the key and signing outside `xcodebuild archive`: a change to the signing
+  approach, not done (open decision).
+- `brew install xcodegen` runs Homebrew and the XcodeGen bottle, unpinned. XcodeGen runs while the
+  key is on disk. Pin it (a release zip with a checksum) to close that.
+- Xcode 27.2 and the `xcode-27` runner image are GitHub's.
 - No OAuth secret: the iOS app has no Google or Microsoft sign-in yet.
 
 Local release from a Mac signed in to Xcode with the team:
@@ -224,6 +257,9 @@ it gives you.
 
 ### GitHub secrets for iOS
 
+All are secrets of the `release` environment (see
+[Release credentials](#release-credentials-the-release-environment)).
+
 | Secret                        | Content                                                                                        |
 | ----------------------------- | ---------------------------------------------------------------------------------------------- |
 | `IOS_SIGNING_P12`             | Base64 of one .p12 with the "Apple Development" and "Apple Distribution" certificates and keys |
@@ -253,16 +289,16 @@ Once:
 4. Store the secrets:
 
    ```sh
-   base64 -i lagom-signing.p12 | gh secret set IOS_SIGNING_P12
-   gh secret set IOS_SIGNING_P12_PASSWORD
-   gh secret set APP_STORE_CONNECT_KEY < AuthKey_XXXXXXXXXX.p8
-   gh secret set APP_STORE_CONNECT_KEY_ID --body XXXXXXXXXX
-   gh secret set APP_STORE_CONNECT_ISSUER_ID --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   base64 -i lagom-signing.p12 | gh secret set IOS_SIGNING_P12 --env release
+   gh secret set IOS_SIGNING_P12_PASSWORD --env release
+   gh secret set APP_STORE_CONNECT_KEY --env release < AuthKey_XXXXXXXXXX.p8
+   gh secret set APP_STORE_CONNECT_KEY_ID --env release --body XXXXXXXXXX
+   gh secret set APP_STORE_CONNECT_ISSUER_ID --env release --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
    ```
 
 5. Delete the local .p12 and .p8 copies, or keep them only in a password manager.
-6. Run the workflow with `workflow_dispatch` on a branch. Check that the log signs with "Apple Distribution"
-   and exports an .ipa.
+6. Push a `v*` tag. Check that the `upload` log signs with "Apple Distribution" and uploads the build.
+   A dispatch on a branch archives unsigned only.
 7. Put the support and privacy pages on the site (`brand/store/app-store/README.md` lists the URLs).
 8. Fill in the listing from `brand/store/app-store/`, the age rating and App Privacy ("Data Not Collected").
    Answer the export compliance question once (see above).
