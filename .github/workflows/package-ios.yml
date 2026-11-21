@@ -1,8 +1,10 @@
 name: Package iOS
 
-# Tags v1.2.3 (and a manual run on a tag) archive, export and upload to TestFlight.
-# A manual run on a branch exports a signed .ipa without uploading it.
-# Without the signing secrets, and on pull requests, it archives unsigned: a build check only.
+# Tags v1.2.3 (and a manual run on a v* tag) archive, export and upload to TestFlight.
+# Pull requests and every other run archive unsigned: a build check only.
+# No job that runs cargo, build scripts or code from an artifact gets a release credential:
+# rust (cargo, no secrets) -> check (unsigned, not v* tags) or upload (release environment, v* tags).
+# docs/release.md, "Release credentials", has the rule; "iOS and iPadOS" has the job layout.
 on:
   push:
     tags: ["v*"]
@@ -10,6 +12,7 @@ on:
     paths:
       - apps/mobile/apple/project.yml
       - apps/mobile/apple/release.sh
+      - apps/mobile/apple/unpack-ffi.sh
       - apps/mobile/apple/ExportOptions.plist
       - apps/mobile/apple/PrivacyInfo.xcprivacy
       - scripts/build-apple.sh
@@ -19,11 +22,20 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  package:
-    name: iPhone and iPad archive
+  # Runs cargo and the build scripts of all dependencies, so it gets no release secret. It makes
+  # the static library and the Swift bindings (scripts/build-apple.sh) for the archive jobs.
+  rust:
+    name: Rust library and Swift bindings
     # The iPhone Duo layout needs the iOS 27 SDK: an app built with an older SDK runs scaled as a plain iPhone app.
     runs-on: xcode-27
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha256: ${{ steps.ffi.outputs.sha256 }}
     steps:
       - name: Xcode 27.2, as on the release Mac
         run: |
@@ -39,8 +51,6 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install XcodeGen
-        run: brew install xcodegen
       - name: Version from the tag
         id: version
         env:
@@ -50,13 +60,102 @@ jobs:
         run: |
           if [[ $REF_TYPE == tag ]]; then version=${REF_NAME#v}; else version=0.0.0-dev.${SHA:0:7}; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      # Pull requests never get the signing keys, even from branches in this repository.
+      - name: Build the library and bindings
+        id: ffi
+        run: |
+          scripts/build-apple.sh
+          tar -C apps/mobile/apple/Generated -cf "$RUNNER_TEMP/lagom-ffi.tar" LagomFFI.xcframework LagomCore.swift
+          echo "sha256=$(shasum -a 256 "$RUNNER_TEMP/lagom-ffi.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-ffi
+          path: ${{ runner.temp }}/lagom-ffi.tar
+          if-no-files-found: error
+
+  # Pull requests, branches and non-v* tags: an unsigned archive from the prebuilt library, with
+  # the same steps as upload minus the key. No secret, no environment.
+  check:
+    name: iPhone and iPad archive (unsigned)
+    needs: rust
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: xcode-27
+    steps:
+      - name: Xcode 27.2, as on the release Mac
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $sdk"
+          [[ ${sdk%%.*} -ge 27 ]] || { echo "::error::iOS SDK $sdk is older than 27: the iPhone Duo would get a scaled app."; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            apps/mobile/apple/
+            apps/desktop/assets/fonts/
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ios-ffi
+          path: ${{ runner.temp }}/ffi
+      - name: Unpack the library and bindings
+        env:
+          SHA256: ${{ needs.rust.outputs.sha256 }}
+        run: apps/mobile/apple/unpack-ffi.sh "$RUNNER_TEMP/ffi/lagom-ffi.tar" "$SHA256"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Archive unsigned
+        env:
+          VERSION: ${{ needs.rust.outputs.version }}
+          LAGOM_PREBUILT: "1"
+          LAGOM_GOOGLE_IOS_CLIENT_ID: ${{ vars.LAGOM_GOOGLE_IOS_CLIENT_ID }}
+          LAGOM_MICROSOFT_IOS_CLIENT_ID: ${{ vars.LAGOM_MICROSOFT_CLIENT_ID }}
+        run: |
+          apps/mobile/apple/release.sh "$VERSION" --unsigned
+          plutil -p apps/mobile/apple/build/Lagom.xcarchive/Products/Applications/Lagom.app/Info.plist \
+            | grep -E 'CFBundleShortVersionString|CFBundleVersion"'
+
+  # A fresh runner with the App Store Connect key. It runs no cargo, no rustup and nothing from the
+  # artifact: the tar holds a static library, headers and one Swift file that Xcode compiles into
+  # the app. The secrets live in the `release` environment, which admits only v* tags.
+  upload:
+    name: iPhone and iPad archive and TestFlight upload
+    needs: rust
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: xcode-27
+    environment: release
+    # The keychain stays unlocked while the job runs; a hung upload must not keep it for hours.
+    timeout-minutes: 60
+    steps:
+      - name: Xcode 27.2, as on the release Mac
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $sdk"
+          [[ ${sdk%%.*} -ge 27 ]] || { echo "::error::iOS SDK $sdk is older than 27: the iPhone Duo would get a scaled app."; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            apps/mobile/apple/
+            apps/desktop/assets/fonts/
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ios-ffi
+          path: ${{ runner.temp }}/ffi
+      # Before any credential is on this runner.
+      - name: Unpack the library and bindings
+        env:
+          SHA256: ${{ needs.rust.outputs.sha256 }}
+        run: apps/mobile/apple/unpack-ffi.sh "$RUNNER_TEMP/ffi/lagom-ffi.tar" "$SHA256"
+      - name: Install XcodeGen
+        run: brew install xcodegen
       # The .p12 holds the development and the distribution identity: automatic signing archives
       # with the first and exports with the second. Without it, an Admin API key lets Xcode use
       # cloud-managed certificates instead.
       - name: Signing keychain and App Store Connect key
-        id: signing
-        if: github.event_name != 'pull_request'
         env:
           P12: ${{ secrets.IOS_SIGNING_P12 }}
           P12_PASSWORD: ${{ secrets.IOS_SIGNING_P12_PASSWORD }}
@@ -65,8 +164,8 @@ jobs:
           ASC_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           if [[ -z $ASC_KEY || -z $ASC_KEY_ID || -z $ASC_ISSUER ]]; then
-            echo '::warning::No App Store Connect key: the archive is unsigned and nothing goes to TestFlight.'
-            exit 0
+            echo '::error::The release environment lacks APP_STORE_CONNECT_KEY, _KEY_ID or _ISSUER_ID: nothing goes to TestFlight.'
+            exit 1
           fi
           if [[ -n $P12 ]]; then
             keychain=$RUNNER_TEMP/lagom-ios.keychain-db
@@ -80,36 +179,27 @@ jobs:
             security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
             security list-keychains -d user -s "$keychain" login.keychain-db
           fi
-          printf '%s\n' "$ASC_KEY" > "$RUNNER_TEMP/asc.p8"
+          # A random folder: the compiler builds code from the artifact while the key is on disk,
+          # and a header could #embed a file at a path it can guess.
+          keydir=$(mktemp -d "$RUNNER_TEMP/asc.XXXXXXXXXXXX")
+          (umask 077; printf '%s\n' "$ASC_KEY" > "$keydir/asc.p8")
           {
-            echo "LAGOM_ASC_KEY=$RUNNER_TEMP/asc.p8"
+            echo "LAGOM_ASC_KEY=$keydir/asc.p8"
             echo "LAGOM_ASC_KEY_ID=$ASC_KEY_ID"
             echo "LAGOM_ASC_ISSUER=$ASC_ISSUER"
           } >> "$GITHUB_ENV"
-          echo "signed=1" >> "$GITHUB_OUTPUT"
       - name: Archive, export and upload
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          SIGNED: ${{ steps.signing.outputs.signed }}
-          REF_TYPE: ${{ github.ref_type }}
+          VERSION: ${{ needs.rust.outputs.version }}
+          LAGOM_PREBUILT: "1"
           LAGOM_GOOGLE_IOS_CLIENT_ID: ${{ vars.LAGOM_GOOGLE_IOS_CLIENT_ID }}
           LAGOM_MICROSOFT_IOS_CLIENT_ID: ${{ vars.LAGOM_MICROSOFT_CLIENT_ID }}
         run: |
-          if [[ $SIGNED != 1 ]]; then mode=--unsigned
-          elif [[ $REF_TYPE == tag ]]; then mode=--upload
-          else mode="export"; fi
-          apps/mobile/apple/release.sh "$VERSION" "$mode"
+          apps/mobile/apple/release.sh "$VERSION" --upload
           plutil -p apps/mobile/apple/build/Lagom.xcarchive/Products/Applications/Lagom.app/Info.plist \
             | grep -E 'CFBundleShortVersionString|CFBundleVersion"'
       - name: Remove signing material
         if: always()
         run: |
           [[ ! -f $RUNNER_TEMP/lagom-ios.keychain-db ]] || security delete-keychain "$RUNNER_TEMP/lagom-ios.keychain-db"
-          rm -f "$RUNNER_TEMP/asc.p8"
-      # The .ipa when signed; an unsigned archive is only a build check and is not kept.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.signing.outputs.signed == '1'
-        with:
-          name: ios-ipa
-          path: apps/mobile/apple/build/export/*.ipa
-          if-no-files-found: ignore
+          rm -rf "$RUNNER_TEMP"/asc.*
