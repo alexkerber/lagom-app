@@ -1,7 +1,10 @@
 name: Package Android
 
-# Tags v1.2.3 build the signed release App Bundle and APK and attach them to the draft GitHub release.
-# Pull requests that touch Android packaging only build, unsigned.
+# Tags v1.2.3 build the release App Bundle and APK, sign them with the upload key and attach them to
+# the draft GitHub release. Pull requests and every other run build unsigned, as a workflow artifact.
+# No job that runs Gradle, cargo, build scripts or code from an artifact gets a release credential:
+# build (Gradle and cargo, no secrets) -> sign (upload key, v* tags) -> release.
+# docs/release.md, "Release credentials", has the rule; "Android" has the job layout.
 on:
   push:
     tags: ["v*"]
@@ -19,13 +22,20 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  package:
-    name: Release AAB and APK
+  # Runs Gradle, cargo and the build scripts of all dependencies, so it gets no upload key. The
+  # release AAB and APK stay unsigned; the sign job signs them.
+  build:
+    name: Release AAB and APK (unsigned)
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      signed: ${{ steps.build.outputs.signed }}
+      aab_sha256: ${{ steps.build.outputs.aab_sha256 }}
+      apk_sha256: ${{ steps.build.outputs.apk_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -70,57 +80,159 @@ jobs:
         id: build
         working-directory: apps/mobile/android
         env:
-          # Pull requests never get the upload key, even from branches in this repository.
-          LAGOM_ANDROID_KEYSTORE: ${{ github.event_name != 'pull_request' && secrets.LAGOM_ANDROID_KEYSTORE || '' }}
-          LAGOM_ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.LAGOM_ANDROID_KEYSTORE_PASSWORD || '' }}
-          LAGOM_ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.LAGOM_ANDROID_KEY_ALIAS || '' }}
-          LAGOM_ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.LAGOM_ANDROID_KEY_PASSWORD || '' }}
           VERSION: ${{ steps.version.outputs.version }}
           # Public client IDs (repository variables, not secrets); empty hides that sign-in button.
           LAGOM_GOOGLE_ANDROID_CLIENT_ID: ${{ vars.LAGOM_GOOGLE_ANDROID_CLIENT_ID }}
           LAGOM_MICROSOFT_ANDROID_CLIENT_ID: ${{ vars.LAGOM_MICROSOFT_CLIENT_ID }}
         run: |
           ./gradlew :app:bundleRelease :app:assembleRelease
-          mkdir -p "$RUNNER_TEMP/out"
-          if [[ -n $LAGOM_ANDROID_KEYSTORE ]]; then
-            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
-            cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/out/lagom-$VERSION-android.apk"
-            echo "signed=1" >> "$GITHUB_OUTPUT"
-          else
-            echo '::warning::No upload key: the AAB and APK are unsigned. Play and phones refuse them.'
-            cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/out/lagom-$VERSION-android-unsigned.apk"
+          out=$RUNNER_TEMP/out
+          mkdir -p "$out"
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "$out/lagom-$VERSION-android-unsigned.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "$out/lagom-$VERSION-android-unsigned.aab"
+          {
+            echo "aab_sha256=$(sha256sum "$out/lagom-$VERSION-android-unsigned.aab" | cut -d' ' -f1)"
+            echo "apk_sha256=$(sha256sum "$out/lagom-$VERSION-android-unsigned.apk" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-unsigned
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  # A fresh runner with the upload key. It runs no Gradle, no cargo, no checkout and nothing from the
+  # artifact: only zipalign, apksigner (build-tools 36.0.0) and jarsigner/keytool (JDK 17). The
+  # secrets live in the `release` environment, which admits only v* tags.
+  sign:
+    name: Sign with the upload key
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      aab_sha256: ${{ steps.sign.outputs.aab_sha256 }}
+      apk_sha256: ${{ steps.sign.outputs.apk_sha256 }}
+    env:
+      # The upload certificate, from apksigner in the v0.1.30-beta.7 run (2026-11-20). A build signed
+      # with any other key fails here, before it reaches the release.
+      UPLOAD_CERT_SHA256: dc2bee3081b108a24f8f7b4fe0e855ce5608d1e54b6145b0d536ef5b30676efe
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'build-tools;36.0.0'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-unsigned
+          path: ${{ runner.temp }}/in
+      # Before any credential is on this runner. The hashes come from the build job.
+      - name: Check the unsigned files
+        working-directory: ${{ runner.temp }}/in
+        env:
+          AAB_SHA256: ${{ needs.build.outputs.aab_sha256 }}
+          APK_SHA256: ${{ needs.build.outputs.apk_sha256 }}
+        # Both digests must be well formed: sha256sum skips a malformed line with a warning only.
+        run: |
+          [[ $AAB_SHA256 =~ ^[0-9a-f]{64}$ && $APK_SHA256 =~ ^[0-9a-f]{64}$ ]]
+          sha256sum -c --strict - <<EOF
+          $AAB_SHA256  lagom-$VERSION-android-unsigned.aab
+          $APK_SHA256  lagom-$VERSION-android-unsigned.apk
+          EOF
+      - name: Sign and verify
+        id: sign
+        env:
+          KEYSTORE: ${{ secrets.LAGOM_ANDROID_KEYSTORE }}
+          KS_PASS: ${{ secrets.LAGOM_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.LAGOM_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.LAGOM_ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z $KEYSTORE || -z $KS_PASS || -z $KEY_ALIAS ]]; then
+            echo '::error::The release environment lacks LAGOM_ANDROID_KEYSTORE, _KEYSTORE_PASSWORD or _KEY_ALIAS: nothing is attached.'
+            exit 1
           fi
-          cp app/build/outputs/bundle/release/app-release.aab "$RUNNER_TEMP/out/lagom-$VERSION-android.aab"
-          rm -f app/build/signing/upload.jks
+          # The key password is optional; the keystore password is used when it is missing, as in Gradle.
+          export KS_PASS KEY_PASS=${KEY_PASSWORD:-$KS_PASS}
+          tools=$ANDROID_HOME/build-tools/36.0.0
+          in=$RUNNER_TEMP/in out=$RUNNER_TEMP/out
+          mkdir -p "$out"
+          keydir=$(mktemp -d "$RUNNER_TEMP/key.XXXXXXXXXXXX")
+          (umask 077; printf '%s' "$KEYSTORE" | base64 --decode > "$keydir/upload.jks")
+          apk=$out/lagom-$VERSION-android.apk aab=$out/lagom-$VERSION-android.aab
+          "$tools/zipalign" -P 16 -f 4 "$in/lagom-$VERSION-android-unsigned.apk" "$keydir/aligned.apk"
+          # No v4 signature: it is a separate .idsig file, and the release attaches the APK alone.
+          "$tools/apksigner" sign --ks "$keydir/upload.jks" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS --v4-signing-enabled false --out "$apk" "$keydir/aligned.apk"
+          cp "$in/lagom-$VERSION-android-unsigned.aab" "$aab"
+          jarsigner -keystore "$keydir/upload.jks" -storepass:env KS_PASS -keypass:env KEY_PASS \
+            -sigalg SHA256withRSA -digestalg SHA-256 "$aab" "$KEY_ALIAS" >/dev/null
+          rm -rf "$keydir"
+          "$tools/zipalign" -c -P 16 4 "$apk"
+          "$tools/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/apk-certs.txt"
+          # Not -strict: it fails on any self-signed certificate, and upload certificates are self-signed.
+          # The digests must still match ("jar verified"); the certificate check below pins the signer.
+          jarsigner -J-Duser.language=en -verify "$aab" | tee "$RUNNER_TEMP/aab-verify.txt"
+          grep -q '^jar verified' "$RUNNER_TEMP/aab-verify.txt"
+          # One certificate each, and it is the upload certificate. A second signer or a chain fails.
+          apk_certs=$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-certs.txt")
+          aab_certs=$(keytool -J-Duser.language=en -printcert -jarfile "$aab" | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          for certs in "$apk_certs" "$aab_certs"; do
+            if [[ $certs != "$UPLOAD_CERT_SHA256" ]]; then
+              echo "::error::Signed with another certificate: $certs"
+              exit 1
+            fi
+          done
+          {
+            echo "aab_sha256=$(sha256sum "$aab" | cut -d' ' -f1)"
+            echo "apk_sha256=$(sha256sum "$apk" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP"/key.*
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android-release
           path: ${{ runner.temp }}/out/*
           if-no-files-found: error
 
+  # No environment: it holds only GITHUB_TOKEN.
   release:
     name: Attach to the GitHub release
-    needs: package
-    # An unsigned build on a tag stays a workflow artifact; it must not reach the release page.
-    if: github.ref_type == 'tag' && needs.package.outputs.signed == '1'
+    needs: [build, sign]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: android-release
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
           sparse-checkout: scripts/upload-release.sh
           sparse-checkout-cone-mode: false
           path: repo
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-release
+          path: ${{ runner.temp }}/release
       # release-draft.yml creates the draft; a human publishes it after docs/release.md.
       - name: Upload to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.package.outputs.version }}
-        run: repo/scripts/upload-release.sh "$TAG" "lagom-$VERSION-android.apk" "lagom-$VERSION-android.aab"
+          VERSION: ${{ needs.build.outputs.version }}
+          AAB_SHA256: ${{ needs.sign.outputs.aab_sha256 }}
+          APK_SHA256: ${{ needs.sign.outputs.apk_sha256 }}
+        run: |
+          upload=$GITHUB_WORKSPACE/repo/scripts/upload-release.sh
+          cd "$RUNNER_TEMP/release"
+          [[ $AAB_SHA256 =~ ^[0-9a-f]{64}$ && $APK_SHA256 =~ ^[0-9a-f]{64}$ ]]
+          sha256sum -c --strict - <<EOF
+          $AAB_SHA256  lagom-$VERSION-android.aab
+          $APK_SHA256  lagom-$VERSION-android.apk
+          EOF
+          "$upload" "$TAG" "lagom-$VERSION-android.apk" "lagom-$VERSION-android.aab"

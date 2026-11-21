@@ -45,6 +45,32 @@ branches. Not verified on `main` when this page was written.
 - Check that a notification appears for new mail.
 - Read `TODO.md` for open items that block the release.
 
+## Release credentials: the `release` environment
+
+Signing and upload secrets live in the GitHub environment `release`, not in the repository secrets.
+
+- The environment's deployment policy admits only tags that match `v*`. A job with
+  `environment: release` on a branch or a pull request stops at the gate and gets no secret.
+- A tag ruleset lets only repository admins create, update or delete `v*` tags. So only an admin
+  starts a run that reaches the secrets.
+- A job that holds a release credential runs no cargo, no rustup, no build script and no code from
+  an artifact. It runs on a fresh GitHub-hosted runner, checks out `github.sha` and checks each
+  artifact against a hash from the job that made it. A compromised Rust dependency then runs code
+  only in jobs without a credential. That job still signs what the build made: the split keeps the
+  keys away from the build, it does not prove the build benign.
+- Environment secrets: `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY`,
+  `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` and `SPARKLE_ED_PRIVATE_KEY` (macOS).
+  `APP_STORE_CONNECT_KEY`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and the optional
+  `IOS_SIGNING_P12` and `IOS_SIGNING_P12_PASSWORD` (iOS). `LAGOM_ANDROID_KEYSTORE`,
+  `LAGOM_ANDROID_KEYSTORE_PASSWORD`, `LAGOM_ANDROID_KEY_ALIAS` and the optional
+  `LAGOM_ANDROID_KEY_PASSWORD` (Android).
+- Repository secret: only `LAGOM_OAUTH_ENV` (client IDs that ship in the app, a build input).
+- Store a secret with `gh secret set <NAME> --env release`. After you move one, delete the
+  repository copy with `gh secret delete <NAME>`: a workflow on any branch can read a repository secret.
+  Move a platform's secrets when its workflow split is on `main`; the old workflow reads repository secrets.
+- A `workflow_dispatch` on a branch never asks for the environment. It builds without signing.
+- Not verified: a tag run with the environment (written 2026-11-21).
+
 ## macOS
 
 Workflow: `.github/workflows/package-macos.yml`. Script: `scripts/package-macos.sh`.
@@ -260,8 +286,29 @@ Workflow: `.github/workflows/package-android.yml`. Store text and Data safety an
 - Tags `v*`: build the App Bundle and the APK, sign them with the upload key and attach both to the
   draft release. Files: `lagom-<LAGOM_VERSION>-android.aab` and `.apk`.
 - Pull requests that change Android packaging: build unsigned, as a workflow artifact only.
-- `workflow_dispatch`: as a tag, but development version and nothing goes to a release.
-- Without the upload key the build is unsigned and the workflow warns. A tag then attaches nothing.
+- `workflow_dispatch` on a branch: build unsigned with the development version, as a workflow artifact.
+  It no longer signs: the upload key is in the `release` environment, which admits only `v*` tags.
+  On a `v*` tag it runs as a tag push.
+- When the environment lacks the upload key, a tag run fails in `sign` and attaches nothing.
+
+CI jobs. No job that runs Gradle, cargo, a build script or code from an artifact gets a release
+credential:
+
+| Job       | Runs                                                                                                                                                                                                                                            | Secrets                               |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `build`   | cargo-ndk, `scripts/build-android.sh`, Gradle `bundleRelease` and `assembleRelease` without a signing config. Uploads the unsigned AAB and APK, with their SHA-256 as job outputs.                                                              | None                                  |
+| `sign`    | `environment: release`, `v*` tags only. A fresh runner and no checkout. Checks both hashes, then `zipalign`, `apksigner` (build-tools 36.0.0) and `jarsigner` (JDK 17). Verifies both signatures and that the signer is the upload certificate. | `LAGOM_ANDROID_*`                     |
+| `release` | `v*` tags after `sign`. No environment. Checks the hashes from `sign` and attaches the files to the draft.                                                                                                                                      | `GITHUB_TOKEN` with `contents: write` |
+
+`sign` compares the signer with the upload certificate's SHA-256,
+`dc2bee3081b108a24f8f7b4fe0e855ce5608d1e54b6145b0d536ef5b30676efe` (from `apksigner` in the
+v0.1.30-beta.7 run, 2026-11-20). Change `UPLOAD_CERT_SHA256` in the workflow when the upload key changes.
+`jarsigner -verify` runs without `-strict`, which refuses every self-signed certificate (measured
+2026-11-21); the pinned certificate does that job. Tested locally 2026-11-21 with a throwaway key:
+signing and both verifications pass, the pinned certificate refuses the throwaway signer, a changed
+AAB fails `jarsigner -verify`, and an empty or wrong hash stops the job.
+It signs what `build` made: the split keeps the key away from Gradle and cargo, it does not prove the
+app code benign. `setup-java` and `setup-android` run in `sign` too, pinned to a commit.
 
 Local release build:
 
@@ -270,8 +317,11 @@ scripts/build-android.sh
 LAGOM_VERSION=1.2.3 apps/mobile/android/gradlew -p apps/mobile/android :app:bundleRelease
 ```
 
-Signing reads four values from the environment or from `~/.gradle/gradle.properties`, never from the
-repository. Without them the release output is unsigned.
+A local release build signs in Gradle: it reads four values from the environment or from
+`~/.gradle/gradle.properties`, never from the repository. Without them the release output is unsigned.
+CI never gives Gradle the key.
+
+In CI all four are secrets of the `release` environment.
 
 | Secret or property                | Content                                                                       |
 | --------------------------------- | ----------------------------------------------------------------------------- |
@@ -290,20 +340,21 @@ Human steps (once):
 
    ```sh
    keytool -genkeypair -v -keystore lagom-upload.jks -keyalg RSA -keysize 4096 -validity 10000 -alias upload
-   base64 -i lagom-upload.jks | gh secret set LAGOM_ANDROID_KEYSTORE
-   gh secret set LAGOM_ANDROID_KEYSTORE_PASSWORD
-   gh secret set LAGOM_ANDROID_KEY_ALIAS --body upload
+   base64 -i lagom-upload.jks | gh secret set LAGOM_ANDROID_KEYSTORE --env release
+   gh secret set LAGOM_ANDROID_KEYSTORE_PASSWORD --env release
+   gh secret set LAGOM_ANDROID_KEY_ALIAS --env release --body upload
    ```
 
    Keep the keystore and its password in a password manager, then delete the local copy.
+
 3. Turn on Play App Signing and upload the first `.aab` by hand. Google keeps the app signing key.
 4. New personal developer accounts must run a closed test with at least 12 testers for 14 days
    before production access. Plan for this.
 5. Fill in the store listing, Data safety, content rating and target audience from
    `brand/store/google-play/`. Icon `brand/store/play-icon-512.png`, feature graphic
    `brand/store/play-feature-1024x500.png`. Take the screenshots from the shot list there.
-6. Run the workflow once with `workflow_dispatch` and check that the log shows the certificate from
-   `apksigner verify --print-certs`.
+6. Push a `v*` tag and check that the `sign` log shows the certificate from
+   `apksigner verify --print-certs`. A dispatch on a branch builds unsigned only.
 
 ## OAuth providers (all platforms)
 
