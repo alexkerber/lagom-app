@@ -653,6 +653,8 @@ impl Compose {
         self.phase = phase;
         // A sheet that is not up may not draw again: its native web view must not stay on screen.
         if !self.is_modal() { self.web.hide(); }
+        // A reopened draft or an undone send shows its quote again, though it was hidden.
+        else { self.quote_open = self.quoted.is_some(); }
         if phase == Phase::Gone {
             cx.emit(gpui::DismissEvent);
         }

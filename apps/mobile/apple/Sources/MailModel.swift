@@ -709,7 +709,7 @@ final class MailModel {
     /// DEBUG `-LagomDemoCompose`: a reply to the demo's HTML ticket, once, after the list that presents the sheet is up.
     private var demoComposed = false
     func openDemoCompose() async {
-        guard Storage.composeScreen != nil, !demoComposed, composeDraft == nil, let core,
+        guard Storage.composeScreen == "quote", !demoComposed, composeDraft == nil, let core,
               let row = rows.first(where: { $0.subject.hasPrefix("Stockholm C") }) else { return }
         demoComposed = true
         composeDraft = (try? await core.composeDraft(id: row.id, kind: .reply)).map { ComposeDraft(reply: $0, kind: .reply) }

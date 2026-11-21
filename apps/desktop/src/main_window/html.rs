@@ -602,7 +602,10 @@ mod tests {
         assert!(compose.read_with(cx, |c, _| c.quote_open()), "Enter shows it again");
         press(cx, "space", "space");
         assert!(compose.read_with(cx, |c, cx| c.outgoing(cx).quoted.is_some()), "a hidden quote still goes with the reply");
-        // A reopened draft opens its quote again, though it was hidden.
+        assert!(!compose.read_with(cx, |c, _| c.quote_open()));
+        // A reopened draft opens its quote again, though it was hidden: the kept sheet and one read from the store.
+        compose.update_in(cx, |c, window, cx| c.reopen(window, cx));
+        assert!(compose.read_with(cx, |c, _| c.quote_open()), "the kept sheet reopens with its quote open");
         let path = std::env::temp_dir().join(format!("lagom-quote-open-{}.db", std::process::id()));
         let store = std::rc::Rc::new(lagom_core::store::Store::open(&path).unwrap());
         let (imap, smtp) = lagom_core::presets::servers("self@gmail.com").unwrap();
