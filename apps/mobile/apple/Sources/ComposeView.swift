@@ -18,7 +18,8 @@ struct ComposeView: View {
     @State private var pickingPhotos = false
     @State private var photos: [PhotosPickerItem] = []
     @State private var attaching = false
-    @State private var quoteOpen = Storage.composeScreen == "quote-open"
+    // A quoted original always opens expanded, a reopened draft too; Hide only folds it for this sheet.
+    @State private var quoteOpen = true
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.railInset) private var railInset
@@ -237,8 +238,8 @@ struct ComposeView: View {
 
     private var from: String { model.accounts.first { $0.id == draft.account }?.email ?? "" }
 
-    /// The HTML original under the editor: a quiet "··· Quoted message" row that opens it in place, read-only,
-    /// in the reading pane's web view and document; × removes it from this message.
+    /// The HTML original under the editor, read-only, in the reading pane's web view and document,
+    /// with a quiet "··· Hide quoted message" row that folds it in place. It always goes with the reply.
     @ViewBuilder private func quote(_ quoted: QuotedMail) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -254,11 +255,6 @@ struct ComposeView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(quoteOpen ? "Hide quoted message" : "Show quoted message")
                 Spacer(minLength: 0)
-                IconButton(title: "Remove quoted message", icon: "close") {
-                    setQuoteOpen(false)
-                    draft.quoted = nil
-                    model.composeDraft = draft
-                }
             }
             if quoteOpen, let core = model.core {
                 MailHTML(document: mailDocument(html: quoted.html, dark: scheme == .dark, messageId: 0, remote: false), messageID: 0, core: core)

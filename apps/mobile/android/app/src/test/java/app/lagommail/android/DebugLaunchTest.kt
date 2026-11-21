@@ -9,8 +9,9 @@ class DebugLaunchTest {
         assertEquals(DebugLaunch(), debugLaunch(debug = false, demo = "welcome", theme = "light"))
     }
     @Test fun debugTakesOnlyKnownDemos() {
-        for (demo in listOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none")) assertEquals(demo, debugLaunch(true, demo, null).demo)
+        for (demo in listOf("mail", "welcome", "notifications", "calendar-google", "calendar-granted", "calendar-none", "compose-quote")) assertEquals(demo, debugLaunch(true, demo, null).demo)
         assertNull(debugLaunch(true, "anything", null).demo)
+        assertNull("the quote always opens: no closed/open variants", debugLaunch(true, "compose-quote-open", null).demo)
         assertNull(debugLaunch(true, null, null).demo)
     }
     @Test fun debugThemeForcesLightOrDarkOtherwiseFollowsSystem() {

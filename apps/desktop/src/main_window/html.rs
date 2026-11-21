@@ -581,17 +581,11 @@ mod tests {
         assert!(!body.contains("> "), "the editable body holds no quote: {body:?}");
         assert!(quoted.html.contains("<blockquote type=\"cite\"") && quoted.html.contains("Version 0.4 is out"));
         assert!(!quoted.html.contains("<style") && !quoted.html.contains("svg+xml"), "sanitized: {}", quoted.html);
-        assert!(cx.debug_bounds("quote-toggle").is_some() && cx.debug_bounds("quote-preview").is_none(), "collapsed by default");
-        let click = |cx: &mut gpui::VisualTestContext, id: &'static str| {
-            cx.update(|window, _| window.refresh());
-            cx.run_until_parked();
-            let at = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} not shown")).center();
-            cx.simulate_click(at, gpui::Modifiers::none());
-            cx.run_until_parked();
-        };
-        click(cx, "quote-toggle");
-        assert!(cx.debug_bounds("quote-preview").is_some(), "expands in place");
-        // The keyboard reaches both controls: Tab from the body, then Space or Enter, released, presses.
+        // The quote always opens, and nothing removes it.
+        assert!(compose.read_with(cx, |c, _| c.quote_open()), "open by default");
+        assert!(cx.debug_bounds("quote-toggle").is_some() && cx.debug_bounds("quote-preview").is_some(), "open by default");
+        assert!(cx.debug_bounds("remove-quote").is_none(), "no control removes the quote");
+        // The keyboard reaches the toggle: Tab from the body, then Space or Enter, released, presses.
         let press = |cx: &mut gpui::VisualTestContext, keys: &str, key: &str| {
             cx.simulate_keystrokes(keys);
             cx.update(|window, _| window.refresh());
@@ -604,9 +598,20 @@ mod tests {
         press(cx, "tab space", "space");
         // Debug bounds outlive the frame that drew them: read the state.
         assert!(!compose.read_with(cx, |c, _| c.quote_open()), "Space on the toggle hides the quote");
-        press(cx, "tab enter", "enter");
-        assert!(compose.read_with(cx, |c, cx| c.outgoing(cx).quoted.is_none()), "Enter on × removes the quote");
-        assert_eq!(cx.update(|window, cx| compose.read(cx).focused_field(window, cx)), Some(3), "the body takes focus back");
+        press(cx, "enter", "enter");
+        assert!(compose.read_with(cx, |c, _| c.quote_open()), "Enter shows it again");
+        press(cx, "space", "space");
+        assert!(compose.read_with(cx, |c, cx| c.outgoing(cx).quoted.is_some()), "a hidden quote still goes with the reply");
+        // A reopened draft opens its quote again, though it was hidden.
+        let path = std::env::temp_dir().join(format!("lagom-quote-open-{}.db", std::process::id()));
+        let store = std::rc::Rc::new(lagom_core::store::Store::open(&path).unwrap());
+        let (imap, smtp) = lagom_core::presets::servers("self@gmail.com").unwrap();
+        let account = lagom_core::account::Account::new("self@gmail.com".into(), imap, smtp).unwrap();
+        let draft = lagom_core::outbox::Draft { id: "quote-open".into(), quoted: Some(quoted), ..Default::default() };
+        let reopened = cx.update(|window, cx| cx.new(|cx| crate::compose::Compose::restore(draft, account, store, window, cx)));
+        assert!(reopened.read_with(cx, |c, _| c.quote_open()), "a reopened draft opens its quote");
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
         // A plain-text original quotes into the body, as before.
         let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "compose", window, cx));
         cx.run_until_parked();

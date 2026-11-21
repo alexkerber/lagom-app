@@ -149,8 +149,9 @@ import kotlinx.coroutines.CancellationException
                     enabled = !model.sending, textStyle = body.copy(color = lagom.ink), cursorBrush = SolidColor(lagom.accent))
             }
             draft.quoted?.let { quoted ->
-                var open by remember(draft.id) { mutableStateOf(model.demoQuoteOpen) }
-                QuoteRow(open, enabled = !model.sending, toggle = { open = !open }) { open = false; edit(draft.copy(quoted = null)) }
+                // Always open, a reopened draft too; Hide only folds it for this sheet.
+                var open by remember(draft.id) { mutableStateOf(true) }
+                QuoteRow(open) { open = !open }
                 // The reading pane's web view and document: the same sanitized HTML and the same blocks on remote content.
                 if (open) Box(Modifier.fillMaxWidth().height(280.dp).padding(bottom = 12.dp).clip(RoundedCornerShape(8.dp))
                     .border(1.dp, lagom.line, RoundedCornerShape(8.dp)).semantics { contentDescription = "Quoted message" }) {
@@ -161,15 +162,12 @@ import kotlinx.coroutines.CancellationException
     }
 }
 
-/** The quiet "··· Quoted message" row under the editor: it opens the quote in place; × removes it from this message. */
-@Composable private fun QuoteRow(open: Boolean, enabled: Boolean, toggle: () -> Unit, remove: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f).heightIn(min = 48.dp).clickable(role = Role.Button, onClickLabel = if (open) "Hide quoted message" else "Show quoted message", onClick = toggle),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("···", color = lagom.ink2, style = MaterialTheme.typography.bodySmall.copy(fontFamily = LabelFace))
-            Text(if (open) "Hide quoted message" else "Quoted message", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
-        }
-        LagomIconButton("Remove quoted message", R.drawable.ic_close, enabled = enabled, onClick = remove)
+/** The quiet "··· Hide quoted message" row under the editor: it folds or opens the quote in place. The quote always goes with the reply. */
+@Composable private fun QuoteRow(open: Boolean, toggle: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button, onClickLabel = if (open) "Hide quoted message" else "Show quoted message", onClick = toggle),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("···", color = lagom.ink2, style = MaterialTheme.typography.bodySmall.copy(fontFamily = LabelFace))
+        Text(if (open) "Hide quoted message" else "Quoted message", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
     }
 }
 
