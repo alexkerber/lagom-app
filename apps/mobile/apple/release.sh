@@ -3,7 +3,7 @@
 # --unsigned archives without signing and stops there: a build check without an Apple account.
 # Signs automatically with the Apple ID signed in to Xcode (team in project.yml), or with an
 # App Store Connect API key when LAGOM_ASC_KEY (path to the .p8), LAGOM_ASC_KEY_ID and
-# LAGOM_ASC_ISSUER are set, as in CI.
+# LAGOM_ASC_ISSUER are set, as in CI. LAGOM_PREBUILT=1 skips the Rust build and uses Generated/.
 # Usage: apps/mobile/apple/release.sh <version> [--upload | --unsigned]
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -19,7 +19,14 @@ esac
 build=build
 archive=$build/Lagom.xcarchive
 rm -rf "$build"
-../../../scripts/build-apple.sh
+# CI's keyed job sets LAGOM_PREBUILT=1: Generated/ then comes from unpack-ffi.sh, and this job runs
+# no cargo and no build script of a dependency (docs/release.md, "Release credentials").
+if [ "${LAGOM_PREBUILT:-}" = 1 ]; then
+  [ -f Generated/LagomCore.swift ] && [ -d Generated/LagomFFI.xcframework ] \
+    || { echo "LAGOM_PREBUILT=1 but Generated/ has no LagomFFI.xcframework or LagomCore.swift" >&2; exit 1; }
+else
+  ../../../scripts/build-apple.sh
+fi
 xcodegen generate --spec project.yml
 
 # CFBundleShortVersionString takes three numbers only, so a pre-release ships as its 1.2.3 part.
