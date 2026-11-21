@@ -66,11 +66,13 @@ Signing and upload secrets live in the GitHub environment `release`, not in the 
 - Environment secrets: `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY`,
   `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` and `SPARKLE_ED_PRIVATE_KEY` (macOS).
   `APP_STORE_CONNECT_KEY`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and the optional
-  `IOS_SIGNING_P12` and `IOS_SIGNING_P12_PASSWORD` (iOS).
-- Repository secrets: `LAGOM_OAUTH_ENV` (client IDs that ship in the app, a build input) and the
-  Android `LAGOM_ANDROID_KEYSTORE*` (not moved yet).
+  `IOS_SIGNING_P12` and `IOS_SIGNING_P12_PASSWORD` (iOS). `LAGOM_ANDROID_KEYSTORE`,
+  `LAGOM_ANDROID_KEYSTORE_PASSWORD`, `LAGOM_ANDROID_KEY_ALIAS` and the optional
+  `LAGOM_ANDROID_KEY_PASSWORD` (Android).
+- Repository secret: only `LAGOM_OAUTH_ENV` (client IDs that ship in the app, a build input).
 - Store a secret with `gh secret set <NAME> --env release`. After you move one, delete the
   repository copy with `gh secret delete <NAME>`: a workflow on any branch can read a repository secret.
+  Move a platform's secrets when its workflow split is on `main`; the old workflow reads repository secrets.
 - A `workflow_dispatch` on a branch never asks for the environment. It builds without signing.
 - Not verified: a tag run with the environment (written 2026-11-21).
 
