@@ -23,6 +23,8 @@ mod menus;
 mod rich;
 mod text_input;
 mod theme;
+#[cfg(lagom_sparkle)]
+mod updates;
 
 use std::borrow::Cow;
 
@@ -244,6 +246,8 @@ fn main() {
         }).detach();
         #[cfg(target_os = "macos")]
         icon::install();
+        #[cfg(lagom_sparkle)]
+        updates::start();
     });
 }
 

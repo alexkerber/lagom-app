@@ -2665,6 +2665,10 @@ impl Render for MainWindow {
                     confirm: self.confirm_remove_account,
                     remove_note: &self.remove_note,
                     default_mail: self.default_mail,
+                    #[cfg(lagom_sparkle)]
+                    updates: crate::updates::automatic(),
+                    #[cfg(not(lagom_sparkle))]
+                    updates: None,
                     signing_in,
                     group: self.panes.group_conversations,
                     notifications: self.panes.notifications,

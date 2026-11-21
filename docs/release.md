@@ -13,16 +13,21 @@ and the steps that need a human (certificates, store accounts, secrets).
 - Numeric fields that refuse a suffix use the `1.2.3` part only.
 - Release files are named `lagom-<LAGOM_VERSION>` plus a platform suffix and extension.
 
-| Platform | Where the version goes                                                                       | Build number                                                            |
-| -------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| macOS    | `CFBundleShortVersionString` = `1.2.3`, dmg `lagom-1.2.3.dmg`                                | `CFBundleVersion` = commit time, UTC `YYYYMMDDHHMM`                     |
-| Windows  | `lagom.rc` `FILEVERSION`/`PRODUCTVERSION` = `1,2,3,0`, installer `lagom-1.2.3-windows-x64.*` | none                                                                    |
-| Linux    | package version `1.2.3`, files `lagom-1.2.3-linux-x86_64.*`                                  | none                                                                    |
-| iOS      | `MARKETING_VERSION` = `1.2.3` (pass it to `xcodebuild`, do not edit `project.yml`)           | `CURRENT_PROJECT_VERSION` = UTC minute (`release.sh` already does this) |
-| Android  | `versionName` = `LAGOM_VERSION`                                                              | `versionCode` = major×1 000 000 + minor×10 000 + patch×100 + n          |
+| Platform | Where the version goes                                                                       | Build number                                                                           |
+| -------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| macOS    | `CFBundleShortVersionString` = `1.2.3`, dmg `lagom-1.2.3.dmg`                                | `CFBundleVersion`: dmg = the Android rule; App Store = commit time, UTC `YYYYMMDDHHMM` |
+| Windows  | `lagom.rc` `FILEVERSION`/`PRODUCTVERSION` = `1,2,3,0`, installer `lagom-1.2.3-windows-x64.*` | none                                                                                   |
+| Linux    | package version `1.2.3`, files `lagom-1.2.3-linux-x86_64.*`                                  | none                                                                                   |
+| iOS      | `MARKETING_VERSION` = `1.2.3` (pass it to `xcodebuild`, do not edit `project.yml`)           | `CURRENT_PROJECT_VERSION` = UTC minute (`release.sh` already does this)                |
+| Android  | `versionName` = `LAGOM_VERSION`                                                              | `versionCode` = major×1 000 000 + minor×10 000 + patch×100 + n                         |
 
 Android `n` is the pre-release number (`beta.4` gives 4) and 99 for the final release. So
 `v1.2.3-beta.4` gives 1020304 and `v1.2.3` gives 1020399, and the final release always sorts last.
+
+The dmg uses the same number as `CFBundleVersion`, because Sparkle offers an update only when that
+number is higher. A beta and the final release on one commit still differ. Development builds
+(`0.0.0-dev.<sha>`) get 0. The App Store build keeps the commit time: App Store Connect already has
+builds with that number, and a store build number must not go down.
 
 The Windows, Linux and Android rows are the agreed rule. Their scripts implement it in their own
 branches. Not verified on `main` when this page was written.
@@ -35,7 +40,7 @@ branches. Not verified on `main` when this page was written.
 4. Each desktop packaging workflow builds on the tag and uploads its files to one **draft** GitHub
    release. The first workflow to finish creates the draft.
 5. Download every file from the draft. Install and open each one on a clean machine or account.
-6. Check that the tag has one draft with every platform's files. Only `release-draft.yml` creates it, at tag push; the platform uploads wait for it (`scripts/upload-release.sh`). Write the release notes and publish the draft. Publishing makes it the "latest" release.
+6. Check that the tag has one draft with every platform's files. Only `release-draft.yml` creates it, at tag push; the platform uploads wait for it (`scripts/upload-release.sh`). Check that `lagom-<version>.appcast.xml` is there next to the dmg. Write the release notes and publish the draft. Publishing makes it the "latest" release and puts the dmg in the update feed (see [Automatic updates on macOS](#automatic-updates-on-macos)).
 7. Upload the iOS and Android builds to the stores (see below). Store review takes one to several days.
 
 ### Before you tag
@@ -45,33 +50,90 @@ branches. Not verified on `main` when this page was written.
 - Check that a notification appears for new mail.
 - Read `TODO.md` for open items that block the release.
 
+## Release credentials: the `release` environment
+
+Signing and upload secrets live in the GitHub environment `release`, not in the repository secrets.
+
+- The environment's deployment policy admits only tags that match `v*`. A job with
+  `environment: release` on a branch or a pull request stops at the gate and gets no secret.
+- A tag ruleset lets only repository admins create, update or delete `v*` tags. So only an admin
+  starts a run that reaches the secrets.
+- A job that holds a release credential runs no cargo, no rustup, no build script and no code from
+  an artifact. It runs on a fresh GitHub-hosted runner, checks out `github.sha` and checks each
+  artifact against a hash from the job that made it. A compromised Rust dependency then runs code
+  only in jobs without a credential. That job still signs what the build made: the split keeps the
+  keys away from the build, it does not prove the build benign.
+- Environment secrets: `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY`,
+  `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` and `SPARKLE_ED_PRIVATE_KEY` (macOS).
+  `APP_STORE_CONNECT_KEY`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and the optional
+  `IOS_SIGNING_P12` and `IOS_SIGNING_P12_PASSWORD` (iOS). `LAGOM_ANDROID_KEYSTORE`,
+  `LAGOM_ANDROID_KEYSTORE_PASSWORD`, `LAGOM_ANDROID_KEY_ALIAS` and the optional
+  `LAGOM_ANDROID_KEY_PASSWORD` (Android).
+- Repository secret: only `LAGOM_OAUTH_ENV` (client IDs that ship in the app, a build input).
+- Store a secret with `gh secret set <NAME> --env release`. After you move one, delete the
+  repository copy with `gh secret delete <NAME>`: a workflow on any branch can read a repository secret.
+  Move a platform's secrets when its workflow split is on `main`; the old workflow reads repository secrets.
+- A `workflow_dispatch` on a branch never asks for the environment. It builds without signing.
+- Not verified: a tag run with the environment (written 2026-11-21).
+
 ## macOS
 
-Workflow: `.github/workflows/package-macos.yml`. Script: `scripts/package-macos.sh`.
+Workflow: `.github/workflows/package-macos.yml`. Scripts: `scripts/package-macos.sh` builds the
+app, `scripts/sign-macos.sh` signs it and makes the dmg.
 
 - The dmg holds one universal app (Apple Silicon and Intel), built with `lipo`. Minimum macOS 13.
 - Tags `v*`: build, sign with the Developer ID, notarize, staple and upload to the draft release.
 - Pull requests that change packaging: build an ad-hoc signed dmg as a workflow artifact. Pull
   requests never get the signing secrets.
-- `workflow_dispatch` on a branch: as a tag, but the version is `0.0.0-dev.<sha>` and nothing goes to
-  a release.
-- Without the signing secrets the workflow still builds an ad-hoc signed dmg and warns. Gatekeeper
-  blocks that dmg on other Macs. Use it only for tests.
+- `workflow_dispatch` on a branch, `main` included: only the ad-hoc dmg. The signing secrets are in
+  the `release` environment, which admits only `v*` tags. So a branch cannot get a notarized dmg
+  with its own Sparkle key file. `workflow_dispatch` on a `v*` tag runs as a tag push.
+- The ad-hoc dmg is for tests only: Gatekeeper blocks it on other Macs. When the environment lacks a
+  signing secret, a tag run fails in `sign` and attaches nothing to the release.
 - No entitlements file. The app is not sandboxed, and the hardened runtime allows the network,
   keychain, notifications and WKWebView.
 
-Local release from a Mac with the Developer ID in the login keychain:
+CI jobs. No job that runs cargo, a build script or code from an artifact gets a release credential:
+
+| Job       | Runs                                                                                                                                                         | Secrets                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `meta`    | Sets the version. Signs only for `v*` tags.                                                                                                                  | None                                                |
+| `build`   | cargo, `LAGOM_BUILD_ONLY=1 scripts/package-macos.sh`. Uploads the unsigned app as a tar, and an ad-hoc dmg.                                                  | `LAGOM_OAUTH_ENV` (client IDs that ship in the app) |
+| `sign`    | `environment: release`. A fresh runner, a sparse checkout of this commit, `scripts/sign-macos.sh`. No cargo, nothing from the artifact runs. `v*` tags only. | `MACOS_CERTIFICATE_*`, `APPLE_NOTARY_*`             |
+| `sparkle` | `environment: release`. A fresh runner. Checks the dmg hash from `sign`, then `scripts/sparkle-item.sh`. `v*` tags only.                                     | `SPARKLE_ED_PRIVATE_KEY`                            |
+| `release` | Signed tags only. No environment. Downloads the named artifacts, checks their hashes, attaches them to the draft.                                            | `GITHUB_TOKEN` with `contents: write`               |
+
+Threat model. A compromised dependency can run code in `build`, through its build script. Before
+this split it could use the unlocked Developer ID and read the notary key. With Sparkle, a Developer
+ID-signed dmg with a new EdDSA key can pass Sparkle's key-change path, so that identity could
+authorize updates. Now `build` has no credential. `sign` checks that the app is the dmg build of
+this version with this commit's Sparkle key. It cannot prove that the code in the app is benign:
+the isolation keeps the keys away from the build, but `sign` still signs what `build` made. The
+rust cache that `build` saves feeds only later `build` jobs, which hold no credential. Not run with
+the real secrets yet (2026-11-20); the first tag run is the test.
+
+A branch can edit this workflow, but it cannot read the signing or Sparkle secrets: they are in the
+`release` environment (see [Release credentials](#release-credentials-the-release-environment)).
+Only an admin can push a `v*` tag.
+
+Local release from a Mac with the Developer ID in the login keychain. One command builds and signs:
 
 ```sh
 rustup target add aarch64-apple-darwin x86_64-apple-darwin   # once
 scripts/package-macos.sh 1.2.3                                # writes target/macos/lagom-1.2.3.dmg
 ```
 
+The same in two steps, as CI does: `LAGOM_BUILD_ONLY=1 scripts/package-macos.sh 1.2.3`, then
+`scripts/sign-macos.sh 1.2.3`.
+
 `LAGOM_SIGN_IDENTITY=-` signs ad hoc and skips notarization. `LAGOM_NOTARIZE=0` signs but skips
 notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGOM_NOTARY_KEY`,
 `LAGOM_NOTARY_KEY_ID` and `LAGOM_NOTARY_ISSUER` are set.
 
 ### GitHub secrets for macOS
+
+All except `LAGOM_OAUTH_ENV` are secrets of the `release` environment. `LAGOM_OAUTH_ENV` is a
+repository secret, because the `build` job reads it.
 
 | Secret                       | Content                                                                                                                                            |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -81,6 +143,7 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 | `APPLE_NOTARY_KEY_ID`        | The API key ID (10 characters)                                                                                                                     |
 | `APPLE_NOTARY_ISSUER_ID`     | The issuer ID (a UUID) from the same App Store Connect page                                                                                        |
 | `LAGOM_OAUTH_ENV`            | The full text of `.env.oauth` (Google and Microsoft client IDs). Optional; without it OAuth sign-in is off. Windows and Linux use the same secret. |
+| `SPARKLE_ED_PRIVATE_KEY`     | The Sparkle EdDSA private key. Only `scripts/sparkle-keys.sh` sets it. Without it a tag build gets no appcast item.                                |
 
 ### Human steps for macOS (once)
 
@@ -92,17 +155,69 @@ notarization. Notarization uses the keychain profile `lagom-notary` unless `LAGO
 4. Store the secrets:
 
    ```sh
-   base64 -i lagom-devid.p12 | gh secret set MACOS_CERTIFICATE_P12
-   gh secret set MACOS_CERTIFICATE_PASSWORD
-   gh secret set APPLE_NOTARY_KEY < AuthKey_XXXXXXXXXX.p8
-   gh secret set APPLE_NOTARY_KEY_ID --body XXXXXXXXXX
-   gh secret set APPLE_NOTARY_ISSUER_ID --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   base64 -i lagom-devid.p12 | gh secret set MACOS_CERTIFICATE_P12 --env release
+   gh secret set MACOS_CERTIFICATE_PASSWORD --env release
+   gh secret set APPLE_NOTARY_KEY --env release < AuthKey_XXXXXXXXXX.p8
+   gh secret set APPLE_NOTARY_KEY_ID --env release --body XXXXXXXXXX
+   gh secret set APPLE_NOTARY_ISSUER_ID --env release --body xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
    gh secret set LAGOM_OAUTH_ENV < .env.oauth
    ```
 
 5. Delete the local .p12 and .p8 copies, or keep them only in a password manager.
-6. Run the workflow once with `workflow_dispatch` and check that the log shows `Authority=Developer ID Application`
-   and an accepted notarization.
+6. The first `v*` tag is the test: check that the `sign` log shows `Authority=Developer ID Application`
+   and an accepted notarization. A dispatch on a branch does not sign.
+
+### Automatic updates on macOS
+
+The dmg updates itself with [Sparkle 2](https://sparkle-project.org) (2.10.1, pinned with its
+checksum in `scripts/sparkle.sh`). The App Store build has no Sparkle: the store updates it.
+
+- The app menu has "Check for Updates…" under About. Settings, General has "Check for updates
+  automatically", on by default. Sparkle saves that switch in its own user defaults.
+- Sparkle checks once a day, downloads in the background and installs when lagom quits. "Check for
+  Updates…" shows Sparkle's own window with Install and Relaunch.
+- Feed: `https://lagommail.app/appcast.xml`, on GitHub Pages. `pages.yml` builds it on every deploy
+  with `scripts/appcast.sh`, from the `lagom-<version>.appcast.xml` files of the 20 newest
+  **published** releases. Publishing a release redeploys the site from `main`. Drafts never appear,
+  because their download links do not work.
+- Every release is a beta today, so the feed has betas. A separate beta channel
+  (`sparkle:channel`) comes when stable releases start.
+- Security: every dmg is signed with an EdDSA key (`sign_update`), and the app has the public key
+  as `SUPublicEDKey`. `SUVerifyUpdateBeforeExtraction` checks the signature before Sparkle opens the
+  dmg. The feed is HTTPS only. Sparkle accepts an update when the EdDSA signature matches. Its only
+  other path is for a key change: the new dmg and app carry the same Developer ID team. It always
+  rejects an app with a broken code signature.
+- `scripts/package-macos.sh` embeds `Sparkle.framework` in `Contents/Frameworks` without its XPC
+  services (they serve sandboxed apps only). `scripts/sign-macos.sh` signs Autoupdate, Updater.app,
+  the framework and then the app with the Developer ID and the hardened runtime.
+- `scripts/sparkle-item.sh <version>` signs a notarized dmg and writes its `<item>`. The local release
+  script runs it with the Keychain key. CI runs it only for tags, in its own job on a fresh runner
+  that runs no cargo, so build scripts of dependencies never see the private key.
+- Sparkle accepts a dmg signed by the same Developer ID team as a key change, so that identity also
+  authorizes updates. CI keeps it in the `sign` job, away from cargo (see "CI jobs" above).
+- Without `apps/desktop/macos/sparkle-ed-public-key` the dmg has no Sparkle, and CI warns.
+- An ad-hoc signed dmg (pull requests, `LAGOM_SIGN_IDENTITY=-`) contains Sparkle, but the hardened
+  runtime refuses to load it, so that build has no updater. Measured 2026-11-20; Developer ID
+  signing loads it.
+- Test on your Mac: a debug build reads `LAGOM_SPARKLE_FEED` as the feed URL (release builds do
+  not), so it can point at an appcast on `127.0.0.1` signed with a throwaway key.
+
+Key setup (once, on the Mac that signs releases):
+
+```sh
+scripts/sparkle-keys.sh   # needs gh signed in; Keychain asks to allow generate_keys
+git add apps/desktop/macos/sparkle-ed-public-key && git commit -m "macOS: Sparkle public key"
+```
+
+The script makes the key pair in the login Keychain (account `lagom`), or keeps the one there. It
+stores the private key as `SPARKLE_ED_PRIVATE_KEY` in the `release` environment
+(`gh secret set --env release`) through a temp file that only you can read and
+that it deletes. It prints and writes only the public key. Back up the private key once in a
+password manager: `target/sparkle/bin/generate_keys --account lagom -x <file>`, then delete the file. Without the key,
+no update reaches the installed apps.
+
+Local release: `scripts/package-macos.sh 1.2.3` also writes `target/macos/lagom-1.2.3.appcast.xml`.
+Upload it with the dmg: `scripts/upload-release.sh v1.2.3 target/macos/lagom-1.2.3.dmg target/macos/lagom-1.2.3.appcast.xml`.
 
 ### Mac App Store
 
@@ -296,14 +411,15 @@ Human steps (once):
    ```
 
    Keep the keystore and its password in a password manager, then delete the local copy.
+
 3. Turn on Play App Signing and upload the first `.aab` by hand. Google keeps the app signing key.
 4. New personal developer accounts must run a closed test with at least 12 testers for 14 days
    before production access. Plan for this.
 5. Fill in the store listing, Data safety, content rating and target audience from
    `brand/store/google-play/`. Icon `brand/store/play-icon-512.png`, feature graphic
    `brand/store/play-feature-1024x500.png`. Take the screenshots from the shot list there.
-6. Run the workflow once with `workflow_dispatch` and check that the log shows the certificate from
-   `apksigner verify --print-certs`.
+6. Push a `v*` tag and check that the `sign` log shows the certificate from
+   `apksigner verify --print-certs`. A dispatch on a branch builds unsigned only.
 
 ## OAuth providers (all platforms)
 
@@ -314,12 +430,13 @@ Human steps (once):
 
 ## In-app update check: decision
 
-Decision: a small "new version available" check against GitHub releases fits. Sparkle does not fit now.
-Not implemented on this branch. Tracked as an open item below.
+Decision (Alex 2026-11-20): the macOS dmg installs updates itself with Sparkle. See
+[Automatic updates on macOS](#automatic-updates-on-macos). Automatic installs matter now. This
+replaces the earlier decision of a notify-only check on macOS.
 
-- Sparkle installs updates itself, but it is macOS only. It needs an embedded framework, an EdDSA key,
-  a hosted appcast and Objective-C glue from Rust. Revisit when automatic installs matter.
-- The check that fits:
+Windows and Linux keep the notify-only plan below. Not implemented yet. Tracked as an open item below.
+
+- The check that fits Windows and Linux:
   - At most once a day, send `GET https://api.github.com/repos/alexkerber/lagom-app/releases/latest` with
     the reqwest client in `lagom-core`. Send no cookies and no identifiers. GitHub sees the IP address
     and a fixed user agent only.
@@ -327,10 +444,11 @@ Not implemented on this branch. Tracked as an open item below.
   - When the release is newer, show one quiet row: "lagom 1.2.4 is available" with a link to the
     release page. No download in the app.
   - Settings get a "Check for updates" switch, on by default, saved with the other settings.
-  - The same code serves macOS, Windows and Linux. The stores update iOS and Android.
+  - The same code serves Windows and Linux. Sparkle updates the macOS dmg. The stores update the
+    App Store build, iOS and Android.
 - Why it is not on this branch: it needs a settings switch and a row in the main window. Other
   branches change those files now. Do it after they merge.
 
 ## Open items
 
-- [ ] Desktop: the update check described above.
+- [ ] Windows and Linux: the update check described above.

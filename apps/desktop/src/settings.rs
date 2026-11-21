@@ -32,6 +32,8 @@ pub struct Data<'a> {
     pub group: bool,
     pub notifications: bool,
     pub default_mail: Option<bool>,
+    /// Sparkle's automatic checks; `None` in builds without Sparkle (App Store, Windows, Linux).
+    pub updates: Option<bool>,
     pub task_lists: &'a [lagom_core::tasks::TaskList],
     pub default_list: Option<i64>,
     pub names: &'a HashMap<String, Entity<TextInput>>,
@@ -142,6 +144,7 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .child(plate(t).px(px(14.)).py(px(6.))
             .child(stop(t, toggle_row(t, "Group by conversation", d.group)).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
             .child(stop(t, toggle_row(t, "Notifications for new mail", d.notifications)).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
+            .children(d.updates.map(|on| stop(t, toggle_row(t, "Check for updates automatically", on)).on_click(cx.listener(move |_, _, _, cx| { #[cfg(lagom_sparkle)] crate::updates::set_automatic(!on); cx.notify(); }))))
             .children(d.default_mail.map(|on| default_mail_row(t, on, cx))));
     let lists = (!d.task_lists.is_empty()).then(|| div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(12.))
         .child(section(t, "Default task list", Some("New tasks go here.")))
