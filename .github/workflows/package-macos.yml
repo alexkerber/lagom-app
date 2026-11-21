@@ -136,24 +136,31 @@ jobs:
           name: macos-app
           path: ${{ runner.temp }}/app
       # Before any credential is on this runner. bsdtar refuses absolute paths, ".." and writing
-      # through symlinks unless it gets -P. Then only plain files, folders and symlinks that stay
-      # inside the app may remain (Sparkle.framework has its own Versions/Current links).
+      # through symlinks unless it gets -P. Then only plain files, folders and relative symlinks that
+      # stay inside the app may remain (Sparkle.framework has its own Versions/Current links).
       - name: Unpack the app
         run: |
-          if tar -tf "$RUNNER_TEMP/app/lagom-app.tar" | grep -qv '^lagom\.app/'; then
+          # The listing in a variable: `tar | grep -q` under pipefail fails on SIGPIPE and skips the check.
+          entries=$(tar -tf "$RUNNER_TEMP/app/lagom-app.tar")
+          if grep -v '^lagom\.app/' <<<"$entries"; then
             echo 'The app artifact holds files outside lagom.app.' >&2
             exit 1
           fi
           mkdir -p target/macos
           tar -xf "$RUNNER_TEMP/app/lagom-app.tar" -C target/macos
+          if [[ -L target/macos/lagom.app || ! -d target/macos/lagom.app || $(ls -A target/macos) != lagom.app ]]; then
+            echo 'The app artifact is not one lagom.app folder.' >&2
+            exit 1
+          fi
           app=$(cd target/macos/lagom.app && pwd -P)
           if [[ -n $(find "$app" ! -type f ! -type d ! -type l) || -n $(find "$app" -type f -links +1) ]]; then
             echo 'The app artifact holds special files or hard links.' >&2
             exit 1
           fi
+          # Relative only: an absolute link would point at this runner's checkout after cp -R into the dmg.
           find "$app" -type l -print0 | while IFS= read -r -d '' link; do
             target=$(realpath "$link")
-            if [[ $target != "$app"/* ]]; then
+            if [[ $(readlink "$link") == /* || $target != "$app"/* ]]; then
               echo "The app artifact has a symlink out of the app: ${link#"$app"/}" >&2
               exit 1
             fi
