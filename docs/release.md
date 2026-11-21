@@ -418,8 +418,8 @@ Human steps (once):
 5. Fill in the store listing, Data safety, content rating and target audience from
    `brand/store/google-play/`. Icon `brand/store/play-icon-512.png`, feature graphic
    `brand/store/play-feature-1024x500.png`. Take the screenshots from the shot list there.
-6. Run the workflow once with `workflow_dispatch` on `main` and check that the log shows the certificate from
-   `apksigner verify --print-certs`.
+6. Push a `v*` tag and check that the `sign` log shows the certificate from
+   `apksigner verify --print-certs`. A dispatch on a branch builds unsigned only.
 
 ## OAuth providers (all platforms)
 
