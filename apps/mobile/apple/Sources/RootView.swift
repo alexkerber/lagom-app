@@ -9,6 +9,7 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.layoutDirection) private var layoutDirection
     /// The iPad sidebar hides for more room (Alex 2026-11-22): its button at the top left on every page, or a swipe.
     @AppStorage("lagom.sidebarShown") private var sidebarShown = true
     @State private var addAccount = false
@@ -51,7 +52,9 @@ struct RootView: View {
                     .frame(maxHeight: .infinity, alignment: .top)
                     .clipped()
                     .contentShape(Rectangle())
-                    .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { dx in
+                    .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { x in
+                        // Toward the sidebar's edge closes it; right to left puts that edge on the right.
+                        let dx = layoutDirection == .rightToLeft ? -x : x
                         if dx < -60 { showSidebar(false) } else if dx > 60 { showSidebar(true) }
                     }))
                     // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop.
