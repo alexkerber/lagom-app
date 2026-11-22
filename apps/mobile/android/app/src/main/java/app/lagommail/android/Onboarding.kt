@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -24,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.isSpecified
@@ -88,7 +90,7 @@ internal val SplashIcon = 160.dp
         when (shown) {
             Step.WELCOME -> Welcome(model, settled, { settled = true }, ::addAccount)
             Step.CHOOSE -> ChooseAccount(model, providers) { choosing = false }
-            Step.FORM -> model.accountForm?.let { AddAccountScreen(model, it, showProviders = false) { model.accountForm = null } }
+            Step.FORM -> model.accountForm?.let { AddAccountScreen(model, it) { model.accountForm = null } }
             Step.NOTIFICATIONS -> Notifications(answer)
         }
     }
@@ -191,11 +193,19 @@ internal val SplashIcon = 160.dp
 }
 
 @Composable private fun ChooseAccount(model: MailModel, providers: List<Pair<SignInProvider, String>>, back: () -> Unit) {
-    val context = LocalContext.current
     StepPage(top = { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = back) }, centred = false, buttons = {}) {
         DisplayTitle("Choose your mail", TextSize.display, Modifier.padding(top = 8.dp))
+        ChooseMailList(model, providers) { model.accountForm = AccountForm() }
+    }
+}
+
+/** Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.
+ *  The intro's Choose step and Add account show the same list (Alex 2026-11-22). */
+@Composable internal fun ChooseMailList(model: MailModel, providers: List<Pair<SignInProvider, String>>, other: () -> Unit) {
+    val context = LocalContext.current
+    Column {
         if (providers.isNotEmpty()) {
-            // Hidden until this build has the provider's client ID, as in Add account. Google asks for its full button text
+            // Hidden until this build has the provider's client ID. Google asks for its full button text
             // and its "G" on white.
             Rows(Modifier.padding(top = 24.dp)) {
                 providers.forEachIndexed { index, (provider, name) ->
@@ -205,7 +215,10 @@ internal val SplashIcon = 160.dp
                         Box(Modifier.size(32.dp).clip(CircleShape).background(Color.White).border(1.dp, lagom.line, CircleShape), contentAlignment = Alignment.Center) {
                             Image(painterResource(logo), null, Modifier.size(16.dp))
                         }
-                    }) { model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) } }
+                    }, enabled = !model.signingIn) {
+                        model.signInForm = model.accountForm
+                        model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) }
+                    }
                 }
             }
         }
@@ -215,8 +228,14 @@ internal val SplashIcon = 160.dp
             listOf("iCloud", "Fastmail", "Yahoo", "Other (IMAP)")
                 .forEachIndexed { index, name ->
                     if (index > 0) Hairline()
-                    Choice(name, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }) { model.accountForm = AccountForm() }
+                    Choice(name, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }, enabled = !model.signingIn) { other() }
                 }
+        }
+        // The browser has returned and the core is adding the account; the rows wait for it.
+        if (model.signingIn) Row(Modifier.padding(top = 16.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = lagom.ink2)
+            Text("Signing in…", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
         }
         Row(Modifier.padding(top = 16.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -236,8 +255,8 @@ internal val SplashIcon = 160.dp
 @Composable internal fun Hairline(inset: Int = 64) = HorizontalDivider(Modifier.padding(start = inset.dp), thickness = 1.dp, color = lagom.line)
 
 /** One account kind: its mark, the name and a chevron. */
-@Composable private fun Choice(title: String, mark: @Composable () -> Unit, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
+@Composable private fun Choice(title: String, mark: @Composable () -> Unit, enabled: Boolean = true, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).alpha(if (enabled) 1f else 0.5f).clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         Box(Modifier.width(32.dp), contentAlignment = Alignment.Center) { mark() }
         Text(title, Modifier.weight(1f), color = lagom.ink, fontSize = TextSize.body, lineHeight = TextSize.body * Leading, fontWeight = FontWeight.Medium)

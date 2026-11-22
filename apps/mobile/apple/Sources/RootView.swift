@@ -157,14 +157,20 @@ struct RootView: View {
 
     private func railButton(_ page: AppSection) -> some View {
         let active = section == page
+        let unread = page == .mail ? planner.unreadCount : 0
         return Button { section = page } label: {
             Icon(page.icon).foregroundStyle(active ? Theme.selectionIcon : Theme.secondary)
+                // The sidebar row's quiet count, folded to a dot beside the icon.
+                .overlay(alignment: .topTrailing) {
+                    if unread > 0 { Circle().fill(Theme.secondary).frame(width: 6, height: 6).offset(x: 4, y: -2) }
+                }
                 .frame(width: 38, height: 44)
                 .background(active ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
                 .frame(width: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(page.title)
+        .accessibilityValue(unread > 0 ? "\(unread) unread" : "")
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 

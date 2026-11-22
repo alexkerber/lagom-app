@@ -90,7 +90,7 @@ internal fun List<MailCounts>.sidebarCount(box: Mailbox, account: String? = null
             }
             SidebarRow("Add account", R.drawable.ic_account_add, enabled = enabled && model.core != null) {
                 choose(AppSection.MAIL)
-                model.accountForm = AccountForm()
+                model.accountForm = AccountForm(choosing = true)
             }
         }
     }

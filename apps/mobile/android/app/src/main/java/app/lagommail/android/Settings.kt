@@ -75,7 +75,7 @@ import app.lagommail.core.MailAccount
                         }
                         if (model.accounts.isNotEmpty()) Hairline()
                         SettingsRow("Add account", mark = { LagomIcon(R.drawable.ic_account_add) }, chevron = false, enabled = model.core != null) {
-                            model.accountForm = AccountForm()
+                            model.accountForm = AccountForm(choosing = true)
                         }
                     }
                     Group("General") {

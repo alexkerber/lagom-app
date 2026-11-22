@@ -231,7 +231,9 @@ internal fun server(host: String, port: String, username: String, tls: Boolean):
     return MailServer(host.trim(), number.toUShort(), username.trim(), if (tls) TransportSecurity.TLS else TransportSecurity.START_TLS)
 }
 
-internal class AccountForm {
+/** One Add account visit. `choosing` shows Choose your mail first; `fromList` is a form opened from it, whose Back
+ *  returns there with a fresh form, so one kind's servers never meet the next kind's password. */
+internal class AccountForm(val choosing: Boolean = false, val fromList: Boolean = false) {
     var email by mutableStateOf("")
     var password by mutableStateOf("")
     var passwordStep by mutableStateOf(false)
@@ -248,14 +250,16 @@ internal class AccountForm {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable internal fun AddAccountScreen(model: MailModel, form: AccountForm, showProviders: Boolean = true, close: () -> Unit) {
+@Composable internal fun AddAccountScreen(model: MailModel, form: AccountForm, close: () -> Unit) {
     with(form) {
-        BackHandler(model.accountForm === form) { if (!connecting) { password = ""; close() } }
+        BackHandler(model.accountForm === form) {
+            if (!connecting) { password = ""; if (fromList) model.accountForm = AccountForm(choosing = true) else close() }
+        }
         Scaffold(containerColor = lagom.bg, topBar = {
             TopBar(Modifier.statusBarsPadding(), start = 4.dp, end = 12.dp) {
                 LagomIconButton("Cancel", R.drawable.ic_close, enabled = !connecting) { password = ""; close() }
                 BarTitle("Add account", Modifier.weight(1f))
-                HouseButton(if (passwordStep) "Sign in" else "Continue", primary = true,
+                if (!choosing) HouseButton(if (passwordStep) "Sign in" else "Continue", primary = true,
                     enabled = !connecting && email.isNotBlank() && (!passwordStep || password.isNotEmpty()), onClick = {
                     if (!passwordStep) { passwordStep = true; imapUser = email; smtpUser = email }
                     else {
@@ -276,19 +280,14 @@ internal class AccountForm {
                 })
             }
         }) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Hidden until this build has the provider's client ID.
-                val context = LocalContext.current
-                val providers = remember { listOf(SignInProvider.GOOGLE to "Google", SignInProvider.MICROSOFT to "Microsoft").filter { signInAvailable(it.first) } }
-                if (showProviders) for ((provider, name) in providers) {
-                    HouseButton("Sign in with $name", R.drawable.ic_connect, Modifier.fillMaxWidth(), enabled = !connecting) {
-                        model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) }
-                    }
-                }
+            val providers = remember { listOf(SignInProvider.GOOGLE to "Google", SignInProvider.MICROSOFT to "Microsoft").filter { signInAvailable(it.first) } }
+            if (choosing) Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
+                ChooseMailList(model, providers) { model.accountForm = AccountForm(fromList = true) }
+            } else Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Field("Email", email, !connecting, KeyboardType.Email) { email = it }
                 if (passwordStep) {
                     Field("Password", password, !connecting, KeyboardType.Password) { password = it }
-                    Text(if (providers.any { it.first == SignInProvider.MICROSOFT }) "Gmail and iCloud need an app password, not your normal password. For Microsoft, use Sign in with Microsoft."
+                    Text(if (providers.any { it.first == SignInProvider.MICROSOFT }) "Gmail and iCloud need an app password, not your normal password. For Microsoft, go back and choose Continue with Microsoft."
                         else "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.", color = lagom.ink2, style = MaterialTheme.typography.bodySmall)
                     Row { Checkbox(advanced, { advanced = it }, enabled = !connecting); Text("Advanced", Modifier.padding(top = 12.dp)) }
                     if (advanced) {
