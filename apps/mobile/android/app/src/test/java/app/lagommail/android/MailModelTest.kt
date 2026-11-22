@@ -61,7 +61,7 @@ class MailModelTest {
 
     @Test fun finishedSignInClosesTheFormAndARefusedRedirectKeepsIt() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.start()
-        val form = AccountForm(); model.accountForm = form
+        val form = AccountForm(); model.accountForm = form; model.signInForm = form
         model.finishSignIn("msauth.com.example.app://auth?code=c&state=guess"); runCurrent()
         assertEquals("Sign-in was interrupted. Try again.", model.error)
         assertSame(form, model.accountForm); assertFalse(form.connecting)
@@ -70,6 +70,15 @@ class MailModelTest {
         model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending"); runCurrent()
         assertNull(model.accountForm); assertFalse(form.connecting)
         assertEquals(1, core.redirects.size); assertEquals(syncs + 1, core.syncs)
+    }
+
+    @Test fun signInRedirectLeavesAFormOpenedSinceOpen() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        val list = AccountForm(choosing = true); model.accountForm = list; model.signInForm = list
+        // Fastmail opened while Google's page was still in the browser.
+        val typed = AccountForm(fromList = true).apply { email = "me@fastmail.example" }; model.accountForm = typed
+        model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending"); runCurrent()
+        assertSame(typed, model.accountForm); assertEquals("me@fastmail.example", typed.email)
     }
 
     @Test fun undoRestoresDraftAndExpirySyncsOnlyInForeground() = runTest(dispatcher) {
