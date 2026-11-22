@@ -152,7 +152,7 @@ struct RootView: View {
             Spacer(minLength: 0)
             railButton(.settings).padding(.bottom, 8)
         }
-        .padding(.leading, 12).padding(.top, 52)
+        .padding(.leading, 9).padding(.top, 52)
     }
 
     private func railButton(_ page: AppSection) -> some View {
@@ -161,7 +161,7 @@ struct RootView: View {
             Icon(page.icon).foregroundStyle(active ? Theme.selectionIcon : Theme.secondary)
                 .frame(width: 38, height: 44)
                 .background(active ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
-                .contentShape(Rectangle())
+                .frame(width: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(page.title)
