@@ -46,6 +46,13 @@ for target in "${targets[@]}"; do binaries+=("target/$target/release/lagom"); do
 lipo -create -output "$app/Contents/MacOS/lagom" "${binaries[@]}"
 [[ -n ${LAGOM_MAC_TARGETS:-} ]] || lipo "$app/Contents/MacOS/lagom" -verify_arch arm64 x86_64
 cp brand/app-icon/export/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+# Assets.car carries the dark and tinted icons for macOS 26 (CFBundleIconName); older macOS uses the .icns.
+icons=$(mktemp -d)
+xcrun actool brand/app-icon/AppIcon.icon --compile "$icons" --platform macosx \
+    --minimum-deployment-target "$MACOSX_DEPLOYMENT_TARGET" --app-icon AppIcon --include-all-app-icons \
+    --output-partial-info-plist "$icons/partial.plist" >/dev/null
+cp "$icons/Assets.car" "$app/Contents/Resources/Assets.car"
+rm -rf "$icons"
 # The bundle version is the commit time, so rebuilding one commit gives the same Info.plist.
 build_number=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M)
 year=${build_number:0:4}
@@ -61,6 +68,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>$bundle_id</string>
     <key>CFBundleExecutable</key><string>lagom</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${version%%-*}</string>
     <key>CFBundleVersion</key><string>$build_number</string>
