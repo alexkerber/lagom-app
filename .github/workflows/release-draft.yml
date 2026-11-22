@@ -21,6 +21,6 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release view "$TAG" >/dev/null 2>&1 && exit 0
-          prerelease=()
-          [[ $TAG != *-* ]] || prerelease=(--prerelease)
-          gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag --title "lagom ${TAG#v}" --generate-notes
+          # Betas too are full releases: the site links to releases/latest/download/<name>, and
+          # GitHub's "latest" skips pre-releases. Publishing the draft is the step that ships.
+          gh release create "$TAG" --draft --verify-tag --title "lagom ${TAG#v}" --generate-notes
