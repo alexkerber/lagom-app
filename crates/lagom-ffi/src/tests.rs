@@ -4,6 +4,9 @@ use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
 use std::{any::Any, collections::HashMap};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// A guard against a hung fake server, not a speed check: Windows CI runners took over 10 s now and then.
+const HANG: std::time::Duration = std::time::Duration::from_secs(30);
+
 // The test binary replaces the backend before any credential operation; it never opens a keychain.
 #[derive(Clone, Default, Debug)]
 struct MemorySecrets(Arc<Mutex<HashMap<String, Vec<u8>>>>);
@@ -169,7 +172,7 @@ async fn replies_queue_markdown_durably_without_network_or_cross_account_sends()
 async fn imap_fixture_sync_and_rejected_flags_preserve_confirmed_state() {
     // SQLite migrations are setup, not part of the protocol hang guard.
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
         let server = tokio::spawn(async move {
@@ -225,7 +228,7 @@ async fn folder_failure_keeps_inbox_first_and_reconnects_for_remaining_folders()
     for all in [false, true] {
         // Each independent fixture gets a protocol budget after its SQLite migrations.
         let (_dir, core) = fixture();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::time::timeout(HANG, async {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
             let server = tokio::spawn(async move {
@@ -316,7 +319,7 @@ fn html_privacy_and_recipients_share_core_policy() {
 async fn done_and_delete_move_through_imap_without_crossing_accounts() {
     // SQLite migrations are setup, not part of the protocol hang guard.
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (a, other, id, untouched) = {
             let mut s = core.stores.local.lock().unwrap();
@@ -382,7 +385,7 @@ async fn done_and_delete_move_through_imap_without_crossing_accounts() {
 async fn manual_add_verifies_both_servers_before_saving() {
     // SQLite migrations are setup, not part of the protocol hang guard.
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         for accepted in [false, true] {
             let imap = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let smtp = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -444,7 +447,7 @@ async fn stalled_sync_keeps_cached_mail_and_durable_enqueue_available() {
     let sync = tokio::spawn({ let core = core.clone(); async move { core.sync_all().await } });
     let (socket, _) = listener.accept().await.unwrap();
     // The stall never ends, so a generous bound still proves local work does not wait; Windows CI is slow.
-    let local = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let local = tokio::time::timeout(HANG, async {
         let same = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
         assert_eq!(same.message(id).await.unwrap().text_body, "line one\nline two");
         assert_eq!(same.mailbox(Some(a.id.clone()), Mailbox::Inbox, 100, 0).await.unwrap()[0].id, id);
@@ -531,7 +534,7 @@ async fn undo_later_restores_the_old_snooze_without_a_server() {
 #[tokio::test]
 async fn undo_done_moves_the_message_back_to_the_inbox() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (a, id) = {
             let mut s = core.stores.local.lock().unwrap();
@@ -755,7 +758,7 @@ async fn attachment_and_forward_fetch_only_missing_parts_and_reuse_the_cache() {
     for attachment_first in [false, true] {
         // SQLite migrations are setup, not part of the protocol hang guard.
         let (dir, core) = fixture();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::time::timeout(HANG, async {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let id = {
                 let mut s = core.stores.local.lock().unwrap();
@@ -906,7 +909,7 @@ async fn unified_search_uses_desktop_prefixes_and_pages_across_accounts() {
 
 #[tokio::test]
 async fn inline_loading_fetches_legacy_mail_and_reuses_cache() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (dir, core) = fixture();
         let id = {
@@ -947,7 +950,7 @@ async fn inline_loading_fetches_legacy_mail_and_reuses_cache() {
 
 #[tokio::test]
 async fn reply_fetches_inline_images_before_it_quotes() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (dir, core) = fixture();
         let id = {
@@ -1071,7 +1074,7 @@ async fn draft_invalid_tokens_and_failed_enqueue_preserve_edits_and_discard_is_d
 #[tokio::test]
 async fn mobile_sync_all_keeps_local_drafts_off_the_server() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let a = fixture_account(&core.stores.local.lock().unwrap(), "a@example.test", listener.local_addr().unwrap().port());
         let id = smtp::message_id(&a.email);
@@ -1149,7 +1152,7 @@ async fn first_reply_save_survives_deleted_parent() {
 #[tokio::test]
 async fn background_sync_reports_new_unseen_mail_once_and_survives_a_locked_account() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let a = fixture_account(&core.stores.local.lock().unwrap(), "fixture@example.test", listener.local_addr().unwrap().port());
         let locked = fixture_account(&core.stores.local.lock().unwrap(), "a-locked@example.test", 1);
@@ -1375,7 +1378,7 @@ async fn user_actions_do_not_wait_for_a_slow_folder_sync() {
         let sync = tokio::spawn({ let core = core.clone(); async move { core.sync(a.id).await } });
         slow.stalled.notified().await;
         // The sync now holds the folder lock in the middle of INBOX.
-        tokio::time::timeout(std::time::Duration::from_secs(10), core.mark_read(id, true)).await
+        tokio::time::timeout(HANG, core.mark_read(id, true)).await
             .expect("the read flag waited for the sync").unwrap();
         assert!(!core.message(id).await.unwrap().row.unread);
         // Stands in for a move: it waits for INBOX only and runs before Archive. The first poll queues it.
@@ -1425,7 +1428,7 @@ async fn a_read_flag_leaves_a_changed_mailbox_to_the_sync() {
         let a = fixture_account(&s, "fixture@example.test", listener.local_addr().unwrap().port());
         mail(&mut s, &a, 1, 1)
     };
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = BufReader::new(socket);
@@ -1748,7 +1751,7 @@ async fn moving_server(listener: tokio::net::TcpListener, destinations: &[&str])
 #[tokio::test]
 async fn move_to_folder_and_undo_move_the_message_back() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (a, id, receipts) = {
             let mut s = core.stores.local.lock().unwrap();
@@ -1773,7 +1776,7 @@ async fn move_to_folder_and_undo_move_the_message_back() {
 #[tokio::test]
 async fn empty_trash_deletes_only_the_chosen_accounts_trash() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (a, other) = {
             let mut s = core.stores.local.lock().unwrap();
@@ -1823,7 +1826,7 @@ async fn empty_trash_deletes_only_the_chosen_accounts_trash() {
 #[tokio::test]
 async fn moving_later_mail_to_its_own_folder_ends_the_snooze_and_undo_restores_it() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (a, id, inbox) = {
             let mut s = core.stores.local.lock().unwrap();
@@ -1860,7 +1863,7 @@ async fn moving_later_mail_to_its_own_folder_ends_the_snooze_and_undo_restores_i
 #[tokio::test]
 async fn create_folder_checks_the_name_as_desktop_and_creates_it_on_the_server() {
     let (_dir, core) = fixture();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let a = fixture_account(&core.stores.local.lock().unwrap(), "folders@example.test", listener.local_addr().unwrap().port());
         // No folder list yet: desktop's words, and no connection.
