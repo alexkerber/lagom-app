@@ -1181,7 +1181,7 @@ impl TextElement {
         }
         if look.italic {
             font.style = FontStyle::Italic;
-            // Hauora has no italic and GPUI does not slant an upright face; the system face does.
+            // Bundled Inter has no italic and GPUI does not slant an upright face; the system face does.
             font.family = ".SystemUIFont".into();
         }
         if look.code && !look.marker {

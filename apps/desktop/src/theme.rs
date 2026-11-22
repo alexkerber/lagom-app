@@ -142,7 +142,7 @@ pub mod radius {
 }
 
 pub mod face {
-    pub const TEXT: &str = "Hauora";
+    pub const TEXT: &str = "Inter";
     pub const DISPLAY: &str = "Hauora";
     pub const LABEL: &str = "Geist Mono";
     /// Thousandths of an em.
@@ -228,12 +228,15 @@ pub const DEFAULT_ACCENT: Accent = Accent::Dusk;
 pub mod font {
     pub const MONO: &str = super::face::LABEL; // key caps and Today labels
 
-    /// All text: Hauora, the brand face, on every platform (Alex 2026-11-20: "samma typsnitt överallt").
-    /// `LAGOM_UI_FONT=system` switches back to the system font (GPUI's ".SystemUIFont") for comparison.
+    /// Body and UI text: San Francisco (GPUI's ".SystemUIFont") on macOS, bundled Inter on Windows and
+    /// Linux. Hauora stays for headings; as body text it reads cramped (Alex 2026-11-22: "svårläst").
+    /// `LAGOM_UI_FONT=system|hauora` picks that face instead, for comparison.
     pub fn ui() -> &'static str {
         static UI: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
         UI.get_or_init(|| match std::env::var("LAGOM_UI_FONT").as_deref() {
             Ok("system") => ".SystemUIFont",
+            Ok("hauora") => super::face::DISPLAY,
+            _ if cfg!(target_os = "macos") => ".SystemUIFont",
             _ => super::face::TEXT,
         })
     }

@@ -49,7 +49,7 @@ struct LagomApp: App {
                 Button("OK") { model.error = nil; planner.error = nil }
             } message: { Text(model.error ?? planner.error ?? "") }
             .tint(Theme.accent)
-            // Text without its own size gets the text face at the system's body size.
+            // Text without its own size gets the body face at the system's body size.
             .modifier(LagomFont(points: 17, style: .body))
             .preferredColorScheme(Self.debugScheme)
             .task(id: phase) {

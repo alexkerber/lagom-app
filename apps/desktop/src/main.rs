@@ -36,8 +36,9 @@ use main_window::MainWindow;
 /// Icons and fonts compiled into the binary.
 struct Assets;
 
-/// Bundled faces, all OFL; licences sit next to them.
-const FONTS: [&[u8]; 7] = [
+/// Bundled faces, all OFL; licences sit next to them. macOS sets body text in the system face, so
+/// only Windows and Linux carry Inter.
+const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/Hauora-Regular.ttf"),
     include_bytes!("../assets/fonts/Hauora-Medium.ttf"),
     include_bytes!("../assets/fonts/Hauora-SemiBold.ttf"),
@@ -45,6 +46,14 @@ const FONTS: [&[u8]; 7] = [
     include_bytes!("../assets/fonts/Hauora-ExtraBold.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    #[cfg(not(target_os = "macos"))]
+    include_bytes!("../assets/fonts/Inter-Regular.otf"),
+    #[cfg(not(target_os = "macos"))]
+    include_bytes!("../assets/fonts/Inter-Medium.otf"),
+    #[cfg(not(target_os = "macos"))]
+    include_bytes!("../assets/fonts/Inter-SemiBold.otf"),
+    #[cfg(not(target_os = "macos"))]
+    include_bytes!("../assets/fonts/Inter-Bold.otf"),
 ];
 
 impl AssetSource for Assets {
@@ -228,7 +237,7 @@ fn main() {
     for url in mailto_args(std::env::args()) { links.send(url).ok(); }
     app.on_open_urls(move |urls| for url in urls { links.send(url).ok(); });
     app.run(move |cx: &mut App| {
-        // Hauora for all text, Geist Mono for labels and key caps; both bundled.
+        // Hauora for headings, Geist Mono for labels and key caps, Inter for body text off macOS.
         cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load");
         main_window::bind_keys(cx);
         text_input::bind_keys(cx);

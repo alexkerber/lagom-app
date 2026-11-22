@@ -107,9 +107,9 @@ def swift(tokens):
     out += ["", "    enum Radius {"]
     out += [f"        static let {key}: CGFloat = {number(value)}" for key, value in tokens["radii"].items()]
     display, label, tracking = faces(tokens)
-    out += ["    }", "", "    /// The text family (SwiftUI picks the weight), PostScript names of the other faces; tracking in ems.",
-            "    enum Face {", f'        static let text = "{tokens["type"]["faces"]["text"]}"',
-            f'        static let display = "{display[1]}"', f'        static let label = "{label[1]}"',
+    # Body text on iOS is the system font, so only the display and label faces are named here.
+    out += ["    }", "", "    /// PostScript names of the bundled faces; tracking in ems.",
+            "    enum Face {", f'        static let display = "{display[1]}"', f'        static let label = "{label[1]}"',
             f"        static let displayTracking: CGFloat = {number(tracking)}", "    }"]
     out += ["}", "", "extension TextSize {", "    var points: CGFloat {", "        switch self {"]
     sizes = mobile_sizes(tokens, "ios")
