@@ -213,13 +213,16 @@ internal class MailModel(
     private var foreground = false
     private var wake: Job? = null
 
-    /** The browser's redirect after "Sign in with Google" or Microsoft. The core refuses all but the pending sign-in. */
+    /** The Add account form a provider sign-in started from; its redirect closes that form only, not one opened since. */
+    var signInForm: AccountForm? = null
+    /** The browser's redirect after "Continue with Google" or Microsoft. The core refuses all but the pending sign-in. */
     fun finishSignIn(redirect: String) = perform {
-        val form = accountForm
+        val form = signInForm
         form?.connecting = true
         signingIn = true
         try {
             requireNotNull(core).finishSignIn(redirect)
+            signInForm = null
             if (accountForm === form) accountForm = null
             reload()
             sync()
