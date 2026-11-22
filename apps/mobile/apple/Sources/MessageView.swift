@@ -61,7 +61,7 @@ struct MessageView: View {
         let row = message.row
         let pad: CGFloat = width == .regular ? 24 : 16
         VStack(alignment: .leading, spacing: 16) {
-            Text(RowPresentation(row).subject).lagomFont(.subject, .semibold).lineLimit(3).textSelection(.enabled)
+            Text(RowPresentation(row).subject).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2)).lineLimit(3).textSelection(.enabled)
                 .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 20) {
                 header

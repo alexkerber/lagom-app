@@ -2554,7 +2554,7 @@ fn reading_view(
     let loading = m.text.as_ref().is_some_and(|t| t.borrow().is_none());
     div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().max_w(px(760.))
         .flex().flex_col().gap(px(16.)).p(px(24.))
-        .child(div().flex_shrink_0().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD)
+        .child(div().flex_shrink_0().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD)
             .debug_selector(|| "reading-subject".into()).child(m.subject.clone()))
         .child(div().flex().flex_col().gap(px(20.)).p(px(20.))
             .bg(t.raised).rounded(px(radius::CARD))
