@@ -59,7 +59,7 @@ struct AddAccountView: View {
         } footer: {
             if !providers || form {
             if providers {
-                IconButton(title: "Back", icon: "chevron-left") { form = false; passwordStep = false; password = ""; error = nil }
+                IconButton(title: "Back", icon: "chevron-left") { back() }
                     .disabled(connecting)
             }
             HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
@@ -96,6 +96,13 @@ struct AddAccountView: View {
                 .pickerStyle(.segmented).fixedSize()
             }
         }
+    }
+
+    /// Back to the list starts the form afresh, so one kind's servers never meet the next kind's password.
+    private func back() {
+        form = false; passwordStep = false; advanced = false; error = nil
+        email = ""; password = ""; imapUser = ""; smtpUser = ""
+        imapHost = ""; smtpHost = ""; imapPort = "993"; smtpPort = "587"; imapTLS = true; smtpTLS = false
     }
 
     private func connect() async {
