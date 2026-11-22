@@ -38,9 +38,8 @@ struct RootView: View {
             // system bar, which iOS puts on its right edge (Alex 2026-11-17).
             if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
-                    // Hidden, the sidebar folds to a strip that holds only its button; a swipe either way on it
-                    // closes or opens it.
-                    // Kept while hidden, so its scroll position survives.
+                    // Hidden, the sidebar folds to a strip of its button and the pages' icons; a swipe either way on it
+                    // closes or opens it. The list stays while hidden, so its scroll position survives.
                     SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
                         .padding(.top, 44)
                         .frame(width: 240)
@@ -48,7 +47,9 @@ struct RootView: View {
                         .opacity(sidebarShown ? 1 : 0)
                         .allowsHitTesting(sidebarShown)
                         .accessibilityHidden(!sidebarShown)
-                    .frame(width: sidebarShown ? 240 : 52, alignment: .leading)
+                        // Hidden, the pages' icons stay on the strip, on the rows' own lines.
+                        .overlay(alignment: .topLeading) { if !sidebarShown { rail.transition(.opacity) } }
+                    .frame(width: sidebarShown ? 240 : 62, alignment: .leading)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .clipped()
                     .contentShape(Rectangle())
@@ -64,7 +65,8 @@ struct RootView: View {
                 // One button in one place, as iPadOS's own sidebar toggle: it stays put while the sidebar moves.
                 .overlay(alignment: .topLeading) {
                     IconButton(title: sidebarShown ? "Hide sidebar" : "Show sidebar", icon: "sidebar") { showSidebar(!sidebarShown) }
-                        .padding(.leading, 4)
+                        // Centred on the rows' icons (12 + 10 + 9 pt).
+                        .padding(.leading, 9)
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
@@ -141,6 +143,29 @@ struct RootView: View {
             model.searchText = ""
         }
         section = .mail
+    }
+
+    /// The folded sidebar: each page's icon where its row was, Settings at the foot.
+    private var rail: some View {
+        VStack(spacing: 2) {
+            ForEach(AppSection.allCases.filter { $0 != .settings }) { railButton($0) }
+            Spacer(minLength: 0)
+            railButton(.settings).padding(.bottom, 8)
+        }
+        .padding(.leading, 12).padding(.top, 52)
+    }
+
+    private func railButton(_ page: AppSection) -> some View {
+        let active = section == page
+        return Button { section = page } label: {
+            Icon(page.icon).foregroundStyle(active ? Theme.selectionIcon : Theme.secondary)
+                .frame(width: 38, height: 44)
+                .background(active ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(page.title)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 
     private func showSidebar(_ shown: Bool) {
