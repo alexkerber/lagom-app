@@ -1,6 +1,6 @@
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSImage};
-use objc2_foundation::{NSData, NSString};
+use objc2_foundation::{NSBundle, NSData, NSString};
 
 /// The standard About panel: the icon set by `install`, the name, and the bundle's version.
 pub fn about() {
@@ -8,8 +8,10 @@ pub fn about() {
     NSApplication::sharedApplication(main_thread).orderFrontStandardAboutPanel(None);
 }
 
+/// Gives `cargo run` an icon. A bundled lagom keeps its own, so macOS can show the dark and tinted ones.
 pub fn install() {
     let Some(main_thread) = MainThreadMarker::new() else { return };
+    if NSBundle::mainBundle().bundleIdentifier().is_some() { return }
     let data = NSData::with_bytes(include_bytes!("../../../brand/app-icon/export/lagom-512.png"));
     if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
         // Called on the main thread after GPUI has created NSApplication.
