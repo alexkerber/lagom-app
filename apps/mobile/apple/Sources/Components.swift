@@ -599,15 +599,6 @@ struct RailGroup<Content: View>: View {
     }
 }
 
-/// The iPad sidebar's shown state; nil where there is no sidebar. Mail's menu button toggles it.
-private struct SidebarShownKey: EnvironmentKey { static let defaultValue: Binding<Bool>? = nil }
-extension EnvironmentValues {
-    var sidebarShown: Binding<Bool>? {
-        get { self[SidebarShownKey.self] }
-        set { self[SidebarShownKey.self] = newValue }
-    }
-}
-
 private struct InRailGroupKey: EnvironmentKey { static let defaultValue = false }
 extension EnvironmentValues {
     var inRailGroup: Bool {

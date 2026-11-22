@@ -9,8 +9,7 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// The iPad sidebar hides for more room (Alex 2026-11-22): the menu button before the mailbox, a swipe left
-    /// on the sidebar, or a swipe right from the screen's left edge.
+    /// The iPad sidebar hides for more room (Alex 2026-11-22): its button at the top left on every page, or a swipe.
     @AppStorage("lagom.sidebarShown") private var sidebarShown = true
     @State private var addAccount = false
     @State private var removing: MailAccount?
@@ -38,25 +37,33 @@ struct RootView: View {
             // system bar, which iOS puts on its right edge (Alex 2026-11-17).
             if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
-                    if sidebarShown {
-                        SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
-                            .frame(width: 240)
-                            .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { if $0 < -60 { showSidebar(false) } }))
-                            .transition(.move(edge: .leading))
+                    // Hidden, the sidebar folds to a strip that holds only its button; a swipe either way on it
+                    // closes or opens it.
+                    ZStack(alignment: .topLeading) {
+                        if sidebarShown {
+                            SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
+                                .padding(.top, 44)
+                                .frame(width: 240)
+                                .transition(.move(edge: .leading).combined(with: .opacity))
+                        }
                     }
+                    .frame(width: sidebarShown ? 240 : 52, alignment: .leading)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .clipped()
+                    .contentShape(Rectangle())
+                    .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { dx in
+                        if dx < -60 { showSidebar(false) } else if dx > 60 { showSidebar(true) }
+                    }))
                     // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop.
                     page(section)
                         .background(Theme.background.ignoresSafeArea())
-                        // The page's left margin catches the swipe that brings the sidebar back.
-                        .overlay(alignment: .leading) {
-                            if !sidebarShown {
-                                Color.clear.frame(width: 20).contentShape(Rectangle())
-                                    .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { if $0 > 60 { showSidebar(true) } }))
-                            }
-                        }
+                }
+                // One button in one place, as iPadOS's own sidebar toggle: it stays put while the sidebar moves.
+                .overlay(alignment: .topLeading) {
+                    IconButton(title: sidebarShown ? "Hide sidebar" : "Show sidebar", icon: "sidebar") { showSidebar(!sidebarShown) }
+                        .padding(.leading, 4)
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
-                .environment(\.sidebarShown, Binding(get: { sidebarShown }, set: { showSidebar($0) }))
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
                 TabView(selection: $section) {

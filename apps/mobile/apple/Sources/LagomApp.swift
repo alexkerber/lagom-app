@@ -129,7 +129,6 @@ struct MailView: View {
     @State private var searching = false
     @State private var focusOnOpen = false
     @FocusState private var searchFocused: Bool
-    @Environment(\.sidebarShown) private var sidebarShown
 
     private var regular: Bool { width == .regular && height == .regular }
     /// The iPad sidebar holds Settings; an unfolded Duo is regular too but has no sidebar.
@@ -286,9 +285,6 @@ struct MailView: View {
                 if !sidebar {
                     Image("LaunchIcon").resizable().frame(width: 28, height: 28).accessibilityHidden(true)
                     Spacer(minLength: 8)
-                }
-                if let shown = sidebarShown {
-                    IconButton(title: shown.wrappedValue ? "Hide sidebar" : "Show sidebar", icon: "sidebar") { shown.wrappedValue.toggle() }
                 }
                 mailboxMenu
                 if sidebar { Spacer(minLength: 0) }
