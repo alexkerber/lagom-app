@@ -235,7 +235,7 @@ impl MainWindow {
             .on_action(|_: &crate::text_input::FocusPrev, window, _| window.focus_prev())
             .capture_action(cx.listener(|this, _: &crate::text_input::Enter, window, cx| { this.save_new_event(window, cx); cx.stop_propagation(); }))
             .capture_action(cx.listener(|this, _: &crate::text_input::Escape, window, cx| { this.cancel_new_event(window, cx); cx.stop_propagation(); }))
-            .child(div().text_size(px(size::TITLE)).font_weight(FontWeight::SEMIBOLD).child("New event"))
+            .child(div().font_family(font::DISPLAY).text_size(px(size::TITLE)).font_weight(FontWeight::BOLD).child("New event"))
             .child(field(TITLE, "Title", cx))
             .child(div().flex().gap(px(8.)).child(field(DATE, "Date", cx)).child(field(END_DATE, if editor.all_day { "Last day" } else { "End date" }, cx)))
             .when(!editor.all_day, |d| d.child(div().flex().gap(px(8.)).child(field(START, "Start · ↑ ↓ 15 min", cx)).child(field(END, "End · ↑ ↓ 15 min", cx))))

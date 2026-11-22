@@ -14,7 +14,7 @@ use lagom_core::oauth::Provider;
 use crate::main_window::{button, icon, icon_button, pressable, MainWindow, OneLine};
 use crate::text_input::TextInput;
 use crate::motion::spring;
-use crate::theme::{radius, size, Theme};
+use crate::theme::{font, radius, size, Theme};
 
 /// What the Settings page shows.
 pub struct Data<'a> {
@@ -163,7 +163,7 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .flex_col()
         .gap(px(32.))
         // A window-title-sized heading, as in System Settings panes.
-        .child(div().text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).child("Settings"))
+        .child(div().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).child("Settings"))
         .child(accounts)
         .child(general)
         .children(lists)
@@ -257,7 +257,7 @@ fn account_page(t: &Theme, d: &Data, ix: usize, cx: &mut Context<MainWindow>) ->
         .child(div().flex().items_center().gap(px(14.))
             .child(avatar(a, d.colors[ix], 48.))
             .child(div().min_w(px(0.)).flex().flex_col().gap(px(2.))
-                .child(div().text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).one_line().child(a.email.clone()))
+                .child(div().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).one_line().child(a.email.clone()))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child(kind))))
         .child(plate(t).p(px(16.)).gap(px(20.))
             .child(field("Your name", "Shown to the people you write to, and in the sidebar.", d.names.get(&a.id), None))

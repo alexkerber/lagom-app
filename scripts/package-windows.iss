@@ -44,6 +44,8 @@ SignTool=lagom
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion {#SignFlag}
 ; The toast icon: the AppUserModelId IconUri below.
 Source: "{#Repo}\brand\app-icon\export\lagom-512.png"; DestDir: "{app}"; Flags: ignoreversion
+; The OFL asks for its text beside every copy of the fonts compiled into lagom.exe.
+Source: "{#Repo}\apps\desktop\assets\fonts\OFL-*.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#Bootstrapper}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWebView2
 
 [Icons]

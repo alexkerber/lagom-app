@@ -4,7 +4,7 @@
 use gpui::{div, ease_out_quint, prelude::*, px, Animation, AnimationExt, Div, FontWeight, SharedString};
 
 use crate::main_window::{icon, mono};
-use crate::theme::{size, Theme};
+use crate::theme::{font, size, Theme};
 
 /// `status`: the account and its sync state, quiet at the foot of the pane.
 pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
@@ -14,7 +14,7 @@ pub fn view(t: &Theme, status_icon: &'static str, status: SharedString) -> Div {
         .items_center()
         .text_center()
         .child(div().mb(px(16.)).child(icon("icons/inbox.svg", t.ink2, 32.)))
-        .child(div().text_size(px(size::SUBJECT)).font_weight(FontWeight::SEMIBOLD).child("Nothing left."))
+        .child(div().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).child("Nothing left."))
         .child(div().mt(px(6.)).text_color(t.ink2).child("Not too much. Not too little. Just right."))
         // Calm fade-in, no confetti (docs/motion.md). Plays once per element id. A fade only, so
         // reduced motion keeps it.

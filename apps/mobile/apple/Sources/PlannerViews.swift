@@ -1115,7 +1115,7 @@ private struct WeekEvent: View {
         .accessibilityValue(event.allDay ? "" : (start..<max(start, end)).formatted(.interval.hour().minute()))
         .popover(isPresented: $shown) {
             VStack(alignment: .leading, spacing: 12) {
-                Text(title).lagomFont(.title, .semibold)
+                Text(title).font(.custom(Theme.Face.display, size: TextSize.title.points, relativeTo: .headline))
                 Text(event.allDay ? "All day" : (start..<max(start, end)).formatted(.interval.weekday().day().month().hour().minute()))
                     .lagomFont(.small).foregroundStyle(Theme.secondary)
                 if let location = event.location, !location.isEmpty { Text(location).lagomFont(.base) }

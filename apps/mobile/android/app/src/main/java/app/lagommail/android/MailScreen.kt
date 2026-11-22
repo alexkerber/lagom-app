@@ -714,7 +714,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
     Column(Modifier.fillMaxSize().padding(top = BarHeight).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (row == null) { Text("Loading message…", color = lagom.ink2); return@Column }
         val view = RowPresentation(row)
-        Text(view.subject, style = MaterialTheme.typography.headlineSmall)
+        Text(view.subject, style = MaterialTheme.typography.headlineSmall.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold))
         Text(view.sender, fontWeight = FontWeight.SemiBold)
         Text(row.preview, color = lagom.ink2)
     }
@@ -839,7 +839,7 @@ private data class Reading(val id: Long, val messages: List<MailMessage>)
         Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             SelectionContainer {
                 Text(message.row.subject.ifEmpty { "(No subject)" }, Modifier.padding(top = 16.dp).semantics { heading() },
-                    style = MaterialTheme.typography.headlineSmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    style = MaterialTheme.typography.headlineSmall.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
             Header(model, message, plain) { plain = !plain }
             message.unsubscribe?.let { UnsubscribeLine(model, id, it) }

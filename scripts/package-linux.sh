@@ -34,6 +34,10 @@ rm -rf "$out"
 root=$out/root
 install -Dm755 -s "$bin" "$root/usr/bin/lagom"
 install -Dm644 "packaging/linux/$id.desktop" "$root/usr/share/applications/$id.desktop"
+# The OFL asks for its text beside every copy of the fonts compiled into the binary.
+for licence in apps/desktop/assets/fonts/OFL-*.txt; do
+    install -Dm644 "$licence" "$root/usr/share/doc/lagom/fonts/${licence##*/}"
+done
 for icon in brand/app-icon/export/hicolor/*/apps/lagom.png; do
     size=${icon#brand/app-icon/export/hicolor/}
     install -Dm644 "$icon" "$root/usr/share/icons/hicolor/${size%%/*}/apps/$id.png"
