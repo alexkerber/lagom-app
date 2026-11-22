@@ -215,10 +215,13 @@ internal class MailModel(
 
     /** The Add account form a provider sign-in started from; its redirect closes that form only, not one opened since. */
     var signInForm: AccountForm? = null
+    private var redirects = 0
     /** The browser's redirect after "Continue with Google" or Microsoft. The core refuses all but the pending sign-in. */
     fun finishSignIn(redirect: String) = perform {
         val form = signInForm
         form?.connecting = true
+        // Redirects can overlap (two sign-ins started); busy ends with the last one.
+        redirects++
         signingIn = true
         try {
             requireNotNull(core).finishSignIn(redirect)
@@ -226,7 +229,10 @@ internal class MailModel(
             if (accountForm === form) accountForm = null
             reload()
             sync()
-        } finally { form?.connecting = false; signingIn = false }
+        } finally {
+            redirects--
+            if (redirects == 0) { form?.connecting = false; signingIn = false }
+        }
     }
     /** From the browser's redirect until the sync after it ends: Calendar's grant button shows its progress. */
     var signingIn by mutableStateOf(false); private set
