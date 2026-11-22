@@ -99,7 +99,8 @@ struct MessageView: View {
             .disabled(model.preparingCompose) }
         }
         // The pages' shared edges, so the subject starts on the list header's line.
-        .pageEdges(top: !embedded, sides: !embedded).padding(.bottom, pad)
+        // The bottom mirrors the page top: 8 pt over the safe area, so Reply sits on the sidebar's Settings line.
+        .pageEdges(top: !embedded, sides: !embedded).padding(.bottom, railInset > 0 ? pad : 8)
         // An embedded body's edges sit outside it, so its cap is the reading width alone.
         .frame(maxWidth: embedded ? 760 : 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)

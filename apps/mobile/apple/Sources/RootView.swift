@@ -8,6 +8,10 @@ struct RootView: View {
     @AppStorage(AppSection.storageKey) private var section: AppSection = .mail
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.layoutDirection) private var layoutDirection
+    /// The iPad sidebar hides for more room (Alex 2026-11-22): its button at the top left on every page, or a swipe.
+    @AppStorage("lagom.sidebarShown") private var sidebarShown = true
     @State private var addAccount = false
     @State private var removing: MailAccount?
     /// The phone's Settings sheet; a mailto link or a notification closes it, and Add account inside it.
@@ -34,11 +38,35 @@ struct RootView: View {
             // system bar, which iOS puts on its right edge (Alex 2026-11-17).
             if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
+                    // Hidden, the sidebar folds to a strip of its button and the pages' icons; a swipe either way on it
+                    // closes or opens it. The list stays while hidden, so its scroll position survives.
                     SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
+                        .padding(.top, 44)
                         .frame(width: 240)
+                        .offset(x: sidebarShown ? 0 : -240)
+                        .opacity(sidebarShown ? 1 : 0)
+                        .allowsHitTesting(sidebarShown)
+                        .accessibilityHidden(!sidebarShown)
+                        // Hidden, the pages' icons stay on the strip, on the rows' own lines.
+                        .overlay(alignment: .topLeading) { if !sidebarShown { rail.transition(.opacity) } }
+                    .frame(width: sidebarShown ? 240 : 62, alignment: .leading)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .clipped()
+                    .contentShape(Rectangle())
+                    .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { x in
+                        // Toward the sidebar's edge closes it; right to left puts that edge on the right.
+                        let dx = layoutDirection == .rightToLeft ? -x : x
+                        if dx < -60 { showSidebar(false) } else if dx > 60 { showSidebar(true) }
+                    }))
                     // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop.
                     page(section)
                         .background(Theme.background.ignoresSafeArea())
+                }
+                // One button in one place, as iPadOS's own sidebar toggle: it stays put while the sidebar moves.
+                .overlay(alignment: .topLeading) {
+                    IconButton(title: sidebarShown ? "Hide sidebar" : "Show sidebar", icon: "sidebar") { showSidebar(!sidebarShown) }
+                        // Centred on the rows' icons (12 + 10 + 9 pt).
+                        .padding(.leading, 9)
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
             } else {
@@ -115,6 +143,33 @@ struct RootView: View {
             model.searchText = ""
         }
         section = .mail
+    }
+
+    /// The folded sidebar: each page's icon where its row was, Settings at the foot.
+    private var rail: some View {
+        VStack(spacing: 2) {
+            ForEach(AppSection.allCases.filter { $0 != .settings }) { railButton($0) }
+            Spacer(minLength: 0)
+            railButton(.settings).padding(.bottom, 8)
+        }
+        .padding(.leading, 9).padding(.top, 52)
+    }
+
+    private func railButton(_ page: AppSection) -> some View {
+        let active = section == page
+        return Button { section = page } label: {
+            Icon(page.icon).foregroundStyle(active ? Theme.selectionIcon : Theme.secondary)
+                .frame(width: 38, height: 44)
+                .background(active ? Theme.selected : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+                .frame(width: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(page.title)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    private func showSidebar(_ shown: Bool) {
+        withAnimation(Motion.move(reduceMotion)) { sidebarShown = shown }
     }
 
     @ViewBuilder private func page(_ section: AppSection) -> some View {

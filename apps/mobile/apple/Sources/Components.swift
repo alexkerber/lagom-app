@@ -426,7 +426,7 @@ struct StageSwipe: ViewModifier {
 }
 
 /// A pan that starts only when the finger moves more sideways than up or down, so the list still scrolls.
-private struct HorizontalPan: UIGestureRecognizerRepresentable {
+struct HorizontalPan: UIGestureRecognizerRepresentable {
     let enabled: Bool
     let changed: (CGFloat) -> Void
     let ended: (CGFloat) -> Void
