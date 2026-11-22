@@ -8,6 +8,10 @@ struct RootView: View {
     @AppStorage(AppSection.storageKey) private var section: AppSection = .mail
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.verticalSizeClass) private var height
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The iPad sidebar hides for more room (Alex 2026-11-22): the menu button before the mailbox, a swipe left
+    /// on the sidebar, or a swipe right from the screen's left edge.
+    @AppStorage("lagom.sidebarShown") private var sidebarShown = true
     @State private var addAccount = false
     @State private var removing: MailAccount?
     /// The phone's Settings sheet; a mailto link or a notification closes it, and Add account inside it.
@@ -34,13 +38,25 @@ struct RootView: View {
             // system bar, which iOS puts on its right edge (Alex 2026-11-17).
             if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
-                    SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
-                        .frame(width: 240)
+                    if sidebarShown {
+                        SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
+                            .frame(width: 240)
+                            .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { if $0 < -60 { showSidebar(false) } }))
+                            .transition(.move(edge: .leading))
+                    }
                     // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop.
                     page(section)
                         .background(Theme.background.ignoresSafeArea())
+                        // The page's left margin catches the swipe that brings the sidebar back.
+                        .overlay(alignment: .leading) {
+                            if !sidebarShown {
+                                Color.clear.frame(width: 20).contentShape(Rectangle())
+                                    .gesture(HorizontalPan(enabled: true, changed: { _ in }, ended: { if $0 > 60 { showSidebar(true) } }))
+                            }
+                        }
                 }
                 .background(Theme.sidebar.ignoresSafeArea())
+                .environment(\.sidebarShown, Binding(get: { sidebarShown }, set: { showSidebar($0) }))
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
                 TabView(selection: $section) {
@@ -115,6 +131,10 @@ struct RootView: View {
             model.searchText = ""
         }
         section = .mail
+    }
+
+    private func showSidebar(_ shown: Bool) {
+        withAnimation(Motion.move(reduceMotion)) { sidebarShown = shown }
     }
 
     @ViewBuilder private func page(_ section: AppSection) -> some View {

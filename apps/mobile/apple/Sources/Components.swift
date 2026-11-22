@@ -426,7 +426,7 @@ struct StageSwipe: ViewModifier {
 }
 
 /// A pan that starts only when the finger moves more sideways than up or down, so the list still scrolls.
-private struct HorizontalPan: UIGestureRecognizerRepresentable {
+struct HorizontalPan: UIGestureRecognizerRepresentable {
     let enabled: Bool
     let changed: (CGFloat) -> Void
     let ended: (CGFloat) -> Void
@@ -596,6 +596,15 @@ struct RailGroup<Content: View>: View {
         VStack(spacing: 0) { content }
             .environment(\.inRailGroup, true)
             .modifier(RailGlass(shape: Capsule()))
+    }
+}
+
+/// The iPad sidebar's shown state; nil where there is no sidebar. Mail's menu button toggles it.
+private struct SidebarShownKey: EnvironmentKey { static let defaultValue: Binding<Bool>? = nil }
+extension EnvironmentValues {
+    var sidebarShown: Binding<Bool>? {
+        get { self[SidebarShownKey.self] }
+        set { self[SidebarShownKey.self] = newValue }
     }
 }
 
