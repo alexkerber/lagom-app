@@ -1,3 +1,4 @@
+import AuthenticationServices
 import SwiftUI
 
 /// The intro before the app: Welcome, Choose account, then Notifications once an account is in.
@@ -9,12 +10,10 @@ struct OnboardingView: View {
     let notifications: Bool
     let allow: () -> Void
     let notNow: () -> Void
-    @Environment(\.webAuthenticationSession) private var browser
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var choosing = Storage.introChoose
     @State private var other = false
     @State private var connecting = false
-    @State private var error: String?
     @State private var height: CGFloat = 0
     /// Welcome's own height: the page ScrollView writes `height` while both show in the transition.
     @State private var welcomeHeight: CGFloat = 0
@@ -110,7 +109,7 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             HStack {
                 if step == .choose {
-                    IconButton(title: "Back", icon: "chevron-left") { choosing = false; error = nil }.disabled(connecting)
+                    IconButton(title: "Back", icon: "chevron-left") { choosing = false }.disabled(connecting)
                 }
             }
             .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
@@ -139,51 +138,7 @@ struct OnboardingView: View {
         case .welcome: EmptyView()
         case .choose:
             DisplayTitle(text: "Choose your mail", size: .display).padding(.top, 8)
-            let providers = [(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")]
-                .filter { signInAvailable(provider: $0.0) }
-            Group {
-                if !providers.isEmpty {
-                    // Hidden until this build has the provider's client ID, as in Add account. Google asks for its full
-                    // button text and its "G" on white.
-                    rows {
-                        ForEach(Array(providers.enumerated()), id: \.offset) { index, item in
-                            if index > 0 { hairline }
-                            row("Continue with \(item.1)", mark: Image(item.2).resizable().frame(width: 16, height: 16)
-                                .frame(width: 32, height: 32).background(.white, in: .circle)
-                                .overlay { Circle().strokeBorder(Theme.line) }) { Task { await signIn(item.0) } }
-                        }
-                    }
-                    .padding(.top, 24)
-                }
-                MonoLabel(text: "Other mail").padding(.top, 32).padding(.bottom, 8)
-                // The address decides the servers, so every mail app opens the same form.
-                rows {
-                    row("iCloud", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
-                    hairline
-                    row("Fastmail", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
-                    hairline
-                    row("Yahoo", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
-                    hairline
-                    row("Other (IMAP)", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other = true }
-                }
-            }
-            .disabled(connecting)
-            if connecting {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("Signing in…").lagomFont(.small).foregroundStyle(Theme.secondary)
-                }
-                .accessibilityElement(children: .combine)
-                .padding(.top, 16)
-            }
-            if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(.top, 16) }
-            HStack(spacing: 8) {
-                Icon("access", size: 14)
-                Text("Passwords stay on this device.")
-            }
-            .lagomFont(.small).foregroundStyle(Theme.secondary)
-            .accessibilityElement(children: .combine)
-            .padding(.top, 16)
+            ChooseMail(model: model, connecting: $connecting) { other = true }
         case .notifications:
             Icon("inbox", size: 32).foregroundStyle(Theme.accent)
             DisplayTitle(text: "Notifications", size: .display).padding(.top, 24)
@@ -205,6 +160,69 @@ struct OnboardingView: View {
     private func wide(_ title: String, icon: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) { ButtonLabel(title: title, icon: icon, primary: primary).frame(maxWidth: .infinity, minHeight: 48) }
             .buttonStyle(HouseButtonStyle(primary: primary))
+    }
+
+}
+
+/// Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.
+/// The intro's Choose step and the Add account sheet show the same list (Alex 2026-11-22).
+struct ChooseMail: View {
+    let model: MailModel
+    @Binding var connecting: Bool
+    /// After a provider sign-in; the sheet closes here.
+    var signedIn: () -> Void = {}
+    let other: () -> Void
+    @Environment(\.webAuthenticationSession) private var browser
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            let providers = [(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")]
+                .filter { signInAvailable(provider: $0.0) }
+            Group {
+                if !providers.isEmpty {
+                    // Hidden until this build has the provider's client ID. Google asks for its full
+                    // button text and its "G" on white.
+                    rows {
+                        ForEach(Array(providers.enumerated()), id: \.offset) { index, item in
+                            if index > 0 { hairline }
+                            row("Continue with \(item.1)", mark: Image(item.2).resizable().frame(width: 16, height: 16)
+                                .frame(width: 32, height: 32).background(.white, in: .circle)
+                                .overlay { Circle().strokeBorder(Theme.line) }) { Task { await signIn(item.0) } }
+                        }
+                    }
+                    .padding(.top, 24)
+                }
+                MonoLabel(text: "Other mail").padding(.top, 32).padding(.bottom, 8)
+                // The address decides the servers, so every mail app opens the same form.
+                rows {
+                    row("iCloud", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
+                    hairline
+                    row("Fastmail", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
+                    hairline
+                    row("Yahoo", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
+                    hairline
+                    row("Other (IMAP)", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
+                }
+            }
+            .disabled(connecting)
+            if connecting {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Signing in…").lagomFont(.small).foregroundStyle(Theme.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .padding(.top, 16)
+            }
+            if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(.top, 16) }
+            HStack(spacing: 8) {
+                Icon("access", size: 14)
+                Text("Passwords stay on this device.")
+            }
+            .lagomFont(.small).foregroundStyle(Theme.secondary)
+            .accessibilityElement(children: .combine)
+            .padding(.top, 16)
+        }
     }
 
     /// A list of rows in one hairline frame, like a shopping list.
@@ -237,6 +255,7 @@ struct OnboardingView: View {
         defer { connecting = false }
         do {
             guard try await model.signIn(provider, browser: browser, exchanging: { connecting = true }) else { return }
+            signedIn()
             await model.sync()
         } catch { self.error = error.localizedDescription }
     }
