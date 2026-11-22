@@ -3,10 +3,10 @@ import SwiftUI
 
 struct AddAccountView: View {
     let model: MailModel
-    /// The intro asks Google, Microsoft or Other first; Other opens only the mail server form.
+    /// Starts on Choose your mail, as the intro; false opens the address form at once (the intro's Other).
     var providers = true
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.webAuthenticationSession) private var browser
+    @State private var form = false
     @State private var email = ""
     @State private var password = ""
     @State private var passwordStep = false
@@ -24,15 +24,15 @@ struct AddAccountView: View {
 
     var body: some View {
         SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() }) {
+            if providers && !form {
+                ScrollView {
+                    ChooseMail(model: model, connecting: $connecting, signedIn: { dismiss() }) { form = true }
+                        .padding(.horizontal, 16).padding(.bottom, 16)
+                        .frame(maxWidth: 440, alignment: .leading).frame(maxWidth: .infinity)
+                }
+            } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // Hidden until this build has the provider's client ID.
-                    ForEach([(SignInProvider.google, "Google"), (.microsoft, "Microsoft")], id: \.1) { provider, name in
-                        if providers && signInAvailable(provider: provider) {
-                            Button("Sign in with \(name)") { Task { await signIn(provider) } }
-                                .buttonStyle(HouseButtonStyle()).frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
                     FieldRow(label: "Email") {
                         TextField("you@example.com", text: $email).textContentType(.emailAddress).keyboardType(.emailAddress)
                             .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
@@ -42,7 +42,7 @@ struct AddAccountView: View {
                             SecureField("App password", text: $password).textContentType(.password).accessibilityLabel("Password")
                         }
                         Text(signInAvailable(provider: .microsoft)
-                            ? "Gmail and iCloud need an app password, not your normal password. For Microsoft, use Sign in with Microsoft."
+                            ? "Gmail and iCloud need an app password, not your normal password. For Microsoft, go back and choose Continue with Microsoft."
                             : "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.")
                             .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.vertical, 12)
                         Toggle("Advanced", isOn: $advanced).lagomFont(.base).frame(minHeight: 44)
@@ -55,7 +55,13 @@ struct AddAccountView: View {
                 }
                 .padding(.horizontal, 16)
             }
+            }
         } footer: {
+            if !providers || form {
+            if providers {
+                IconButton(title: "Back", icon: "chevron-left") { back() }
+                    .disabled(connecting)
+            }
             HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
                 if passwordStep { Task { await connect() } }
                 else { passwordStep = true; imapUser = email; smtpUser = email }
@@ -64,6 +70,7 @@ struct AddAccountView: View {
             if connecting {
                 ProgressView()
                 Text("Signing in…").lagomFont(.small).foregroundStyle(Theme.secondary)
+            }
             }
             Spacer(minLength: 0)
         }
@@ -91,14 +98,11 @@ struct AddAccountView: View {
         }
     }
 
-    private func signIn(_ provider: SignInProvider) async {
-        error = nil
-        defer { connecting = false }
-        do {
-            guard try await model.signIn(provider, browser: browser, exchanging: { connecting = true }) else { return }
-            dismiss()
-            await model.sync()
-        } catch { self.error = error.localizedDescription }
+    /// Back to the list starts the form afresh, so one kind's servers never meet the next kind's password.
+    private func back() {
+        form = false; passwordStep = false; advanced = false; error = nil
+        email = ""; password = ""; imapUser = ""; smtpUser = ""
+        imapHost = ""; smtpHost = ""; imapPort = "993"; smtpPort = "587"; imapTLS = true; smtpTLS = false
     }
 
     private func connect() async {
