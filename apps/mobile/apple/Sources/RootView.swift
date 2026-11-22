@@ -40,14 +40,14 @@ struct RootView: View {
                 HStack(spacing: 0) {
                     // Hidden, the sidebar folds to a strip that holds only its button; a swipe either way on it
                     // closes or opens it.
-                    ZStack(alignment: .topLeading) {
-                        if sidebarShown {
-                            SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
-                                .padding(.top, 44)
-                                .frame(width: 240)
-                                .transition(.move(edge: .leading).combined(with: .opacity))
-                        }
-                    }
+                    // Kept while hidden, so its scroll position survives.
+                    SidebarView(model: model, planner: planner, section: $section, addAccount: $addAccount, removing: $removing)
+                        .padding(.top, 44)
+                        .frame(width: 240)
+                        .offset(x: sidebarShown ? 0 : -240)
+                        .opacity(sidebarShown ? 1 : 0)
+                        .allowsHitTesting(sidebarShown)
+                        .accessibilityHidden(!sidebarShown)
                     .frame(width: sidebarShown ? 240 : 52, alignment: .leading)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .clipped()
