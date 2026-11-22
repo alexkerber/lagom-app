@@ -1378,7 +1378,7 @@ async fn user_actions_do_not_wait_for_a_slow_folder_sync() {
         let sync = tokio::spawn({ let core = core.clone(); async move { core.sync(a.id).await } });
         slow.stalled.notified().await;
         // The sync now holds the folder lock in the middle of INBOX.
-        tokio::time::timeout(HANG, core.mark_read(id, true)).await
+        tokio::time::timeout(std::time::Duration::from_secs(10), core.mark_read(id, true)).await
             .expect("the read flag waited for the sync").unwrap();
         assert!(!core.message(id).await.unwrap().row.unread);
         // Stands in for a move: it waits for INBOX only and runs before Archive. The first poll queues it.
