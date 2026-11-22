@@ -12,6 +12,10 @@ and the steps that need a human (certificates, store accounts, secrets).
   `option_env!("LAGOM_VERSION")` and treats `None` as a development build.
 - Numeric fields that refuse a suffix use the `1.2.3` part only.
 - Release files are named `lagom-<LAGOM_VERSION>` plus a platform suffix and extension.
+- Each file also goes up without the version (`lagom-windows-x64-setup.exe`, `lagom.dmg`), so
+  `https://github.com/alexkerber/lagom-app/releases/latest/download/<name>` always gives the newest
+  published release. The site links there. Betas are full releases, not GitHub pre-releases, because
+  "latest" skips pre-releases; a tag makes a draft, and publishing the draft ships it.
 
 | Platform | Where the version goes                                                                       | Build number                                                            |
 | -------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
