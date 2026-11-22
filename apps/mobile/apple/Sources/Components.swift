@@ -477,21 +477,22 @@ private struct PageMarginKey: EnvironmentKey { static let defaultValue: CGFloat 
 
 /// The page edges every page shares (Alex 2026-11-20: "Apple best practice"), so titles and the content under them
 /// start on one line. Sides: the system's layout margin. Top: 8 pt under the safe area; on the Duo, whose status bar
-/// sits in the right column and leaves no top inset, a 44 pt first row centres on that status bar's clock (92 pt,
-/// measured on the cover display), which also keeps it clear of the inner display's 55 pt corners.
+/// sits in the right column and leaves no top inset, the same layout margin as the sides (HIG: content starts at the
+/// safe area plus the layout margin). A first row level with the rail's clock sat too low (Alex 2026-11-20).
 struct PageEdges: ViewModifier {
     var top = true
+    var sides = true
     @Environment(\.pageMargin) private var margin
     @Environment(\.railInset) private var railInset
 
     func body(content: Content) -> some View {
-        content.padding(.horizontal, margin).padding(.top, top ? (railInset > 0 ? 92 - 22 : 8) : 0)
+        content.padding(.horizontal, sides ? margin : 0).padding(.top, top ? (railInset > 0 ? margin : 8) : 0)
     }
 }
 
 extension View {
-    /// A page's header and content edges; `top: false` for a page's later blocks.
-    func pageEdges(top: Bool = true) -> some View { modifier(PageEdges(top: top)) }
+    /// A page's header and content edges; `top: false` for a page's later blocks, `sides: false` inside a page that has them.
+    func pageEdges(top: Bool = true, sides: Bool = true) -> some View { modifier(PageEdges(top: top, sides: sides)) }
 
     /// Reads the system's layout margin at the root; views and sheets under it inherit it.
     func readsPageMargin() -> some View { modifier(PageMarginReader()) }

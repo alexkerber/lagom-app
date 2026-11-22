@@ -29,18 +29,20 @@ struct ConversationView: View {
                             Spacer(minLength: 0)
                             Text(DateWords().listTime(RowPresentation(row).date)).lagomFont(.small)
                         }
-                        .lineLimit(1).frame(minHeight: 44).padding(.horizontal, 16).contentShape(Rectangle())
+                        .lineLimit(1).frame(minHeight: 44).contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(expanded ? "Collapse" : "Expand") message from \(sender)")
                     .accessibilityValue("\(DateWords().readingDate(RowPresentation(row).date)), \(row.preview)")
                     if expanded {
                         // shortcut: like desktop, each expanded body scrolls independently; measure HTML for continuous scrolling later.
-                        MessageView(message: message, model: model).frame(height: 560)
+                        MessageView(message: message, model: model, embedded: true).frame(height: 560)
                     }
                     Theme.line.frame(height: 1)
                 }
             }
+            // The conversation takes the page edges once; its embedded bodies add none of their own.
+            .pageEdges()
         }
     }
 }
@@ -50,6 +52,8 @@ struct ConversationView: View {
 struct MessageView: View {
     let message: MailMessage
     @Bindable var model: MailModel
+    /// A body inside a conversation, which already sits on the page edges.
+    var embedded = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.horizontalSizeClass) private var width
     @Environment(\.railInset) private var railInset
@@ -94,8 +98,10 @@ struct MessageView: View {
             .buttonStyle(.plain)
             .disabled(model.preparingCompose) }
         }
-        .padding(pad)
-        .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
+        // The pages' shared edges, so the subject starts on the list header's line.
+        .pageEdges(top: !embedded, sides: !embedded).padding(.bottom, pad)
+        // An embedded body's edges sit outside it, so its cap is the reading width alone.
+        .frame(maxWidth: embedded ? 760 : 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Theme.ink)
         .quickLookPreview($model.attachmentURL)
@@ -229,7 +235,8 @@ struct MessagePreview: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
         }
-        .padding(pad)
+        // The pages' shared edges, so the subject starts on the list header's line.
+        .pageEdges().padding(.bottom, pad)
         .frame(maxWidth: 760 + 2 * pad, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Theme.ink)

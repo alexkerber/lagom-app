@@ -565,12 +565,15 @@ struct MailView: View {
             .background(Theme.background)
             .disabled(model.working)
         } else if let id = model.selectedID, let row = model.rows.first(where: { $0.id == id || $0.messageIds.contains(id) }) {
-            // While the message loads its list preview stands in, under a bar as tall as the toolbar.
+            // While the message loads its list preview stands in, under a bar as tall as the toolbar. On the Duo the
+            // loaded message has no toolbar, so the preview has none either and the subject does not jump.
             VStack(spacing: 0) {
-                HStack {
-                    if !split && railInset == 0 { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                if railInset == 0 {
+                    HStack {
+                        if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                    }
+                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
                 }
-                .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
                 MessagePreview(row: row)
             }
             .background(Theme.background)
