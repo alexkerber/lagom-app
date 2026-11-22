@@ -88,7 +88,7 @@ internal val SplashIcon = 160.dp
         when (shown) {
             Step.WELCOME -> Welcome(model, settled, { settled = true }, ::addAccount)
             Step.CHOOSE -> ChooseAccount(model, providers) { choosing = false }
-            Step.FORM -> model.accountForm?.let { AddAccountScreen(model, it, showProviders = false) { model.accountForm = null } }
+            Step.FORM -> model.accountForm?.let { AddAccountScreen(model, it) { model.accountForm = null } }
             Step.NOTIFICATIONS -> Notifications(answer)
         }
     }
@@ -191,11 +191,19 @@ internal val SplashIcon = 160.dp
 }
 
 @Composable private fun ChooseAccount(model: MailModel, providers: List<Pair<SignInProvider, String>>, back: () -> Unit) {
-    val context = LocalContext.current
     StepPage(top = { LagomIconButton("Back", R.drawable.ic_chevron_left, onClick = back) }, centred = false, buttons = {}) {
         DisplayTitle("Choose your mail", TextSize.display, Modifier.padding(top = 8.dp))
+        ChooseMailList(model, providers) { model.accountForm = AccountForm() }
+    }
+}
+
+/** Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.
+ *  The intro's Choose step and Add account show the same list (Alex 2026-11-22). */
+@Composable internal fun ChooseMailList(model: MailModel, providers: List<Pair<SignInProvider, String>>, other: () -> Unit) {
+    val context = LocalContext.current
+    Column {
         if (providers.isNotEmpty()) {
-            // Hidden until this build has the provider's client ID, as in Add account. Google asks for its full button text
+            // Hidden until this build has the provider's client ID. Google asks for its full button text
             // and its "G" on white.
             Rows(Modifier.padding(top = 24.dp)) {
                 providers.forEachIndexed { index, (provider, name) ->
@@ -215,7 +223,7 @@ internal val SplashIcon = 160.dp
             listOf("iCloud", "Fastmail", "Yahoo", "Other (IMAP)")
                 .forEachIndexed { index, name ->
                     if (index > 0) Hairline()
-                    Choice(name, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }) { model.accountForm = AccountForm() }
+                    Choice(name, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }) { other() }
                 }
         }
         Row(Modifier.padding(top = 16.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(8.dp),
