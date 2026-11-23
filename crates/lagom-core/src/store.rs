@@ -54,7 +54,8 @@ impl Store {
         }
         owner_only(path, 0o600)?;
         let db = Connection::open(path)?;
-        db.busy_timeout(std::time::Duration::from_secs(5))?;
+        let busy_timeout = std::time::Duration::from_secs(5);
+        db.busy_timeout(busy_timeout)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         for side in ["-wal", "-shm"] {
             let mut p = path.as_os_str().to_owned();
@@ -149,7 +150,12 @@ impl Store {
             store.db.execute_batch(include_str!("schema_v21.sql"))?;
         }
         if store.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_credentials)", [], |r| r.get(0))? {
-            store.clean_pending(None)?;
+            store.db.busy_timeout(std::time::Duration::ZERO)?;
+            match store.clean_pending(None) {
+                Err(Error::Store(e)) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
+                result => result?,
+            }
+            store.db.busy_timeout(busy_timeout)?;
         }
         Ok(store)
     }
@@ -239,7 +245,13 @@ impl Store {
         let pending = stmt.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (account, key, current) in pending {
-            if !current { Account::delete_key(&account, (!key.is_empty()).then_some(key.as_str()))?; }
+            if !current {
+                if let Err(error) = Account::delete_key(&account, (!key.is_empty()).then_some(key.as_str())) {
+                    if id.is_some() { return Err(error); }
+                    eprintln!("lagom: credential cleanup pending: {error}");
+                    continue;
+                }
+            }
             self.db.execute("DELETE FROM pending_credentials WHERE account=?1 AND credential_key=?2", params![account, key])?;
         }
         Ok(())
@@ -423,6 +435,17 @@ mod tests {
             .query_map(params!["account", 0], |r| r.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert!(plan.iter().any(|p| p.contains("SEARCH m USING INDEX messages_visible_folder_date")), "{plan:?}");
     }
+    #[test]
+    fn open_defers_pending_credentials_while_a_writer_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("busy.sqlite3");
+        let writer = Store::open(&path).unwrap();
+        writer.db.execute("INSERT INTO pending_credentials VALUES ('account','key')", []).unwrap();
+        let _tx = writer.credential_transaction().unwrap();
+        let reader = Store::open(&path).unwrap();
+        assert_eq!(reader.db.query_row("SELECT credential_key FROM pending_credentials", [], |r| r.get::<_, String>(0)).unwrap(), "key");
+    }
+
     #[test]
     fn bounded_task_write_restores_timeout_and_leaves_worker_timeout_unchanged() {
         use std::time::{Duration, Instant};

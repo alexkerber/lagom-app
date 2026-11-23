@@ -497,10 +497,10 @@ impl LagomCore {
             }
         };
         let grant = pending.account().map(|a| a.id.clone());
+        let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
         self.run_sync(move |stores| {
             let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = &*stores.folder_lock();
-            let signed = network(lagom_core::oauth::finish(pending, &callback_url))?;
             s.save_browser_sign_in(signed, grant.as_deref()).map(Into::into)
         }).await
     }

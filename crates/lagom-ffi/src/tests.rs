@@ -1280,14 +1280,12 @@ async fn browser_sign_in_takes_only_its_own_redirect_once() {
     // A wrong state leaves the real sign-in pending.
     assert!(matches!(core.finish_sign_in(stray.into()).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
     let denied = format!("msauth.com.example.app://auth?error=access_denied&state={state}");
-    let finish = core.finish_sign_in(denied.clone());
-    tokio::pin!(finish);
     {
-        // A one-message action can still write a rotated token while it holds this lock.
+        // A denied callback can finish while a one-message action holds the removal lock.
         let _refresh = core.stores.removal.read().unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut finish).await.is_err());
+        let result = tokio::time::timeout(HANG, core.finish_sign_in(denied.clone())).await.unwrap();
+        assert!(matches!(result, Err(MailError::Failed { reason }) if reason == "sign-in cancelled"));
     }
-    assert!(matches!(tokio::time::timeout(HANG, finish).await.unwrap(), Err(MailError::Failed { reason }) if reason == "sign-in cancelled"));
     // The redirect is single use.
     assert!(matches!(core.finish_sign_in(denied).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
     assert!(core.accounts().await.unwrap().is_empty());
@@ -1940,9 +1938,13 @@ fn browser_sign_in_upgrades_password_account() {
     drop(Store::open(store.path()).unwrap());
     assert!(orphan.password().is_err());
     assert_eq!(old.password().unwrap().as_str(), "fixture");
-    memory_secrets::fail_next_delete(&old.id);
+    memory_secrets::deny_deletes(Some(&old.id));
     let saved = store.save_browser_sign_in(browser(&old, email, "one"), Some(&old.id)).unwrap();
+    drop(Store::open(store.path()).unwrap());
+    let pending: String = db.query_row("SELECT credential_key FROM pending_credentials WHERE account=?1", [&old.id], |r| r.get(0)).unwrap();
+    assert_eq!(pending, "");
     assert!(old.password().is_ok());
+    memory_secrets::deny_deletes(None);
     db.execute("INSERT INTO pending_credentials VALUES (?1,?2)", rusqlite::params![saved.id, saved.credential_key]).unwrap();
     drop(Store::open(store.path()).unwrap());
     assert_eq!(saved.password().unwrap().as_str(), "replacement");

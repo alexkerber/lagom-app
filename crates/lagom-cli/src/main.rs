@@ -294,6 +294,7 @@ async fn main() -> Result<()> {
         Some(path) => Store::open(path)?,
         None => Store::open_default()?,
     };
+    oauth::configure_refresh_store(store.path());
     match args.command {
         Command::Mcp => mcp::run(&store)?,
         Command::Tasks { command } => match command {

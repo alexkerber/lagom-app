@@ -8,8 +8,8 @@ struct MemorySecrets(Arc<Mutex<HashMap<String, Vec<u8>>>>);
 struct MemoryEntry { store: MemorySecrets, id: String, user: String }
 
 thread_local! { static DENY_DELETE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
-#[allow(dead_code)] // Only the rollback test injects a failure.
-pub fn fail_next_delete(user: &str) { DENY_DELETE.with(|key| key.replace(Some(user.into()))); }
+#[allow(dead_code)]
+pub fn deny_deletes(user: Option<&str>) { DENY_DELETE.with(|key| key.replace(user.map(str::to_owned))); }
 
 impl CredentialBuilderApi for MemorySecrets {
     fn build(&self, _: Option<&str>, service: &str, user: &str) -> keyring::Result<Box<Credential>> {
@@ -21,7 +21,7 @@ impl CredentialApi for MemoryEntry {
     fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> { self.store.0.lock().unwrap().insert(self.id.clone(), secret.to_vec()); Ok(()) }
     fn get_secret(&self) -> keyring::Result<Vec<u8>> { self.store.0.lock().unwrap().get(&self.id).cloned().ok_or(keyring::Error::NoEntry) }
     fn delete_credential(&self) -> keyring::Result<()> {
-        if DENY_DELETE.with(|key| key.borrow_mut().take_if(|id| *id == self.user).is_some()) {
+        if DENY_DELETE.with(|key| key.borrow().as_deref() == Some(self.user.as_str())) {
             return Err(keyring::Error::Invalid("delete".into(), "fixture failure".into()));
         }
         self.store.0.lock().unwrap().remove(&self.id);
