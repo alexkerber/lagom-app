@@ -26,6 +26,13 @@ class Perf(unittest.TestCase):
         self.assertTrue(perf.report(linux, 2.0, {"size": 53.2}, "linux")[1])
         self.assertFalse(perf.report(linux, 2.0, {"size": 53.2}, "darwin")[1])
 
+    def test_windows_binary_size_budget(self):
+        config = perf.tomllib.loads((perf.ROOT / "docs/performance-budgets.toml").read_text(encoding="utf-8"))
+        budgets = {"binary.size": config["budgets"]["binary.size"]}
+        for size, expected in [(32, True), (32 + 1e-6, False)]:
+            with self.subTest(size=size):
+                self.assertEqual(perf.report(budgets, config["tolerance"], {"binary.size": size}, "win32")[1], expected)
+
 
 if __name__ == "__main__":
     unittest.main()
