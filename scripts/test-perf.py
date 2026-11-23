@@ -32,6 +32,9 @@ class Perf(unittest.TestCase):
         for size, expected in [(32, True), (32 + 1e-6, False)]:
             with self.subTest(size=size):
                 self.assertEqual(perf.report(budgets, config["tolerance"], {"binary.size": size}, "win32")[1], expected)
+        times = {"sync": {"max": 10, "unit": "ms"}}
+        self.assertTrue(perf.report(times, 2.0, {"sync": 9000.0}, "win32")[1])
+        self.assertFalse(perf.report(times, 2.0, {"sync": 9000.0}, "linux")[1])
 
 
 if __name__ == "__main__":
