@@ -280,7 +280,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Fixes for the 19 findings of the 2026-11-09 review (sync stall, attachment marking, quoted Markdown, autocomplete, inert tags, iOS data protection and the low findings).
 - [ ] Measure on Windows: the URL `NavigateToString` reports in the navigation gate, the `Zone.Identifier` stream on saved attachments, and whether `<iframe srcdoc>` resource hints are inert.
 - [ ] Measure on an iPhone: data protection class and backup exclusion of the mail store, the `WhenUnlockedThisDeviceOnly` keychain write, link previews off.
-- [ ] iOS: migrate keychain items stored before the accessibility change (rewrite on first read).
+- [x] iOS (`fix/ios-keychain-migrate`): Reading an older keychain item updates its accessibility to `WhenUnlockedThisDeviceOnly`. A failed update still returns the secret. Four Rust account tests passed. The app and tests built for the generic iOS Simulator. Migration on an iPhone remains unverified.
 - [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
 - [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
 - [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
