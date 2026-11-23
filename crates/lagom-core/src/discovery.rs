@@ -142,14 +142,19 @@ fn password(email: &str, icloud: bool) -> Discovery {
         help_url: Some(help.into()),
     }
 }
+pub fn is_outlook_address(email: &str) -> bool {
+    email.trim().rsplit_once('@').is_some_and(|(_, domain)| outlook_domain(&domain.to_ascii_lowercase()))
+}
+
+fn outlook_domain(domain: &str) -> bool {
+    matches!(domain, "outlook.com" | "msn.com") || domain.starts_with("hotmail.") || domain.starts_with("live.")
+}
+
 fn known(domain: &str, email: &str) -> Option<Discovery> {
     Some(match domain {
         "gmail.com" | "googlemail.com" => Discovery::OAuth(Provider::Google),
-        "outlook.com" | "msn.com" => Discovery::OAuth(Provider::Microsoft),
+        d if outlook_domain(d) => Discovery::OAuth(Provider::Microsoft),
         "icloud.com" | "me.com" | "mac.com" => password(email, true),
-        d if d.starts_with("hotmail.") || d.starts_with("live.") => {
-            Discovery::OAuth(Provider::Microsoft)
-        }
         d if d.starts_with("fastmail.") => password(email, false),
         _ => return None,
     })
@@ -278,6 +283,7 @@ mod tests {
                 |_| async { panic!("known domain did HTTP") },
             )
             .await;
+            assert_eq!(is_outlook_address(&format!(" {} ", email.to_uppercase())), result == Discovery::OAuth(Provider::Microsoft));
             match domain {
                 "gmail.com" | "GOOGLEMAIL.COM" => {
                     assert_eq!(result, Discovery::OAuth(Provider::Google))

@@ -1,5 +1,6 @@
 package app.lagommail.android
 
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.*
@@ -199,6 +200,11 @@ internal val SplashIcon = 160.dp
     }
 }
 
+internal fun MailModel.startSignIn(context: Context, provider: SignInProvider) {
+    signInForm = accountForm
+    perform { openSignIn(context, requireNotNull(core).beginSignIn(provider).url) }
+}
+
 /** Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.
  *  The intro's Choose step and Add account show the same list (Alex 2026-11-22). */
 @Composable internal fun ChooseMailList(model: MailModel, providers: List<Pair<SignInProvider, String>>, other: () -> Unit) {
@@ -216,8 +222,7 @@ internal val SplashIcon = 160.dp
                             Image(painterResource(logo), null, Modifier.size(16.dp))
                         }
                     }, enabled = !model.signingIn) {
-                        model.signInForm = model.accountForm
-                        model.perform { openSignIn(context, requireNotNull(model.core).beginSignIn(provider).url) }
+                        model.startSignIn(context, provider)
                     }
                 }
             }
