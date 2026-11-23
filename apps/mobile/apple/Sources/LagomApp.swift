@@ -226,7 +226,7 @@ struct MailView: View {
     }
 
     private var composeButton: some View {
-        IconButton(title: "New message", icon: "compose") {
+        BarButton(title: "New message", icon: "compose") {
             let account = model.accountID ?? model.accounts.first?.id ?? ""
             Task { await model.newMessage(account: account) }
         }
@@ -277,19 +277,15 @@ struct MailView: View {
         }
     }
 
-    /// The list header (Alex 2026-11-20): the lagom mark with the mailbox on the right, then the filter with
-    /// search and New message on the right. The iPad keeps the mailbox at the left, under its sidebar's brandless list.
+    /// The list header, the app bar every page shares (Alex 2026-11-23): the mailbox as the title at the left,
+    /// Search and New message as glass buttons at the right, then the filter.
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                if !sidebar {
-                    Image("LaunchIcon").resizable().frame(width: 28, height: 28).accessibilityHidden(true)
-                    Spacer(minLength: 8)
-                }
+            HStack(alignment: .top, spacing: 8) {
                 mailboxMenu
-                if sidebar { Spacer(minLength: 0) }
+                Spacer(minLength: 8)
+                if !searchOpen { headerButtons }
             }
-            .frame(minHeight: 44)
             if searchOpen {
                 HStack(spacing: 8) {
                     SearchField(text: $model.searchText).focused($searchFocused)
@@ -298,11 +294,7 @@ struct MailView: View {
                 // The keyboard rises once, with the field the button opened, not each time a kept search reappears.
                 .onAppear { if focusOnOpen { searchFocused = true; focusOnOpen = false } }
             } else {
-                // At the largest text sizes the buttons go under the filter, so nothing collapses to "…".
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) { listControl; Spacer(minLength: 8); headerButtons }
-                    VStack(alignment: .leading, spacing: 4) { listControl; HStack(spacing: 8) { Spacer(minLength: 0); headerButtons } }
-                }
+                listControl
             }
         }
         .pageEdges().padding(.bottom, 6)
@@ -323,14 +315,12 @@ struct MailView: View {
     /// Search, a button that opens the field as on the Mac (Alex 2026-11-20), and New message without a rail.
     /// iOS 26's minimized `.searchable` draws nothing here: the bar it lives in is hidden for lagom's own header.
     @ViewBuilder private var headerButtons: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             if model.mailbox != .drafts {
-                IconButton(title: "Search", icon: "search") { searching = true; focusOnOpen = true }
+                BarButton(title: "Search", icon: "search") { searching = true; focusOnOpen = true }
             }
             if railInset == 0 { composeButton }
         }
-        // The last glyph ends on the mailbox title's right edge (measured on the folded Duo).
-        .padding(.trailing, -14)
     }
 
     private var searchOpen: Bool { model.mailbox != .drafts && (searching || !model.searchText.isEmpty) }
@@ -366,16 +356,18 @@ struct MailView: View {
                 Section { Button { settingsOpen = true } label: { Label { Text("Settings") } icon: { Image("settings") } } }
             }
         } label: {
-            VStack(alignment: sidebar ? .leading : .trailing, spacing: 1) {
+            // The title row is 44 pt as on every page, so the mailbox sits level with Today, Calendar and To-do.
+            VStack(alignment: .leading, spacing: -6) {
                 HStack(spacing: 4) {
-                    Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).lineLimit(1)
+                    PageTitleText(text: name)
                     Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
                 }
+                .frame(minHeight: 44)
                 .foregroundStyle(Theme.ink)
                 HStack(spacing: 6) {
                     // Synced is the quiet default: the cloud shows only while it syncs or fails.
                     if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
-                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(sidebar ? .leading : .trailing)
+                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(.leading)
                         .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
                 .foregroundStyle(Theme.secondary)

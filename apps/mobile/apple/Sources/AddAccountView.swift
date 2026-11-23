@@ -136,7 +136,7 @@ extension MailModel {
     /// `exchanging` runs once the page has returned, while the core trades its code for tokens.
     func signIn(_ provider: SignInProvider, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
         guard let core else { return false }
-        if let mock = Storage.mockSignIn { return try await mockSignIn(mock, exchanging: exchanging) }
+        if let mock = Storage.mockSignIn, provider == .google { return try await mockSignIn(mock, exchanging: exchanging) }
         return try await authenticate(core.beginSignIn(provider: provider), browser: browser, exchanging: exchanging)
     }
 
@@ -146,13 +146,13 @@ extension MailModel {
         return try await authenticate(core.beginCalendarAccess(accountId: account), browser: browser, exchanging: exchanging)
     }
 
-    /// `Storage.mockSignIn`: the provider's page takes a second, then the exchange another; ok seeds the demo's
+    /// `Storage.mockSignIn`: page and exchange take two seconds; ok seeds the demo's
     /// Google accounts (mail scopes only, so Calendar offers its grant).
     private func mockSignIn(_ outcome: String, exchanging: () -> Void) async throws -> Bool {
-        try await Task.sleep(for: .seconds(1))
-        if outcome == "cancel" { return false }
+        // At once, unlike the real page: the page's modal sheet is what keeps Back and the rows from a second tap.
         exchanging()
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(2))
+        if outcome == "cancel" { return false }
         if outcome == "error" { throw MailError.Failed(reason: "Google did not accept the sign-in. Try again.") }
         try seedDemoWithoutCalendar(dataDir: Storage.directory().path, state: "google")
         await reload()

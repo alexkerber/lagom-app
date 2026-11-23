@@ -88,12 +88,28 @@ struct BackButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.backward").font(.system(size: 17, weight: .semibold))
-                .frame(width: 44, height: 44).contentShape(Circle())
+                .frame(width: 44, height: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(Theme.ink)
         .modifier(RailGlass())
         .accessibilityLabel("Back")
+    }
+}
+
+/// An action in a page's title bar: a round glass button, as Back (Alex 2026-11-23: one app bar on every page,
+/// in Liquid Glass). The main action is tinted with the accent.
+struct BarButton: View {
+    let title: String
+    let icon: String
+    var primary = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) { Icon(icon, label: title).frame(width: 44, height: 44).contentShape(Rectangle()) }
+            .buttonStyle(.plain)
+            .foregroundStyle(primary ? Theme.accentInk : Theme.ink)
+            .modifier(RailGlass(primary: primary))
     }
 }
 
@@ -170,28 +186,30 @@ struct GroupHeader: View {
     }
 }
 
-/// A page title as on desktop: semibold at the title size, actions on the right.
+/// Every page's title (Alex 2026-11-23, "titel vänster, ingen logga"): Hauora at the subject size, the one size
+/// Today, Mail, Calendar, To-do and Settings share.
+struct PageTitleText: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2)).lineLimit(1)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The app bar of a page: the title at the left, its actions as round glass `BarButton`s at the right.
 struct PageTitle<Trailing: View>: View {
     let title: String
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(title).font(.custom(Theme.Face.display, size: TextSize.title.points, relativeTo: .headline)).accessibilityAddTraits(.isHeader)
+            PageTitleText(text: title)
             Spacer(minLength: 8)
             trailing
         }
         .foregroundStyle(Theme.ink)
         .frame(minHeight: 44)
-    }
-}
-
-/// A section heading in a page: Schedule, To do, a task list's name.
-struct Heading: View {
-    let title: String
-
-    var body: some View {
-        Text(title).lagomFont(.base, .semibold).foregroundStyle(Theme.ink).accessibilityAddTraits(.isHeader)
     }
 }
 

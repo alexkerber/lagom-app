@@ -52,8 +52,9 @@ struct TodayView: View {
         line += part(count(planner.today?.events.count ?? 0, "event", "events", "no events"), "calendar") + part(" and ")
         line += part(count(dueCount(planner.today?.tasks ?? [], day: planner.today?.day ?? ""), "task due", "tasks due", "nothing due"), "todo") + part(".")
         return VStack(alignment: .leading, spacing: 12) {
-            // A 44 pt first row, as every page title, so it shares the row the page edges place.
-            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide))).frame(minHeight: 44)
+            // The app bar every page shares, then the day.
+            PageTitle(title: "Today") { EmptyView() }
+            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)
                 .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
                 .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
@@ -977,20 +978,23 @@ private struct WeekGrid: View {
         let title = DateWords().monthTitle(month)
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(title.month).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
+                PageTitleText(text: title.month)
                 if let year = title.year { Text(year).lagomFont(.subject).foregroundStyle(Theme.secondary) }
             }
             .lineLimit(1).layoutPriority(1)
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             if !(oneDay && railInset > 0) {
-                IconButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
-                Button("Today") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
-                IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+                BarButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
+                Button { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } } label: {
+                    Text("Today").lagomFont(.base, .medium).padding(.horizontal, 16).frame(minHeight: 44).contentShape(Capsule())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.ink).modifier(RailGlass(shape: Capsule()))
+                BarButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
             }
             // The Mac's accent New event after the week buttons; a phone shows only its plus. On the Duo it is in the column.
             if railInset == 0 && !planner.eventCalendars.isEmpty {
-                HouseButton(title: "New event", icon: "plus", primary: true, iconOnly: oneDay) { newEvent = true }
+                BarButton(title: "New event", icon: "plus", primary: true) { newEvent = true }
             }
         }
         .frame(minHeight: 44)

@@ -178,7 +178,7 @@ struct ChooseMail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             let providers = [(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")]
-                .filter { signInAvailable(provider: $0.0) || Storage.mockSignIn != nil }
+                .filter { signInAvailable(provider: $0.0) || (Storage.mockSignIn != nil && $0.0 == .google) }
             Group {
                 if !providers.isEmpty {
                     // Hidden until this build has the provider's client ID. Google asks for its full
