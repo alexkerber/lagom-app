@@ -3540,6 +3540,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
+ "dom_query",
  "futures-util",
  "hickory-resolver",
  "html5ever",
