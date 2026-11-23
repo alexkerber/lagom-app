@@ -9,6 +9,7 @@ on:
     paths:
       - scripts/package-macos.sh
       - scripts/build-release.sh
+      - brand/app-icon/AppIcon.icon/**
       - .github/workflows/package-macos.yml
   workflow_dispatch:
 
