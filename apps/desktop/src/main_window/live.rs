@@ -527,6 +527,10 @@ impl MainWindow {
                         compose.update(cx, |c, cx| c.forwarded(&draft, &result, cx));
                     }
                 }
+                Event::MessageFile(result) => match result {
+                    Ok(path) => cx.open_with_system(&path),
+                    Err(error) => self.notify(format!("Could not open this message: {error}"), cx),
+                },
                 Event::Downloaded(result) => match result {
                     Ok(path) => cx.reveal_path(&path),
                     Err(error) => self.notify(format!("Could not download attachment: {error}"), cx),
@@ -982,10 +986,9 @@ impl MainWindow {
         self.act_on(id, Move::Read(seen), window, cx);
     }
 
-    pub(super) fn download_attachment(&mut self, id: usize, section: String, cx: &mut Context<Self>) {
+    pub(super) fn download(&mut self, command: Cmd, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
-        let Some(store) = self.inbox.mail.get(id).and_then(|m| m.store) else { return };
-        if !live.bridge.send(Cmd::Download { id: store, section }) {
+        if !live.bridge.send(command) {
             self.worker_gone(cx);
         }
     }
@@ -1058,6 +1061,8 @@ impl MainWindow {
         if self.inbox.mail[id].body.is_empty() {
             self.inbox.mail[id].body = match live.store.message(store).and_then(|m| Ok((m, live.store.attachments(store)?, live.store.inline_parts(store)?))) {
                 Ok((m, parts, inline)) => {
+                    self.inbox.mail[id].oversized = m.body_html.is_none() && m.body_text == lagom_core::mime::BODY_UNAVAILABLE
+                        && live.store.inline_loaded(store).unwrap_or(false);
                     self.inbox.mail[id].inline = std::sync::Arc::new(inline);
                     self.inbox.mail[id].attachments = parts;
                     self.inbox.mail[id].unsubscribe = live.store.unsubscribe(store).ok().flatten();
@@ -2287,6 +2292,27 @@ mod tests {
     }
 
     #[gpui::test]
+    fn large_body_shows_open_in_another_app(cx: &mut TestAppContext) {
+        let (view, cx, mut rx) = window(cx);
+        let id = view.update(cx, |v, cx| {
+            let store = v.live.as_ref().unwrap().store.clone();
+            let summary = incoming(v, 1);
+            let id = summary.id;
+            store.save_message(&lagom_core::store::Message { summary, body_text: lagom_core::mime::BODY_UNAVAILABLE.into(), body_html: None }).unwrap();
+            assert!(store.inline_loaded(id).unwrap());
+            v.reload(cx);
+            v.inbox.select(0);
+            v.open_message(v.inbox.single().unwrap(), false, cx);
+            cx.notify();
+            id
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("Open in another app").unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        assert!(matches!(rx.try_recv(), Ok(Cmd::OpenMessage(row)) if row == id));
+    }
+
+    #[gpui::test]
     fn opening_a_body_sync_left_out_fetches_it_and_shows_the_html(cx: &mut TestAppContext) {
         let (view, cx, mut rx) = window(cx);
         let id = view.update(cx, |v, cx| {
@@ -2301,6 +2327,8 @@ mod tests {
             v.open_message(v.inbox.single().unwrap(), false, cx);
             id
         });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Open in another app").is_none());
         view.update_in(cx, |v, window, cx| {
             let selected = v.inbox.single().unwrap();
             assert!(matches!(rx.try_recv(), Ok(Cmd::Inline(row)) if row == id));
@@ -5725,7 +5753,7 @@ mod tests {
         let (view, cx, mut rx) = window(cx);
         view.update(cx, |v, cx| {
             v.inbox.mail[0].store = Some(42);
-            v.download_attachment(0, "2.1".into(), cx);
+            v.download(Cmd::Download { id: v.inbox.mail[0].store.unwrap(), section: "2.1".into() }, cx);
         });
         assert!(matches!(rx.try_recv(), Ok(Cmd::Download { id: 42, section }) if section == "2.1"));
         view.update_in(cx, |v, window, cx| v.on_events(vec![Event::Downloaded(Err("fixture failure".into()))], window, cx));

@@ -42,6 +42,105 @@ fn message(store: &Store, account: &str, folder: i64, uid: u32) -> i64 {
 }
 
 #[tokio::test]
+async fn large_body_streams_to_eml() {
+    let mut first = String::from("Subject: Original\r\n\r\n");
+    first.push_str(&"x".repeat(1048576 - first.len()));
+    let tail = "end\r\n";
+    let mut steps = login("");
+    for start in [0, 1048576] {
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<0.1048576>)",
+            &format!("* 1 FETCH (UID 1 BODY[]<0> {{1048576}}\r\n{first})\r\n")));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<1048576.1048576>)",
+            &format!("* 1 FETCH (UID 1 BODY[]<{start}> {{5}}\r\n{tail})\r\n")));
+    }
+    steps.push(step("SELECT \"INBOX\"", selected()));
+    let (mut imap, mut store, temp, server) = fixture(steps).await;
+    let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    store.reset_uidvalidity(folder, 7).unwrap();
+    let id = message(&store, &imap.account.id, folder, 1);
+    let dir = temp.path().join("cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["message-aB34z6.eml", "personal.eml"] {
+        let old = std::fs::File::create(dir.join(name)).unwrap();
+        old.set_modified(std::time::SystemTime::now() - Duration::from_secs(8 * 86400)).unwrap();
+    }
+    assert!(imap.save_eml(&store, id, &dir).await.is_err());
+    assert_eq!(dir.read_dir().unwrap().count(), 1);
+    assert!(dir.join("personal.eml").exists());
+    let path = imap.save_eml(&store, id, &dir).await.unwrap();
+    assert_eq!(path.extension().unwrap(), "eml");
+    #[cfg(target_os = "macos")]
+    {
+        let mark = std::process::Command::new("xattr").args(["-p", "com.apple.quarantine"]).arg(&path).output().unwrap();
+        assert!(mark.status.success() && mark.stdout.starts_with(b"0083;"));
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), first + tail);
+    assert_eq!(imap.save_eml(&store, id, &dir).await.unwrap(), path);
+    assert_eq!(dir.read_dir().unwrap().count(), 2);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn eml_accepts_estimated_size() {
+    for size in [2, 20] {
+        let mut steps = login("");
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<0.1048576>)", "* 1 FETCH (UID 1 BODY[]<0> {4}\r\nmail)\r\n"));
+        let (mut imap, mut store, temp, server) = fixture(steps).await;
+        let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        store.reset_uidvalidity(folder, 7).unwrap();
+        let id = message(&store, &imap.account.id, folder, 1);
+        store.db.execute("UPDATE messages SET size=? WHERE id=?", (size, id)).unwrap();
+        let path = imap.save_eml(&store, id, temp.path()).await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"mail");
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn eml_discards_download_past_size_limit() {
+    const CHUNK: usize = 1048576;
+    let full = "z".repeat(CHUNK);
+    let mut steps = login("");
+    steps.push(step("SELECT \"INBOX\"", selected()));
+    for chunk in 0..=16 {
+        let offset = chunk * CHUNK;
+        let data = if chunk == 16 { "x" } else { &full };
+        steps.push(step(&format!("UID FETCH 1 (UID BODY.PEEK[]<{offset}.{CHUNK}>)"),
+            &format!("* 1 FETCH (UID 1 BODY[]<{offset}> {{{}}}\r\n{data})\r\n", data.len())));
+    }
+    let (mut imap, mut store, temp, server) = fixture(steps).await;
+    let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    store.reset_uidvalidity(folder, 7).unwrap();
+    let id = message(&store, &imap.account.id, folder, 1);
+    let dir = temp.path().join("cache");
+    assert!(matches!(imap.save_eml(&store, id, &dir).await, Err(Error::Network("message download exceeds size limit"))));
+    assert_eq!(dir.read_dir().unwrap().count(), 0);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn eml_exact_chunk_accepts_nil_or_empty_at_end() {
+    let body = "z".repeat(1048576);
+    for end in ["NIL", "{0}\r\n"] {
+        let mut steps = login("");
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<0.1048576>)",
+            &format!("* 1 FETCH (UID 1 BODY[]<0> {{1048576}}\r\n{body})\r\n")));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<1048576.1048576>)",
+            &format!("* 1 FETCH (UID 1 BODY[]<1048576> {end})\r\n")));
+        let (mut imap, mut store, temp, server) = fixture(steps).await;
+        let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        store.reset_uidvalidity(folder, 7).unwrap();
+        let id = message(&store, &imap.account.id, folder, 1);
+        let path = imap.save_eml(&store, id, temp.path()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn review_upgrade_preserves_encoded_folders_and_local_mail() {
     let names = [("R&--D", "R&-D"), ("R&-D", "R&D"), ("&U,BTFw-/&ZeVnLIqe-", "台北/日本語")];
     let mut steps = login("");
