@@ -27,11 +27,13 @@ internal fun List<MailCounts>.sidebarCount(box: Mailbox, account: String? = null
     }
 
 /** The iPad sidebar: pages, Mail's scopes, then accounts. */
-@Composable internal fun LagomSidebar(model: MailModel, section: AppSection, unread: Int, enabled: Boolean, choose: (AppSection) -> Unit) {
+@Composable internal fun LagomSidebar(model: MailModel, section: AppSection, unread: Int, enabled: Boolean, hide: () -> Unit, choose: (AppSection) -> Unit) {
     fun active(box: Mailbox, account: String? = null) =
         !model.showingDrafts && model.folder == null && model.mailbox == box && model.accountId == account
-    Column(Modifier.width(240.dp).fillMaxHeight().padding(horizontal = 12.dp).padding(top = 8.dp)) {
-        // No logo, as the iPad sidebar: the pages start at the top.
+    // Top 4 dp: the toggle sits where the folded rail has it, level with the page title.
+    Column(Modifier.width(240.dp).fillMaxHeight().padding(horizontal = 12.dp).padding(top = 4.dp)) {
+        // No logo, as the iPad sidebar: its toggle, then the pages.
+        LagomIconButton("Hide sidebar", R.drawable.ic_sidebar, Modifier.offset(x = (-4).dp), onClick = hide)
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 AppSection.entries.forEach { page ->
