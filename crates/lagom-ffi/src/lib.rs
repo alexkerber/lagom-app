@@ -68,6 +68,8 @@ pub fn configure_sign_in(app_id: String, google_client_id: String, microsoft_cli
 }
 #[uniffi::export]
 pub fn sign_in_available(provider: SignInProvider) -> bool { lagom_core::oauth::mobile_available(provider.into()) }
+#[uniffi::export]
+pub fn is_outlook_address(email: String) -> bool { lagom_core::discovery::is_outlook_address(&email) }
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum Mailbox { Inbox, Later, Done, Sent, Trash }
 impl Mailbox {
