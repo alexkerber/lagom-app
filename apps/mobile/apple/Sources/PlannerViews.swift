@@ -6,6 +6,8 @@ struct TodayView: View {
     let model: MailModel
     let openMail: (Int64?) -> Void
     let open: (AppSection) -> Void
+    /// A phone's way to Settings beside the title; the iPad has its sidebar row.
+    var openSettings: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var width
     /// Dynamic Type scale of the display size, so tracking stays the same share of an em.
     @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
@@ -53,7 +55,9 @@ struct TodayView: View {
         line += part(count(dueCount(planner.today?.tasks ?? [], day: planner.today?.day ?? ""), "task due", "tasks due", "nothing due"), "todo") + part(".")
         return VStack(alignment: .leading, spacing: 12) {
             // The app bar every page shares, then the day.
-            PageTitle(title: "Today") { EmptyView() }
+            PageTitle(title: "Today") {
+                if let openSettings { BarButton(title: "Settings", icon: "settings", action: openSettings) }
+            }
             MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)
                 .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
@@ -659,7 +663,9 @@ struct NewTaskView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        SheetScaffold(title: "New task", cancel: { dismiss() }) {
+        SheetScaffold(title: "New task", cancel: { dismiss() },
+                      confirm: SheetConfirm(title: "Add task", systemImage: "checkmark", icon: "plus",
+                                            disabled: saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty, action: save)) {
             VStack(spacing: 0) {
                 FieldRow(label: "Task") {
                     TextField("", text: $title).focused($focused).submitLabel(.done).onSubmit(save).accessibilityLabel("Task")
@@ -684,10 +690,6 @@ struct NewTaskView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 16)
-        } footer: {
-            HouseButton(title: "Add task", icon: "plus", primary: true, action: save)
-                .disabled(saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty)
-            Spacer(minLength: 0)
         }
         .onAppear { focused = true }
         .presentationDetents([.medium, .large])
@@ -731,7 +733,8 @@ struct NewEventView: View {
 
     var body: some View {
         let calendars = planner.eventCalendars
-        SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() }) {
+        SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() },
+                      confirm: SheetConfirm(title: "Save event", systemImage: "checkmark", icon: "done", disabled: saving || calendars.isEmpty, action: save)) {
             ScrollView {
                 VStack(spacing: 0) {
                     FieldRow(label: "Title", labelWidth: 84) {
@@ -777,10 +780,6 @@ struct NewEventView: View {
                 .disabled(saving)
             }
             .scrollDismissesKeyboard(.interactively)
-        } footer: {
-            Button(saving ? "Saving…" : "Save event", action: save).buttonStyle(HouseButtonStyle(primary: true))
-                .disabled(saving || calendars.isEmpty)
-            Spacer(minLength: 0)
         }
         // An event moves as a whole: a later start keeps its length, as Apple's Calendar does.
         .onChange(of: start) { old, new in end = end.addingTimeInterval(new.timeIntervalSince(old)) }

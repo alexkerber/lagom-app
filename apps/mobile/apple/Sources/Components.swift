@@ -298,32 +298,83 @@ struct SearchField: View {
     }
 }
 
-/// A sheet as the desktop compose sheet: a subtle title bar with Cancel, the content, and a footer
-/// whose first item is the primary action.
+/// A sheet's primary action: Send, Save, Add. `systemImage` for the system bar, `icon` for the Duo's footer.
+struct SheetConfirm {
+    let title: String
+    let systemImage: String
+    let icon: String
+    var disabled = false
+    let action: () -> Void
+}
+
+/// A sheet as Apple's Mail and Calendar draw one (Alex 2026-11-23: "pure native"): the system bar with
+/// Cancel at the leading edge and the primary action at the trailing edge, in Liquid Glass on iOS 26; the
+/// content; then a footer for anything else. The Duo keeps Cancel in its rail and the action in the footer.
 struct SheetScaffold<Content: View, Footer: View>: View {
     let title: String
     var cancelDisabled = false
     let cancel: () -> Void
+    var confirm: SheetConfirm? = nil
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
     @Environment(\.railInset) private var railInset
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(title).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).accessibilityAddTraits(.isHeader)
-                Spacer()
-                if railInset == 0 { IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }
+        if railInset == 0 {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    content
+                    if Footer.self != EmptyView.self { footerBar }
+                }
+                .foregroundStyle(Theme.ink)
+                .background(Theme.raised)
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { cancelButton.disabled(cancelDisabled) }
+                    if let confirm {
+                        ToolbarItem(placement: .confirmationAction) { confirmButton(confirm).disabled(confirm.disabled) }
+                    }
+                }
             }
-            .padding(.leading, 16).padding(.trailing, 6).frame(minHeight: 50)
-            .background(Theme.subtle)
-            content
-            HStack(spacing: 10) { footer }
+        } else {
+            VStack(spacing: 0) {
+                Text(title).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).accessibilityAddTraits(.isHeader)
+                    .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading).padding(.leading, 16)
+                    .background(Theme.subtle)
+                content
+                HStack(spacing: 10) {
+                    if let confirm {
+                        HouseButton(title: confirm.title, icon: confirm.icon, primary: true, action: confirm.action).disabled(confirm.disabled)
+                    }
+                    footer
+                }
                 .padding(.horizontal, 16).frame(minHeight: 64)
+            }
+            .foregroundStyle(Theme.ink)
+            .background(Theme.raised)
+            .railColumn(top: { RailButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }, bottom: { EmptyView() })
         }
-        .foregroundStyle(Theme.ink)
-        .background(Theme.raised)
-        .railColumn(top: { RailButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }, bottom: { EmptyView() })
+    }
+
+    private var footerBar: some View {
+        HStack(spacing: 10) { footer }.padding(.horizontal, 16).frame(minHeight: 64)
+    }
+
+    // iOS 26 draws the close role as a glass circle with an xmark, and the confirm role in the accent's prominent glass.
+    @ViewBuilder private var cancelButton: some View {
+        // Ink, as in Apple's Mail and Calendar; only the primary action takes the accent.
+        if #available(iOS 26.0, *) { Button(role: .close, action: cancel).tint(Theme.ink) }
+        else { Button("Cancel", role: .cancel, action: cancel) }
+    }
+
+    @ViewBuilder private func confirmButton(_ confirm: SheetConfirm) -> some View {
+        if #available(iOS 26.0, *) {
+            Button(role: .confirm, action: confirm.action) { Label(confirm.title, systemImage: confirm.systemImage) }
+                .tint(Theme.accent)
+        } else {
+            Button(confirm.title, action: confirm.action).fontWeight(.semibold)
+        }
     }
 }
 
@@ -663,4 +714,10 @@ struct RailGlass<S: Shape>: ViewModifier {
 
 extension RailGlass where S == Circle {
     init(primary: Bool = false) { self.primary = primary; shape = Circle() }
+}
+
+extension SheetScaffold where Footer == EmptyView {
+    init(title: String, cancelDisabled: Bool = false, cancel: @escaping () -> Void, confirm: SheetConfirm? = nil, @ViewBuilder content: () -> Content) {
+        self.init(title: title, cancelDisabled: cancelDisabled, cancel: cancel, confirm: confirm, content: content, footer: { EmptyView() })
+    }
 }

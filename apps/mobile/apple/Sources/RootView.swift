@@ -72,7 +72,7 @@ struct RootView: View {
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
                 TabView(selection: $section) {
-                    // Settings opens from the mailbox menu on a phone; it is rarely used (Alex 2026-11-17).
+                    // Settings opens from the mailbox menu and Today's title on a phone (Alex 2026-11-23: "hur kommer jag till settings").
                     ForEach(AppSection.allCases.filter { $0 != .settings }) { page in
                         Tab(value: page) {
                             self.page(page)
@@ -93,6 +93,8 @@ struct RootView: View {
         }
         .foregroundStyle(Theme.ink)
         .sheet(isPresented: $addAccount) { AddAccountView(model: model).duoRail() }
+        // At the root, so Today's button and the mailbox menu open the same sheet.
+        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, sheet: true).duoRail() }
         .modifier(RemoveAccountDialog(model: model, removing: $removing))
         // One reload per scope, even when the mailbox and the account change together.
         .task(id: "\(model.mailbox.rawValue)/\(model.folder?.id ?? 0)/\(model.accountID ?? "")/\(model.searchText)/\(model.core == nil)/\(model.notificationRevision)") {
@@ -180,7 +182,8 @@ struct RootView: View {
 
     @ViewBuilder private func page(_ section: AppSection) -> some View {
         switch section {
-        case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 })
+        case .today: TodayView(planner: planner, model: model, openMail: openMail, open: { self.section = $0 },
+                               openSettings: UIDevice.current.userInterfaceIdiom == .pad ? nil : { settingsOpen = true })
         case .mail: MailView(model: model, planner: planner, settingsOpen: $settingsOpen)
         case .calendar: CalendarView(planner: planner, model: model)
         case .todo: TodoView(planner: planner, model: model, openMail: openMail)

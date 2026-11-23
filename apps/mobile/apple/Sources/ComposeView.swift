@@ -51,7 +51,9 @@ struct ComposeView: View {
     }
 
     var body: some View {
-        SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { cancelling = true }) {
+        // On the Duo, Send and Attach sit at the bottom of the right column.
+        SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { cancelling = true },
+                      confirm: railInset == 0 ? SheetConfirm(title: "Send", systemImage: "arrow.up", icon: "send", disabled: cannotSend, action: send) : nil) {
             // An open quote can outgrow a short sheet or the space above the keyboard: then the message scrolls.
             if quoteOpen && draft.quoted != nil {
                 ScrollView { form(scrolls: true) }.scrollBounceBehavior(.basedOnSize)
@@ -59,11 +61,7 @@ struct ComposeView: View {
                 form(scrolls: false)
             }
         } footer: {
-            // On the Duo, Send and Attach sit at the bottom of the right column.
-            if railInset == 0 {
-                HouseButton(title: "Send", icon: "send", primary: true, action: send).disabled(cannotSend)
-                attachMenu
-            }
+            if railInset == 0 { attachMenu }
             if sending { CalmProgress(label: "Sending") }
             Spacer(minLength: 0)
             if let error {

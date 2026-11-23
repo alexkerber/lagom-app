@@ -23,7 +23,12 @@ struct AddAccountView: View {
     @State private var error: String?
 
     var body: some View {
-        SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() }) {
+        SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() },
+                      confirm: !providers || form ? SheetConfirm(title: passwordStep ? "Sign in" : "Continue", systemImage: passwordStep ? "checkmark" : "arrow.right",
+                          icon: "account-add", disabled: email.isEmpty || connecting || (passwordStep && password.isEmpty)) {
+                          if passwordStep { Task { await connect() } }
+                          else { passwordStep = true; imapUser = email; smtpUser = email }
+                      } : nil) {
             if providers && !form {
                 ScrollView {
                     ChooseMail(model: model, connecting: $connecting, signedIn: { dismiss() }) { form = true }
@@ -62,11 +67,6 @@ struct AddAccountView: View {
                 BackButton { back() }
                     .disabled(connecting)
             }
-            HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
-                if passwordStep { Task { await connect() } }
-                else { passwordStep = true; imapUser = email; smtpUser = email }
-            }
-            .disabled(email.isEmpty || connecting || (passwordStep && password.isEmpty))
             if connecting {
                 ProgressView()
                 Text("Signing in…").lagomFont(.small).foregroundStyle(Theme.secondary)
@@ -186,7 +186,8 @@ struct SignatureView: View {
     @State private var error: String?
 
     var body: some View {
-        SheetScaffold(title: "Signature", cancelDisabled: saving, cancel: { dismiss() }) {
+        SheetScaffold(title: "Signature", cancelDisabled: saving, cancel: { dismiss() },
+                      confirm: SheetConfirm(title: "Save", systemImage: "checkmark", icon: "done", disabled: !loaded || saving) { Task { await save() } }) {
             VStack(alignment: .leading, spacing: 0) {
                 FieldRow(label: "Account") { Text(account.email).lineLimit(1) }
                     .padding(.horizontal, 16)
@@ -204,10 +205,6 @@ struct SignatureView: View {
                     .accessibilityLabel("Signature")
                 if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(16) }
             }
-        } footer: {
-            HouseButton(title: "Save", icon: "done", primary: true) { Task { await save() } }
-                .disabled(!loaded || saving)
-            Spacer(minLength: 0)
         }
         .interactiveDismissDisabled(saving)
         .task {
