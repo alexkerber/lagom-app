@@ -700,12 +700,17 @@ private const val NEW_LIST = Long.MIN_VALUE
     LaunchedEffect(opening) { if (opening) { delay(2_000); opening = false } }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         accounts.forEach { account ->
-            val title = if (accounts.size == 1) (if (tasks) "Allow Google Tasks access" else "Show your Google Calendar")
+            val title = if (account.googleHostedPassword) "Sign in with Google · ${account.email}"
+                else if (accounts.size == 1) (if (tasks) "Allow Google Tasks access" else "Show your Google Calendar")
                 else "${if (tasks) "Allow Google Tasks" else "Show calendar"} · ${account.email}"
             HouseButton(if (model.signingIn) "Connecting…" else title, if (tasks) R.drawable.ic_todo else R.drawable.ic_calendar, primary = true,
                 enabled = !model.signingIn && !opening) {
                 opening = true
-                planner.perform { openSignIn(context, requireNotNull(planner.core).beginCalendarAccess(account.id).url) }
+                planner.perform {
+                    val core = requireNotNull(planner.core)
+                    val start = core.beginCalendarAccess(account.id)
+                    openSignIn(context, start.url)
+                }
             }
         }
     }
@@ -734,19 +739,20 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
             planner.perform { planner.showWeek(0) }
         }
         if (oneDay) WeekStrip(week, selected) { selected = it }
-        val access = planner.calendarAccess.firstOrNull()
+        val accounts = planner.calendarAccess + model.accounts.filter { it.googleHostedPassword }
+        val access = accounts.firstOrNull()
         if (!planner.calendarConnected && planner.week.isEmpty() && access != null) {
             EmptyState(R.drawable.ic_calendar, "Calendar is not connected", Modifier.fillMaxSize(),
-                if (planner.calendarAccess.size == 1) "Google asks once for access to ${access.email}." else "Google asks once for each account.") {
-                CalendarAccessButtons(planner, model, planner.calendarAccess)
+                if (accounts.size == 1) "Google asks once for access to ${access.email}." else "Google asks once for each account.") {
+                CalendarAccessButtons(planner, model, accounts)
             }
         } else if (!planner.calendarConnected && planner.week.isEmpty() && planner.calendarGranted) {
             EmptyState(R.drawable.ic_calendar, "Calendar not synced yet", Modifier.fillMaxSize(), "Your calendar shows here after the next sync.")
         } else if (!planner.calendarConnected && planner.week.isEmpty()) {
             EmptyState(R.drawable.ic_calendar, "Calendar needs a Google account", Modifier.fillMaxSize(),
-                "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
+                "Add a Google account to see your calendar here.")
         } else {
-            CalendarAccessButtons(planner, model, planner.calendarAccess, Modifier.padding(top = 8.dp))
+            CalendarAccessButtons(planner, model, accounts, Modifier.padding(top = 8.dp))
             if (!oneDay) Row(Modifier.padding(top = 8.dp)) {
                 Spacer(Modifier.width(Gutter))
                 days.forEach { WeekDayHead(it, Modifier.weight(1f)) }

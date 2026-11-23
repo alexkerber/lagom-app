@@ -94,6 +94,8 @@ impl Auth {
 pub struct Account {
     pub id: String,
     pub auth: Auth,
+    pub provider_subject: Option<String>,
+    pub credential_key: Option<String>,
     pub display_name: String,
     pub email: String,
     pub imap: ServerConfig,
@@ -104,6 +106,8 @@ impl Account {
         let account = Self {
             id: uuid::Uuid::new_v4().to_string(),
             auth: Auth::Password,
+            provider_subject: None,
+            credential_key: None,
             display_name: email.clone(),
             email,
             imap,
@@ -126,18 +130,43 @@ impl Account {
         self.imap.validate()?;
         self.smtp.validate()
     }
-    fn secret_entry(&self) -> Result<keyring::Entry> {
-        // A separate service name keeps test runs away from the owner's real keychain entries.
-        let service = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
-        keyring::Entry::new(&service, &self.id).map_err(|_| Error::Secret)
+    pub fn google_hosted_password(&self) -> bool {
+        self.auth == Auth::Password && self.imap.host.eq_ignore_ascii_case(Provider::Google.imap_host())
+    }
+    pub(crate) fn with_provider_identity(&self, provider: Provider, email: &str, subject: &str) -> Result<Self> {
+        if provider == Provider::Google && (!self.email.eq_ignore_ascii_case(email) || !self.imap.username.eq_ignore_ascii_case(email)) {
+            return Err(Error::GoogleAccountMismatch(email.into()));
+        }
+        if self.provider_subject.as_deref().is_some_and(|saved| saved != subject) {
+            return Err(Error::Invalid("The provider returned a different account."));
+        }
+        let mut account = self.clone();
+        if provider == Provider::Google && self.google_hosted_password() {
+            (account.imap, account.smtp) = provider.servers(email);
+            account.auth = Auth::OAuth(provider);
+        } else if self.auth != Auth::OAuth(provider) || !self.email.eq_ignore_ascii_case(email) {
+            return Err(Error::Invalid("Sign in with the same email address as this account"));
+        }
+        Ok(account)
+    }
+    pub(crate) fn secret_key(&self) -> &str { self.credential_key.as_deref().unwrap_or(&self.id) }
+    fn secret_service(key: Option<&str>) -> String {
+        let base = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
+        match key {
+            Some(key) => format!("{base}.{key}"),
+            None => base,
+        }
+    }
+    fn secret_entry(id: &str, key: Option<&str>) -> Result<keyring::Entry> {
+        keyring::Entry::new(&Self::secret_service(key), id).map_err(|_| Error::Secret)
     }
     pub fn set_password(&self, password: &str) -> Result<()> {
-        let entry = self.secret_entry()?;
+        let entry = Self::secret_entry(&self.id, self.credential_key.as_deref())?;
         // iOS: readable only while unlocked and never in backups or device migration.
         #[cfg(target_os = "ios")]
         {
             use security_framework::{access_control::{ProtectionMode, SecAccessControl}, passwords::{set_generic_password_options, PasswordOptions}};
-            let service = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
+            let service = Self::secret_service(self.credential_key.as_deref());
             let mut options = PasswordOptions::new_generic_password(&service, &self.id);
             options.set_access_control(SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly), 0).map_err(|_| Error::Secret)?);
             // An update keeps an older item's class, so the item is replaced.
@@ -148,7 +177,7 @@ impl Account {
         entry.set_password(password).map_err(|_| Error::Secret)
     }
     pub fn password(&self) -> Result<Zeroizing<String>> {
-        let entry = self.secret_entry()?;
+        let entry = Self::secret_entry(&self.id, self.credential_key.as_deref())?;
         #[cfg(target_os = "ios")]
         if let Some(native) = entry.get_credential().downcast_ref::<keyring::ios::IosCredential>() {
             if let Some(password) = ios_keychain::read(&native.service, &native.account) {
@@ -161,9 +190,16 @@ impl Account {
     }
     /// Ok when the secret is gone, also when it was never there.
     pub fn delete_password(&self) -> Result<()> {
-        match self.secret_entry()?.delete_credential() {
+        if self.credential_key.is_some() { self.delete_secret(None)?; }
+        self.delete_secret(self.credential_key.as_deref())
+    }
+    pub(crate) fn delete_secret(&self, key: Option<&str>) -> Result<()> {
+        Self::delete_key(&self.id, key)
+    }
+    pub(crate) fn delete_key(id: &str, key: Option<&str>) -> Result<()> {
+        match Self::secret_entry(id, key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {
-                crate::oauth::forget(&self.id);
+                crate::oauth::forget(key.unwrap_or(id));
                 Ok(())
             },
             Err(_) => Err(Error::Secret),
@@ -207,6 +243,20 @@ mod tests {
         ] {
             assert!(Account::new(email.into(), imap.clone(), smtp.clone()).is_err());
         }
+    }
+    #[test]
+    fn calendar_offers_sign_in_for_google_hosted_password_accounts() {
+        let (imap, smtp) = crate::presets::servers("a@gmail.com").unwrap();
+        let mut account = Account::new("a@work.example".into(), imap, smtp).unwrap();
+        assert!(account.google_hosted_password());
+        account.imap.host = "other.example".into();
+        assert!(!account.google_hosted_password());
+        for email in ["a@GMAIL.com", "a@GoogleMail.com"] {
+            account.email = email.into();
+            assert!(!account.google_hosted_password());
+        }
+        account.auth = Auth::OAuth(Provider::Google);
+        assert!(!account.google_hosted_password());
     }
     #[test]
     fn keychain_contract_with_mock() {

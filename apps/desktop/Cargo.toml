@@ -40,6 +40,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 wry = { version = "0.57", default-features = false }
 
 [dev-dependencies]
+keyring = "3.6"
 rusqlite = { version = "0.41", features = ["bundled"] }
 # GPUI's TestAppContext, to drive key dispatch in tests.
 gpui = { version = "0.2.2", features = ["test-support"] }

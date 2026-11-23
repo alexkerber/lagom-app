@@ -3474,6 +3474,7 @@ dependencies = [
  "gpui",
  "iana-time-zone",
  "image",
+ "keyring",
  "lagom-core",
  "notify-rust",
  "objc2",

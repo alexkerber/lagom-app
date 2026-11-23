@@ -38,9 +38,9 @@ fn network<T>(future: impl Future<Output = lagom_core::Result<T>>) -> lagom_core
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MailAccount { pub id: String, pub email: String, pub display_name: String,
     /// How it signs in, in Settings' words ("Email and password", "Google account").
-    #[uniffi(default = "")] pub kind: String }
+    #[uniffi(default = "")] pub kind: String, #[uniffi(default = false)] pub google_hosted_password: bool }
 impl From<Account> for MailAccount {
-    fn from(a: Account) -> Self { Self { kind: a.auth.kind().into(), id: a.id, email: a.email, display_name: a.display_name } }
+    fn from(a: Account) -> Self { Self { google_hosted_password: a.google_hosted_password(), kind: a.auth.kind().into(), id: a.id, email: a.email, display_name: a.display_name } }
 }
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum TransportSecurity { Tls, StartTls, Plain }
@@ -208,7 +208,7 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     network: tokio::sync::Mutex<Store>,
     // A whole sync, so two syncs never overlap. Order: sync, removal, network, local.
     sync: Mutex<()>,
-    // One-message actions share it; removal takes it alone, so no token refresh writes a removed account's secret back.
+    // Credential replacement and removal wait for one-message actions to finish refreshing tokens.
     removal: std::sync::RwLock<()>,
     // Read flags the server confirmed during the current folder step (see `FolderLock`).
     read_flags: Mutex<HashMap<i64, bool>>,
@@ -334,11 +334,7 @@ fn account(store: &Store, id: &str) -> lagom_core::Result<Account> {
 async fn add(store: &Store, account: Account, password: Zeroizing<String>) -> lagom_core::Result<MailAccount> {
     let session = ImapSync::login(&account, &password).await?;
     smtp::verify(&account, &password).await?;
-    account.set_password(&password)?;
-    if let Err(error) = store.save_account(&account) {
-        account.delete_password()?;
-        return Err(error);
-    }
+    store.save_password_account(&account, &password)?;
     let _ = session.logout().await;
     Ok(account.into())
 }
@@ -383,14 +379,6 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     if let Some(session) = session { let _ = network(session.logout()); }
     if let Some(error) = first { return Err(error); }
     match error { Some(error) => Err(error), None => Ok(()) }
-}
-/// After a calendar grant, which already replaced this account's refresh token: keep the scopes Google granted this time.
-fn save_grant(s: &Store, id: &str, account: Account, scopes: &str) -> lagom_core::Result<MailAccount> {
-    match s.set_account_scopes(id, scopes) {
-        // Removed while the browser was open: its new secret must not stay behind.
-        Err(lagom_core::Error::NotFound) => { let _ = account.delete_password(); Err(lagom_core::Error::NotFound) }
-        other => other.map(|()| account.into()),
-    }
 }
 /// Mail, then Calendar and Google Tasks, which run even when mail failed.
 fn sync_with_google(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
@@ -446,7 +434,7 @@ impl LagomCore {
             let mut a = account(s, &account_id)?;
             let name = name.trim();
             a.display_name = if name.is_empty() { a.email.clone() } else { name.to_string() };
-            s.save_account(&a)?;
+            s.set_account_name(&a)?;
             Ok(a.into())
         }).await
     }
@@ -501,8 +489,6 @@ impl LagomCore {
     }
     /// `callback_url` is the redirect the browser handed back. Only the pending sign-in's own redirect
     /// (its URI and state) is taken; anything else is refused and leaves the sign-in pending.
-    // shortcut: adds new accounts, or calendar access after `begin_calendar_access`. When a refresh token expires
-    // the user removes the account and signs in again; use core's `reauthenticate` checks here once that happens in practice.
     pub async fn finish_sign_in(&self, callback_url: String) -> Result<MailAccount> {
         let callback_url = Zeroizing::new(callback_url);
         let pending = {
@@ -513,30 +499,21 @@ impl LagomCore {
             }
         };
         let grant = pending.account().map(|a| a.id.clone());
-        self.run_network(move |s| network(async {
-            let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
-            let account = signed.account;
-            if let Some(id) = grant { return save_grant(s, &id, account, &signed.scopes); }
-            let saved = s.accounts().and_then(|all| {
-                if all.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
-                    return Err(lagom_core::Error::Invalid("This account is already in lagom."));
-                }
-                s.save_authorized_account(&account, &signed.scopes)
-            });
-            // The sign-in stored its refresh token under the new account's id; an unsaved account must not keep it.
-            if let Err(error) = saved { let _ = account.delete_password(); return Err(error); }
-            Ok(account.into())
-        })).await
+        let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
+        self.run_sync(move |stores| {
+            let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let s = &*stores.folder_lock();
+            s.save_browser_sign_in(signed, grant.as_deref()).map(Into::into)
+        }).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
         // A running sync finishes its account, and running one-message actions their token refresh, before the rows go.
         self.run_sync(move |stores| {
             let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = &mut *stores.folder_lock();
-            account(s, &id)?.delete_password()?;
             // Serialize with refresh, and evict even if the caller cancels this future.
             let _local = stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            s.delete_account(&id)?;
+            s.remove_credentials_and_account(&id, Account::delete_password)?;
             stores.contacts.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
             stores.unsaved_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(account, _, _)| *account != id);
             Ok(())

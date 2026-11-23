@@ -697,6 +697,7 @@ impl MainWindow {
                         self.set_page(Page::Mail, cx);
                         if let Some(live) = &mut self.live {
                             live.accounts = live.store.accounts().unwrap_or_default();
+                            live.sync.remove(&id);
                             live.current = live.accounts.iter().position(|a| a.id == id).unwrap_or(0);
                         }
                         self.inbox = Inbox::live();
@@ -1509,7 +1510,7 @@ impl MainWindow {
         if account.display_name == name { return; }
         let mut changed = account.clone();
         changed.display_name = name;
-        match live.store.with_short_lock_wait(|store| store.save_account(&changed)) {
+        match live.store.with_short_lock_wait(|store| store.set_account_name(&changed)) {
             Ok(()) => *account = changed,
             Err(e) => return self.notify(format!("Could not save your name: {e}"), cx),
         }
