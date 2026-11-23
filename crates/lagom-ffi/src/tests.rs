@@ -1,32 +1,14 @@
 use super::*;
 use lagom_core::store::{Message, MessageSummary};
-use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
-use std::{any::Any, collections::HashMap};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// A guard against a hung fake server, not a speed check: Windows CI runners took over 10 s now and then.
 const HANG: std::time::Duration = std::time::Duration::from_secs(30);
 
-// The test binary replaces the backend before any credential operation; it never opens a keychain.
-#[derive(Clone, Default, Debug)]
-struct MemorySecrets(Arc<Mutex<HashMap<String, Vec<u8>>>>);
-#[derive(Debug)]
-struct MemoryEntry { store: MemorySecrets, id: String }
-impl CredentialBuilderApi for MemorySecrets {
-    fn build(&self, _: Option<&str>, service: &str, user: &str) -> keyring::Result<Box<Credential>> {
-        Ok(Box::new(MemoryEntry { store: self.clone(), id: format!("{service}/{user}") }))
-    }
-    fn as_any(&self) -> &dyn Any { self }
-}
-impl CredentialApi for MemoryEntry {
-    fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> { self.store.0.lock().unwrap().insert(self.id.clone(), secret.to_vec()); Ok(()) }
-    fn get_secret(&self) -> keyring::Result<Vec<u8>> { self.store.0.lock().unwrap().get(&self.id).cloned().ok_or(keyring::Error::NoEntry) }
-    fn delete_credential(&self) -> keyring::Result<()> { self.store.0.lock().unwrap().remove(&self.id); Ok(()) }
-    fn as_any(&self) -> &dyn Any { self }
-}
+#[path = "../../lagom-core/tests/support/memory_secrets.rs"]
+mod memory_secrets;
 fn fixture() -> (tempfile::TempDir, Arc<LagomCore>) {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| keyring::set_default_credential_builder(Box::<MemorySecrets>::default()));
+    memory_secrets::install();
     let dir = tempfile::tempdir().unwrap();
     let core = LagomCore::open(dir.path().to_string_lossy().into()).unwrap();
     (dir, core)
@@ -1918,4 +1900,63 @@ fn a_calendar_grant_keeps_the_granted_scopes_and_a_removed_account_loses_its_new
     s.delete_account(&a.id).unwrap();
     assert!(matches!(save_grant(&s, &a.id, a.clone(), &granted), Err(lagom_core::Error::NotFound)));
     assert!(a.password().is_err(), "no secret stays behind for a removed account");
+}
+
+#[test]
+fn browser_sign_in_upgrades_password_account() {
+    let (dir, core) = fixture();
+    let mut store = core.stores.local.lock().unwrap();
+    let mut old = fixture_account(&store, "work@example.com", 3143);
+    old.display_name = "Work".into();
+    store.set_account_name(&old).unwrap();
+    store.set_signature(&old.id, "Work signature").unwrap();
+    let draft = lagom_core::outbox::Draft { id: "draft".into(), account: old.id.clone(), text: "Unsent".into(), ..Default::default() };
+    store.save_draft(&draft).unwrap();
+    let queued = store.enqueue(&old, &Outgoing { to: vec!["reader@example.com".into()], text: "Queued".into(), ..Default::default() }, 0).unwrap();
+    let message = mail(&mut store, &old, 1, 1);
+    let browser_account = || {
+        let mut a = Account::new("WORK@example.com".into(), old.imap.clone(), old.smtp.clone()).unwrap();
+        a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+        a.imap.host = "imap.gmail.com".into();
+        a.imap.security = Security::Tls;
+        a
+    };
+    let signed = browser_account();
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_scopes BEFORE UPDATE OF scopes ON accounts
+        BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+    signed.set_password("token").unwrap();
+    assert!(store.save_browser_sign_in(signed.clone(), "first").is_err());
+    db.execute_batch("DROP TRIGGER fail_scopes").unwrap();
+    signed.set_password("token").unwrap();
+    memory_secrets::fail_next_delete(&old.id);
+    assert!(store.save_browser_sign_in(signed.clone(), "first").is_err());
+    assert_eq!(store.account_scopes(&old.id).unwrap(), "");
+    assert_eq!(store.accounts().unwrap(), [old.clone()]);
+    assert_eq!(old.password().unwrap().as_str(), "fixture");
+    signed.set_password("token").unwrap();
+    assert_eq!(store.save_browser_sign_in(signed.clone(), "first").unwrap().id, old.id);
+    assert!(old.password().is_err());
+    assert!(signed.password().is_err());
+    let again = browser_account();
+    again.set_password("replacement").unwrap();
+    store.save_browser_sign_in(again, "second").unwrap();
+    let mut wrong = browser_account();
+    wrong.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Microsoft);
+    wrong.set_password("wrong").unwrap();
+    assert!(store.save_browser_sign_in(wrong.clone(), "wrong").is_err());
+    assert!(wrong.password().is_err());
+    let accounts = store.accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    let a = &accounts[0];
+    assert_eq!(a.id, old.id);
+    assert_eq!(a.display_name, old.display_name);
+    assert_eq!(store.signature(&a.id).unwrap(), "Work signature");
+    assert_eq!(store.draft(&draft.id).unwrap(), draft);
+    assert_eq!(store.due_outbox(&a.id, 0).unwrap(), [queued]);
+    assert_eq!(a.imap, signed.imap);
+    assert_eq!(a.auth, signed.auth);
+    assert_eq!(a.password().unwrap().as_str(), "replacement");
+    assert_eq!(store.account_scopes(&a.id).unwrap(), "second");
+    assert_eq!(store.message(message).unwrap().summary.account, old.id);
 }

@@ -38,9 +38,9 @@ fn network<T>(future: impl Future<Output = lagom_core::Result<T>>) -> lagom_core
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MailAccount { pub id: String, pub email: String, pub display_name: String,
     /// How it signs in, in Settings' words ("Email and password", "Google account").
-    #[uniffi(default = "")] pub kind: String }
+    #[uniffi(default = "")] pub kind: String, #[uniffi(default = false)] pub google_hosted_password: bool }
 impl From<Account> for MailAccount {
-    fn from(a: Account) -> Self { Self { kind: a.auth.kind().into(), id: a.id, email: a.email, display_name: a.display_name } }
+    fn from(a: Account) -> Self { Self { google_hosted_password: a.google_hosted_password(), kind: a.auth.kind().into(), id: a.id, email: a.email, display_name: a.display_name } }
 }
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum TransportSecurity { Tls, StartTls, Plain }
@@ -444,7 +444,7 @@ impl LagomCore {
             let mut a = account(s, &account_id)?;
             let name = name.trim();
             a.display_name = if name.is_empty() { a.email.clone() } else { name.to_string() };
-            s.save_account(&a)?;
+            s.set_account_name(&a)?;
             Ok(a.into())
         }).await
     }
@@ -499,8 +499,6 @@ impl LagomCore {
     }
     /// `callback_url` is the redirect the browser handed back. Only the pending sign-in's own redirect
     /// (its URI and state) is taken; anything else is refused and leaves the sign-in pending.
-    // shortcut: adds new accounts, or calendar access after `begin_calendar_access`. When a refresh token expires
-    // the user removes the account and signs in again; use core's `reauthenticate` checks here once that happens in practice.
     pub async fn finish_sign_in(&self, callback_url: String) -> Result<MailAccount> {
         let callback_url = Zeroizing::new(callback_url);
         let pending = {
@@ -515,15 +513,7 @@ impl LagomCore {
             let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
             let account = signed.account;
             if let Some(id) = grant { return save_grant(s, &id, account, &signed.scopes); }
-            let saved = s.accounts().and_then(|all| {
-                if all.iter().any(|a| a.email.eq_ignore_ascii_case(&account.email)) {
-                    return Err(lagom_core::Error::Invalid("This account is already in lagom."));
-                }
-                s.save_authorized_account(&account, &signed.scopes)
-            });
-            // The sign-in stored its refresh token under the new account's id; an unsaved account must not keep it.
-            if let Err(error) = saved { let _ = account.delete_password(); return Err(error); }
-            Ok(account.into())
+            s.save_browser_sign_in(account, &signed.scopes).map(Into::into)
         })).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {

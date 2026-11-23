@@ -199,7 +199,13 @@ private struct CalendarAccessButton: View {
         defer { connecting = false }
         do {
             // The button stays busy until the sync has fetched the calendar and tasks.
-            guard try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true }) else { return }
+            let finished: Bool
+            if account.googleHostedPassword {
+                finished = try await model.signIn(.google, browser: browser, exchanging: { connecting = true })
+            } else {
+                finished = try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true })
+            }
+            guard finished else { return }
             await model.sync()
             await planner.reload()
         } catch { planner.error = error.localizedDescription }
@@ -879,8 +885,13 @@ private struct WeekGrid: View {
                 EmptyState(icon: "calendar", title: "Calendar not synced yet", detail: "Your calendar shows here after the next sync.")
                     .frame(maxHeight: .infinity)
             } else if !planner.calendarConnected && planner.week.isEmpty {
+                let upgrade = model.accounts.first(where: \.googleHostedPassword)
                 EmptyState(icon: "calendar", title: "Calendar needs a Google account",
-                           detail: "Add a Google account to see your calendar here. Accounts with a password have no calendar.")
+                           detail: upgrade == nil ? "Add a Google account to see your calendar here." : "Sign in with the same address to keep your mail.") {
+                    if let upgrade {
+                        CalendarAccessButton(planner: planner, model: model, account: upgrade, icon: "calendar", title: "Sign in with Google")
+                    }
+                }
                     .frame(maxHeight: .infinity)
             } else {
                 if !planner.calendarAccess.isEmpty {

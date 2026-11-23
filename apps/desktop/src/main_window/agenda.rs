@@ -35,7 +35,17 @@ impl MainWindow {
         let t = self.theme;
         let mut controls = div().id("calendar-accounts").flex_shrink_0().max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
         if self.today.calendar_accounts.is_empty() && self.today.events.is_empty() {
-            controls = controls.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
+            if self.live.as_ref().is_some_and(|live| live.accounts.iter().any(|a| a.google_hosted_password())) {
+                controls = controls.child(mono("Sign in with the same address to keep your mail.", t.ink2))
+                    .child(button(&t, "Sign in with Google", None).on_click(cx.listener(|this, _, window, cx| {
+                        this.add_account(window, cx);
+                        if let Page::AddAccount(add) = &this.page {
+                            add.update(cx, |add, cx| add.browser(Provider::Google, true, window, cx));
+                        }
+                    })));
+            } else {
+                controls = controls.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
+            }
         }
         for (ix, (account, allowed)) in self.today.calendar_accounts.iter().enumerate() {
             let id = account.id.clone();

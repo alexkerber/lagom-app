@@ -2,6 +2,10 @@
 //! it), owns the network and sync writes, and works through `Cmd`s in order. Compose commits
 //! locally; the UI reads the store and hears about changes through `Event`s, without network waits.
 
+#[cfg(test)]
+#[path = "../../../crates/lagom-core/tests/support/memory_secrets.rs"]
+mod memory_secrets;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
@@ -535,18 +539,13 @@ impl Worker {
             Err(Error::Cancelled) => { self.emit(Event::SignInCancelled); return; }
             Err(error) => { self.emit(Event::SignedIn(Err(shown(&error)))); return; }
         };
-        let account = signed.account;
-        if self.duplicate(&account) {
-            // The new sign-in's secret is stored under its own id; the existing account keeps its own.
-            let _ = account.delete_password();
-            self.emit(Event::SignedIn(Err(format!("{} is already in lagom.", account.email))));
-            return;
-        }
-        if let Err(error) = self.store.save_authorized_account(&account, &signed.scopes) {
-            let _ = account.delete_password();
-            self.emit(Event::SignedIn(Err(shown(&error))));
-            return;
-        }
+        let account = match self.store.save_browser_sign_in(signed.account, &signed.scopes) {
+            Ok(account) => account,
+            Err(error) => { self.emit(Event::SignedIn(Err(shown(&error)))); return; }
+        };
+        self.sessions.remove(&account.id);
+        self.reauth_required.remove(&account.id);
+        if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(account.id.clone())); }
         self.emit(Event::SignedIn(Ok(account.id.clone())));
         self.emit(Event::Changed);
         self.watch(&account);
@@ -1777,6 +1776,29 @@ mod tests {
         assert_eq!(worker.store.accounts().unwrap(), [account.clone()]);
         assert_eq!(worker.store.folders(&account.id, now()).unwrap()[0].id, folder);
         assert_eq!(worker.store.due_outbox(&account.id, i64::MAX).unwrap(), [id]);
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_sign_in_upgrades_password_account() {
+        memory_secrets::install();
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let path = std::env::temp_dir().join(format!("lagom-signin-upgrade-{}.db", std::process::id()));
+        let store = Store::open(&path).unwrap();
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+        let config = lagom_core::account::ServerConfig { host: "outlook.office365.com".into(), port: 993,
+            security: lagom_core::account::Security::Tls, username: "me@outlook.com".into() };
+        let old = Account::new("me@outlook.com".into(), config.clone(), config.clone()).unwrap();
+        old.set_password("password").unwrap();
+        worker.store.save_account(&old).unwrap();
+        let mut account = Account::new(old.email.clone(), config.clone(), config).unwrap();
+        account.auth = lagom_core::account::Auth::OAuth(Provider::Microsoft);
+        account.set_password("refresh").unwrap();
+        worker.signed_in(Ok(SignedIn { email: account.email.clone(), display_name: account.display_name.clone(), account, scopes: "mail".into() }));
+        assert!(matches!(out.recv().await, Some(Event::SignedIn(Ok(id))) if id == old.id));
+        assert_eq!(worker.store.accounts().unwrap()[0].password().unwrap().as_str(), "refresh");
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }

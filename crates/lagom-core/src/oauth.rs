@@ -336,7 +336,7 @@ async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token:
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or(Error::ReauthRequired)?;
-    let cache = cache(&account.id);
+    let cache = cache(account.secret_key());
     let mut cached = cache.lock().await;
     // No cancellation point between persisting the credential and returning its account.
     account.set_password(refresh)?;
@@ -606,7 +606,7 @@ async fn access_token_with(
     if config.id.trim().is_empty() {
         return Err(Error::Invalid("sign-in provider is not configured"));
     }
-    let cache = cache(&account.id);
+    let cache = cache(account.secret_key());
     let mut cached = cache.lock().await;
     if let Some(c) = cached
         .as_ref()

@@ -91,6 +91,7 @@ impl Auth {
 pub struct Account {
     pub id: String,
     pub auth: Auth,
+    pub credential_key: Option<String>,
     pub display_name: String,
     pub email: String,
     pub imap: ServerConfig,
@@ -101,6 +102,7 @@ impl Account {
         let account = Self {
             id: uuid::Uuid::new_v4().to_string(),
             auth: Auth::Password,
+            credential_key: None,
             display_name: email.clone(),
             email,
             imap,
@@ -123,10 +125,21 @@ impl Account {
         self.imap.validate()?;
         self.smtp.validate()
     }
+    pub fn google_hosted_password(&self) -> bool {
+        self.auth == Auth::Password && (self.imap.host.eq_ignore_ascii_case("imap.gmail.com")
+            || self.email.rsplit_once('@').is_some_and(|(_, domain)|
+                domain.eq_ignore_ascii_case("gmail.com") || domain.eq_ignore_ascii_case("googlemail.com")))
+    }
+    pub(crate) fn secret_key(&self) -> &str { self.credential_key.as_deref().unwrap_or(&self.id) }
+    fn secret_service(&self) -> String {
+        let base = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
+        match &self.credential_key {
+            Some(key) => format!("{base}.{key}"),
+            None => base,
+        }
+    }
     fn secret_entry(&self) -> Result<keyring::Entry> {
-        // A separate service name keeps test runs away from the owner's real keychain entries.
-        let service = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
-        keyring::Entry::new(&service, &self.id).map_err(|_| Error::Secret)
+        keyring::Entry::new(&self.secret_service(), &self.id).map_err(|_| Error::Secret)
     }
     pub fn set_password(&self, password: &str) -> Result<()> {
         let entry = self.secret_entry()?;
@@ -135,7 +148,7 @@ impl Account {
         #[cfg(target_os = "ios")]
         {
             use security_framework::{access_control::{ProtectionMode, SecAccessControl}, passwords::{set_generic_password_options, PasswordOptions}};
-            let service = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
+            let service = self.secret_service();
             let mut options = PasswordOptions::new_generic_password(&service, &self.id);
             options.set_access_control(SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly), 0).map_err(|_| Error::Secret)?);
             // An update keeps an older item's class, so the item is replaced.
@@ -155,7 +168,7 @@ impl Account {
     pub fn delete_password(&self) -> Result<()> {
         match self.secret_entry()?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {
-                crate::oauth::forget(&self.id);
+                crate::oauth::forget(self.secret_key());
                 Ok(())
             },
             Err(_) => Err(Error::Secret),
@@ -199,6 +212,20 @@ mod tests {
         ] {
             assert!(Account::new(email.into(), imap.clone(), smtp.clone()).is_err());
         }
+    }
+    #[test]
+    fn calendar_offers_sign_in_for_google_hosted_password_accounts() {
+        let (imap, smtp) = crate::presets::servers("a@gmail.com").unwrap();
+        let mut account = Account::new("a@work.example".into(), imap, smtp).unwrap();
+        assert!(account.google_hosted_password());
+        account.imap.host = "other.example".into();
+        assert!(!account.google_hosted_password());
+        for email in ["a@GMAIL.com", "a@GoogleMail.com"] {
+            account.email = email.into();
+            assert!(account.google_hosted_password());
+        }
+        account.auth = Auth::OAuth(Provider::Google);
+        assert!(!account.google_hosted_password());
     }
     #[test]
     fn keychain_contract_with_mock() {

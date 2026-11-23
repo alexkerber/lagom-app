@@ -322,11 +322,8 @@ async fn main() -> Result<()> {
         },
         Command::SignIn { provider } => {
             let signed = sign_in(provider.into()).await?;
-            if let Err(error) = store.save_account(&signed.account) {
-                let _ = signed.account.delete_password();
-                return Err(error.into());
-            }
-            println!("Added {} ({})", clean(&signed.email), signed.account.id);
+            let account = store.save_browser_sign_in(signed.account, &signed.scopes)?;
+            println!("Signed in {} ({})", clean(&signed.email), account.id);
         }
         Command::Discover { email } => match discover(&email).await {
             Discovery::OAuth(provider) => println!(
