@@ -164,6 +164,25 @@ pub struct ImapSync {
     /// Kept to reconnect after a message whose response left the session unusable.
     password: zeroize::Zeroizing<String>,
 }
+fn prune_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
+    let max_age = Duration::from_secs(7 * 24 * 60 * 60);
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let filename = entry.file_name();
+        let Some(key) = filename.to_str().and_then(|s| s.strip_prefix("message-"))
+            .and_then(|s| s.strip_suffix(".eml")) else { continue };
+        // Older versions published tempfile's six-character alphanumeric names.
+        let owned = (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+            || (key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric()));
+        if !owned { continue; }
+        let Ok(meta) = entry.metadata() else { continue };
+        let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
+        if meta.is_file() && age.is_some_and(|age| age > max_age) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
 impl ImapSync {
     pub async fn login(account: &Account, password: &str) -> Result<Self> {
         account.validate()?;
@@ -580,12 +599,25 @@ impl ImapSync {
 
     async fn save_eml(&mut self, store: &Store, id: i64, dir: &std::path::Path) -> Result<std::path::PathBuf> {
         use async_imap::imap_proto::{AttributeValue, Response, Status};
+        use sha2::{Digest, Sha256};
         use std::io::Write;
 
-        let message = store.message(id)?.summary;
-        self.select_unchanged(store, &message, "mailbox changed; resync before download").await?;
+        let message = store.message_summary(id)?;
+        let (folder, validity) = self.select_unchanged(store, &message, "mailbox changed; resync before download").await?;
+        let mut key = Sha256::new();
+        key.update((folder.account.len() as u64).to_be_bytes());
+        key.update(folder.account.as_bytes());
+        key.update(folder.name.as_bytes());
+        key.update(validity.to_be_bytes());
+        key.update(message.uid.to_be_bytes());
+        let path = dir.join(format!("message-{:x}.eml", key.finalize()));
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return Ok(path);
+        }
         std::fs::create_dir_all(dir)?;
-        let mut file = tempfile::Builder::new().prefix("message-").suffix(".eml").tempfile_in(dir)?;
+        prune_cached_emls(dir)?;
+        let mut file = tempfile::NamedTempFile::new_in(dir)?;
+        let limit = u64::from(message.size) * 2 + 16 * 1024 * 1024;
         let mut offset = 0u32;
         const CHUNK: u32 = 1024 * 1024;
         loop {
@@ -598,13 +630,14 @@ impl ImapSync {
                 match response.parsed() {
                     Response::Fetch(_, attrs) if attrs.contains(&AttributeValue::Uid(message.uid)) => {
                         for attr in attrs {
-                            if let AttributeValue::BodySection { section: None, index: Some(start), data: Some(data) } = attr {
+                            if let AttributeValue::BodySection { section: None, index: Some(start), data } = attr {
+                                let data = data.as_deref().unwrap_or_default();
                                 if written.is_some() || *start != offset || data.len() > CHUNK as usize {
                                     return Err(Error::Network("incomplete message download"));
                                 }
                                 let end = offset.checked_add(data.len() as u32).ok_or(Error::Network("message size overflow"))?;
-                                if message.size != 0 && end > message.size {
-                                    return Err(Error::Network("message size changed"));
+                                if u64::from(end) > limit {
+                                    return Err(Error::Network("message download exceeds size limit"));
                                 }
                                 file.write_all(data)?;
                                 written = Some(end);
@@ -624,12 +657,13 @@ impl ImapSync {
             if complete { break; }
         }
         self.session.get_mut().remaining = None;
-        if offset == 0 || (message.size != 0 && offset != message.size) {
+        if offset == 0 {
             return Err(Error::Network("incomplete message download"));
         }
         file.as_file().sync_all()?;
         attachment::mark_downloaded(file.path())?;
-        Ok(file.keep().map_err(|e| e.error)?.1)
+        file.persist(&path).map_err(|e| e.error)?;
+        Ok(path)
     }
 
     pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
