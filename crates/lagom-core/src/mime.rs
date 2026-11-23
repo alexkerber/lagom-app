@@ -41,7 +41,8 @@ pub fn html_to_text(html: &str) -> String {
         return clean_lines(read(html, None).text.trim_end());
     }
     let document = dom_query::Document::from(html);
-    document.select("head, style, script, title, template, noframes, frameset, [hidden]").remove();
+    // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
+    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden]").remove();
     for node in document.select("[style]").iter() {
         if style_hides(&node.attr_or("style", "")) { node.remove(); }
     }
@@ -62,8 +63,9 @@ impl TokenSink for DomCost {
     fn process_token(&self, token: Token, _: u64) -> TokenSinkResult<()> {
         match token {
             Token::TagToken(tag) => {
-                // A later block can reconstruct every formatting element, including its attributes.
-                if tag.kind == TagKind::StartTag && formatting(&tag.name) {
+                // A later block can reconstruct every formatting element, including its attributes. A repeated
+                // `html` or `body` merges its attributes into the first by a scan of all of them, so it costs the same.
+                if tag.kind == TagKind::StartTag && (formatting(&tag.name) || matches!(tag.name, local_name!("html") | local_name!("body"))) {
                     let attrs: usize = tag.attrs.iter().map(|a| 64 + a.name.local.len() + a.value.len()).sum();
                     self.formatting.set(self.formatting.get() + 128 + attrs);
                 }
@@ -1187,6 +1189,18 @@ mod tests {
     fn dom_budget_charges_for_formatting_reconstruction() {
         assert!(within_dom_budget(&"<q>text</q>".repeat(40)));
         assert!(!within_dom_budget(&"<b>text</b>".repeat(40)));
+        // Attribute merging on repeated `body` took seconds at 200 copies.
+        let attrs: String = (1..=256).map(|n| format!(" a{n}")).collect();
+        assert!(!within_dom_budget(&format!("<body{attrs}>").repeat(200)));
+        assert!(within_dom_budget("<html lang=en><body style=\"margin:0\"><p>Hi</p></body></html>"));
+    }
+
+    #[test]
+    fn svg_and_math_text_stays_hidden() {
+        for html in ["<svg>Secret</svg>", "<svg><desc>Secret</desc></svg>", "<svg><metadata>Secret</metadata></svg>",
+            "<svg><![CDATA[<div hidden>]]>Secret</svg>", "<math><annotation>Secret</annotation></math>", "<svg><text>Logo</text></svg>"] {
+            assert_eq!(html_to_text(html), "", "{html}");
+        }
     }
 
     #[test]
@@ -1280,7 +1294,6 @@ mod tests {
             ("<h1 hidden>Hidden<h2>Shown</h2>", "Shown"),
             // HTML tags in `svg` end it; `svg` text is hidden.
             ("<svg><g/><span hidden>a</span>Shown</svg>", "Shown"),
-            ("<svg><text>Logo</text></svg>", "Logo"),
         ] {
             assert_eq!(html_to_text(html), dom, "{html}");
             assert_eq!(clean_lines(read(html, None).text.trim_end()), "", "{html} (streaming)");
