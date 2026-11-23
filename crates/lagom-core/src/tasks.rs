@@ -165,6 +165,10 @@ impl Store {
     pub fn rename_task(&self, id: i64, name: &str) -> Result<()> {
         changed(self.db.execute("UPDATE tasks SET title=?2,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?])?)
     }
+    pub fn edit_task(&self, id: i64, name: Option<&str>, change_due: bool, due: Option<String>) -> Result<()> {
+        changed(self.db.execute("UPDATE tasks SET title=COALESCE(?2,title),due=CASE WHEN ?3 THEN ?4 ELSE due END,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0",
+            params![id, name.map(title).transpose()?, change_due, due])?)
+    }
     pub fn update_task(&self, id: i64, name: &str, notes: &str, due: Option<String>) -> Result<()> {
         changed(self.db.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?, notes, due])?)
     }
