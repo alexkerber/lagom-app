@@ -46,7 +46,9 @@ pub fn html_to_text(html: &str) -> String {
     for node in document.select("[style]").iter() {
         if style_hides(&node.attr_or("style", "")) { node.remove(); }
     }
-    clean_lines(&document.formatted_text())
+    // Document::formatted_text trims by byte and panics on trailing multibyte whitespace in `pre`
+    // (dom_query 0.28); the selection form skips that trim and clean_lines trims instead.
+    clean_lines(&document.select("html").formatted_text())
 }
 
 /// Work units for input bytes, stack scans and reconstructed formatting nodes.
@@ -1193,6 +1195,12 @@ mod tests {
         let attrs: String = (1..=256).map(|n| format!(" a{n}")).collect();
         assert!(!within_dom_budget(&format!("<body{attrs}>").repeat(200)));
         assert!(within_dom_budget("<html lang=en><body style=\"margin:0\"><p>Hi</p></body></html>"));
+    }
+
+    #[test]
+    fn trailing_multibyte_whitespace_does_not_panic() {
+        assert_eq!(html_to_text("<pre>x\u{3000}</pre>"), "x");
+        assert_eq!(html_to_text("<pre>x\u{2003}\u{2003}</pre>"), "x");
     }
 
     #[test]
