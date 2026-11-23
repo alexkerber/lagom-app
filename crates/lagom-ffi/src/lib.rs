@@ -206,7 +206,7 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     network: tokio::sync::Mutex<Store>,
     // A whole sync, so two syncs never overlap. Order: sync, removal, network, local.
     sync: Mutex<()>,
-    // One-message actions share it; removal takes it alone, so no token refresh writes a removed account's secret back.
+    // Credential replacement and removal wait for one-message actions to finish refreshing tokens.
     removal: std::sync::RwLock<()>,
     // Read flags the server confirmed during the current folder step (see `FolderLock`).
     read_flags: Mutex<HashMap<i64, bool>>,
@@ -509,12 +509,14 @@ impl LagomCore {
             }
         };
         let grant = pending.account().map(|a| a.id.clone());
-        self.run_network(move |s| network(async {
-            let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
+        self.run_sync(move |stores| {
+            let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let s = &*stores.folder_lock();
+            let signed = network(lagom_core::oauth::finish(pending, &callback_url))?;
             let account = signed.account;
             if let Some(id) = grant { return save_grant(s, &id, account, &signed.scopes); }
             s.save_browser_sign_in(account, &signed.scopes).map(Into::into)
-        })).await
+        }).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
         // A running sync finishes its account, and running one-message actions their token refresh, before the rows go.

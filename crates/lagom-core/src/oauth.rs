@@ -57,14 +57,20 @@ impl Provider {
             scope: scope.into(),
         }
     }
+    pub(crate) fn imap_host(self) -> &'static str {
+        match self {
+            Self::Google => "imap.gmail.com",
+            Self::Microsoft => "outlook.office365.com",
+        }
+    }
     fn servers(self, email: &str) -> (ServerConfig, ServerConfig) {
-        let (imap, smtp) = match self {
-            Self::Google => ("imap.gmail.com", "smtp.gmail.com"),
-            Self::Microsoft => ("outlook.office365.com", "smtp.office365.com"),
+        let smtp = match self {
+            Self::Google => "smtp.gmail.com",
+            Self::Microsoft => "smtp.office365.com",
         };
         (
             ServerConfig {
-                host: imap.into(),
+                host: self.imap_host().into(),
                 port: 993,
                 security: Security::Tls,
                 username: email.into(),
@@ -447,6 +453,7 @@ async fn callback(listener: &TcpListener, v6: Option<&TcpListener>, state: &str)
 
 #[derive(Deserialize)]
 struct Claims {
+    email_verified: Option<bool>,
     email: Option<String>,
     preferred_username: Option<String>,
     name: Option<String>,
@@ -464,6 +471,9 @@ fn claims(jwt: &str) -> Result<(String, String)> {
     );
     let claims: Claims =
         serde_json::from_slice(&payload).map_err(|_| Error::Invalid("invalid ID token claims"))?;
+    if claims.email_verified == Some(false) {
+        return Err(Error::Invalid("Email address has not been verified"));
+    }
     let email = claims
         .email
         .or(claims.preferred_username)

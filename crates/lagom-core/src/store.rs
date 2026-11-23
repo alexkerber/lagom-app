@@ -220,6 +220,7 @@ impl Store {
     pub fn save_browser_sign_in(&self, signed: Account, scopes: &str) -> Result<Account> {
         let result = (|| {
             let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+            let Auth::OAuth(provider) = signed.auth else { return Err(Error::Invalid("Expected a provider sign-in")); };
             let mut matching = self.accounts()?.into_iter().filter(|a| a.email.eq_ignore_ascii_case(&signed.email));
             let Some(old) = matching.next() else {
                 self.save_account(&signed)?;
@@ -237,6 +238,12 @@ impl Store {
             let mut account = old.clone();
             account.auth = signed.auth;
             if old.auth == Auth::Password {
+                if !old.imap.host.eq_ignore_ascii_case(provider.imap_host()) {
+                    return Err(Error::Invalid(match provider {
+                        crate::oauth::Provider::Google => "This address is already in lagom with its own mail server. Remove it first to sign in with Google.",
+                        crate::oauth::Provider::Microsoft => "This address is already in lagom with its own mail server. Remove it first to sign in with Microsoft.",
+                    }));
+                }
                 account.imap = signed.imap.clone();
                 account.smtp = signed.smtp.clone();
             }
@@ -253,14 +260,16 @@ impl Store {
                 Ok(())
             };
             if let Err(error) = save() {
-                account.delete_password()?;
+                account.delete_secret(account.credential_key.as_deref())?;
                 return Err(error);
             }
-            if let Err(error) = old.delete_password() {
+            if let Err(error) = old.delete_secret(old.credential_key.as_deref()) {
                 self.replace_sign_in(&account, &old, &old_scopes)?;
-                account.delete_password()?;
+                account.delete_secret(account.credential_key.as_deref())?;
                 return Err(error);
             }
+            // An interrupted previous upgrade may have left the base password behind.
+            if old.credential_key.is_some() { let _ = old.delete_secret(None); }
             Ok(account)
         })();
         if result.is_err() { signed.delete_password()?; }

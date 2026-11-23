@@ -1280,7 +1280,14 @@ async fn browser_sign_in_takes_only_its_own_redirect_once() {
     // A wrong state leaves the real sign-in pending.
     assert!(matches!(core.finish_sign_in(stray.into()).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
     let denied = format!("msauth.com.example.app://auth?error=access_denied&state={state}");
-    assert!(matches!(core.finish_sign_in(denied.clone()).await, Err(MailError::Failed { reason }) if reason == "sign-in cancelled"));
+    let finish = core.finish_sign_in(denied.clone());
+    tokio::pin!(finish);
+    {
+        // A one-message action can still write a rotated token while it holds this lock.
+        let _refresh = core.stores.removal.read().unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut finish).await.is_err());
+    }
+    assert!(matches!(tokio::time::timeout(HANG, finish).await.unwrap(), Err(MailError::Failed { reason }) if reason == "sign-in cancelled"));
     // The redirect is single use.
     assert!(matches!(core.finish_sign_in(denied).await, Err(MailError::Failed { reason }) if reason == "Sign-in was interrupted. Try again."));
     assert!(core.accounts().await.unwrap().is_empty());
@@ -1903,12 +1910,34 @@ fn a_calendar_grant_keeps_the_granted_scopes_and_a_removed_account_loses_its_new
 }
 
 #[test]
+fn browser_sign_in_refuses_a_password_account_on_its_own_server() {
+    use lagom_core::{account::Auth, oauth::Provider};
+    let (_dir, core) = fixture();
+    let store = core.stores.local.lock().unwrap();
+    let old = fixture_account(&store, "work@gmail.com", 3143);
+    for (provider, name, host) in [(Provider::Google, "Google", "imap.gmail.com"), (Provider::Microsoft, "Microsoft", "outlook.office365.com")] {
+        let mut signed = Account::new(old.email.clone(), old.imap.clone(), old.smtp.clone()).unwrap();
+        signed.imap.host = host.into();
+        signed.imap.security = Security::Tls;
+        signed.auth = Auth::OAuth(provider);
+        signed.set_password("token").unwrap();
+        let error = store.save_browser_sign_in(signed.clone(), "mail").unwrap_err();
+        assert_eq!(error.to_string(), format!("This address is already in lagom with its own mail server. Remove it first to sign in with {name}."));
+        assert_eq!(store.accounts().unwrap(), [old.clone()]);
+        assert_eq!(old.password().unwrap().as_str(), "fixture");
+        assert!(signed.password().is_err());
+    }
+}
+
+#[test]
 fn browser_sign_in_upgrades_password_account() {
     let (dir, core) = fixture();
     let mut store = core.stores.local.lock().unwrap();
     let mut old = fixture_account(&store, "work@example.com", 3143);
+    old.imap.host = "IMAP.GMAIL.COM".into();
+    old.imap.security = Security::Tls;
     old.display_name = "Work".into();
-    store.set_account_name(&old).unwrap();
+    store.save_account(&old).unwrap();
     store.set_signature(&old.id, "Work signature").unwrap();
     let draft = lagom_core::outbox::Draft { id: "draft".into(), account: old.id.clone(), text: "Unsent".into(), ..Default::default() };
     store.save_draft(&draft).unwrap();
@@ -1938,9 +1967,12 @@ fn browser_sign_in_upgrades_password_account() {
     assert_eq!(store.save_browser_sign_in(signed.clone(), "first").unwrap().id, old.id);
     assert!(old.password().is_err());
     assert!(signed.password().is_err());
+    // A process can exit after the database commits and before the base password is deleted.
+    old.set_password("leftover").unwrap();
     let again = browser_account();
     again.set_password("replacement").unwrap();
     store.save_browser_sign_in(again, "second").unwrap();
+    assert!(old.password().is_err());
     let mut wrong = browser_account();
     wrong.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Microsoft);
     wrong.set_password("wrong").unwrap();
@@ -1959,4 +1991,8 @@ fn browser_sign_in_upgrades_password_account() {
     assert_eq!(a.password().unwrap().as_str(), "replacement");
     assert_eq!(store.account_scopes(&a.id).unwrap(), "second");
     assert_eq!(store.message(message).unwrap().summary.account, old.id);
+    old.set_password("leftover").unwrap();
+    a.delete_password().unwrap();
+    assert!(old.password().is_err());
+    assert!(a.password().is_err());
 }

@@ -131,24 +131,24 @@ impl Account {
                 domain.eq_ignore_ascii_case("gmail.com") || domain.eq_ignore_ascii_case("googlemail.com")))
     }
     pub(crate) fn secret_key(&self) -> &str { self.credential_key.as_deref().unwrap_or(&self.id) }
-    fn secret_service(&self) -> String {
+    fn secret_service(key: Option<&str>) -> String {
         let base = std::env::var("LAGOM_KEYCHAIN_SERVICE").unwrap_or_else(|_| "lagom".into());
-        match &self.credential_key {
+        match key {
             Some(key) => format!("{base}.{key}"),
             None => base,
         }
     }
-    fn secret_entry(&self) -> Result<keyring::Entry> {
-        keyring::Entry::new(&self.secret_service(), &self.id).map_err(|_| Error::Secret)
+    fn secret_entry(&self, key: Option<&str>) -> Result<keyring::Entry> {
+        keyring::Entry::new(&Self::secret_service(key), &self.id).map_err(|_| Error::Secret)
     }
     pub fn set_password(&self, password: &str) -> Result<()> {
-        let entry = self.secret_entry()?;
+        let entry = self.secret_entry(self.credential_key.as_deref())?;
         // iOS: readable only while unlocked and never in backups or device migration. Reads stay with
         // keyring, which matches service and account only, so older items keep working.
         #[cfg(target_os = "ios")]
         {
             use security_framework::{access_control::{ProtectionMode, SecAccessControl}, passwords::{set_generic_password_options, PasswordOptions}};
-            let service = self.secret_service();
+            let service = Self::secret_service(self.credential_key.as_deref());
             let mut options = PasswordOptions::new_generic_password(&service, &self.id);
             options.set_access_control(SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly), 0).map_err(|_| Error::Secret)?);
             // An update keeps an older item's class, so the item is replaced.
@@ -159,16 +159,20 @@ impl Account {
         entry.set_password(password).map_err(|_| Error::Secret)
     }
     pub fn password(&self) -> Result<Zeroizing<String>> {
-        self.secret_entry()?
+        self.secret_entry(self.credential_key.as_deref())?
             .get_password()
             .map(Zeroizing::new)
             .map_err(|_| Error::Secret)
     }
     /// Ok when the secret is gone, also when it was never there.
     pub fn delete_password(&self) -> Result<()> {
-        match self.secret_entry()?.delete_credential() {
+        if self.credential_key.is_some() { self.delete_secret(None)?; }
+        self.delete_secret(self.credential_key.as_deref())
+    }
+    pub(crate) fn delete_secret(&self, key: Option<&str>) -> Result<()> {
+        match self.secret_entry(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {
-                crate::oauth::forget(self.secret_key());
+                crate::oauth::forget(key.unwrap_or(&self.id));
                 Ok(())
             },
             Err(_) => Err(Error::Secret),

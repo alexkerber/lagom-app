@@ -33,7 +33,7 @@ fn jwt(payload: &str) -> String {
 #[test]
 fn jwt_identity() {
     assert_eq!(
-        claims(&jwt(r#"{"email":"a@gmail.com","name":"Alice"}"#)).unwrap(),
+        claims(&jwt(r#"{"email":"a@gmail.com","name":"Alice","email_verified":true}"#)).unwrap(),
         ("a@gmail.com".into(), "Alice".into())
     );
     assert_eq!(
@@ -46,6 +46,7 @@ fn jwt_identity() {
         "invalid".into(),
         "a.%.c".into(),
         jwt("{}"),
+        jwt(r#"{"email":"a@gmail.com","email_verified":false}"#),
         jwt(r#"{"email":"a\n@b.com"}"#),
     ] {
         assert!(claims(&token).is_err());
