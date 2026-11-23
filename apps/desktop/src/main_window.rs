@@ -97,6 +97,7 @@ pub fn bind_keys(cx: &mut App) {
 // Motion per docs/motion.md: the state changes at once, the animation only paints on top.
 // Under reduced motion (`motion::reduced`) nothing travels: rows fade and close the gap.
 const MOTION: Duration = crate::theme::motion::ROW;
+const SLIDE: Duration = crate::theme::motion::SPRING;
 /// Colour change behind a swiped row when it crosses a threshold.
 const TINT_FADE: Duration = crate::theme::motion::TINT;
 /// Vertical padding and line gap inside a message row.
@@ -371,6 +372,8 @@ pub struct MainWindow {
     sidebar_scroll: ScrollHandle,
     sidebar_mail: bool,
     sidebar_fade: Option<Instant>,
+    /// When the sidebar started to slide in or out; it slides as an AppKit split view collapses.
+    sidebar_slide: Option<Instant>,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -509,6 +512,7 @@ impl MainWindow {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_mail: false,
             sidebar_fade: None,
+            sidebar_slide: None,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -2633,12 +2637,18 @@ impl Render for MainWindow {
         }
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
-        (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
+        // How much of the sidebar shows, 0 to 1, while it slides.
+        let slide = self.sidebar_slide.map(|at| at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).filter(|t| *t < 1.).map(|t| ease_out_quint()(t));
+        if slide.is_some() { window.request_animation_frame(); } else { self.sidebar_slide = None; }
+        let shown = match (slide, self.panes.sidebar_hidden) { (Some(p), hidden) => if hidden { 1. - p } else { p }, (None, hidden) => if hidden { 0. } else { 1. } };
+        // A sliding sidebar keeps its full width; only its clip narrows.
+        (self.sidebar_w, self.list_w) = Panes { sidebar_hidden: shown == 0., ..self.panes }.fit(f32::from(window.viewport_size().width));
         self.web_frame(window, cx);
         self.forget_hidden_images(cx);
         crate::rich::release(window, cx);
         let welcome = self.welcome();
-        let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
+        // macOS: with the sidebar gone, the panel clears the traffic lights.
+        let panel_top = if welcome { 36. } else if cfg!(target_os = "macos") { 8. + 28. * (1. - shown) } else { 8. };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
@@ -2709,7 +2719,7 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        if welcome || self.panes.sidebar_hidden { self.glass.hide(); }
+        if welcome || (self.panes.sidebar_hidden && self.sidebar_slide.is_none()) { self.glass.hide(); }
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", Page::Settings(_) => "MainWindow Settings", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
@@ -2768,6 +2778,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
                 this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
+                this.sidebar_slide = (!crate::motion::reduced()).then(Instant::now);
                 this.save_panes(cx);
                 cx.notify();
             }))
@@ -2790,7 +2801,12 @@ impl Render for MainWindow {
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
-            .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.sidebar(cx)))
+            .when(!welcome && shown > 0., |d| d.child(match shown < 1. {
+                // The sidebar keeps its width and slides under a clip, so no row reflows.
+                true => div().w(px(self.sidebar_w * shown)).h_full().flex_shrink_0().flex().overflow_hidden()
+                    .child(self.sidebar(cx).ml(px(self.sidebar_w * (shown - 1.)))),
+                false => self.sidebar(cx),
+            }))
             .child(
                 // The content meets the sidebar at a straight edge: no inset panel, so no stray corner.
                 div().flex_1().min_w(px(0.)).h_full().flex().bg(t.bg).child(div()
@@ -2808,7 +2824,7 @@ impl Render for MainWindow {
                     .children(toasts)
                     .when(matches!(self.page, Page::Mail) && !empty, |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
             )
-            .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
+            .when(!welcome && shown == 1., |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
             .child(self.resize_events(cx))
             .children(self.palette.clone())
             .children(self.sending.clone())
@@ -4602,6 +4618,9 @@ mod dispatch {
         cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(widths(cx).0, 220.);
         cx.simulate_keystrokes("alt-secondary-s");
+        // The sidebar keeps its width while it slides out.
+        assert_eq!(widths(cx).0, 220.);
+        view.update(cx, |v, cx| { v.sidebar_slide = None; cx.notify(); });
         assert_eq!(widths(cx).0, 0.);
         assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
     }

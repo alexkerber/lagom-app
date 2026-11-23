@@ -495,6 +495,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sidebar_slides_out_and_back_at_full_width(cx: &mut TestAppContext) {
+        cx.update(|cx| bind_keys(cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+        cx.run_until_parked();
+        let full = cx.debug_bounds("sidebar").unwrap();
+        let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        for hide in [true, false] {
+            view.update(cx, |v, cx| { v.panes.sidebar_hidden = hide; v.sidebar_slide = Some(Instant::now() - SLIDE / 4); cx.notify(); });
+            draw(cx);
+            // Mid-slide: same width, moved left, so no row reflows.
+            let mid = cx.debug_bounds("sidebar").unwrap();
+            assert_eq!(mid.size.width, full.size.width);
+            assert!(mid.origin.x < full.origin.x);
+            view.update(cx, |v, cx| { v.sidebar_slide = Some(Instant::now() - SLIDE); cx.notify(); });
+            cx.run_until_parked();
+            // A test window keeps the last drawn bounds of a removed element, so check the state.
+            assert_eq!(view.read_with(cx, |v, _| v.sidebar_w > 0.), !hide);
+            assert!(view.read_with(cx, |v, _| v.sidebar_slide.is_none()));
+        }
+        assert_eq!(cx.debug_bounds("sidebar").unwrap(), full);
+    }
+
+    #[gpui::test]
     fn review_mailboxes_have_spacing_without_a_duplicate_heading(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
         cx.run_until_parked();
