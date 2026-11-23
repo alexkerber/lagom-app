@@ -2,6 +2,7 @@
 
 ## Brand and site
 
+- [ ] Windows: sync.parse_save_1000 took 9.2 s on the CI runner against 1.3 s on Linux. Find out whether it is the runner (Defender, NTFS fsync) or lagom, then gate Windows times in `scripts/perf.py`.
 - [x] Use lowercase "lagom" in desktop, mobile and site UI, package display names, CLI help, OAuth pages and shared errors.
 
 - [x] Domain: `lagommail.app`, chosen 2026-11-09 (`lagom.app`, `.se`, `.dev` and `.email` are taken). Bundle id `app.lagommail.desktop`. Registration not confirmed in the registry on 2026-11-09.
@@ -153,7 +154,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [x] Add account on iOS: the sheet opens on the intro's Choose your mail (Alex 2026-11-22: "det var väll inte den designen vi kom fram till?"); #223. Not verified: a real sign-in.
 - [x] Android Add account opens on the intro's Choose your mail, as iOS (shared `ChooseMailList`; Back returns to the list with a fresh form). Verified on the Pixel 9a: list, IMAP form, Back. Not verified: provider rows (the local build has no client IDs), a real sign-in.
 - [ ] Windows FFI tests time out now and then (`done_and_delete_move_through_imap_without_crossing_accounts`, `inline_loading_fetches_legacy_mail_and_reuses_cache`); a rerun passes. The hang guard is now 30 s (`HANG` in `crates/lagom-ffi/src/tests.rs`). Hypothesis, not measured: slow Windows runners, not a deadlock; if a run still times out at 30 s, look for a real hang.
-- [ ] Performance budgets run on Ubuntu and macOS only (`perf.yml`); a Windows binary over its 32 MB budget passes CI unseen (Codex 2026-11-22).
+- [x] Windows now runs the shared performance checks on `ci/perf-windows`. Workflow YAML and the 32 MB boundary passed local tests. The hosted Windows build remains unverified.
 - [x] Mac app icon in dark and tinted styles (Alex 2026-11-22): Icon Composer file `brand/app-icon/AppIcon.icon`, compiled into Assets.car by package-macos.sh. Measured: NSWorkspace gives the navy dark icon on this Mac (dark icon style).
 - [x] Site screenshots from the current app (Alex 2026-11-22): main window and detail crops recaptured in demo mode.
 - [ ] Site: iPhone and iPad screenshots (Alex 2026-11-22). Needs the iPhone 17 Pro registered for the test bundle and the iPad unlocked.
