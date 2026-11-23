@@ -18,7 +18,7 @@ tolerance = 2.0
 "reload.ui_thread_background" = { max = 8, unit = "ms", why = "Key press to updated frame: reload() on the UI thread at 100k; applying the read result is not timed" }
 "reload.ui_thread_jump" = { max = 8, unit = "ms", why = "Open a message from search, a notification or a task: the jump on the UI thread at 100k; applying the read result is not timed" }
 "reload.cold_start_first_list" = { max = 200, unit = "ms", why = "Cold start to first frame: store open and first list read at 100k" }
-"binary.size" = { max = 30, max_linux = 32, max_win32 = 32, unit = "MB", why = "Release binary. Windows and Linux bundle Inter (2.4 MB; Alex chose Inter for body text, 2026-11-22); macOS uses SF" }
+"binary.size" = { max = 30, max_linux = 32.5, max_win32 = 32, unit = "MB", why = "Release binary. Windows and Linux bundle Inter for body text (2.4 MB); macOS uses SF. Linux +0.5 MB for resvg 0.50, which the audit fixes need" }
 
 # Set 2026-11-14 with this gate: parts of the budgets above.
 "reload.store_open" = { max = 20, unit = "ms", why = "Part of cold start" }
