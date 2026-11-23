@@ -44,6 +44,12 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 # keyring's iOS backend stores with the default accessibility class; this sets ThisDeviceOnly. Same 3.7.0 as keyring's macOS backend.
 [target.'cfg(target_os = "ios")'.dependencies]
 security-framework = { version = "3", default-features = false }
+core-foundation = "0.10"
+security-framework-sys = "2"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-foundation = "0.10"
+security-framework-sys = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in Cargo.lock; sets the quarantine attribute on saved attachments.
