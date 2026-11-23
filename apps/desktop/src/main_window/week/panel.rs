@@ -18,7 +18,7 @@ impl MainWindow {
                         this.week.suggestion = 0;
                         this.week.guest_error = None;
                     }
-                    TextInputEvent::Enter => this.add_calendar_guest(cx),
+                    TextInputEvent::Enter => this.add_calendar_guest(false, cx),
                     TextInputEvent::Escape => this.week.suggestions.clear(),
                 }
                 cx.notify();
@@ -55,9 +55,9 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn add_calendar_guest(&mut self, cx: &mut Context<Self>) {
+    fn add_calendar_guest(&mut self, tab: bool, cx: &mut Context<Self>) {
         let Some(input) = self.week.guest_input.clone() else { return };
-        let guests = match self.week.suggestions.get(self.week.suggestion) {
+        let guests = match crate::mail::selected_contact(&self.week.suggestions, self.week.suggestion, tab) {
             Some(contact) => vec![contact.recipient()],
             None => split_recipients(input.read(cx).text()),
         };
@@ -157,12 +157,12 @@ impl MainWindow {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                         this.week.guest_input.clone().unwrap().update(cx, |input, cx| input.insert(&text.replace(['\r', '\n'], ","), false, cx));
                         this.week.suggestions.clear();
-                        this.add_calendar_guest(cx);
+                        this.add_calendar_guest(false, cx);
                         cx.stop_propagation();
                     } else { cx.propagate(); }
                 }))
                 .capture_action(cx.listener(|this, _: &crate::text_input::FocusNext, window, cx| {
-                    this.add_calendar_guest(cx); window.focus_next(); cx.stop_propagation();
+                    this.add_calendar_guest(true, cx); window.focus_next(); cx.stop_propagation();
                 }))
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     let n = this.week.suggestions.len();
@@ -181,7 +181,7 @@ impl MainWindow {
                     .p(px(6.)).rounded(px(radius::CONTROL)).when(index == self.week.suggestion, |d| d.bg(t.sel))
                     .child(contact.recipient())
                     .on_mouse_down(MouseButton::Left, |_, window, cx| { window.prevent_default(); cx.stop_propagation(); })
-                    .on_click(cx.listener(move |this, _, _, cx| { this.week.suggestion = index; this.add_calendar_guest(cx); })))))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.week.suggestion = index; this.add_calendar_guest(false, cx); })))))
             .children(self.week.guests.iter().enumerate().map(|(index, guest)| div().flex().items_center().gap(px(4.))
                 .child(div().flex_1().min_w(px(0.)).overflow_hidden().flex().flex_col().child(calendar_title(gpui::StyledText::new(guest.clone()))))
                 .child(icon_button(&t, "remove-guest", "icons/remove-guest.svg", "Remove guest").id(("remove-guest", index))

@@ -157,6 +157,9 @@ impl LagomCore {
     pub async fn add_todo(&self, list: i64, title: String, due_date: Option<String>) -> Result<Todo> {
         self.run(move |s| Ok(s.add_task(list, &title, "", due(due_date)?)?.into())).await
     }
+    pub async fn edit_todo(&self, id: i64, title: Option<String>, change_due: bool, due_date: Option<String>) -> Result<()> {
+        self.run(move |s| s.edit_task(id, title.as_deref(), change_due, due(due_date)?)).await
+    }
     pub async fn set_todo_done(&self, id: i64, done: bool) -> Result<()> {
         self.run(move |s| s.set_done(id, done)).await
     }
@@ -388,6 +391,16 @@ mod tests {
         assert!(core.add_todo(list, "Bad".into(), Some("10/11/2026".into())).await.is_err());
         let padded = core.add_todo(list, "Padded".into(), Some("2026-2-3".into())).await.unwrap();
         assert_eq!(padded.due.as_deref(), Some("2026-02-03"));
+        core.edit_todo(padded.id, Some("Renamed".into()), false, None).await.unwrap();
+        assert!(core.edit_todo(padded.id, Some("Bad".into()), true, Some("bad".into())).await.is_err());
+        let edited = core.todos(list, false).await.unwrap().pop().unwrap();
+        assert_eq!((edited.title.as_str(), edited.due), ("Renamed", padded.due));
+        core.edit_todo(padded.id, Some("Moved".into()), true, Some("2026-4-5".into())).await.unwrap();
+        let edited = core.todos(list, false).await.unwrap().pop().unwrap();
+        assert_eq!((edited.title.as_str(), edited.due.as_deref()), ("Moved", Some("2026-04-05")));
+        core.edit_todo(padded.id, None, true, None).await.unwrap();
+        let edited = core.todos(list, false).await.unwrap().pop().unwrap();
+        assert_eq!((edited.title.as_str(), edited.due), ("Moved", None));
         core.delete_todo(padded.id).await.unwrap();
         assert!(core.add_todo(list, "   ".into(), None).await.is_err(), "core rejects empty titles");
         assert!(core.add_todo(-1, "Nowhere".into(), None).await.is_err());

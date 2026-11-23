@@ -203,6 +203,15 @@ internal class PlannerModel : ViewModel() {
         catch (e: Exception) { error = "Could not add “$trimmed”: ${e.mailMessage()}"; false }
     }
 
+    suspend fun edit(id: Long, originalTitle: String, originalDay: LocalDate?, title: String, due: LocalDate?) {
+        val core = core ?: return
+        val rename = title.trim().takeIf { it.isNotEmpty() && it != originalTitle }
+        val changeDue = due != originalDay
+        if (rename == null && !changeDue) return
+        guard { core.editTodo(id, rename, changeDue, due?.toString()) }
+        reloadTodos()
+    }
+
     /** Saves at once; [settleMillis] keeps the lists as drawn a moment longer, so a tick is seen before its row moves. */
     suspend fun toggle(todo: Todo, settleMillis: Long = 0) {
         val core = core ?: return
