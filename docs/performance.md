@@ -181,7 +181,7 @@ Measured 2026-11-14 on macOS 27.2.1, Apple M4 Max, release, other builds running
 | `mime.large` (3 MB)            |   0.56 ms |  50 ms |
 | `html.to_text_100kb`           |    2.0 ms |  10 ms |
 | `sync.parse_save_1000`         | 0.8–1.5 s |    2 s |
-| `binary.size`                  |   27.5 MB |  30 MB (32 on Windows, 32.5 on Linux) |
+| `binary.size`                  |   27.5 MB |  30 MB (32 on Windows, 33 on Linux) |
 
 First CI run (PR #131, 2026-11-14): every time was within 1.3× of the reference Mac, most
 faster. ubuntu-latest: cold start 36 ms, `load_accounts` 35 ms, `sync.parse_save_1000` 1.41 s.
