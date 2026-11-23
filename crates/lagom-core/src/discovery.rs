@@ -22,36 +22,28 @@ pub enum Discovery {
     },
     Manual,
 }
-#[cfg(any(target_os = "android", test))]
-mod android;
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+mod system;
 
 const DEADLINE: Duration = Duration::from_secs(3);
 
 pub async fn discover(email: &str) -> Discovery {
-    discover_with(
-        email,
-        // shortcut: no MX lookup on iOS (see Cargo.toml), presets and autoconfig still apply; add a platform resolver if iOS needs MX.
-        #[cfg(target_os = "ios")]
-        |_| async { None },
-        #[cfg(not(target_os = "ios"))]
-        mx,
-        |domain| async move {
-            let response = oauth::http(DEADLINE)
-                .ok()?
-                .get(format!("https://autoconfig.thunderbird.net/v1.1/{domain}"))
-                .send()
-                .await
-                .ok()?;
-            if !response.status().is_success() {
-                return None;
-            }
-            String::from_utf8(oauth::body(response).await.ok()?.to_vec()).ok()
-        },
-    )
+    discover_with(email, mx, |domain| async move {
+        let response = oauth::http(DEADLINE)
+            .ok()?
+            .get(format!("https://autoconfig.thunderbird.net/v1.1/{domain}"))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        String::from_utf8(oauth::body(response).await.ok()?.to_vec()).ok()
+    })
     .await
 }
-#[cfg(target_os = "android")]
-use android::mx;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use system::mx;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn mx(domain: String) -> Option<Vec<String>> {

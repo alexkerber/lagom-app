@@ -285,7 +285,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] “Meet with” now shares compose’s Tab rule on `fix/meet-with-tab`. Tab only accepts suggestions for contacts you have written to. A headless test verifies that Enter can still select a new contact. Desktop tests passed. Manual UI behavior was not verified.
 - [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
-- [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
+- [x] iOS account setup asks the system resolver for MX records using only the domain (`fix/ios-mx-lookup`). Discovery tests passed. Both iOS libraries built, and the unsigned device app linked. Live DNS on an iPhone or iPad remains unverified.
 - [x] Dependency audit on `deps/audit`. Updated `cookie` to 0.18.3 for RUSTSEC-2026-0594.
   Dropped GPUI’s unused Git test helpers, removing both `git2` advisories (RUSTSEC-2026-0183 and RUSTSEC-2026-0184).
   Updated GPUI’s SVG renderer and `stacksafe`, removing three unmaintained warnings.

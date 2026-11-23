@@ -39,6 +39,7 @@ sha2 = "0.10"
 url = "2"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
+hickory-proto = "0.26"
 quick-xml = { version = "0.41", features = ["serialize"] }
 
 # keyring's iOS backend stores with the default accessibility class; this sets ThisDeviceOnly. Same 3.7.0 as keyring's macOS backend.
