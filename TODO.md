@@ -286,4 +286,15 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
 - [x] iOS account setup asks the system resolver for MX records using only the domain (`fix/ios-mx-lookup`). Discovery tests passed. Both iOS libraries built, and the unsigned device app linked. Live DNS on an iPhone or iPad remains unverified.
-- [ ] `cargo audit` warnings: 18 unmaintained dependency warnings and two unsound `git2 0.20.4` advisories (RUSTSEC-2026-0183, RUSTSEC-2026-0184), still reported without ignores; update the upstream dependency chains.
+- [x] Dependency audit on `deps/audit`. Updated `cookie` to 0.18.3 for RUSTSEC-2026-0594.
+  Dropped GPUI’s unused Git test helpers, removing both `git2` advisories (RUSTSEC-2026-0183 and RUSTSEC-2026-0184).
+  Updated GPUI’s SVG renderer and `stacksafe`, removing three unmaintained warnings.
+  `cargo audit` reports zero vulnerabilities, zero unsound warnings and 16 unmaintained warnings without ignores.
+  The macOS workspace build passed. Core, FFI and desktop tests passed (836 total, ten ignored).
+  Linux, Windows, mobile builds and release size budgets remain unverified.
+  - Zed’s tar fork requires `async-std`. Both `async-std` and `async-imap` require `pin-utils`.
+  - GPUI’s utilities require `futures-lite` 1, which pulls in `instant`. Its Metal backend still requires `paste`.
+  - Zed’s HTTP fork requires `rustls-pemfile`. UniFFI’s Askama templates still pull in `basic-toml`.
+  - Lagom and `async-imap` use `chrono`. Replacing it requires a date and time migration.
+  - GPUI’s Linux text backend retains `rustybuzz` and two `ttf-parser` versions. Newer cosmic-text requires weight-aware font loading and glyph caching.
+  - Linux portals, notifications and credential storage retain zbus 4 and 5. Each pulls in `zbus_names`, `zvariant` and `zvariant_derive`. Migrating all three consumers to zbus 6 exceeds this update.
