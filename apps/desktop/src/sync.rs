@@ -2,6 +2,10 @@
 //! it), owns the network and sync writes, and works through `Cmd`s in order. Compose commits
 //! locally; the UI reads the store and hears about changes through `Event`s, without network waits.
 
+#[cfg(test)]
+#[path = "../../../crates/lagom-core/tests/support/memory_secrets.rs"]
+mod memory_secrets;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
@@ -74,6 +78,7 @@ pub enum Cmd {
     MarkSeen(i64),
     Inline(i64),
     ForwardAttachments { draft: String, id: i64 },
+    OpenMessage(i64),
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
     Send(String),
@@ -139,6 +144,7 @@ pub enum Event {
     /// A MarkSeen finished, done or not.
     Seen(i64),
     Inline { id: i64, error: Option<String> },
+    MessageFile(Result<PathBuf, String>),
     Downloaded(Result<PathBuf, String>),
     ForwardAttachments { draft: String, result: Result<Vec<lagom_core::smtp::OutgoingAttachment>, String> },
     /// `error` says why, also when the message went out but its Sent copy failed.
@@ -175,6 +181,7 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
         .name("lagom-mail".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("mail runtime");
+            oauth::configure_refresh_store(&path);
             rt.block_on(run(path, cmd_rx, me, ev_tx));
         })
         .expect("mail thread");
@@ -381,7 +388,7 @@ impl Worker {
                         let scopes = match self.store.account_scopes(&id) {
                             Ok(mut scopes) => {
                                 if calendar_consent {
-                                    if account.auth != lagom_core::account::Auth::OAuth(Provider::Google) {
+                                    if account.auth != lagom_core::account::Auth::OAuth(Provider::Google) && !account.google_hosted_password() {
                                         self.signed_in(Err(Error::Invalid("Google calendar requires a Google account")));
                                         return;
                                     }
@@ -395,7 +402,7 @@ impl Worker {
                         self.emit(if calendar_consent { Event::CalendarSync(id, SyncState::SigningIn) } else { Event::Sync(id, SyncState::SigningIn) });
                         let events = self.events.clone();
                         self.start_sign_in(async move {
-                            oauth::reauthenticate(&account, &scopes, move |url| {
+                            oauth::reauthenticate(&account, &scopes, calendar_consent, move |url| {
                                 let _ = events.send(Event::OpenUrl(url.into()));
                             }).await
                         });
@@ -439,6 +446,10 @@ impl Worker {
             Cmd::ForwardAttachments { draft, id } => {
                 let result = self.forward_attachments(id).await.map_err(|e| shown(&e));
                 self.emit(Event::ForwardAttachments { draft, result });
+            }
+            Cmd::OpenMessage(id) => {
+                let result = self.cache_eml(id).await.map_err(|e| shown(&e));
+                self.emit(Event::MessageFile(result));
             }
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| shown(&e));
@@ -489,13 +500,7 @@ impl Worker {
             let calendar_consent = std::mem::take(&mut self.calendar_consent);
             let healthy = !self.reauth_required.contains(&id);
             let result = result.and_then(|signed| {
-                let account = self.account(&id)?;
-                // The name may change on the account page while the browser is open; the rest may not.
-                let mut before = signed.account.clone();
-                before.display_name = account.display_name.clone();
-                if before != account { return Err(Error::Invalid("account changed during sign-in")); }
-                self.store.set_account_scopes(&id, &signed.scopes)?;
-                self.store.resume_outbox(&id, chrono::Local::now().timestamp_millis())?;
+                let account = self.store.save_browser_sign_in(signed, Some(&id))?;
                 self.reauth_required.remove(&id);
                 self.sessions.remove(&id);
                 self.watch(&account);
@@ -535,18 +540,13 @@ impl Worker {
             Err(Error::Cancelled) => { self.emit(Event::SignInCancelled); return; }
             Err(error) => { self.emit(Event::SignedIn(Err(shown(&error)))); return; }
         };
-        let account = signed.account;
-        if self.duplicate(&account) {
-            // The new sign-in's secret is stored under its own id; the existing account keeps its own.
-            let _ = account.delete_password();
-            self.emit(Event::SignedIn(Err(format!("{} is already in lagom.", account.email))));
-            return;
-        }
-        if let Err(error) = self.store.save_authorized_account(&account, &signed.scopes) {
-            let _ = account.delete_password();
-            self.emit(Event::SignedIn(Err(shown(&error))));
-            return;
-        }
+        let account = match self.store.save_browser_sign_in(signed, None) {
+            Ok(account) => account,
+            Err(error) => { self.emit(Event::SignedIn(Err(shown(&error)))); return; }
+        };
+        self.sessions.remove(&account.id);
+        self.reauth_required.remove(&account.id);
+        if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(account.id.clone())); }
         self.emit(Event::SignedIn(Ok(account.id.clone())));
         self.emit(Event::Changed);
         self.watch(&account);
@@ -588,11 +588,7 @@ impl Worker {
         let result = async {
             let session = ImapSync::login(&account, &password).await?;
             smtp::verify(&account, &password).await?;
-            account.set_password(&password)?;
-            if let Err(e) = self.store.save_account(&account) {
-                let _ = account.delete_password();
-                return Err(e);
-            }
+            self.store.save_password_account(&account, &password)?;
             Ok(session)
         }
         .await;
@@ -641,16 +637,12 @@ impl Worker {
             task.abort();
         }
         self.sessions.remove(id);
-        if let Ok(account) = self.account(id) {
-            // Keep the row while the secret stays: without it nobody could find the secret again.
-            if delete_password(&account).is_err() {
-                if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(id.into())); }
-                self.emit(Event::Sync(id.to_string(), SyncState::Failed("could not remove the saved password; try Remove again".into())));
-                self.emit(Event::Changed);
-                return;
-            }
+        if let Err(error) = self.store.remove_credentials_and_account(id, delete_password) {
+            if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Resume(id.into())); }
+            self.emit(Event::Sync(id.into(), SyncState::Failed(shown(&error))));
+            self.emit(Event::Changed);
+            return;
         }
-        let _ = self.store.delete_account(id);
         self.reauth_required.remove(id);
         self.emit(Event::Changed);
     }
@@ -1075,6 +1067,15 @@ impl Worker {
             parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
         }
         Ok(parts)
+    }
+
+    async fn cache_eml(&mut self, id: i64) -> lagom_core::Result<PathBuf> {
+        let id = self.resolve(id).await?;
+        let account = self.account(&self.store.message_summary(id)?.account)?;
+        let mut session = self.take(&account).await?;
+        let result = session.cache_eml(&self.store, id).await;
+        self.give(&account.id, session, &result);
+        result
     }
 
     async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
@@ -1658,6 +1659,15 @@ mod tests {
         }).await.expect("fixture completes without keychain or external servers");
     }
 
+    fn signed_fixture(mut account: Account, scopes: &str) -> SignedIn {
+        memory_secrets::install();
+        account.provider_subject = Some("subject".into());
+        SignedIn {
+            email: account.email.clone(), display_name: account.display_name.clone(), account, scopes: scopes.into(),
+            refresh_token: Zeroizing::new("refresh".into()), access_token: Zeroizing::new("access".into()), expires_in: 3600,
+        }
+    }
+
     #[tokio::test]
     async fn calendar_consent_and_scope_denial_do_not_pause_mail_or_delete_cached_events() {
         use lagom_core::account::Auth;
@@ -1699,7 +1709,7 @@ mod tests {
         }
         worker.quick(Cmd::AllowCalendar(account.id.clone())).await;
         worker.sign_in.take().unwrap().abort();
-        worker.signed_in(Ok(SignedIn { email: account.email.clone(), display_name: account.display_name.clone(), account: account.clone(), scopes: scopes.clone() }));
+        worker.signed_in(Ok(signed_fixture(account.clone(), &scopes)));
         worker.idle.remove(&account.id).unwrap().abort();
         assert_eq!(worker.store.account_scopes(&account.id).unwrap(), scopes);
         assert!(matches!(worker.deferred.pop_front(), Some(Cmd::Sync(Some(id))) if id == account.id));
@@ -1768,15 +1778,39 @@ mod tests {
         let before = account.clone();
         account.display_name = "Fixture Name".into();
         worker.store.save_account(&account).unwrap();
-        worker.signed_in(Ok(SignedIn { email: before.email.clone(), display_name: before.display_name.clone(), account: before, scopes: String::new() }));
+        worker.signed_in(Ok(signed_fixture(before, "")));
         worker.idle.remove(&account.id).unwrap().abort();
         assert!(matches!(out.try_recv().unwrap(), Event::Changed));
         assert!(matches!(out.try_recv().unwrap(), Event::Reauthenticated { account: id, result: Ok(()) } if id == account.id));
         assert!(!worker.reauth_required.contains(&account.id));
         assert!(matches!(worker.deferred.pop_front(), Some(Cmd::Sync(Some(id))) if id == account.id));
-        assert_eq!(worker.store.accounts().unwrap(), [account.clone()]);
+        let saved = worker.store.accounts().unwrap().pop().unwrap();
+        assert_eq!((saved.id, saved.display_name), (account.id.clone(), account.display_name.clone()));
         assert_eq!(worker.store.folders(&account.id, now()).unwrap()[0].id, folder);
         assert_eq!(worker.store.due_outbox(&account.id, i64::MAX).unwrap(), [id]);
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_account_sign_in_refuses_existing_address() {
+        memory_secrets::install();
+        let (me, _rx) = unbounded_channel();
+        let (events, mut out) = unbounded_channel();
+        let path = std::env::temp_dir().join(format!("lagom-signin-upgrade-{}.db", std::process::id()));
+        let store = Store::open(&path).unwrap();
+        let mut worker = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+        let config = lagom_core::account::ServerConfig { host: "outlook.office365.com".into(), port: 993,
+            security: lagom_core::account::Security::Tls, username: "me@outlook.com".into() };
+        let old = Account::new("me@outlook.com".into(), config.clone(), config.clone()).unwrap();
+        old.set_password("password").unwrap();
+        worker.store.save_account(&old).unwrap();
+        let mut account = Account::new(old.email.clone(), config.clone(), config).unwrap();
+        account.auth = lagom_core::account::Auth::OAuth(Provider::Microsoft);
+
+        worker.signed_in(Ok(signed_fixture(account, "mail")));
+        assert!(matches!(out.recv().await, Some(Event::SignedIn(Err(_)))));
+        assert_eq!(worker.store.accounts().unwrap()[0].password().unwrap().as_str(), "password");
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }

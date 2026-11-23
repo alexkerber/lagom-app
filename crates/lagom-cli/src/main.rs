@@ -294,6 +294,7 @@ async fn main() -> Result<()> {
         Some(path) => Store::open(path)?,
         None => Store::open_default()?,
     };
+    oauth::configure_refresh_store(store.path());
     match args.command {
         Command::Mcp => mcp::run(&store)?,
         Command::Tasks { command } => match command {
@@ -322,11 +323,8 @@ async fn main() -> Result<()> {
         },
         Command::SignIn { provider } => {
             let signed = sign_in(provider.into()).await?;
-            if let Err(error) = store.save_account(&signed.account) {
-                let _ = signed.account.delete_password();
-                return Err(error.into());
-            }
-            println!("Added {} ({})", clean(&signed.email), signed.account.id);
+            let account = store.save_browser_sign_in(signed, None)?;
+            println!("Signed in {} ({})", clean(&account.email), account.id);
         }
         Command::Discover { email } => match discover(&email).await {
             Discovery::OAuth(provider) => println!(
@@ -385,11 +383,7 @@ async fn main() -> Result<()> {
                 bail!("Password cannot be empty");
             }
             ImapSync::login(&account, &password).await?.logout().await?;
-            account.set_password(&password)?;
-            if let Err(error) = store.save_account(&account) {
-                let _ = account.delete_password();
-                return Err(error.into());
-            }
+            store.save_password_account(&account, &password)?;
             println!("Added {} ({})", account.email, account.id);
         }
         Command::Accounts => {

@@ -142,8 +142,8 @@ impl Render for MessageWindow {
                 main.message_action(id, *action, window, cx);
             }).ok();
         });
-        let on_download = move |section, _: &mut Window, cx: &mut App| {
-            main_window.update(cx, |main, _, cx| main.download_attachment(id, section, cx)).ok();
+        let on_download = move |command, _: &mut Window, cx: &mut App| {
+            main_window.update(cx, |main, _, cx| main.download(command, cx)).ok();
         };
         div()
             .key_context("MessageWindow")
