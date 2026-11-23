@@ -6,6 +6,7 @@ struct AddAccountView: View {
     /// Starts on Choose your mail, as the intro; false opens the address form at once (the intro's Other).
     var providers = true
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.webAuthenticationSession) private var browser
     @State private var form = false
     @State private var email = ""
     @State private var password = ""
@@ -23,8 +24,9 @@ struct AddAccountView: View {
     @State private var error: String?
 
     var body: some View {
+        let outlook = isOutlookAddress(email: email)
         SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() },
-                      confirm: !providers || form ? SheetConfirm(title: passwordStep ? "Sign in" : "Continue", systemImage: passwordStep ? "checkmark" : "arrow.right", disabled: email.isEmpty || connecting || (passwordStep && password.isEmpty)) {
+                      confirm: (!providers || form) && !outlook ? SheetConfirm(title: passwordStep ? "Sign in" : "Continue", systemImage: passwordStep ? "checkmark" : "arrow.right", disabled: email.isEmpty || connecting || (passwordStep && password.isEmpty)) {
                           if passwordStep { Task { await connect() } }
                           else { passwordStep = true; imapUser = email; smtpUser = email }
                       } : nil) {
@@ -41,13 +43,19 @@ struct AddAccountView: View {
                         TextField("you@example.com", text: $email).textContentType(.emailAddress).keyboardType(.emailAddress)
                             .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
                     }
-                    if passwordStep {
+                    if outlook {
+                        if signInAvailable(provider: .microsoft) {
+                            HouseButton(title: "Sign in with Microsoft", icon: "account-add", primary: true) {
+                                Task { await signInWithMicrosoft() }
+                            }
+                        } else {
+                            Text("Outlook sign-in is not available in this build.")
+                        }
+                    } else if passwordStep {
                         FieldRow(label: "Password") {
                             SecureField("App password", text: $password).textContentType(.password).accessibilityLabel("Password")
                         }
-                        Text(signInAvailable(provider: .microsoft)
-                            ? "Gmail and iCloud need an app password, not your normal password. For Microsoft, go back and choose Continue with Microsoft."
-                            : "Gmail and iCloud need an app password, not your normal password. Some Microsoft accounts only work with Sign in with Microsoft, which this version does not have.")
+                        Text("Gmail and iCloud need an app password, not your normal password.")
                             .lagomFont(.small).foregroundStyle(Theme.secondary).padding(.vertical, 12)
                         Toggle("Advanced", isOn: $advanced).lagomFont(.base).frame(minHeight: 44)
                         if advanced {
@@ -102,6 +110,16 @@ struct AddAccountView: View {
         form = false; passwordStep = false; advanced = false; error = nil
         email = ""; password = ""; imapUser = ""; smtpUser = ""
         imapHost = ""; smtpHost = ""; imapPort = "993"; smtpPort = "587"; imapTLS = true; smtpTLS = false
+    }
+
+    private func signInWithMicrosoft() async {
+        error = nil
+        defer { connecting = false }
+        do {
+            guard try await model.signIn(.microsoft, browser: browser, exchanging: { connecting = true }) else { return }
+            dismiss()
+            await model.sync()
+        } catch { self.error = error.localizedDescription }
     }
 
     private func connect() async {

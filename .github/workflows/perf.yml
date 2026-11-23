@@ -27,10 +27,15 @@ jobs:
   budgets:
     name: Budgets (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -48,7 +53,10 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
             libx11-xcb-dev libxcb1-dev libfontconfig-dev libssl-dev libasound2-dev \
             libglib2.0-dev libdbus-1-dev libzstd-dev libclang-dev cmake pkg-config
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
       - name: Test the budget runner
-        run: python3 scripts/test-perf.py
+        run: python scripts/test-perf.py
       - name: Measure budgets (release)
-        run: python3 scripts/perf.py
+        run: python scripts/perf.py

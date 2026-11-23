@@ -57,8 +57,8 @@ Never use, boot, reset, erase or install on somebody else's simulator.
 
 Add an account with email and password, or expand Advanced for separate IMAP
 and SMTP hosts, ports, usernames and TLS/STARTTLS. Gmail/iCloud need an
-app-specific password. Microsoft password authentication is commonly disabled;
-Google/Microsoft OAuth needs mobile client IDs and is outside this slice.
+app-specific password for password login. Outlook, Hotmail, Live and MSN use
+Microsoft browser sign-in when the build has a Microsoft client ID.
 
 The app has the desktop's four pages: Today, Mail, Calendar and Todo. Compact
 layouts use a tab bar; regular width and height (iPad, unfolded phones) use the
