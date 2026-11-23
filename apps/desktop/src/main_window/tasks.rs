@@ -649,7 +649,7 @@ impl MainWindow {
             }
             groups = groups.child(group);
         }
-        // New list ends the lists, as New task ends each list: no plus in the corner (Alex 2026-11-20).
+        // New list ends the lists, as New task ends each list: no plus in the corner.
         groups = groups.child(match self.task_input(Edit::AddList) {
             Some(input) => div().flex_shrink_0().px(px(8.)).child(input).into_any_element(),
             None => pressable(div().id("new-list"), &t, false).debug_selector(|| "new-list".into())

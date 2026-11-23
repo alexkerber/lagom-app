@@ -71,13 +71,13 @@ body = 14
 title = 15
 subject = 20
 display = 26
-# Today's date and counts: large, with some weight (Alex 2026-11-17: "stora fonter och lite kraft").
+# Today's date and counts: large, with some weight.
 hero = 48
 
 # The bundled faces (OFL, apps/desktop/assets/fonts): text for body and UI text, display for headings,
 # Today's sentence and page titles, label for small capitals and counts. Body text is the system font
 # (San Francisco) on iOS, iPadOS and macOS and Inter on Android, Windows and Linux; Hauora is a display
-# face and reads cramped as body text (Alex 2026-11-22: "svårläst ... känns sönder kernad").
+# face and reads cramped as body text.
 # Families as the font files name them; the site's web fonts are "Hauora Sans".
 [type.faces]
 # Off Apple platforms only; Apple platforms use the system font.

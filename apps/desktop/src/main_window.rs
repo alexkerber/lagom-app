@@ -1584,7 +1584,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .text_size(px(size::BASE))
         .font_weight(FontWeight::MEDIUM)
         .gap(px(6.))
-        .children(action_icon(label).map(|path| action_glyph(t, path, fill)))
+        .children(action_icon(label).filter(|_| shows_icon(label)).map(|path| action_glyph(t, path, fill)))
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
             underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
         }))))
@@ -1598,6 +1598,12 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.text_color(t.ink), t, false),
     }
+}
+
+/// Text buttons are text, as macOS push buttons are. The message
+/// actions keep theirs: they are the reading pane's toolbar, and its More menu shares the drawings.
+pub(crate) fn shows_icon(label: &str) -> bool {
+    matches!(label, "Reply" | "Reply all" | "Forward" | "Later" | "Done" | "Move" | "Move to Inbox" | "Mark unread" | "Mark read" | "Delete")
 }
 
 fn action_glyph(t: &Theme, path: &'static str, fill: Option<Rgba>) -> gpui::Svg {
@@ -1798,9 +1804,9 @@ impl MainWindow {
                     .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path))| {
                         let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
-                        // Alex 2026-11-14: no ⌘ keys on the rows; the tooltip still names them.
+                        // No ⌘ keys on the rows; the tooltip still names them.
                         sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
-                            // Alex 2026-11-15: a quiet number, as on every other row; no filled pill.
+                            // A quiet number, as on every other row; no filled pill.
                             .when(ix == 1 && unread > 0, |d| d.child(roll(
                                 mono(unread.to_string(), t.ink2).debug_selector(|| "mail-unread-badge".into()), format!("mail-{unread}"))))
                             .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "To-do · ⌘4"][ix].into())).into())
@@ -1872,7 +1878,7 @@ impl MainWindow {
         let row = |id: ElementId, active: bool| {
             polish::mailbox_style(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
-        // The 28 px button's glyph ends where the row counts and chevrons end (Alex 2026-11-15).
+        // The 28 px button's glyph ends where the row counts and chevrons end.
         let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder").mr(px(-6.))
             .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
         #[cfg(test)]
@@ -1908,7 +1914,7 @@ impl MainWindow {
             list = list.child(
                 row(("folder", f).into(), active)
                     .debug_selector(move || format!("folder-{f}"))
-                    // Alex 2026-11-15: less indent. Top-level icons line up with Inbox; each level adds one icon width.
+                    // Top-level icons line up with Inbox; each level adds one icon width.
                     .pl(px(10. + 16. * depth as f32))
                     .text_color(color)
                     .on_click(cx.listener(move |this, _, _, cx| this.open_box(Some(f), cx)))
@@ -1922,7 +1928,7 @@ impl MainWindow {
                     // A zero count is calm: no number at all.
                     .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}"))))
                     // Trailing, as on Sent and Done: 6 px right padding puts the centre on a one-digit count's
-                    // (Alex 2026-11-15). A negative margin here collapsed the label to a few letters.
+                    //. A negative margin here collapsed the label to a few letters.
                     .when(chevron.is_some(), |d| d.pr(px(6.)))
                     .children(chevron.map(|c| div().flex_shrink_0().child(c))),
             );

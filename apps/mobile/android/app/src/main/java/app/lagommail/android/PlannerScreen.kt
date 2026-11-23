@@ -148,7 +148,7 @@ internal val AppSection.icon: Int get() = when (this) {
     Text(text.uppercase(), modifier.semantics { heading(); contentDescription = text }, color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontFamily = LabelFace, fontWeight = FontWeight.Medium, fontSize = 13.sp)
 
-/** The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page. */
+/** The desktop's Today sentence in two tones: the counts are ink and open their page. */
 @Composable private fun TodaySentence(planner: PlannerModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
     val ink = MaterialTheme.colorScheme.onSurface
     val greeting = when (LocalTime.now().hour) { in 0..11 -> "Good morning."; in 12..17 -> "Good afternoon."; else -> "Good evening." }
@@ -359,8 +359,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 /** The inline field's target when it adds a list rather than a task. */
 private const val NEW_LIST = Long.MIN_VALUE
 
-/** Local task lists, as iOS `TodoView` and the desktop's Todo page. Adding happens where the eye is (Alex 2026-11-20,
- *  "plus uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips above
+/** Local task lists, as iOS `TodoView` and the desktop's Todo page. Adding happens where the eye is, not in a corner:
+ *  "New task" ends each list and turns into a field in place, with due chips above
  *  the keyboard. Enter adds and keeps the field open for the next task; Close or Back keeps what was typed. */
 @Composable internal fun TodoScreen(planner: PlannerModel, model: MailModel) {
     // The list the field is open in, NEW_LIST, or null.
@@ -744,7 +744,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
         LagomIconButton("Previous week", R.drawable.ic_chevron_left) { planner.perform { planner.showWeek(-1) } }
         HouseButton("Today", onClick = onToday)
         LagomIconButton("Next week", R.drawable.ic_chevron_right) { planner.perform { planner.showWeek(1) } }
-        // Round and filled, Material's own icon button, as the iOS bar's glass plus (Alex 2026-11-23).
+        // Round and filled, Material's own icon button, as the iOS bar's glass plus.
         newEvent?.let { FilledIconButton(onClick = it, Modifier.semantics { contentDescription = "New event" }) {
             LagomIcon(R.drawable.ic_plus, tint = lagom.accentInk)
         } }

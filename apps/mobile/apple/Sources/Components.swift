@@ -45,9 +45,13 @@ struct ButtonLabel: View {
     var primary = false
     var iconOnly = false
 
+    /// Text buttons are text. The message actions keep their
+    /// icons: they are the reading toolbar, as on the Mac.
+    static let iconActions: Set = ["Reply", "Reply all", "Forward", "Later", "Done", "Move", "Move to Inbox", "Mark unread", "Mark read", "Delete", "More"]
+
     var body: some View {
         HStack(spacing: 6) {
-            Icon(icon).foregroundStyle(primary ? Theme.accentFillInk : Theme.secondary)
+            if iconOnly || Self.iconActions.contains(title) { Icon(icon).foregroundStyle(primary ? Theme.accentFillInk : Theme.secondary) }
             if !iconOnly { Text(title).lineLimit(1) }
         }
         .accessibilityElement(children: .ignore)
@@ -80,7 +84,7 @@ struct IconButton: View {
     }
 }
 
-/// Back as the system's navigation bar draws it (Alex 2026-11-23: "native också runda"): a round glass button with
+/// Back as the system's navigation bar draws it: a round glass button with
 /// the system chevron, which also turns round in right-to-left languages.
 struct BackButton: View {
     var label = "Back"
@@ -98,8 +102,7 @@ struct BackButton: View {
     }
 }
 
-/// An action in a page's title bar: a round glass button, as Back (Alex 2026-11-23: one app bar on every page,
-/// in Liquid Glass). The main action is tinted with the accent.
+/// An action in a page's title bar: a round glass button, as Back. The main action is tinted with the accent.
 struct BarButton: View {
     let title: String
     let icon: String
@@ -114,7 +117,7 @@ struct BarButton: View {
     }
 }
 
-/// The unread count on Mail in the sidebar: a quiet number, as on desktop (Alex 2026-11-15). Numbers roll, they do not jump.
+/// The unread count on Mail in the sidebar: a quiet number, as on desktop. Numbers roll, they do not jump.
 struct Badge: View {
     let count: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -187,7 +190,7 @@ struct GroupHeader: View {
     }
 }
 
-/// Every page's title (Alex 2026-11-23, "titel vänster, ingen logga"): Hauora at the subject size, the one size
+/// Every page's title: Hauora at the subject size, the one size
 /// Today, Mail, Calendar, To-do and Settings share.
 struct PageTitleText: View {
     let text: String
@@ -307,7 +310,7 @@ struct SheetConfirm {
     let action: () -> Void
 }
 
-/// A sheet as Apple's Mail and Calendar draw one (Alex 2026-11-23: "pure native"): the system bar with
+/// A sheet as Apple's Mail and Calendar draw one: the system bar with
 /// Cancel at the leading edge and the primary action at the trailing edge, in Liquid Glass on iOS 26; the
 /// content; then a footer for anything else. The Duo keeps Cancel in its rail and the action in the footer.
 struct SheetScaffold<Content: View, Footer: View>: View {
@@ -562,10 +565,10 @@ extension EnvironmentValues {
 }
 private struct PageMarginKey: EnvironmentKey { static let defaultValue: CGFloat = 16 }
 
-/// The page edges every page shares (Alex 2026-11-20: "Apple best practice"), so titles and the content under them
+/// The page edges every page shares, so titles and the content under them
 /// start on one line. Sides: the system's layout margin. Top: 8 pt under the safe area; on the Duo, whose status bar
 /// sits in the right column and leaves no top inset, the same layout margin as the sides (HIG: content starts at the
-/// safe area plus the layout margin). A first row level with the rail's clock sat too low (Alex 2026-11-20).
+/// safe area plus the layout margin). A first row level with the rail's clock sat too low.
 struct PageEdges: ViewModifier {
     var top = true
     var sides = true
@@ -613,7 +616,7 @@ private struct SystemMargin: UIViewRepresentable {
     }
 }
 
-/// The Duo's right column (Alex 2026-11-17), the same on every screen: close, back and secondary actions at
+/// The Duo's right column, the same on every screen: close, back and secondary actions at
 /// the top under the status bar; the main action, and Delete, at the bottom. Elsewhere it draws nothing.
 private struct RailColumn<Top: View, Bottom: View>: ViewModifier {
     @Environment(\.railInset) private var inset

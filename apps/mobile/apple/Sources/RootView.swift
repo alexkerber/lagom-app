@@ -10,7 +10,7 @@ struct RootView: View {
     @Environment(\.verticalSizeClass) private var height
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.layoutDirection) private var layoutDirection
-    /// The iPad sidebar hides for more room (Alex 2026-11-22): its button at the top left on every page, or a swipe.
+    /// The iPad sidebar hides for more room: its button at the top left on every page, or a swipe.
     @AppStorage("lagom.sidebarShown") private var sidebarShown = true
     @State private var addAccount = false
     @State private var removing: MailAccount?
@@ -35,7 +35,7 @@ struct RootView: View {
     var body: some View {
         Group {
             // The sidebar is for iPad only. An unfolded iPhone Duo is regular both ways too, but keeps the
-            // system bar, which iOS puts on its right edge (Alex 2026-11-17).
+            // system bar, which iOS puts on its right edge.
             if width == .regular && height == .regular && UIDevice.current.userInterfaceIdiom == .pad {
                 HStack(spacing: 0) {
                     // Hidden, the sidebar folds to a strip of its button and the pages' icons; a swipe either way on it
@@ -72,7 +72,7 @@ struct RootView: View {
             } else {
                 // The system tab bar: native placement, glass and VoiceOver; lagom's icons and a quiet count.
                 TabView(selection: $section) {
-                    // Settings opens from the mailbox menu and Today's title on a phone (Alex 2026-11-23: "hur kommer jag till settings").
+                    // Settings opens from the mailbox menu and Today's title on a phone.
                     ForEach(AppSection.allCases.filter { $0 != .settings }) { page in
                         Tab(value: page) {
                             self.page(page)
@@ -192,7 +192,7 @@ struct RootView: View {
     }
 }
 
-/// The desktop sidebar without the brand (Alex 2026-11-17): the pages, Mail's mailboxes with per-account Inbox,
+/// The desktop sidebar without the brand: the pages, Mail's mailboxes with per-account Inbox,
 /// then Accounts; Settings at the foot.
 struct SidebarView: View {
     @Bindable var model: MailModel
@@ -203,7 +203,7 @@ struct SidebarView: View {
     @State private var newFolder: NewFolderTarget?
 
     var body: some View {
-        // Search is a button in Mail's list header, as on the Mac and the iPhone (Alex 2026-11-20).
+        // Search is a button in Mail's list header, as on the Mac and the iPhone.
         VStack(alignment: .leading, spacing: 20) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {

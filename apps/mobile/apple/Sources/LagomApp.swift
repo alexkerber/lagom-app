@@ -243,7 +243,7 @@ struct MailView: View {
             // A message opened from a notification can be outside the loaded page; its own row stands in.
             let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) } ?? model.message?.row
             VStack(spacing: 4) {
-                // Back first, under the status bar, though a swipe goes back too (Alex 2026-11-17).
+                // Back first, under the status bar, though a swipe goes back too.
                 railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
                 RailGroup {
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
@@ -260,7 +260,7 @@ struct MailView: View {
             }
             .disabled(model.working || model.preparingCompose)
         } else {
-            // The filter stays in the list header beside the mailbox: it sorts the list, it is not an action (Alex 2026-11-17).
+            // The filter stays in the list header beside the mailbox: it sorts the list, it is not an action.
             railButton("New message", icon: "compose") {
                 let account = model.accountID ?? model.accounts.first?.id ?? ""
                 Task { await model.newMessage(account: account) }
@@ -276,7 +276,7 @@ struct MailView: View {
         }
     }
 
-    /// The list header, the app bar every page shares (Alex 2026-11-23): the mailbox as the title at the left,
+    /// The list header, the app bar every page shares: the mailbox as the title at the left,
     /// Search and New message as glass buttons at the right, then the filter.
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -314,7 +314,7 @@ struct MailView: View {
         } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
     }
 
-    /// Search, a button that opens the field as on the Mac (Alex 2026-11-20), and New message without a rail.
+    /// Search, a button that opens the field as on the Mac, and New message without a rail.
     /// iOS 26's minimized `.searchable` draws nothing here: the bar it lives in is hidden for lagom's own header.
     @ViewBuilder private var headerButtons: some View {
         HStack(spacing: 8) {
@@ -353,7 +353,7 @@ struct MailView: View {
                 ForEach(model.accounts, id: \.id) { Text($0.email).tag(Optional($0.id)) }
             }
             // The menu is a phone's sidebar, so Settings closes it as on the Mac; accounts and their names,
-            // signatures and removal live there (Alex 2026-11-20).
+            // signatures and removal live there.
             if !sidebar {
                 Section { Button { settingsOpen = true } label: { Label { Text("Settings") } icon: { Image("settings") } } }
             }

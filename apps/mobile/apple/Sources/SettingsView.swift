@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// The Mac's Settings page (Alex 2026-11-20: one Settings page on every platform): Accounts, a row per account
+/// The Mac's Settings page: Accounts, a row per account
 /// that opens its page (Your name, Signature, Remove account), then General and About. A page in the iPad
 /// sidebar; on a phone a sheet from the mailbox menu's last item. Mobile has no keyboard shortcuts.
 struct SettingsView: View {
@@ -61,8 +61,8 @@ struct SettingsView: View {
                     open = account.id
                 }
             }
-            if !model.accounts.isEmpty { hairline(inset: 64) }
-            row(title: "Add account", mark: Icon("account-add").foregroundStyle(Theme.secondary), chevron: false) { addAccount = true }
+            if !model.accounts.isEmpty { hairline(inset: 16) }
+            row(title: "Add account", chevron: false, tint: Theme.accent) { addAccount = true }
                 .disabled(model.core == nil)
         }
         group("General") {
@@ -116,7 +116,7 @@ struct SettingsView: View {
             row(title: "Signature", detail: "Added to new mail, replies and forwards.") { signing = account }
         }
         group(nil, note: nil) {
-            row(title: "Remove account", mark: Icon("remove-account").foregroundStyle(Theme.danger), chevron: false, tint: Theme.danger) { removing = account }
+            row(title: "Remove account", chevron: false, tint: Theme.danger) { removing = account }
                 .modifier(RemoveAccountDialog(model: model, removing: $removing))
         } footer: {
             Text("Removes the account and its saved mail from this \(UIDevice.current.model). Your mail stays with your provider.")

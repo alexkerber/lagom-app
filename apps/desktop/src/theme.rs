@@ -229,7 +229,7 @@ pub mod font {
     pub const MONO: &str = super::face::LABEL; // key caps and Today labels
 
     /// Body and UI text: San Francisco (GPUI's ".SystemUIFont") on macOS, bundled Inter on Windows and
-    /// Linux. Hauora stays for headings; as body text it reads cramped (Alex 2026-11-22: "svårläst").
+    /// Linux. Hauora stays for headings; as body text it reads cramped.
     /// `LAGOM_UI_FONT=system|hauora` picks that face instead, for comparison.
     pub fn ui() -> &'static str {
         static UI: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
@@ -241,7 +241,7 @@ pub mod font {
         })
     }
 
-    /// Dates, counts and the Today sentence: Hauora Sans, the site's face (Alex 2026-11-17).
+    /// Dates, counts and the Today sentence: Hauora Sans, the site's face.
     pub const DISPLAY: &str = super::face::DISPLAY;
 }
 

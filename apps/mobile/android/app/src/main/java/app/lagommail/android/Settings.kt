@@ -33,7 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.lagommail.core.MailAccount
 
-/** The Mac's Settings page (Alex 2026-11-20: one Settings page on every platform): Accounts, a row per account that
+/** The Mac's Settings page: Accounts, a row per account that
  *  opens its page (Your name, Signature, Remove account), then General and About. From the mailbox menu's last item;
  *  the same page as iOS, without keyboard shortcuts. */
 @Composable internal fun SettingsScreen(model: MailModel, close: () -> Unit) {
@@ -52,7 +52,7 @@ import app.lagommail.core.MailAccount
     // A Surface, not a Column: it takes every touch, so nothing reaches the list underneath.
     Surface(Modifier.fillMaxSize(), color = lagom.bg) { Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding(), start = if (index >= 0) 4.dp else 16.dp) {
-            // Back as the Mail page's, an icon alone (Alex 2026-11-23: the same app bar everywhere).
+            // Back as the Mail page's, an icon alone.
             if (index >= 0) {
                 LagomIconButton("Back to Settings", R.drawable.ic_chevron_left) { open = null }
                 Spacer(Modifier.weight(1f))

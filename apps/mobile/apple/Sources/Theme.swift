@@ -109,7 +109,7 @@ enum TextSize {
 }
 
 /// Body text: the system font (San Francisco) at a lagom size, scaled with Dynamic Type from `style`.
-/// Hauora stays for headings only (Alex 2026-11-22). The system font follows Bold Text itself.
+/// Hauora stays for headings only. The system font follows Bold Text itself.
 struct LagomFont: ViewModifier {
     @ScaledMetric private var points: CGFloat
     let weight: Font.Weight

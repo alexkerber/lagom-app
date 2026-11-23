@@ -342,7 +342,7 @@ class MainActivity : ComponentActivity() {
             // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop and iPad.
             Box(Modifier.weight(1f).fillMaxHeight().background(lagom.bg)) {
                 when (section) {
-                    // Today's title opens Settings too (Alex 2026-11-23: "hur kommer jag till settings"). Settings covers
+                    // Today's title opens Settings too. Settings covers
                     // Today instead of replacing it, so Back finds Today where it was.
                     AppSection.TODAY -> Box(Modifier.fillMaxSize()) {
                         Box(if (todaySettings) Modifier.clearAndSetSemantics {} else Modifier) {

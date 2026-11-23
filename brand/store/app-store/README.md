@@ -55,7 +55,7 @@ Apple counts data as collected when it leaves the device to the developer or a p
 
 ## Screenshots: shot list
 
-Glow style (Alex 2026-11-18): the app icon's gradient, a white Hauora caption and a 3D device from burk
+Glow style: the app icon's gradient, a white Hauora caption and a 3D device from burk
 (`~/Developer/burken/film/mockup.py`). `compose/compose.py` renders each slide at the store size.
 
 | Set         | Size (px)   | Device in the slide           |

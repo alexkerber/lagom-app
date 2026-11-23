@@ -95,7 +95,7 @@ impl MainWindow {
         cx.notify();
     }
 
-    /// The day said as a sentence in two tones (Alex 2026-11-17 chose this over large counts and a serif).
+    /// The day said as a sentence in two tones.
     /// The counts are ink and open their page; the words between them are ink2.
     fn today_sentence(&self, now: chrono::DateTime<chrono::Local>, events: usize, due: usize, cx: &mut Context<Self>) -> Div {
         use chrono::Timelike;

@@ -200,7 +200,7 @@ internal val SplashIcon = 160.dp
 }
 
 /** Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.
- *  The intro's Choose step and Add account show the same list (Alex 2026-11-22). */
+ *  The intro's Choose step and Add account show the same list. */
 @Composable internal fun ChooseMailList(model: MailModel, providers: List<Pair<SignInProvider, String>>, other: () -> Unit) {
     val context = LocalContext.current
     Column {

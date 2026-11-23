@@ -32,7 +32,7 @@ struct TodayView: View {
         .sheet(isPresented: $newTask) { NewTaskView(planner: planner, list: planner.defaultList, due: Date()).duoRail() }
     }
 
-    /// The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page.
+    /// The desktop's Today sentence in two tones: the counts are ink and open their page.
     private var sentence: some View {
         let now = Date.now
         let greeting = switch Calendar.current.component(.hour, from: now) {
@@ -170,7 +170,7 @@ struct CalendarAccessButtons: View {
         if !accounts.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(accounts, id: \.id) { account in
-                    CalendarAccessButton(planner: planner, model: model, account: account, icon: tasks ? "todo" : "calendar",
+                    CalendarAccessButton(planner: planner, model: model, account: account,
                                          title: accounts.count == 1 ? (tasks ? "Allow Google Tasks access" : "Show your Google Calendar")
                                             : "\(tasks ? "Allow Google Tasks" : "Show calendar") · \(account.email)")
                 }
@@ -184,7 +184,6 @@ private struct CalendarAccessButton: View {
     let planner: PlannerModel
     let model: MailModel
     let account: MailAccount
-    let icon: String
     let title: String
     @Environment(\.webAuthenticationSession) private var browser
     @State private var connecting = false
@@ -192,7 +191,7 @@ private struct CalendarAccessButton: View {
     var body: some View {
         Button { Task { await allow() } } label: {
             HStack(spacing: 6) {
-                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) } else { Icon(icon).foregroundStyle(Theme.accentFillInk) }
+                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) }
                 Text(connecting ? "Connecting…" : title).lineLimit(1).truncationMode(.middle)
             }
         }
@@ -380,8 +379,8 @@ struct DueChip: View {
 /// What the inline field adds: a task to a list, or a new list.
 private enum AddField: Hashable { case task(Int64), list }
 
-/// Local task lists, as on the desktop's To-do page. Adding happens where the eye is (Alex 2026-11-20, "plus
-/// uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips
+/// Local task lists, as on the desktop's To-do page. Adding happens where the eye is, not in a corner:
+/// "New task" ends each list and turns into a field in place, with due chips
 /// above the keyboard. Return adds and keeps the field open for the next task; leaving the field keeps its text.
 struct TodoView: View {
     let planner: PlannerModel
@@ -834,7 +833,7 @@ struct NewEventView: View {
     }
 }
 
-/// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo (Alex 2026-11-17).
+/// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo.
 struct CalendarView: View {
     let planner: PlannerModel
     let model: MailModel

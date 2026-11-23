@@ -151,21 +151,21 @@ struct OnboardingView: View {
         switch step {
         case .welcome, .choose: EmptyView()
         case .notifications:
-            wide("Allow", icon: "done", primary: true) { taps += 1; allow() }
-            wide("Not now", icon: "close", action: notNow)
+            wide("Allow", primary: true) { taps += 1; allow() }
+            wide("Not now", action: notNow)
         }
     }
 
     /// A house button across the column, 48 pt tall: the step's one way on.
-    private func wide(_ title: String, icon: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) { ButtonLabel(title: title, icon: icon, primary: primary).frame(maxWidth: .infinity, minHeight: 48) }
+    private func wide(_ title: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Text(title).lineLimit(1).frame(maxWidth: .infinity, minHeight: 48) }
             .buttonStyle(HouseButtonStyle(primary: primary))
     }
 
 }
 
 /// Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.
-/// The intro's Choose step and the Add account sheet show the same list (Alex 2026-11-22).
+/// The intro's Choose step and the Add account sheet show the same list.
 struct ChooseMail: View {
     let model: MailModel
     @Binding var connecting: Bool
@@ -185,7 +185,7 @@ struct ChooseMail: View {
                     // button text and its "G" on white.
                     rows {
                         ForEach(Array(providers.enumerated()), id: \.offset) { index, item in
-                            if index > 0 { hairline }
+                            if index > 0 { hairline(inset: 64) }
                             row("Continue with \(item.1)", mark: Image(item.2).resizable().frame(width: 16, height: 16)
                                 .frame(width: 32, height: 32).background(.white, in: .circle)
                                 .overlay { Circle().strokeBorder(Theme.line) }) { Task { await signIn(item.0) } }
@@ -196,13 +196,11 @@ struct ChooseMail: View {
                 MonoLabel(text: "Other mail").padding(.top, 32).padding(.bottom, 8)
                 // The address decides the servers, so every mail app opens the same form.
                 rows {
-                    row("iCloud", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
-                    hairline
-                    row("Fastmail", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
-                    hairline
-                    row("Yahoo", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
-                    hairline
-                    row("Other (IMAP)", mark: Icon("mail", size: 18).foregroundStyle(Theme.secondary)) { other() }
+                    // Names only: the same envelope four times said nothing.
+                    ForEach(Array(["iCloud", "Fastmail", "Yahoo", "Other (IMAP)"].enumerated()), id: \.offset) { index, name in
+                        if index > 0 { hairline(inset: 16) }
+                        row(name) { other() }
+                    }
                 }
             }
             .disabled(connecting)
@@ -232,14 +230,14 @@ struct ChooseMail: View {
             .clipShape(.rect(cornerRadius: Theme.Radius.control))
     }
 
-    /// Between rows, from the text's edge: 16 inset + 32 mark + 16 gap.
-    private var hairline: some View { Rectangle().fill(Theme.line).frame(height: 1).padding(.leading, 64) }
+    /// Between rows, from the text's edge: 16, or 16 + 32 mark + 16 gap.
+    private func hairline(inset: CGFloat) -> some View { Rectangle().fill(Theme.line).frame(height: 1).padding(.leading, inset) }
 
-    /// One account kind: its mark, the name and a chevron.
-    private func row(_ title: String, mark: some View, action: @escaping () -> Void) -> some View {
+    /// One account kind: a brand's mark if it has one, the name and a chevron.
+    private func row<Mark: View>(_ title: String, mark: Mark? = Optional<EmptyView>.none, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 16) {
-                mark.frame(width: 32).accessibilityHidden(true)
+                if let mark { mark.frame(width: 32).accessibilityHidden(true) }
                 Text(title).lagomFont(.body, .medium)
                 Spacer(minLength: 8)
                 Icon("chevron-right", size: 14).foregroundStyle(Theme.secondary)

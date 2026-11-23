@@ -138,7 +138,7 @@ internal val lagom: LagomColors @Composable @ReadOnlyComposable get() = LocalLag
 /** Every bar on every page is this tall, so moving between pages never shifts the title. */
 internal val BarHeight = 56.dp
 
-// Inter for body text, Hauora (DisplayFace) for headings (Alex 2026-11-22), with Android's existing line-height override.
+// Inter for body text, Hauora (DisplayFace) for headings, with Android's existing line-height override.
 private fun style(size: TextUnit, weight: FontWeight = FontWeight.Normal) =
     TextStyle(fontFamily = TextFace, fontSize = size, lineHeight = size * Leading, fontWeight = weight, letterSpacing = 0.sp)
 
@@ -238,7 +238,7 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
     drawRect(color, topLeft = Offset(0f, if (top) 0f else size.height - 1.dp.toPx()), size = Size(size.width, 1.dp.toPx()))
 }
 
-/** Every page's app bar, as on iOS (Alex 2026-11-23, "titel vänster, ingen logga"): the title at the left in one
+/** Every page's app bar, as on iOS: the title at the left in one
  *  size, the page's actions at the right. */
 @Composable internal fun PageTitle(title: String, trailing: @Composable RowScope.() -> Unit = {}) {
     TopBar(Modifier.statusBarsPadding()) {

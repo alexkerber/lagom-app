@@ -121,7 +121,7 @@ internal fun Mailbox.label(): String = when (this) {
     Box(Modifier.fillMaxSize()) {
     Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) {
     Scaffold(containerColor = lagom.bg, topBar = {
-        // The app bar every page shares, as on iOS (Alex 2026-11-23): the mailbox title and a quiet line at the left
+        // The app bar every page shares, as on iOS: the mailbox title and a quiet line at the left
         // open the mailboxes and accounts; Search and New message at the right. The filter follows in the list's row.
         TopBar(Modifier.statusBarsPadding(), start = 8.dp) {
             Box(Modifier.weight(1f)) {
@@ -175,7 +175,7 @@ internal fun Mailbox.label(): String = when (this) {
                         })
                     }
                     // The menu is a phone's sidebar, so Settings closes it as on the Mac; adding, naming, signing and
-                    // removing accounts live there (Alex 2026-11-20).
+                    // removing accounts live there.
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("Settings") }, leadingIcon = { LagomIcon(R.drawable.ic_settings) },
                         onClick = { menu = false; onSettings() })
@@ -377,7 +377,7 @@ internal fun Mailbox.label(): String = when (this) {
 /** The Search field, which the list's search button opens: an icon, the text, and Clear once there is some. */
 @Composable private fun SearchField(text: String, focus: FocusRequester, modifier: Modifier = Modifier, change: (String) -> Unit) {
     val c = lagom
-    // A subtle fill and no outline, as desktop and iOS (Alex 2026-11-15: one look on every platform).
+    // A subtle fill and no outline, as desktop and iOS.
     Row(modifier.height(40.dp).background(c.subtle, RoundedCornerShape(Radius.control))
         .padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         LagomIcon(R.drawable.ic_search, size = 16.dp)
