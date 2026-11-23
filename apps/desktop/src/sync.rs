@@ -74,6 +74,7 @@ pub enum Cmd {
     MarkSeen(i64),
     Inline(i64),
     ForwardAttachments { draft: String, id: i64 },
+    OpenMessage(i64),
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
     Send(String),
@@ -139,6 +140,7 @@ pub enum Event {
     /// A MarkSeen finished, done or not.
     Seen(i64),
     Inline { id: i64, error: Option<String> },
+    MessageFile(Result<PathBuf, String>),
     Downloaded(Result<PathBuf, String>),
     ForwardAttachments { draft: String, result: Result<Vec<lagom_core::smtp::OutgoingAttachment>, String> },
     /// `error` says why, also when the message went out but its Sent copy failed.
@@ -439,6 +441,10 @@ impl Worker {
             Cmd::ForwardAttachments { draft, id } => {
                 let result = self.forward_attachments(id).await.map_err(|e| shown(&e));
                 self.emit(Event::ForwardAttachments { draft, result });
+            }
+            Cmd::OpenMessage(id) => {
+                let result = self.cache_eml(id).await.map_err(|e| shown(&e));
+                self.emit(Event::MessageFile(result));
             }
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| shown(&e));
@@ -1075,6 +1081,15 @@ impl Worker {
             parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
         }
         Ok(parts)
+    }
+
+    async fn cache_eml(&mut self, id: i64) -> lagom_core::Result<PathBuf> {
+        let id = self.resolve(id).await?;
+        let account = self.account(&self.store.message_summary(id)?.account)?;
+        let mut session = self.take(&account).await?;
+        let result = session.cache_eml(&self.store, id).await;
+        self.give(&account.id, session, &result);
+        result
     }
 
     async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {

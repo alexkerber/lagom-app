@@ -42,6 +42,37 @@ fn message(store: &Store, account: &str, folder: i64, uid: u32) -> i64 {
 }
 
 #[tokio::test]
+async fn large_body_streams_to_eml() {
+    let mut first = String::from("Subject: Original\r\n\r\n");
+    first.push_str(&"x".repeat(1048576 - first.len()));
+    let tail = "end\r\n";
+    let mut steps = login("");
+    for start in [1048576, 0] {
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<0.1048576>)",
+            &format!("* 1 FETCH (UID 1 BODY[]<0> {{1048576}}\r\n{first})\r\n")));
+        steps.push(step("UID FETCH 1 (UID BODY.PEEK[]<1048576.1048576>)",
+            &format!("* 1 FETCH (UID 1 BODY[]<{start}> {{5}}\r\n{tail})\r\n")));
+    }
+    let (mut imap, mut store, temp, server) = fixture(steps).await;
+    let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    store.reset_uidvalidity(folder, 7).unwrap();
+    let id = message(&store, &imap.account.id, folder, 1);
+    let dir = temp.path().join("cache");
+    let path = imap.save_eml(&store, id, &dir).await.unwrap();
+    assert_eq!(path.extension().unwrap(), "eml");
+    #[cfg(target_os = "macos")]
+    {
+        let mark = std::process::Command::new("xattr").args(["-p", "com.apple.quarantine"]).arg(&path).output().unwrap();
+        assert!(mark.status.success() && mark.stdout.starts_with(b"0083;"));
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), first + tail);
+    assert!(imap.save_eml(&store, id, &dir).await.is_err());
+    assert_eq!(dir.read_dir().unwrap().count(), 1);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn review_upgrade_preserves_encoded_folders_and_local_mail() {
     let names = [("R&--D", "R&-D"), ("R&-D", "R&D"), ("&U,BTFw-/&ZeVnLIqe-", "台北/日本語")];
     let mut steps = login("");

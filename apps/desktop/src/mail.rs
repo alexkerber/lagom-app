@@ -42,6 +42,7 @@ pub struct Mail {
     pub inline: std::sync::Arc<Vec<lagom_core::inline::InlinePart>>,
     pub inline_referenced: bool,
     pub inline_pending: bool,
+    pub oversized: bool,
     pub inline_retry_after: Option<std::time::Instant>,
     pub unread: bool,
     /// Local store row id. `None` in demo mode.
@@ -80,6 +81,7 @@ impl Mail {
             inline: Default::default(),
             inline_referenced: false,
             inline_pending: false,
+            oversized: false,
             inline_retry_after: None,
             unread: !m.seen,
             store: Some(m.id),

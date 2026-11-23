@@ -572,6 +572,66 @@ impl ImapSync {
         store.set_unsubscribe(id, fetch.and_then(Fetch::header).and_then(crate::unsubscribe::from_headers).as_ref())?;
         Ok(id)
     }
+    /// Save the original message in the desktop cache without buffering the full literal.
+    pub async fn cache_eml(&mut self, store: &Store, id: i64) -> Result<std::path::PathBuf> {
+        let dir = dirs::cache_dir().ok_or(Error::Invalid("cache directory unavailable"))?.join("lagom");
+        self.save_eml(store, id, &dir).await
+    }
+
+    async fn save_eml(&mut self, store: &Store, id: i64, dir: &std::path::Path) -> Result<std::path::PathBuf> {
+        use async_imap::imap_proto::{AttributeValue, Response, Status};
+        use std::io::Write;
+
+        let message = store.message(id)?.summary;
+        self.select_unchanged(store, &message, "mailbox changed; resync before download").await?;
+        std::fs::create_dir_all(dir)?;
+        let mut file = tempfile::Builder::new().prefix("message-").suffix(".eml").tempfile_in(dir)?;
+        let mut offset = 0u32;
+        const CHUNK: u32 = 1024 * 1024;
+        loop {
+            let query = format!("UID FETCH {} (UID BODY.PEEK[]<{offset}.{CHUNK}>)", message.uid);
+            self.session.get_mut().remaining = Some(CHUNK as usize + 65536);
+            let tag = net(self.session.run_command(query)).await?;
+            let mut written = None;
+            loop {
+                let response = net(self.session.read_response()).await?.ok_or(Error::Network(DROPPED))?;
+                match response.parsed() {
+                    Response::Fetch(_, attrs) if attrs.contains(&AttributeValue::Uid(message.uid)) => {
+                        for attr in attrs {
+                            if let AttributeValue::BodySection { section: None, index: Some(start), data: Some(data) } = attr {
+                                if written.is_some() || *start != offset || data.len() > CHUNK as usize {
+                                    return Err(Error::Network("incomplete message download"));
+                                }
+                                let end = offset.checked_add(data.len() as u32).ok_or(Error::Network("message size overflow"))?;
+                                if message.size != 0 && end > message.size {
+                                    return Err(Error::Network("message size changed"));
+                                }
+                                file.write_all(data)?;
+                                written = Some(end);
+                            }
+                        }
+                    }
+                    Response::Done { tag: done, status, .. } if *done == tag => {
+                        if *status != Status::Ok { return Err(Error::Network("message download failed")); }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let end = written.ok_or(Error::Network("message body missing"))?;
+            let complete = end - offset < CHUNK;
+            offset = end;
+            if complete { break; }
+        }
+        self.session.get_mut().remaining = None;
+        if offset == 0 || (message.size != 0 && offset != message.size) {
+            return Err(Error::Network("incomplete message download"));
+        }
+        file.as_file().sync_all()?;
+        attachment::mark_downloaded(file.path())?;
+        Ok(file.keep().map_err(|e| e.error)?.1)
+    }
+
     pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
         let message = store.message(id)?.summary;
         let part = store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
