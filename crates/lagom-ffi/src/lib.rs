@@ -563,6 +563,8 @@ impl LagomCore {
             let mut first_error = None;
             let accounts = stores.folder_lock().accounts()?;
             for a in accounts {
+                // Re-read: a Calendar grant may have replaced this account's credential since the list was read.
+                let Ok(a) = account(&stores.folder_lock(), &a.id) else { continue };
                 if let Err(error) = sync_with_google(stores, &a) {
                     first_error.get_or_insert(lagom_core::Error::Folder { folder: a.email, source: Box::new(error) });
                 }
@@ -585,6 +587,8 @@ impl LagomCore {
                 let s = &mut *lock;
                 // After the lock: a cancel may arrive while a move holds it.
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                // Re-read: a Calendar grant may have replaced this account's credential since the list was read.
+                let Ok(a) = account(s, &a.id) else { continue };
                 // No Inbox yet means no first sync: new_mail would stay silent anyway.
                 let Some(before) = s.folders(&a.id, now())?.into_iter().find(|f| f.role == FolderRole::Inbox) else { continue };
                 let synced = network(async {

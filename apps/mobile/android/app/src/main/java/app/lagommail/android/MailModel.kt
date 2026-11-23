@@ -234,6 +234,10 @@ internal class MailModel(
                 return@perform
             }
             planner.refreshGrant(core, result.account.id)
+        } catch (e: Exception) {
+            // The redirect held back the foreground sync; a failed sign-in must not leave mail unsynced.
+            perform { sync() }
+            throw e
         } finally {
             redirects--
             if (redirects == 0) { form?.connecting = false; signingIn = false }

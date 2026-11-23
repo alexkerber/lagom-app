@@ -198,14 +198,14 @@ private struct CalendarAccessButton: View {
     private func allow() async {
         guard let core = model.core, !model.grantingCalendar else { return }
         model.grantingCalendar = true
-        defer { connecting = false; model.grantingCalendar = false }
+        // Mail syncs after the planner, also when the grant was cancelled or failed: the foreground sync waited for it.
+        defer { connecting = false; model.grantingCalendar = false; Task { await model.sync() } }
         do {
             let finished = try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true })
             guard finished else { return }
             do { try await core.syncGoogle(accountId: account.id) }
             catch { planner.error = error.localizedDescription }
             await planner.reload()
-            Task { await model.sync() }
         } catch { planner.error = error.localizedDescription }
     }
 }
