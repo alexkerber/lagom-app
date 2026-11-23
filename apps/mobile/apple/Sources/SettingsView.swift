@@ -93,7 +93,7 @@ struct SettingsView: View {
     /// One account, as on the Mac: Your name and Signature, then Remove account.
     @ViewBuilder private func accountPage(_ account: MailAccount, color: Color) -> some View {
         HStack {
-            BackButton { open = nil }
+            BackButton(label: "Back to Settings") { open = nil }
             Spacer()
             closeButton
         }

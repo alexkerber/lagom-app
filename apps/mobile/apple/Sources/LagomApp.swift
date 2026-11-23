@@ -281,10 +281,13 @@ struct MailView: View {
     /// Search and New message as glass buttons at the right, then the filter.
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                mailboxMenu
-                Spacer(minLength: 8)
-                if !searchOpen { headerButtons }
+            // A long mailbox name or large text puts the buttons on their own row, so the title never ends in "…".
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 8) { mailboxMenu.fixedSize(); Spacer(minLength: 8); if !searchOpen { headerButtons } }
+                VStack(alignment: .leading, spacing: 4) {
+                    mailboxMenu
+                    if !searchOpen { HStack { Spacer(minLength: 0); headerButtons } }
+                }
             }
             if searchOpen {
                 HStack(spacing: 8) {
@@ -376,6 +379,7 @@ struct MailView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([name, status.text, "mailboxes and accounts"].joined(separator: ", "))
         }
+        .accessibilityAddTraits(.isHeader)
         .task(id: model.syncing) {
             guard model.syncing else { syncShown = false; return }
             guard (try? await Task.sleep(for: Motion.calm)) != nil else { return }

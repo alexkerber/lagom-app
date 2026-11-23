@@ -83,17 +83,18 @@ struct IconButton: View {
 /// Back as the system's navigation bar draws it (Alex 2026-11-23: "native också runda"): a round glass button with
 /// the system chevron, which also turns round in right-to-left languages.
 struct BackButton: View {
+    var label = "Back"
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.backward").font(.system(size: 17, weight: .semibold))
-                .frame(width: 44, height: 44).contentShape(Rectangle())
+                .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(Theme.ink)
         .modifier(RailGlass())
-        .accessibilityLabel("Back")
+        .accessibilityLabel(label)
     }
 }
 
@@ -106,7 +107,7 @@ struct BarButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) { Icon(icon, label: title).frame(width: 44, height: 44).contentShape(Rectangle()) }
+        Button(action: action) { Icon(icon, label: title).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }
             .buttonStyle(.plain)
             .foregroundStyle(primary ? Theme.accentInk : Theme.ink)
             .modifier(RailGlass(primary: primary))
