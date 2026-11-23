@@ -79,9 +79,8 @@ impl Compose {
     }
 
     fn address_enter(&mut self, field: usize, tab: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Tab must not slip in an address the user never wrote to; Enter on a shown row is a choice.
-        let pick = self.addresses.matches.get(self.addresses.selected).is_some_and(|c| !tab || c.written);
-        if self.addresses.active == Some(field) && pick {
+        let pick = crate::mail::selected_contact(&self.addresses.matches, self.addresses.selected, tab);
+        if self.addresses.active == Some(field) && pick.is_some() {
             self.accept_address(field, self.addresses.selected, cx);
         } else {
             self.commit_address(field, cx);

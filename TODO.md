@@ -282,7 +282,7 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] Measure on an iPhone: data protection class and backup exclusion of the mail store, the `WhenUnlockedThisDeviceOnly` keychain write, link previews off.
 - [x] iOS (`fix/ios-keychain-migrate`): Reading an older keychain item updates its accessibility to `WhenUnlockedThisDeviceOnly`. A failed update still returns the secret. Four Rust account tests passed. The app and tests built for the generic iOS Simulator. Migration on an iPhone remains unverified.
 - [ ] Sync: a server that lists a UID in SEARCH but returns no FETCH row still holds the checkpoint.
-- [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
+- [x] “Meet with” now shares compose’s Tab rule on `fix/meet-with-tab`. Tab only accepts suggestions for contacts you have written to. A headless test verifies that Enter can still select a new contact. Desktop tests passed. Manual UI behavior was not verified.
 - [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
 - [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
