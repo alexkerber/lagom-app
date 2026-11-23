@@ -313,7 +313,7 @@ impl AddAccount {
             Discovery::OAuth(oauth::Provider::Google) if !(self.available)(oauth::Provider::Google) => self.form(Provider::Gmail, window, cx),
             Discovery::OAuth(p) => self.browser(p, false, window, cx),
             Discovery::Password { preset, help_url } => {
-                let p = Provider::ALL.into_iter().find(|p| Servers::for_provider(*p).imap_host == preset.imap.host).unwrap_or(Provider::Other);
+                let p = Provider::ALL.into_iter().find(|p| Servers::for_provider(*p).imap_host.eq_ignore_ascii_case(&preset.imap.host)).unwrap_or(Provider::Other);
                 if p == Provider::Outlook { return self.browser(oauth::Provider::Microsoft, false, window, cx); }
                 self.form(p, window, cx);
                 self.advanced = false;
@@ -408,8 +408,11 @@ impl AddAccount {
         }
     }
 
-    pub fn connect(&mut self, cx: &mut Context<Self>) {
+    pub fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.screen != Screen::Form || self.busy() { return; }
+        if lagom_core::discovery::is_outlook_address(&self.typed_email(cx)) {
+            return self.browser(oauth::Provider::Microsoft, false, window, cx);
+        }
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
         match build(self.email.read(cx).text(), &password, &self.servers(cx)) {
             Ok(account) if self.existing.contains(&account.email.to_lowercase()) => self.state = State::Failed(format!("{} is already in lagom.", account.email)),
@@ -455,18 +458,14 @@ impl AddAccount {
     fn on_field(&mut self, field: &Entity<TextInput>, e: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
         match e {
             TextInputEvent::Enter if *field == self.email && self.screen == Screen::Address => self.submit_email(cx),
-            TextInputEvent::Enter if *field == self.password && !self.advanced => self.connect(cx),
-            TextInputEvent::Enter if *field == self.smtp_port => self.connect(cx),
+            TextInputEvent::Enter if *field == self.password && !self.advanced => self.connect(window, cx),
+            TextInputEvent::Enter if *field == self.smtp_port => self.connect(window, cx),
             TextInputEvent::Enter => window.focus_next(),
             TextInputEvent::Escape => self.back(window, cx),
             // A new address drops the old answer or error; a lookup still running is ignored when it lands.
             TextInputEvent::Changed if *field == self.email && self.screen == Screen::Address && matches!(self.state, State::Failed(_) | State::Discovering) => {
                 self.state = State::Idle;
                 cx.notify();
-            }
-            TextInputEvent::Changed if *field == self.email && self.screen == Screen::Form && !self.busy()
-                && lagom_core::discovery::is_outlook_address(&self.typed_email(cx)) => {
-                self.choose(Choice::Lookup("Other (IMAP)"), window, cx);
             }
             TextInputEvent::Changed => {}
         }
@@ -519,7 +518,7 @@ impl AddAccount {
             "enter" if crate::shortcuts::submit().matches(k) || (k.modifiers == Default::default() && matches!(self.screen, Screen::Browser(_) | Screen::Welcome)) => match self.screen {
                 Screen::Address => self.submit_email(cx),
                 Screen::Browser(_) => self.sign_in(window, cx),
-                Screen::Form => self.connect(cx),
+                Screen::Form => self.connect(window, cx),
                 Screen::Welcome => self.welcome_done(window, cx),
                 Screen::Choose => return,
             },
@@ -539,6 +538,7 @@ impl AddAccount {
             Screen::Choose => if let Some(c) = self.choices().get(i).copied() { self.choose(c, window, cx) },
             Screen::Browser(oauth::Provider::Google) if i == 0 => self.form(Provider::Gmail, window, cx),
             Screen::Browser(oauth::Provider::Microsoft) if i == 0 => self.sign_in(window, cx),
+            Screen::Browser(oauth::Provider::Microsoft) if i == 1 && !self.busy() => self.form(Provider::Other, window, cx),
             _ => {}
         }
     }
@@ -685,9 +685,7 @@ impl AddAccount {
     }
 
     fn browser_view(&self, p: oauth::Provider, t: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        if !(self.available)(p) {
-            return div().text_color(t.ink2).child("Outlook sign-in is not available in this build.");
-        }
+        let available = (self.available)(p);
         let name = oauth_name(p);
         let (title, action, wait) = match p {
             oauth::Provider::Google => ("Link your Google account", "Continue in browser", "Waiting for Google…"),
@@ -701,19 +699,25 @@ impl AddAccount {
             .items_center()
             .gap(px(24.))
             .text_center()
-            .child(logo(p, 56.))
-            .child(div().flex().flex_col().items_center().gap(px(8.))
-                .child(headline(title))
-                .child(div().text_size(px(size::TITLE)).text_color(t.ink2).line_height(relative(1.4))
-                    .child(format!("lagom opens {name} in your browser. Sign in there, then come back here."))))
-            .child(button(t, if waiting { wait } else { action }, Some(t.accent))
-                .when(!waiting && p == oauth::Provider::Microsoft, |d| self.stop(d.border_1().border_color(gpui::transparent_black()), 0, t, window))
-                .id("oauth-sign-in")
-                .w_full()
-                .h(px(40.))
-                .justify_center()
-                .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))))
+            .when(!available, |d| d.child(div().text_color(t.ink2).child("Outlook sign-in is not available in this build.")))
+            .when(available, |d| d
+                .child(logo(p, 56.))
+                .child(div().flex().flex_col().items_center().gap(px(8.))
+                    .child(headline(title))
+                    .child(div().text_size(px(size::TITLE)).text_color(t.ink2).line_height(relative(1.4))
+                        .child(format!("lagom opens {name} in your browser. Sign in there, then come back here."))))
+                .child(button(t, if waiting { wait } else { action }, Some(t.accent))
+                    .when(!waiting && p == oauth::Provider::Microsoft, |d| self.stop(d.border_1().border_color(gpui::transparent_black()), 0, t, window))
+                    .id("oauth-sign-in")
+                    .w_full()
+                    .h(px(40.))
+                    .justify_center()
+                    .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx)))))
             .children(self.status(t))
+            .when(!waiting && p == oauth::Provider::Microsoft && !lagom_core::discovery::is_outlook_address(&self.typed_email(cx)), |d| {
+                let link = Self::link(t, "enter-servers", "Enter servers instead").debug_selector(|| "enter-servers".into());
+                d.child(self.stop(link, 1, t, window).on_click(cx.listener(|this, _, window, cx| this.press(1, window, cx))))
+            })
             .when(!waiting && p == oauth::Provider::Google, |d| d.child(self.stop(Self::link(t, "use-app-password", "Use an app password instead"), 0, t, window).on_click(cx.listener(move |this, _, window, cx| {
                 this.form(Provider::Gmail, window, cx);
             }))))
@@ -830,7 +834,7 @@ impl AddAccount {
                     .pt(px(8.))
                     .child(
                         button(t, if self.state == State::Connecting { "Signing in" } else { "Sign in" }, Some(t.accent))
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                     )
                     .children(self.status(t)),
             )
@@ -911,9 +915,9 @@ mod tests {
     fn continue_with_google_starts_and_esc_cancels_it(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| AddAccount { available: |_| true, ..AddAccount::new(true, vec![], window, cx) });
         let sent = events(&view, cx, |e: &SignIn| match e { SignIn::Start(p) => oauth_name(*p).into(), SignIn::Cancel => "cancel".into() });
-        view.update_in(cx, |v, window, cx| { v.sign_in(window, cx); v.connect(cx); });
+        view.update_in(cx, |v, window, cx| { v.sign_in(window, cx); v.connect(window, cx); });
         assert!(view.read_with(cx, |v, _| v.screen == Screen::Choose && v.state == State::Idle), "no sign-in or connect from Choose");
-        view.update_in(cx, |v, window, cx| { v.browser(oauth::Provider::Google, true, window, cx); v.sign_in(window, cx); v.connect(cx); });
+        view.update_in(cx, |v, window, cx| { v.browser(oauth::Provider::Google, true, window, cx); v.sign_in(window, cx); v.connect(window, cx); });
         assert!(view.update_in(cx, |v, window, _| v.focus.is_focused(window) && v.state == State::SigningIn));
         view.update_in(cx, |v, window, cx| { v.back(window, cx); v.back(window, cx); v.sign_in(window, cx); v.failed("late".into(), cx); });
         assert!(view.read_with(cx, |v, _| v.state == State::Cancelling), "a new attempt waits for the worker's cancel");
@@ -948,14 +952,8 @@ mod tests {
     fn outlook_address_only_offers_microsoft_sign_in(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| AddAccount::new(true, vec![], window, cx));
         let sent = events(&view, cx, |e: &SignIn| match e { SignIn::Start(p) => oauth_name(*p).into(), SignIn::Cancel => "cancel".into() });
-        let microsoft = Discovery::OAuth(oauth::Provider::Microsoft);
-        let (imap, smtp) = lagom_core::presets::servers("me@outlook.com").unwrap();
-        let preset = lagom_core::discovery::Preset { name: "Outlook".into(), imap, smtp };
-        for (available, email, discovery) in [
-            (false, "me@outlook.com", microsoft.clone()),
-            (true, "me@outlook.com", microsoft),
-            (true, "me@custom.example", Discovery::Password { preset, help_url: None }),
-        ] {
+        let email = "me@outlook.com";
+        for available in [false, true] {
             view.update_in(cx, |v, window, cx| {
                 v.available = if available { |_| true } else { |_| false };
                 v.choose(Choice::Lookup("Other (IMAP)"), window, cx);
@@ -963,11 +961,12 @@ mod tests {
             });
             view.update(cx, |v, cx| v.submit_email(cx));
             view.update_in(cx, |v, window, cx| {
-                v.discovered(email, discovery, window, cx);
+                v.discovered(email, Discovery::OAuth(oauth::Provider::Microsoft), window, cx);
                 assert_eq!(v.screen, Screen::Browser(oauth::Provider::Microsoft));
             });
             let action = cx.debug_bounds("Sign in with Microsoft");
             assert_eq!(action.is_some(), available);
+            assert!(cx.debug_bounds("enter-servers").is_none());
             assert!(cx.debug_bounds("Sign in").is_none());
             if let Some(bounds) = action {
                 cx.simulate_click(bounds.center(), Default::default());
@@ -976,7 +975,53 @@ mod tests {
             }
             assert_eq!(view.read_with(cx, |v, _| v.state.clone()), if available { State::SigningIn } else { State::Idle });
         }
-        assert_eq!(*sent.borrow(), ["Microsoft", "Microsoft"]);
+        assert_eq!(*sent.borrow(), ["Microsoft"]);
+    }
+
+    #[gpui::test]
+    fn outlook_hosted_custom_domains_offer_manual_servers(cx: &mut gpui::TestAppContext) {
+        let email = "anna@firma.se";
+        let (imap, smtp) = lagom_core::presets::servers("me@outlook.com").unwrap();
+        let preset = lagom_core::discovery::Preset { name: "Outlook".into(), imap, smtp };
+        for available in [true, false] {
+            for discovery in [Discovery::OAuth(oauth::Provider::Microsoft), Discovery::Password { preset: preset.clone(), help_url: None }] {
+                let (view, cx) = cx.add_window_view(|window, cx| AddAccount::new(true, vec![], window, cx));
+                view.update_in(cx, |v, window, cx| {
+                    v.available = if available { |_| true } else { |_| false };
+                    v.choose(Choice::Lookup("Other (IMAP)"), window, cx);
+                    v.email.update(cx, |f, cx| f.set_text(email, cx));
+                });
+                view.update(cx, |v, cx| v.submit_email(cx));
+                view.update_in(cx, |v, window, cx| v.discovered(email, discovery, window, cx));
+                assert_eq!(cx.debug_bounds("Sign in with Microsoft").is_some(), available);
+                let link = cx.debug_bounds("enter-servers").expect("custom domains need a manual route");
+                cx.simulate_click(link.center(), Default::default());
+                view.read_with(cx, |v, cx| {
+                    assert_eq!((v.screen, v.advanced), (Screen::Form, true));
+                    assert_eq!(v.typed_email(cx), email);
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn editing_an_outlook_prefix_stays_on_form_until_submit(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| AddAccount::new(true, vec![], window, cx));
+        let sent = events(&view, cx, |Connect(account, _)| account.email.clone());
+        view.update_in(cx, |v, window, cx| v.fill("anna@example.org", "pw", &Servers::for_provider(Provider::Fastmail), window, cx));
+        for email in ["anna@live.se", "anna@live.se.example.org", "anna@live.example.org"] {
+            view.update(cx, |v, cx| v.email.update(cx, |f, cx| f.set_text(email, cx)));
+            assert_eq!(view.read_with(cx, |v, _| v.screen), Screen::Form);
+        }
+        view.update_in(cx, |v, window, cx| v.connect(window, cx));
+        assert_eq!(*sent.borrow(), ["anna@live.example.org"]);
+        view.update(cx, |v, cx| {
+            v.failed("try again".into(), cx);
+            v.email.update(cx, |f, cx| f.set_text("anna@live.se", cx));
+        });
+        view.update_in(cx, |v, window, cx| v.connect(window, cx));
+        assert_eq!(view.read_with(cx, |v, _| v.screen), Screen::Browser(oauth::Provider::Microsoft));
+        assert_eq!(sent.borrow().len(), 1);
     }
 
     #[gpui::test]
@@ -1017,9 +1062,9 @@ mod tests {
         // Discovery's login names reach the account, but only for the address they were found for.
         let users = events(&view, cx, |Connect(a, _): &Connect| format!("{} {}", a.imap.username, a.smtp.username));
         view.update(cx, |v, cx| v.password.update(cx, |f, cx| f.set_text("pw", cx)));
-        view.update(cx, |v, cx| v.connect(cx));
+        view.update_in(cx, |v, window, cx| v.connect(window, cx));
         view.update(cx, |v, cx| { v.state = State::Idle; v.email.update(cx, |f, cx| f.set_text("b@corp.example", cx)); });
-        view.update(cx, |v, cx| v.connect(cx));
+        view.update_in(cx, |v, window, cx| v.connect(window, cx));
         assert_eq!(*users.borrow(), ["a a@corp.example", "b@corp.example b@corp.example"]);
         // Editing the address while the lookup runs frees the arrow again.
         view.update_in(cx, |v, window, cx| { v.state = State::Idle; v.back(window, cx); });
@@ -1044,7 +1089,7 @@ mod tests {
         view.update_in(cx, |v, window, cx| { v.state = State::Idle; v.press(0, window, cx); });
         assert_eq!(view.read_with(cx, |v, _| (v.screen, v.provider)), (Screen::Form, Provider::Gmail));
         // The form refuses a duplicate too, whatever its case.
-        view.update(cx, |v, cx| { v.email.update(cx, |f, cx| f.set_text("ME@example.com", cx)); v.password.update(cx, |f, cx| f.set_text("pw", cx)); v.connect(cx); });
+        view.update_in(cx, |v, window, cx| { v.email.update(cx, |f, cx| f.set_text("ME@example.com", cx)); v.password.update(cx, |f, cx| f.set_text("pw", cx)); v.connect(window, cx); });
         assert!(view.read_with(cx, |v, _| v.state == State::Failed("ME@example.com is already in lagom.".into())));
     }
 

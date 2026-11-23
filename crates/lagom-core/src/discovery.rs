@@ -147,7 +147,28 @@ pub fn is_outlook_address(email: &str) -> bool {
 }
 
 fn outlook_domain(domain: &str) -> bool {
-    matches!(domain, "outlook.com" | "msn.com") || domain.starts_with("hotmail.") || domain.starts_with("live.")
+    // Hotmail and Live aliases from https://autoconfig.thunderbird.net/v1.1/hotmail.com
+    matches!(domain,
+        "outlook.com" | "msn.com"
+        | "hotmail.be" | "hotmail.ca" | "hotmail.cl" | "hotmail.co.id"
+        | "hotmail.co.il" | "hotmail.co.in" | "hotmail.co.jp" | "hotmail.co.kr"
+        | "hotmail.co.th" | "hotmail.co.uk" | "hotmail.co.za" | "hotmail.com"
+        | "hotmail.com.ar" | "hotmail.com.au" | "hotmail.com.br" | "hotmail.com.hk"
+        | "hotmail.com.tr" | "hotmail.com.tw" | "hotmail.com.vn" | "hotmail.cz"
+        | "hotmail.de" | "hotmail.dk" | "hotmail.es" | "hotmail.fi"
+        | "hotmail.fr" | "hotmail.gr" | "hotmail.hu" | "hotmail.it"
+        | "hotmail.lt" | "hotmail.lv" | "hotmail.my" | "hotmail.nl"
+        | "hotmail.no" | "hotmail.ph" | "hotmail.rs" | "hotmail.se"
+        | "hotmail.sg" | "hotmail.sk"
+        | "live.at" | "live.be" | "live.ca" | "live.cl"
+        | "live.cn" | "live.co.jp" | "live.co.kr" | "live.co.uk"
+        | "live.co.za" | "live.com" | "live.com.ar" | "live.com.au"
+        | "live.com.mx" | "live.com.my" | "live.com.ph" | "live.com.pt"
+        | "live.com.sg" | "live.de" | "live.dk" | "live.fi"
+        | "live.fr" | "live.hk" | "live.ie" | "live.in"
+        | "live.it" | "live.jp" | "live.nl" | "live.no"
+        | "live.ru" | "live.se"
+    )
 }
 
 fn known(domain: &str, email: &str) -> Option<Discovery> {
@@ -308,6 +329,18 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn custom_domains_keep_manual_setup_even_when_microsoft_hosts_mail() {
+        for domain in ["live.example.org", "hotmail.example.org", "live.test", "hotmail.co.uk.example.org", "firma.se"] {
+            let email = format!("anna@{domain}");
+            assert!(!is_outlook_address(&email), "{domain}");
+            assert!(known(domain, &email).is_none());
+            let result = discover_with(&email, |_| async { Some(vec!["tenant.mail.protection.outlook.com".into()]) },
+                |_| async { panic!("matched MX did HTTP") }).await;
+            assert_eq!(result, Discovery::OAuth(Provider::Microsoft));
+        }
+    }
+
     #[tokio::test]
     async fn fake_mx_and_fallback() {
         for host in [
