@@ -85,7 +85,7 @@ fn save_in(dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf> {
 
 /// Gatekeeper, SmartScreen and Office Protected View check only files with the download mark.
 #[cfg(target_os = "macos")]
-fn mark_downloaded(path: &Path) -> std::io::Result<()> {
+pub(crate) fn mark_downloaded(path: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -95,13 +95,13 @@ fn mark_downloaded(path: &Path) -> std::io::Result<()> {
     if status == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 #[cfg(windows)]
-fn mark_downloaded(path: &Path) -> std::io::Result<()> {
+pub(crate) fn mark_downloaded(path: &Path) -> std::io::Result<()> {
     let mut stream = path.as_os_str().to_owned();
     stream.push(":Zone.Identifier");
     std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n")
 }
 #[cfg(not(any(target_os = "macos", windows)))]
-fn mark_downloaded(_: &Path) -> std::io::Result<()> { Ok(()) }
+pub(crate) fn mark_downloaded(_: &Path) -> std::io::Result<()> { Ok(()) }
 
 fn truncate(value: &str, max: usize) -> &str {
     let mut end = value.len().min(max);

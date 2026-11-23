@@ -2327,8 +2327,8 @@ impl MainWindow {
         let m = &self.inbox.mail[id];
         let trash = self.inbox.open_kind() == Some(Kind::Trash);
         let this = cx.entity().downgrade();
-        let on_download = move |section, _: &mut Window, cx: &mut App| {
-            this.update(cx, |this, cx| this.download_attachment(id, section, cx)).ok();
+        let on_download = move |command, _: &mut Window, cx: &mut App| {
+            this.update(cx, |this, cx| this.download(command, cx)).ok();
         };
         // HTML mail: the web view covers only the body. While an overlay hides it, a picture of the
         // page stands in; the text shows only where there is no picture (Windows, a page not yet shown).
@@ -2520,7 +2520,7 @@ fn reading_view(
     slot: impl IntoElement,
     toasts: usize,
     menu: impl IntoElement,
-    on_download: impl Fn(String, &mut Window, &mut App) + 'static,
+    on_download: impl Fn(Cmd, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     notice: Option<Div>,
 ) -> Stateful<Div> {
@@ -2548,7 +2548,7 @@ fn reading_view(
                 .child(div().min_w(px(0.)).truncate().child(stem))
                 .child(div().flex_shrink_0().child(extension)))
             .child(mono(attachment_size(part.size), t.ink2))
-            .when(m.store.is_some(), |d| d.cursor_pointer().on_click(move |_, window, cx| on_download(section.clone(), window, cx)))
+            .when_some(m.store, |d, id| d.cursor_pointer().on_click(move |_, window, cx| on_download(Cmd::Download { id, section: section.clone() }, window, cx)))
     }).collect::<Vec<_>>();
     // The text is still being read (the body then holds only `live::LOADING`).
     let loading = m.text.as_ref().is_some_and(|t| t.borrow().is_none());
@@ -2581,7 +2581,12 @@ fn reading_view(
                 .when(text && loading, |d| d
                     .child(div().text_color(t.ink2).child(m.snippet.clone()))
                     .child(calm(div().text_size(px(size::SMALL)).text_color(t.ink2).child(live::LOADING), ("loading-message", id))))
-                .when(text && !loading, |d| match &m.rich {
+                .when_some(m.store.filter(|_| m.oversized), |d, id| {
+                    let open = on_download.clone();
+                    d.child("This message is too large to display.")
+                        .child(button(t, "Open in another app", None).on_click(move |_, window, cx| open(Cmd::OpenMessage(id), window, cx)))
+                })
+                .when(text && !loading && !m.oversized, |d| match &m.rich {
                     Some(rich) => d.children(rich.view(m, t)),
                     None => d.children(m.body.iter().map(|p| div().child(p.clone()))),
                 })
@@ -3387,6 +3392,7 @@ impl Inbox {
                 fresh.rich = self.mail[id].rich.take();
                 fresh.inline = self.mail[id].inline.clone();
                 fresh.inline_referenced = self.mail[id].inline_referenced;
+                fresh.oversized = self.mail[id].oversized;
                 fresh.inline_pending = self.mail[id].inline_pending;
                 fresh.inline_retry_after = self.mail[id].inline_retry_after;
                 fresh.remote = self.mail[id].remote;

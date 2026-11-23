@@ -148,7 +148,7 @@ index needs a schema bump. Not measured: native frame times, a real account.
 
 ## CI gate
 
-`.github/workflows/perf.yml` runs `python3 scripts/perf.py` on ubuntu-latest and macos-latest
+`.github/workflows/perf.yml` runs `python scripts/perf.py` on ubuntu-latest, macos-latest, and windows-latest
 for pull requests that touch Rust code, and for every push to main. The script runs the ignored
 benchmarks in release (`lagom-core` `perf_tests`, and `reload_reads_100k` and
 `reload_ui_thread_100k` in `lagom`), builds the release binary, and writes a table to the job

@@ -164,6 +164,25 @@ pub struct ImapSync {
     /// Kept to reconnect after a message whose response left the session unusable.
     password: zeroize::Zeroizing<String>,
 }
+fn prune_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
+    let max_age = Duration::from_secs(7 * 24 * 60 * 60);
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let filename = entry.file_name();
+        let Some(key) = filename.to_str().and_then(|s| s.strip_prefix("message-"))
+            .and_then(|s| s.strip_suffix(".eml")) else { continue };
+        // Older versions published tempfile's six-character alphanumeric names.
+        let owned = (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+            || (key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric()));
+        if !owned { continue; }
+        let Ok(meta) = entry.metadata() else { continue };
+        let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
+        if meta.is_file() && age.is_some_and(|age| age > max_age) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
 impl ImapSync {
     pub async fn login(account: &Account, password: &str) -> Result<Self> {
         account.validate()?;
@@ -577,6 +596,81 @@ impl ImapSync {
         store.set_unsubscribe(id, fetch.and_then(Fetch::header).and_then(crate::unsubscribe::from_headers).as_ref())?;
         Ok(id)
     }
+    /// Save the original message in the desktop cache without buffering the full literal.
+    pub async fn cache_eml(&mut self, store: &Store, id: i64) -> Result<std::path::PathBuf> {
+        let dir = dirs::cache_dir().ok_or(Error::Invalid("cache directory unavailable"))?.join("lagom");
+        self.save_eml(store, id, &dir).await
+    }
+
+    async fn save_eml(&mut self, store: &Store, id: i64, dir: &std::path::Path) -> Result<std::path::PathBuf> {
+        use async_imap::imap_proto::{AttributeValue, Response, Status};
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+
+        let message = store.message_summary(id)?;
+        let (folder, validity) = self.select_unchanged(store, &message, "mailbox changed; resync before download").await?;
+        let mut key = Sha256::new();
+        key.update((folder.account.len() as u64).to_be_bytes());
+        key.update(folder.account.as_bytes());
+        key.update(folder.name.as_bytes());
+        key.update(validity.to_be_bytes());
+        key.update(message.uid.to_be_bytes());
+        let path = dir.join(format!("message-{:x}.eml", key.finalize()));
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return Ok(path);
+        }
+        std::fs::create_dir_all(dir)?;
+        prune_cached_emls(dir)?;
+        let mut file = tempfile::NamedTempFile::new_in(dir)?;
+        let limit = u64::from(message.size) * 2 + 16 * 1024 * 1024;
+        let mut offset = 0u32;
+        const CHUNK: u32 = 1024 * 1024;
+        loop {
+            let query = format!("UID FETCH {} (UID BODY.PEEK[]<{offset}.{CHUNK}>)", message.uid);
+            self.session.get_mut().remaining = Some(CHUNK as usize + 65536);
+            let tag = net(self.session.run_command(query)).await?;
+            let mut written = None;
+            loop {
+                let response = net(self.session.read_response()).await?.ok_or(Error::Network(DROPPED))?;
+                match response.parsed() {
+                    Response::Fetch(_, attrs) if attrs.contains(&AttributeValue::Uid(message.uid)) => {
+                        for attr in attrs {
+                            if let AttributeValue::BodySection { section: None, index: Some(start), data } = attr {
+                                let data = data.as_deref().unwrap_or_default();
+                                if written.is_some() || *start != offset || data.len() > CHUNK as usize {
+                                    return Err(Error::Network("incomplete message download"));
+                                }
+                                let end = offset.checked_add(data.len() as u32).ok_or(Error::Network("message size overflow"))?;
+                                if u64::from(end) > limit {
+                                    return Err(Error::Network("message download exceeds size limit"));
+                                }
+                                file.write_all(data)?;
+                                written = Some(end);
+                            }
+                        }
+                    }
+                    Response::Done { tag: done, status, .. } if *done == tag => {
+                        if *status != Status::Ok { return Err(Error::Network("message download failed")); }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let end = written.ok_or(Error::Network("message body missing"))?;
+            let complete = end - offset < CHUNK;
+            offset = end;
+            if complete { break; }
+        }
+        self.session.get_mut().remaining = None;
+        if offset == 0 {
+            return Err(Error::Network("incomplete message download"));
+        }
+        file.as_file().sync_all()?;
+        attachment::mark_downloaded(file.path())?;
+        file.persist(&path).map_err(|e| e.error)?;
+        Ok(path)
+    }
+
     pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
         let message = store.message(id)?.summary;
         let part = store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
