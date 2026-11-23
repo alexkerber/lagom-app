@@ -295,6 +295,7 @@ struct TodoRow: View {
     let toggle: () async -> Void
     /// Opens the source mail; the subject line is its button.
     let openMail: () -> Void
+    var edit: (() -> Void)?
     var words = DateWords()
     /// The tick a tap draws at once, before the row moves (`PlannerModel.toggle`'s settle).
     @State private var ticked: Bool?
@@ -309,8 +310,10 @@ struct TodoRow: View {
             .buttonStyle(.plain).padding(.horizontal, -11)
             .accessibilityLabel(done ? "Mark as not done" : "Mark as done")
             VStack(alignment: .leading, spacing: 2) {
-                Text(todo.title).lagomFont(.base)
+                let label = Text(todo.title).lagomFont(.base)
                     .strikethrough(done).foregroundStyle(done ? Theme.secondary : Theme.ink)
+                if let edit { Button(action: edit) { label }.buttonStyle(.plain).accessibilityHint("Edit task") }
+                else { label }
                 if let subject = todo.mailSubject {
                     Button(action: openMail) {
                         HStack(spacing: 4) {
@@ -376,8 +379,15 @@ struct DueChip: View {
     }
 }
 
-/// What the inline field adds: a task to a list, or a new list.
-private enum AddField: Hashable { case task(Int64), list }
+/// The active inline field on the To-do page.
+private enum AddField: Hashable {
+    case task(Int64), edit(Todo), list
+
+    var isEdit: Bool {
+        if case .edit = self { return true }
+        return false
+    }
+}
 
 /// Local task lists, as on the desktop's To-do page. Adding happens where the eye is, not in a corner:
 /// "New task" ends each list and turns into a field in place, with due chips
@@ -432,7 +442,7 @@ struct TodoView: View {
         }
         .background(Theme.background)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if case .task = adding { dueBar }
+            if let adding, adding != .list { dueBar }
         }
         .onChange(of: focus) { old, new in
             // Leaving the field, by a tap elsewhere or the keyboard going down, keeps what was typed. Checked a turn
@@ -501,14 +511,15 @@ struct TodoView: View {
                 else { Circle().strokeBorder(Theme.line, lineWidth: 1).frame(width: 21, height: 21) }
             }
             .frame(width: 21)
-            TextField(target == .list ? "List name" : "New task", text: $title)
+            let label = target == .list ? "List name" : target.isEdit ? "Task title" : "New task"
+            TextField(label, text: $title)
                 .lagomFont(.base, target == .list ? .bold : .regular)
                 .foregroundStyle(Theme.ink).tint(Theme.accent)
                 .focused($focus, equals: target)
-                .submitLabel(target == .list ? .done : .next)
+                .submitLabel(target == .list || target.isEdit ? .done : .next)
                 .onSubmit(submit)
                 .onAppear { focus = target }
-                .accessibilityLabel(target == .list ? "New list name" : "New task")
+                .accessibilityLabel(target == .list ? "New list name" : label)
             if target != .list, let due, let chip = DateWords().due(DateWords().coreDay(due)) {
                 DueChip(label: chip.label)
             }
@@ -563,6 +574,7 @@ struct TodoView: View {
 
     private func open(_ target: AddField) {
         commit()
+        if case .edit(let todo) = target { title = todo.title; due = todo.due.flatMap(DateWords().day) }
         adding = target
         focus = target
     }
@@ -586,6 +598,9 @@ struct TodoView: View {
         let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
         switch adding {
         case .task(let list)? where !text.isEmpty: add(text, list: list, due: due)
+        case .edit(let todo)?:
+            let day = due
+            Task { await planner.edit(todo, title: text, due: day) }
         case .list? where !text.isEmpty: Task { await planner.addList(name: text) }
         default: break
         }
@@ -604,18 +619,23 @@ struct TodoView: View {
         }
     }
 
-    private func row(_ todo: Todo) -> some View {
-        TodoRow(todo: todo, toggle: { await planner.toggle(todo, settle: tickSettle) },
-                openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } })
-            // Right is Done (Not done in Completed), a long left is Delete, as in Mail; tasks have no Later.
-            .modifier(StageSwipe(canDelete: true, enabled: true, canLater: false, doneTitle: todo.done ? "Not done" : "Done") { stage in
-                leaving.insert(todo.id)
-                Task {
-                    if stage == .delete { await planner.delete(todo) } else { await planner.toggle(todo) }
-                    leaving.remove(todo.id)
-                }
-            })
-            .accessibilityAction(named: "Delete") { Task { await planner.delete(todo) } }
+    @ViewBuilder private func row(_ todo: Todo) -> some View {
+        if case .edit(let original) = adding, original.id == todo.id {
+            field(.edit(original))
+                .onDisappear { if adding == .edit(original), !picking { commit() } }
+        } else {
+            TodoRow(todo: todo, toggle: { await planner.toggle(todo, settle: tickSettle) },
+                    openMail: { Task { if let id = await planner.mail(for: todo) { openMail(id) } } }, edit: { open(.edit(todo)) })
+                // Right is Done (Not done in Completed), a long left is Delete, as in Mail; tasks have no Later.
+                .modifier(StageSwipe(canDelete: true, enabled: true, canLater: false, doneTitle: todo.done ? "Not done" : "Done") { stage in
+                    leaving.insert(todo.id)
+                    Task {
+                        if stage == .delete { await planner.delete(todo) } else { await planner.toggle(todo) }
+                        leaving.remove(todo.id)
+                    }
+                })
+                .accessibilityAction(named: "Delete") { Task { await planner.delete(todo) } }
+        }
     }
 }
 

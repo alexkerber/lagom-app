@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.EaseOut
@@ -306,7 +307,7 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 
 /** A task, desktop `task_row`: a completion circle, its title, a mail mark, and the due chip. A tap ticks the circle at
  *  once; [toggle] saves and reloads a moment later (TICK_MILLIS), so the tick is seen before the row moves. */
-@Composable private fun TodoRow(todo: Todo, words: DateWords, modifier: Modifier = Modifier, toggle: () -> Job) {
+@Composable private fun TodoRow(todo: Todo, words: DateWords, modifier: Modifier = Modifier, edit: (() -> Unit)? = null, toggle: () -> Job) {
     val colors = MaterialTheme.colorScheme
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -327,7 +328,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
             contentDescription = todo.title
             onClick(if (done) "Mark as not done" else "Mark as done") { tap(); true }
         }, contentAlignment = Alignment.Center) { CheckCircle(done) }
-        Text(todo.title, Modifier.weight(1f), color = if (done) colors.onSurfaceVariant else colors.onSurface,
+        val titleAction = if (edit == null) Modifier else Modifier.clickable(onClickLabel = "Edit task", onClick = edit)
+        Text(todo.title, Modifier.weight(1f).then(titleAction), color = if (done) colors.onSurfaceVariant else colors.onSurface,
             textDecoration = if (done) TextDecoration.LineThrough else null)
         if (todo.fromMail) LagomIcon(R.drawable.ic_linked_mail, size = 16.dp, label = "From mail")
         val due = if (done) null else todo.due?.let(words::due)
@@ -365,6 +367,9 @@ private const val NEW_LIST = Long.MIN_VALUE
 @Composable internal fun TodoScreen(planner: PlannerModel, model: MailModel) {
     // The list the field is open in, NEW_LIST, or null.
     var adding by rememberSaveable { mutableStateOf<Long?>(null) }
+    var editing by rememberSaveable { mutableStateOf<Long?>(null) }
+    var originalTitle by rememberSaveable { mutableStateOf("") }
+    var originalDay by rememberSaveable { mutableStateOf<Long?>(null) }
     var title by rememberSaveable { mutableStateOf("") }
     // As an epoch day, which saved state can hold.
     var dueDay by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -375,17 +380,32 @@ private const val NEW_LIST = Long.MIN_VALUE
     /** A task core refused comes back into its field, unless that field already holds the next one or its list is gone;
      *  the alert names it either way. */
     fun add(text: String, target: Long, day: Long?) = planner.perform {
-        if (!planner.add(text, target, day?.let(LocalDate::ofEpochDay)) && title.isEmpty() && (adding == null || adding == target)
+        if (!planner.add(text, target, day?.let(LocalDate::ofEpochDay)) && title.isEmpty() && editing == null && (adding == null || adding == target)
             && planner.lists.any { it.id == target }) { adding = target; title = text; dueDay = day }
     }
     /** Saves what the field holds and closes it. */
     fun commit() {
         val text = title.trim()
         val target = adding
+        val id = editing
+        if (id != null) {
+            val name = originalTitle
+            val day = originalDay?.let(LocalDate::ofEpochDay)
+            val chosen = dueDay?.let(LocalDate::ofEpochDay)
+            planner.perform { planner.edit(id, name, day, text, chosen) }
+        }
         if (text.isNotEmpty() && target != null) { if (target == NEW_LIST) planner.perform { planner.addList(text) } else add(text, target, dueDay) }
-        title = ""; dueDay = null; adding = null
+        title = ""; dueDay = null; adding = null; editing = null
     }
     fun open(target: Long) { commit(); adding = target }
+    fun edit(todo: Todo) {
+        commit()
+        editing = todo.id
+        originalTitle = todo.title
+        originalDay = todo.due?.let(words::day)?.toEpochDay()
+        title = originalTitle
+        dueDay = originalDay
+    }
     /** Enter: the task is added and the field stays for the next; an empty Enter, or a list name, closes it. */
     fun submit() {
         val target = adding ?: return
@@ -394,7 +414,18 @@ private const val NEW_LIST = Long.MIN_VALUE
         title = ""
         add(text, target, dueDay)
     }
-    BackHandler(enabled = adding != null) { commit() }
+    val row: @Composable (Todo, Modifier) -> Unit = { todo, modifier ->
+        if (editing == todo.id) {
+            val activity = LocalActivity.current
+            DisposableEffect(todo.id) {
+                onDispose { if (editing == todo.id && activity?.isChangingConfigurations != true) commit() }
+            }
+            AddField(title, { title = it }, false, due?.let { words.due(it.toString())?.first }, ::commit, editing = true) {
+                if (!picking && editing == todo.id) commit()
+            }
+        } else SwipeTodoRow(planner, todo, words, modifier) { edit(todo) }
+    }
+    BackHandler(enabled = adding != null || editing != null) { commit() }
     Column(Modifier.fillMaxSize().imePadding()) {
         PageTitle(AppSection.TODO.title)
         // Calendar granted but Google Tasks declined or taken back: as the Mac's To-do, ask here.
@@ -421,7 +452,7 @@ private const val NEW_LIST = Long.MIN_VALUE
                     item(key = "list-${list.id}") {
                         ListHeading(list.name, accountAccent(index), all.size - done.size, Modifier.padding(top = if (index == 0) 8.dp else 24.dp))
                     }
-                    items(all.filter { !it.done }, key = { it.id }) { SwipeTodoRow(planner, it, words, Modifier.animateItem()) }
+                    items(all.filter { !it.done }, key = { it.id }) { row(it, Modifier.animateItem()) }
                     item(key = "add-${list.id}") {
                         if (adding == list.id) AddField(title, { title = it }, false, due?.let { words.due(it.toString())?.first }, ::submit) {
                             // Only this field's own leaving: moving to another list's field has already saved it.
@@ -440,7 +471,7 @@ private const val NEW_LIST = Long.MIN_VALUE
                                 Text("Completed (${done.size})", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                        if (expanded) items(done, key = { it.id }) { SwipeTodoRow(planner, it, words, Modifier.animateItem()) }
+                        if (expanded) items(done, key = { it.id }) { row(it, Modifier.animateItem()) }
                     }
                 }
                 item(key = "new-list") {
@@ -451,7 +482,7 @@ private const val NEW_LIST = Long.MIN_VALUE
                 }
             }
         }
-        if (adding != null && adding != NEW_LIST) DueBar(due, { dueDay = it?.toEpochDay() }, { picking = true }) { commit() }
+        if (editing != null || (adding != null && adding != NEW_LIST)) DueBar(due, { dueDay = it?.toEpochDay() }, { picking = true }) { commit() }
     }
     if (picking) {
         // The picker counts in UTC midnights.
@@ -469,7 +500,7 @@ private const val NEW_LIST = Long.MIN_VALUE
 }
 
 /** "New task" (or "New list") as a field in place: an empty circle (or the list dot) where the row will be. */
-@Composable private fun AddField(value: String, onValue: (String) -> Unit, list: Boolean, due: String?, submit: () -> Unit, leave: () -> Unit) {
+@Composable private fun AddField(value: String, onValue: (String) -> Unit, list: Boolean, due: String?, submit: () -> Unit, editing: Boolean = false, leave: () -> Unit) {
     val c = lagom
     val focus = remember { FocusRequester() }
     var focused by remember { mutableStateOf(false) }
@@ -481,17 +512,18 @@ private const val NEW_LIST = Long.MIN_VALUE
         }
         val style = if (list) MaterialTheme.typography.titleMedium.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold, color = c.ink)
             else MaterialTheme.typography.bodyLarge.copy(color = c.ink)
+        val label = if (list) "List name" else if (editing) "Task title" else "New task"
         BasicTextField(value, onValue, Modifier.weight(1f).focusRequester(focus).onFocusChanged {
             // Leaving the field keeps what was typed.
             if (focused && !it.isFocused) leave()
             focused = it.isFocused
-        }.semantics { contentDescription = if (list) "New list name" else "New task" }, textStyle = style, singleLine = true,
+        }.semantics { contentDescription = if (list) "New list name" else label }, textStyle = style, singleLine = true,
             cursorBrush = SolidColor(c.accent),
             // A custom Done keeps the keyboard up for the next task.
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit() }),
             decorationBox = { inner ->
-                Box { if (value.isEmpty()) Text(if (list) "List name" else "New task", style = style.copy(color = c.ink2)); inner() }
+                Box { if (value.isEmpty()) Text(label, style = style.copy(color = c.ink2)); inner() }
             })
         due?.let { DueChip(it) }
     }
@@ -529,7 +561,7 @@ private const val NEW_LIST = Long.MIN_VALUE
 /** As Mail: right past 120 dp is Done (Not done in Completed), left past 60 % of the row is Delete; tasks have no
  *  Later. The colour behind shows the move a release makes. TalkBack gets Delete as an action. */
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun SwipeTodoRow(planner: PlannerModel, todo: Todo, words: DateWords, modifier: Modifier = Modifier) {
+@Composable private fun SwipeTodoRow(planner: PlannerModel, todo: Todo, words: DateWords, modifier: Modifier, edit: () -> Unit) {
     val reach = with(LocalDensity.current) { 120.dp.toPx() }
     // The threshold depends on the direction, which only the state knows.
     val holder = remember { arrayOfNulls<SwipeToDismissBoxState>(1) }
@@ -576,7 +608,7 @@ private const val NEW_LIST = Long.MIN_VALUE
         Surface(color = lagom.bg) {
             TodoRow(todo, words, Modifier.semantics {
                 customActions = listOf(CustomAccessibilityAction("Delete") { planner.perform { planner.delete(todo) }; true })
-            }) { planner.perform { planner.toggle(todo, TICK_MILLIS) } }
+            }, edit) { planner.perform { planner.toggle(todo, TICK_MILLIS) } }
         }
     }
 }
