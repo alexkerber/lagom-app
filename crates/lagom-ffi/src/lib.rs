@@ -412,7 +412,7 @@ fn sync_with_google(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     }
     mail
 }
-/// Both granted services get a turn, even if the first fetch fails.
+/// Both granted services get a turn, even if the first fetch fails; either failure is reported.
 fn sync_google(stores: &Stores, id: &str) -> lagom_core::Result<()> {
     let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut store = Store::open(&stores.path)?;
@@ -428,7 +428,7 @@ fn sync_google(stores: &Stores, id: &str) -> lagom_core::Result<()> {
         network(lagom_core::google::sync_tasks(&mut store, &a))
             .inspect_err(|e| eprintln!("lagom: Google Tasks sync failed: {e:?}")));
     match (calendar, tasks) {
-        (Some(calendar), Some(tasks)) => calendar.or(tasks),
+        (Some(calendar), Some(tasks)) => calendar.and(tasks),
         (Some(result), None) | (None, Some(result)) => result,
         (None, None) => Ok(()),
     }

@@ -2033,7 +2033,7 @@ async fn calendar_grant_waits_for_planner_but_not_mail_locks() {
 }
 
 #[tokio::test]
-async fn planner_sync_reports_failure_when_both_granted_services_fail() {
+async fn planner_sync_reports_a_failed_granted_service() {
     let (_dir, core) = fixture();
     let id = {
         let s = core.stores.local.lock().unwrap();
