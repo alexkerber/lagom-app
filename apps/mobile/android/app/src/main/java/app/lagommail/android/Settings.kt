@@ -52,12 +52,9 @@ import app.lagommail.core.MailAccount
     // A Surface, not a Column: it takes every touch, so nothing reaches the list underneath.
     Surface(Modifier.fillMaxSize(), color = lagom.bg) { Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding(), start = if (index >= 0) 4.dp else 16.dp) {
+            // Back as the Mail page's, an icon alone (Alex 2026-11-23: the same app bar everywhere).
             if (index >= 0) {
-                Row(Modifier.heightIn(min = 48.dp).clickable(onClickLabel = "Back to Settings", role = Role.Button) { open = null }
-                    .padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    LagomIcon(R.drawable.ic_chevron_left, Modifier.padding(horizontal = 12.dp))
-                    Text("Settings", color = lagom.ink2, style = MaterialTheme.typography.bodyLarge)
-                }
+                LagomIconButton("Back to Settings", R.drawable.ic_chevron_left) { open = null }
                 Spacer(Modifier.weight(1f))
             } else BarTitle("Settings", Modifier.weight(1f))
             LagomIconButton("Close", R.drawable.ic_close, onClick = close)

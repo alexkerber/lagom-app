@@ -121,19 +121,17 @@ internal fun Mailbox.label(): String = when (this) {
     Box(Modifier.fillMaxSize()) {
     Box(if (!twoPane && model.selectedId != null) Modifier.clearAndSetSemantics {} else Modifier) {
     Scaffold(containerColor = lagom.bg, topBar = {
-        // As on iOS (Alex 2026-11-20): the lagom mark, and on the right the title and a quiet line that open the
-        // mailboxes and accounts. The filter, Search and New message follow in the list's own row.
-        TopBar(Modifier.statusBarsPadding(), end = 8.dp) {
-            AppIcon(28.dp)
-            Spacer(Modifier.weight(1f))
-            Box {
+        // The app bar every page shares, as on iOS (Alex 2026-11-23): the mailbox title and a quiet line at the left
+        // open the mailboxes and accounts; Search and New message at the right. The filter follows in the list's row.
+        TopBar(Modifier.statusBarsPadding(), start = 8.dp) {
+            Box(Modifier.weight(1f)) {
                 val title = if (model.showingDrafts) "Drafts" else model.folder?.name ?: model.mailbox.label()
                 val syncing = afterWait(model.syncing)
                 val left = if (!model.showingDrafts && model.mailbox == Mailbox.INBOX && model.folder == null && model.accounts.isNotEmpty())
                     model.counts.filter { model.accountId == null || it.account == model.accountId }.sumOf { it.inbox } else null
                 val status = syncStatus(if (syncing && model.syncing) SyncState.Syncing else model.syncState, left)
                 Column(Modifier.clip(RoundedCornerShape(Radius.control)).clickable(onClickLabel = "Mailboxes and accounts") { menu = true }
-                    .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}, horizontalAlignment = Alignment.End) {
+                    .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
@@ -183,11 +181,17 @@ internal fun Mailbox.label(): String = when (this) {
                         onClick = { menu = false; onSettings() })
                 }
             }
+            if (!model.searching && model.searchText.isEmpty()) {
+                if (!model.showingDrafts) LagomIconButton("Search", R.drawable.ic_search) { model.searching = true }
+                LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
+                    val account = model.accountId ?: model.accounts.first().id
+                    model.perform { model.newMessage(account) }
+                }
+            }
         }
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (model.showingDrafts) {
-                ListBar(model)
                 LazyColumn(Modifier.weight(1f)) {
                     val drafts = model.drafts.filter { model.accountId == null || it.account == model.accountId }
                     if (drafts.isEmpty()) item(key = "empty") { EmptyState(R.drawable.ic_edit_draft, "No drafts", rowMotion(true).fillParentMaxSize()) }
@@ -332,12 +336,11 @@ internal fun Mailbox.label(): String = when (this) {
     }
 }
 
-/** The list's row under the bar, as iOS: the filter (Empty Trash in Trash) on the left, Search and New message on the right.
- *  Search opens into the field in the row's place and stays open while it holds text. Drafts have New message only. */
+/** The list's row under the app bar, as iOS: the filter, or Empty Trash in Trash. Search in the app bar opens the field
+ *  in the row's place; it stays open while it holds text. */
 @Composable private fun ListBar(model: MailModel) {
-    var searching by remember { mutableStateOf(false) }
+    var searching by model::searching
     val drafts = model.showingDrafts
-    // The glyphs on the right end 16 dp in, under the mailbox title: 2 dp here and 14 dp inside a 48 dp button.
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!drafts && (searching || model.searchText.isNotEmpty())) {
@@ -354,7 +357,6 @@ internal fun Mailbox.label(): String = when (this) {
             TextButton(onClick = { searching = false; model.perform { model.changeSearch("") } }, Modifier.heightIn(min = 48.dp).padding(end = 2.dp),
                 colors = ButtonDefaults.textButtonColors(contentColor = lagom.ink)) { Text("Cancel") }
         } else {
-            // The buttons measure first; the filter takes what is left, so large text cannot push them off.
             Box(Modifier.weight(1f)) {
                 if (!drafts && model.mailbox == Mailbox.TRASH && model.folder == null) {
                     // In Trash the filter makes way for Empty Trash, as on desktop.
@@ -366,13 +368,6 @@ internal fun Mailbox.label(): String = when (this) {
                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete all") } },
                         dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
                 } else if (!drafts) FilterControl(model.unreadOnly) { model.unreadOnly = it }
-            }
-            Row {
-                if (!drafts) LagomIconButton("Search", R.drawable.ic_search) { searching = true }
-                LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
-                    val account = model.accountId ?: model.accounts.first().id
-                    model.perform { model.newMessage(account) }
-                }
             }
         }
     }

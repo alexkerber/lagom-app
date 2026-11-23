@@ -238,6 +238,15 @@ internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBeh
     drawRect(color, topLeft = Offset(0f, if (top) 0f else size.height - 1.dp.toPx()), size = Size(size.width, 1.dp.toPx()))
 }
 
+/** Every page's app bar, as on iOS (Alex 2026-11-23, "titel vänster, ingen logga"): the title at the left in one
+ *  size, the page's actions at the right. */
+@Composable internal fun PageTitle(title: String, trailing: @Composable RowScope.() -> Unit = {}) {
+    TopBar(Modifier.statusBarsPadding()) {
+        BarTitle(title, Modifier.weight(1f))
+        trailing()
+    }
+}
+
 /** A page title as on desktop and iOS: semibold at the title size. */
 @Composable internal fun BarTitle(title: String, modifier: Modifier = Modifier) =
     Text(title, modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
