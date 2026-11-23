@@ -252,7 +252,7 @@ fn main() {
             }
         }).detach();
         #[cfg(target_os = "macos")]
-        icon::install();
+        { icon::install(); icon::force_appearance(); }
     });
 }
 
