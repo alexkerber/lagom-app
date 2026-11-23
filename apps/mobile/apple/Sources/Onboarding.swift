@@ -109,10 +109,10 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             HStack {
                 if step == .choose {
-                    IconButton(title: "Back", icon: "chevron-left") { choosing = false }.disabled(connecting)
+                    BackButton { choosing = false }.disabled(connecting)
                 }
             }
-            .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) { content(step) }
@@ -178,7 +178,7 @@ struct ChooseMail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             let providers = [(SignInProvider.google, "Google", "GoogleLogo"), (.microsoft, "Microsoft", "MicrosoftLogo")]
-                .filter { signInAvailable(provider: $0.0) }
+                .filter { signInAvailable(provider: $0.0) || Storage.mockSignIn != nil }
             Group {
                 if !providers.isEmpty {
                     // Hidden until this build has the provider's client ID. Google asks for its full

@@ -570,9 +570,9 @@ struct MailView: View {
             VStack(spacing: 0) {
                 if railInset == 0 {
                     HStack {
-                        if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                        if !split { BackButton { model.selectedID = nil } }
                     }
-                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
                 }
                 MessagePreview(row: row)
             }
@@ -582,8 +582,8 @@ struct MailView: View {
         } else {
             // A message outside the loaded rows, while it loads or when it failed to: only the way back.
             VStack(alignment: .leading, spacing: 0) {
-                IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }
-                    .padding(.horizontal, 10).frame(minHeight: 56)
+                BackButton { model.selectedID = nil }
+                    .padding(.horizontal, 16).frame(minHeight: 56)
                 Spacer()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -599,7 +599,7 @@ extension MailView {
         let id = model.selectedID ?? message.row.id
         return HStack(spacing: 8) {
             if !split {
-                IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)
+                BackButton { model.selectedID = nil }
             }
             HouseButton(title: "Reply", icon: "reply", iconOnly: iconOnly) { Task { await model.prepareCompose(id: id, kind: .reply) } }
                 .disabled(model.preparingCompose)

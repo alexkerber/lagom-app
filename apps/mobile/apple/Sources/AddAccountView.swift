@@ -59,7 +59,7 @@ struct AddAccountView: View {
         } footer: {
             if !providers || form {
             if providers {
-                IconButton(title: "Back", icon: "chevron-left") { back() }
+                BackButton { back() }
                     .disabled(connecting)
             }
             HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
@@ -136,6 +136,7 @@ extension MailModel {
     /// `exchanging` runs once the page has returned, while the core trades its code for tokens.
     func signIn(_ provider: SignInProvider, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
         guard let core else { return false }
+        if let mock = Storage.mockSignIn { return try await mockSignIn(mock, exchanging: exchanging) }
         return try await authenticate(core.beginSignIn(provider: provider), browser: browser, exchanging: exchanging)
     }
 
@@ -143,6 +144,19 @@ extension MailModel {
     func allowCalendar(_ account: String, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
         guard let core else { return false }
         return try await authenticate(core.beginCalendarAccess(accountId: account), browser: browser, exchanging: exchanging)
+    }
+
+    /// `Storage.mockSignIn`: the provider's page takes a second, then the exchange another; ok seeds the demo's
+    /// Google accounts (mail scopes only, so Calendar offers its grant).
+    private func mockSignIn(_ outcome: String, exchanging: () -> Void) async throws -> Bool {
+        try await Task.sleep(for: .seconds(1))
+        if outcome == "cancel" { return false }
+        exchanging()
+        try await Task.sleep(for: .seconds(1))
+        if outcome == "error" { throw MailError.Failed(reason: "Google did not accept the sign-in. Try again.") }
+        try seedDemoWithoutCalendar(dataDir: Storage.directory().path, state: "google")
+        await reload()
+        return true
     }
 
     private func authenticate(_ start: SignInStart, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {

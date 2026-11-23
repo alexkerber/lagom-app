@@ -80,6 +80,23 @@ struct IconButton: View {
     }
 }
 
+/// Back as the system's navigation bar draws it (Alex 2026-11-23: "native också runda"): a round glass button with
+/// the system chevron, which also turns round in right-to-left languages.
+struct BackButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.backward").font(.system(size: 17, weight: .semibold))
+                .frame(width: 44, height: 44).contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.ink)
+        .modifier(RailGlass())
+        .accessibilityLabel("Back")
+    }
+}
+
 /// The unread count on Mail in the sidebar: a quiet number, as on desktop (Alex 2026-11-15). Numbers roll, they do not jump.
 struct Badge: View {
     let count: Int
