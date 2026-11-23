@@ -503,6 +503,8 @@ mod tests {
         let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         for hide in [true, false] {
             view.update(cx, |v, cx| { v.panes.sidebar_hidden = hide; v.sidebar_slide = Some(Instant::now() - SLIDE / 4); cx.notify(); });
+            // The test window can report the previous frame's bounds, so draw twice.
+            draw(cx);
             draw(cx);
             // Mid-slide: same width, moved left, so no row reflows.
             let mid = cx.debug_bounds("sidebar").unwrap();

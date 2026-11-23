@@ -374,6 +374,8 @@ pub struct MainWindow {
     sidebar_fade: Option<Instant>,
     /// When the sidebar started to slide in or out; it slides as an AppKit split view collapses.
     sidebar_slide: Option<Instant>,
+    /// The sidebar's drawn width this frame; it narrows while the sidebar slides.
+    sidebar_shown_w: f32,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -513,6 +515,7 @@ impl MainWindow {
             sidebar_mail: false,
             sidebar_fade: None,
             sidebar_slide: None,
+            sidebar_shown_w: 0.,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -1269,7 +1272,7 @@ impl MainWindow {
         // A drag that locks vertical, or a swipe carried onto the sidebar, picks the message up for a folder.
         // shortcut: GPUI starts its drag on the move after this one, so a release on the very move that
         // crosses onto the sidebar lands nowhere; fine while the sidebar's padding sits before its folders.
-        let over_sidebar = !self.panes.sidebar_hidden && f32::from(e.position.x) < self.sidebar_w;
+        let over_sidebar = f32::from(e.position.x) < self.sidebar_shown_w;
         let picked = match (before, self.swipe) {
             (Swipe::Undecided { id, .. }, Swipe::Scroll) => Some(id),
             (_, Swipe::Row { id, dx }) if over_sidebar => {
@@ -2647,6 +2650,7 @@ impl Render for MainWindow {
         self.forget_hidden_images(cx);
         crate::rich::release(window, cx);
         let welcome = self.welcome();
+        self.sidebar_shown_w = if welcome { 0. } else { self.sidebar_w * shown };
         // macOS: with the sidebar gone, the panel clears the traffic lights.
         let panel_top = if welcome { 36. } else if cfg!(target_os = "macos") { 8. + 28. * (1. - shown) } else { 8. };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
@@ -2778,7 +2782,12 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
                 this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
-                this.sidebar_slide = (!crate::motion::reduced()).then(Instant::now);
+                // A toggle mid-slide reverses from where the sidebar is: the eased position p maps
+                // back to the time where the reverse slide shows the same width (ease is 1 - (1 - t)^5).
+                let done = this.sidebar_slide.map(|at| (at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).min(1.)).unwrap_or(1.);
+                let p = 1. - (1. - done).powi(5);
+                let from = 1. - p.powf(0.2);
+                this.sidebar_slide = (!crate::motion::reduced()).then(|| Instant::now() - SLIDE.mul_f32(from));
                 this.save_panes(cx);
                 cx.notify();
             }))
@@ -2822,7 +2831,8 @@ impl Render for MainWindow {
                     .relative()
                     .child(panel)
                     .children(toasts)
-                    .when(matches!(self.page, Page::Mail) && !empty, |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
+                    // The list divider waits for a slide to end, so a drag never moves under the pointer.
+                    .when(matches!(self.page, Page::Mail) && !empty && self.sidebar_slide.is_none(), |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
             )
             .when(!welcome && shown == 1., |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
             .child(self.resize_events(cx))
@@ -4619,7 +4629,7 @@ mod dispatch {
         assert_eq!(widths(cx).0, 220.);
         cx.simulate_keystrokes("alt-secondary-s");
         // The sidebar keeps its width while it slides out.
-        assert_eq!(widths(cx).0, 220.);
+        assert_eq!(widths(cx).0, if crate::motion::reduced() { 0. } else { 220. });
         view.update(cx, |v, cx| { v.sidebar_slide = None; cx.notify(); });
         assert_eq!(widths(cx).0, 0.);
         assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
