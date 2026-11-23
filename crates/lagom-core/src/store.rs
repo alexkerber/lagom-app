@@ -708,13 +708,12 @@ impl Store {
     }
     pub fn save_message(&self, message: &Message) -> Result<i64> {
         let tx = self.write_transaction()?;
-        let id = self.insert_message(message)?;
+        let id = self.insert_message(message, &self.resolve_thread(&message.summary)?)?;
         tx.commit()?;
         Ok(id)
     }
-    fn insert_message(&self, message: &Message) -> Result<i64> {
+    fn insert_message(&self, message: &Message, thread: &str) -> Result<i64> {
         let m = &message.summary;
-        let thread = self.resolve_thread(m)?;
         let id = self.db.query_row("INSERT INTO messages(account,folder,uid,message_id,thread_key,from_name,from_address,to_addresses,cc,subject,date,snippet,seen,flagged,has_attachments,size,body_text,body_html,thread_id,thread_refs)
         SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20 FROM folders WHERE id=?2 AND account=?1
         ON CONFLICT(folder,uid) DO UPDATE SET message_id=excluded.message_id,thread_key=excluded.thread_key,from_name=excluded.from_name,from_address=excluded.from_address,to_addresses=excluded.to_addresses,cc=excluded.cc,subject=excluded.subject,date=excluded.date,snippet=excluded.snippet,seen=excluded.seen,flagged=excluded.flagged,has_attachments=excluded.has_attachments,size=excluded.size,body_text=excluded.body_text,body_html=excluded.body_html,thread_id=excluded.thread_id,thread_refs=excluded.thread_refs RETURNING id",
@@ -724,7 +723,7 @@ impl Store {
     pub(crate) fn save_synced_message(&self, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
         self.save_synced(message, attachments, None)
     }
-    /// A body fetched again for row `id` in UIDVALIDITY `validity`: keeps the row's flags; NotFound
+    /// A body fetched again for row `id` in UIDVALIDITY `validity`: keeps its flags and thread; NotFound
     /// when that row is gone or the folder was reset.
     pub(crate) fn refetched_message(&self, id: i64, validity: u32, message: &Message, attachments: &[crate::attachment::Attachment]) -> Result<i64> {
         self.save_synced(message, attachments, Some((id, validity)))
@@ -742,16 +741,18 @@ impl Store {
     fn save_synced(&self, message: &Message, attachments: &[crate::attachment::Attachment], existing: Option<(i64, u32)>) -> Result<i64> {
         let tx = self.write_transaction()?;
         let kept: Message;
-        let message = if let Some((id, validity)) = existing {
+        let (message, thread) = if let Some((id, validity)) = existing {
             // Read under the write lock: no delete or flag change can come between this and the write.
             let m = &message.summary;
-            let (seen, flagged) = self.db.query_row("SELECT m.seen,m.flagged FROM messages m JOIN folders f ON f.id=m.folder
+            let (seen, flagged, thread) = self.db.query_row("SELECT m.seen,m.flagged,m.thread_id FROM messages m JOIN folders f ON f.id=m.folder
                 WHERE m.id=?1 AND m.folder=?2 AND m.uid=?3 AND f.uidvalidity=?4",
-                params![id, m.folder, m.uid, validity], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(Error::NotFound)?;
+                params![id, m.folder, m.uid, validity], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?.ok_or(Error::NotFound)?;
             kept = Message { summary: MessageSummary { seen, flagged, ..m.clone() }, ..message.clone() };
-            &kept
-        } else { message };
-        let id = self.insert_message(message)?;
+            (&kept, thread)
+        } else {
+            (message, self.resolve_thread(&message.summary)?)
+        };
+        let id = self.insert_message(message, &thread)?;
         // Unchanged parts keep their cached downloads when a body is fetched again.
         let old = self.attachments(id)?;
         for part in old.iter().filter(|p| !attachments.contains(p)) {
@@ -761,7 +762,7 @@ impl Store {
             self.db.execute("INSERT INTO attachments VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, part.section, part.filename, part.mime_type, part.size, part.encoding])?;
         }
-        self.db.execute("UPDATE messages SET attachments_loaded=1,threading_loaded=1 WHERE id=?1", [id])?;
+        self.db.execute("UPDATE messages SET attachments_loaded=1,threading_loaded=(threading_loaded OR ?2) WHERE id=?1", params![id, existing.is_none()])?;
         tx.commit()?;
         Ok(id)
     }
@@ -941,6 +942,24 @@ impl Store {
         tx.execute("UPDATE folders SET uidvalidity=?2,uidnext=NULL,last_uid=0,highest_modseq=NULL WHERE id=?1",params![folder,validity])?;
         tx.commit()?;
         Ok(true)
+    }
+    pub(crate) fn omitted_uids(&self, folder: i64) -> Result<std::collections::HashSet<u32>> {
+        let mut stmt = self.db.prepare("SELECT uid FROM omitted_fetches WHERE folder=?1")?;
+        let rows = stmt.query_map([folder], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+    pub(crate) fn record_omitted_uid(&self, folder: &Folder, uid: u32) -> Result<()> {
+        self.db.execute("INSERT OR IGNORE INTO omitted_fetches(folder,uid)
+            SELECT id,?2 FROM folders WHERE id=?1 AND uidvalidity=?3
+            AND NOT EXISTS (SELECT 1 FROM messages WHERE folder=?1 AND uid=?2)",
+            params![folder.id, uid, folder.uidvalidity])?;
+        Ok(())
+    }
+    pub(crate) fn forget_omitted_uid(&self, folder: &Folder, uid: u32) -> Result<()> {
+        self.db.execute("DELETE FROM omitted_fetches WHERE folder=?1 AND uid=?2
+            AND EXISTS (SELECT 1 FROM folders WHERE id=?1 AND uidvalidity=?3)",
+            params![folder.id, uid, folder.uidvalidity])?;
+        Ok(())
     }
     pub fn finish_sync(
         &mut self,
