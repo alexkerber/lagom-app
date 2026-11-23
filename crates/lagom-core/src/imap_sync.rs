@@ -207,7 +207,11 @@ impl ImapSync {
     async fn try_fetch(&mut self, store: &mut Store, folder: &Folder, uid: u32) -> Result<bool> {
         for retry in [false, true] {
             match self.fetch_message(store, folder, uid, mime::MAX_MIME_BYTES).await {
-                Ok(_) => return Ok(true),
+                Ok(saved) => {
+                    // Keep the retry across an interrupted initial sync and a moving fetch window.
+                    if !saved { store.record_omitted_uid(folder, uid)?; }
+                    return Ok(true);
+                }
                 Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
                 // The network's fault, not the message's: keep the checkpoint and try again next sync.
                 Err(e) if matches!(e, Error::Network(TIMED_OUT)) || (retry && matches!(e, Error::Network(DROPPED))) => return Err(e),
@@ -352,12 +356,17 @@ impl ImapSync {
         let known: HashSet<_> = store.known_uids(id)?.into_iter().collect();
         let last = folder.last_uid;
         let initial = last == 0;
+        let omitted = store.omitted_uids(id)?;
         let candidates: Vec<_> = if initial {
             sorted.iter().rev().take(limit).copied().collect()
         } else {
             sorted.iter().filter(|u| **u > last).copied().collect()
         };
-        for &uid in &candidates {
+        for &uid in omitted.difference(&present) {
+            store.forget_omitted_uid(&folder, uid)?;
+        }
+        let fresh = candidates.iter().copied().filter(|uid| !omitted.contains(uid));
+        for uid in omitted.intersection(&present).copied().chain(fresh) {
             if !known.contains(&uid) && !self.try_fetch(store, &folder, uid).await? {
                 // Otherwise one unreadable message holds the checkpoint below it on every sync.
                 let mut message = mime::placeholder();
@@ -410,13 +419,9 @@ impl ImapSync {
         // SEARCH again catches expunges that occurred while bodies were fetched.
         let present = self.all_uids().await?;
         let saved: HashSet<_> = store.known_uids(id)?.into_iter().collect();
-        if candidates
-            .iter()
-            .any(|uid| present.contains(uid) && !saved.contains(uid))
-        {
-            return Err(Error::Network(
-                "server omitted a message; sync checkpoint retained",
-            ));
+        let pending = store.omitted_uids(id)?;
+        if candidates.iter().any(|uid| present.contains(uid) && !saved.contains(uid) && !pending.contains(uid)) {
+            return Err(Error::Network("server omitted a message; sync checkpoint retained"));
         }
         store.finish_sync(
             id,
