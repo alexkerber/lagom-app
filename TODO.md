@@ -1,5 +1,10 @@
 # Todo
 
+- [x] Google sign-in requests mail, Calendar and Tasks together. Accounts missing Calendar access keep the consent button.
+  After consent, mobile refreshes that account’s planner before starting mail sync. Branch `fix/google-one-consent`.
+  OAuth, FFI, desktop Calendar and sign-in tests passed. iOS built for testing. Android debug assembly and JVM tests passed.
+  Live Google consent and device timing remain unverified.
+
 ## Brand and site
 
 - [ ] Windows: sync.parse_save_1000 took 9.2 s on the CI runner against 1.3 s on Linux. Find out whether it is the runner (Defender, NTFS fsync) or lagom, then gate Windows times in `scripts/perf.py`.

@@ -526,6 +526,13 @@ impl LagomCore {
     pub async fn sync(&self, account_id: String) -> Result<()> {
         self.run_sync(move |stores| { let a = account(&stores.folder_lock(), &account_id)?; sync_with_google(stores, &a) }).await
     }
+    pub async fn sync_google(&self, account_id: String) -> Result<()> {
+        self.run_sync(move |stores| {
+            let a = account(&stores.folder_lock(), &account_id)?;
+            sync_google(stores, &a);
+            Ok(())
+        }).await
+    }
     pub async fn sync_all(&self) -> Result<()> {
         self.run_sync(|stores| {
             let mut first_error = None;

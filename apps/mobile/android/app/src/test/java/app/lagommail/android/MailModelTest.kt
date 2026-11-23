@@ -72,6 +72,24 @@ class MailModelTest {
         assertEquals(1, core.redirects.size); assertEquals(syncs + 1, core.syncs)
     }
 
+    @Test fun calendarGrantReloadsPlannerBeforeMailSyncFinishes() = runTest(dispatcher) {
+        val core = FakeCore(); val model = model(core); model.start()
+        val mail = CompletableDeferred<Unit>(); core.syncGate = mail
+        var reloaded = false
+        model.reloadAfterCalendarGrant = {
+            assertEquals(listOf("fixture"), core.googleSyncs)
+            model.setForeground(true)
+            assertEquals(0, core.syncs)
+            assertTrue(model.signingIn)
+            reloaded = true
+        }
+        model.finishSignIn("com.googleusercontent.apps.fixture:/oauth2redirect?state=pending"); runCurrent()
+        assertTrue(reloaded)
+        assertFalse(model.signingIn)
+        assertTrue(model.syncing)
+        mail.complete(Unit); runCurrent()
+    }
+
     @Test fun signInRedirectLeavesAFormOpenedSinceOpen() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.start()
         val list = AccountForm(choosing = true); model.accountForm = list; model.signInForm = list
@@ -1307,6 +1325,8 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun backgroundSync(): List<MailRow> { syncAll(); return emptyList() }
     var syncs = 0
     override suspend fun syncAll() { syncs++; syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
+    val googleSyncs = mutableListOf<String>()
+    override suspend fun syncGoogle(accountId: String) { googleSyncs += accountId }
     override suspend fun sync(accountId: String) = syncAll()
     var conversationIds = emptyList<Long>()
     override suspend fun conversation(messageId: Long) = (conversationIds.ifEmpty { listOf(messageId) }).map { message(it) }

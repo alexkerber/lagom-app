@@ -457,8 +457,6 @@ async fn calendar_consent_requests_full_scopes_and_existing_identity_hint() {
     account.auth = Auth::OAuth(Provider::Google);
     let mut config = Provider::Google.config();
     config.id = "fixture-id".into();
-    config.scope.push(' ');
-    config.scope.push_str(GOOGLE_CALENDAR_SCOPES);
     let mut observed = None;
     let mut flow = Box::pin(sign_in_with(Provider::Google, config, Some(&account), |url| { observed = Some(url.to_string()); }));
     assert!(tokio::time::timeout(Duration::from_millis(30), &mut flow).await.is_err());
@@ -494,7 +492,7 @@ fn mobile_config(endpoint: &str) -> Config {
         secret: Zeroizing::new(String::new()),
         auth: format!("{endpoint}/authorize"),
         token: format!("{endpoint}/token"),
-        scope: "https://mail.google.com/ openid email profile".into(),
+        scope: Provider::Google.config().scope,
     }
 }
 
@@ -556,6 +554,8 @@ async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
     )
     .unwrap();
     let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
+    let expected_scopes = format!("https://mail.google.com/ openid email profile {GOOGLE_CALENDAR_SCOPES}");
+    assert_eq!(params["scope"], expected_scopes);
     let callback = format!("{redirect}?state={}&code=mobile-code", params["state"]);
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
@@ -574,7 +574,7 @@ async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
     server.await.unwrap();
     assert_eq!(signed.email, "mobile@example.com");
     assert_eq!(signed.account.auth, Auth::OAuth(Provider::Google));
-    assert_eq!(signed.scopes, "https://mail.google.com/ openid email profile");
+    assert_eq!(signed.scopes, expected_scopes);
     let account = save(signed, None);
     assert_eq!(&*account.password().unwrap(), "mobile-refresh");
     account.delete_password().unwrap();
@@ -589,8 +589,7 @@ async fn mobile_calendar_grant_needs_google_hints_the_account_and_keeps_its_iden
     let redirect = "com.googleusercontent.apps.123-abc:/oauth2redirect";
     for (email, ok) in [("other@example.com", false), ("grant@example.com", true)] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut config = mobile_config(&format!("http://{}", listener.local_addr().unwrap()));
-        config.scope = format!("{} {GOOGLE_CALENDAR_SCOPES}", config.scope);
+        let config = mobile_config(&format!("http://{}", listener.local_addr().unwrap()));
         let (url, pending) = begin_with(Provider::Google, config, redirect.into(), Some(account.clone())).unwrap();
         assert_eq!(pending.account().map(|a| a.id.as_str()), Some(account.id.as_str()));
         let params: HashMap<_, _> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();

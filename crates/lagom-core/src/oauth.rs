@@ -31,12 +31,12 @@ impl Provider {
             Self::Google => (
                 "https://accounts.google.com/o/oauth2/v2/auth",
                 "https://oauth2.googleapis.com/token",
-                "https://mail.google.com/ openid email profile",
+                format!("https://mail.google.com/ openid email profile {GOOGLE_CALENDAR_SCOPES}"),
             ),
             Self::Microsoft => (
                 "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-                "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid email profile",
+                "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid email profile".into(),
             ),
         };
         let (id, secret) = match (MOBILE.get(), self) {
@@ -54,7 +54,7 @@ impl Provider {
             secret: Zeroizing::new(secret),
             auth: auth.into(),
             token: token.into(),
-            scope: scope.into(),
+            scope,
         }
     }
     pub(crate) fn imap_host(self) -> &'static str {
@@ -302,9 +302,7 @@ pub fn begin(provider: Provider) -> Result<(String, Pending)> {
 /// The pending flow keeps the selected account through the redirect.
 pub fn begin_calendar_access(account: &Account) -> Result<(String, Pending)> {
     if account.auth != Auth::OAuth(Provider::Google) && !account.google_hosted_password() { return Err(Error::Invalid("Google calendar requires a Google account")); }
-    let (mut config, redirect) = mobile_config(Provider::Google)?;
-    config.scope.push(' ');
-    config.scope.push_str(GOOGLE_CALENDAR_SCOPES);
+    let (config, redirect) = mobile_config(Provider::Google)?;
     begin_with(Provider::Google, config, redirect, Some(account.clone()))
 }
 fn begin_with(provider: Provider, config: Config, redirect: String, existing: Option<Account>) -> Result<(String, Pending)> {

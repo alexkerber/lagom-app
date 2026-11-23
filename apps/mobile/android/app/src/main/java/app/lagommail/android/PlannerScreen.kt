@@ -707,8 +707,9 @@ private const val NEW_LIST = Long.MIN_VALUE
                 enabled = !model.signingIn && !opening) {
                 opening = true
                 planner.perform {
-                    val core = requireNotNull(planner.core)
-                    val start = core.beginCalendarAccess(account.id)
+                    val start = requireNotNull(planner.core).beginCalendarAccess(account.id)
+                    model.signInForm = null
+                    model.reloadAfterCalendarGrant = planner::reload
                     openSignIn(context, start.url)
                 }
             }
