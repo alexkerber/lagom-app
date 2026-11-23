@@ -189,6 +189,17 @@ final class PlannerModel {
         }
     }
 
+    func edit(_ todo: Todo, title: String, due: Date?) async {
+        let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rename = text.isEmpty || text == todo.title ? nil : text
+        let words = DateWords()
+        let changeDue = due != todo.due.flatMap(words.day)
+        guard let core, rename != nil || changeDue else { return }
+        do { try await core.editTodo(id: todo.id, title: rename, changeDue: changeDue, dueDate: due.map(words.coreDay)) }
+        catch { self.error = error.localizedDescription }
+        await reloadTodos()
+    }
+
     /// Saves at once; `settle` keeps the lists as drawn a moment longer, so a tick is seen before its row moves.
     func toggle(_ todo: Todo, settle: Duration = .zero) async {
         guard let core else { return }

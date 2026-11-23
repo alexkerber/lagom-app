@@ -1172,6 +1172,11 @@ internal class FakeCore : LagomCoreInterface {
         createdEvents += Triple(accountId, calendar, form)
     }
     override suspend fun addDemoEvent(form: EventForm) { demoEvents += form }
+    override suspend fun editTodo(id: Long, title: String?, changeDue: Boolean, dueDate: String?) {
+        val index = tasks.indexOfFirst { it.id == id }
+        val task = tasks[index]
+        tasks[index] = task.copy(title = title ?: task.title, due = if (changeDue) dueDate else task.due)
+    }
     override suspend fun deleteTodo(id: Long) { tasks.removeAll { it.id == id } }
     override suspend fun todoMail(id: Long): Long? = null
     override suspend fun mailCounts(): List<MailCounts> = listOf(MailCounts("fixture", 7u, 2u))
