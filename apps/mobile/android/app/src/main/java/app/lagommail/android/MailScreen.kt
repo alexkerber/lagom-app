@@ -290,6 +290,7 @@ internal fun Mailbox.label(): String = when (this) {
                     items(groupRows, key = { it.id }) { row ->
                         Box(rowMotion(animate)) {
                             MailListRow(row, model.working, model.mailbox != Mailbox.TRASH, model.moveTargets(row.account), accountMark(model, row.account),
+                                selected = model.selectedId == row.id,
                                 onSelect = { model.perform { model.select(row.id) } },
                                 onAction = { model.perform { model.act(it, row.id) } },
                                 onRead = { model.perform { model.setRead(row) } },
@@ -488,7 +489,7 @@ internal fun swipeStage(dx: Float, rowWidth: Float, reach: Float, canDelete: Boo
 }
 
 @OptIn(ExperimentalFoundationApi::class)
-@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, mark: Color?, onSelect: () -> Unit,
+@Composable private fun MailListRow(row: MailRow, busy: Boolean, canDelete: Boolean, targets: List<MailFolder>, mark: Color?, selected: Boolean, onSelect: () -> Unit,
     onAction: (MailAction) -> Unit, onRead: () -> Unit, onMove: (MailFolder) -> Unit, onNewFolder: () -> Unit) {
     // A long press opens what iOS's context menu has: Mark read or unread, and Move to.
     var menu by remember { mutableStateOf(false) }
@@ -597,7 +598,9 @@ internal fun swipeStage(dx: Float, rowWidth: Float, reach: Float, canDelete: Boo
                 CustomAccessibilityAction(readLabel) { if (!busy) onRead(); !busy } +
                 targets.map { folder -> CustomAccessibilityAction("Move to ${folder.path}") { if (!busy) onMove(folder); !busy } } +
                 CustomAccessibilityAction("Move to a new folder") { if (!busy) onNewFolder(); !busy }
-        }.fillMaxWidth().heightIn(min = RowHeight).background(lagom.bg).padding(start = 10.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)) {
+        }.fillMaxWidth().heightIn(min = RowHeight)
+            // The open message keeps its row marked beside the reading pane, as on iPad and the Mac.
+            .background(if (selected) lagom.sel else lagom.bg).padding(start = 10.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)) {
             // The desktop list row: unread dot, account bar, sender and time; subject and a two-line snippet under them.
             val c = lagom
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
