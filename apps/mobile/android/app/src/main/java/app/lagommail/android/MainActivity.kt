@@ -330,7 +330,9 @@ class MainActivity : ComponentActivity() {
         if (section == AppSection.TODO) planner.reloadTodos()
     }
     var todaySettings by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(section) { if (section != AppSection.TODAY) todaySettings = false }
+    // Add account from Today's Settings opens on Mail; when it closes, Settings and Today come back.
+    LaunchedEffect(section) { if (section != AppSection.TODAY && !mailOpen) todaySettings = false }
+    LaunchedEffect(mailOpen) { if (!mailOpen && todaySettings && section == AppSection.MAIL) show(AppSection.TODAY) }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
     Scaffold(containerColor = if (sidebar) lagom.sidebar else lagom.bg,
@@ -340,11 +342,16 @@ class MainActivity : ComponentActivity() {
             // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop and iPad.
             Box(Modifier.weight(1f).fillMaxHeight().background(lagom.bg)) {
                 when (section) {
-                    // A phone reaches Settings from Today's title too (Alex 2026-11-23); a tablet has its sidebar row.
-                    AppSection.TODAY -> if (todaySettings) SettingsScreen(model) { todaySettings = false }
-                    else TodayScreen(planner, model, open = ::show, openSettings = if (sidebar) null else ({ todaySettings = true })) { id ->
-                        show(AppSection.MAIL)
-                        opening = model.perform { model.openInbox(id) }
+                    // Today's title opens Settings too (Alex 2026-11-23: "hur kommer jag till settings"). Settings covers
+                    // Today instead of replacing it, so Back finds Today where it was.
+                    AppSection.TODAY -> Box(Modifier.fillMaxSize()) {
+                        Box(if (todaySettings) Modifier.clearAndSetSemantics {} else Modifier) {
+                            TodayScreen(planner, model, open = ::show, openSettings = { todaySettings = true }) { id ->
+                                show(AppSection.MAIL)
+                                opening = model.perform { model.openInbox(id) }
+                            }
+                        }
+                        if (todaySettings) Box(Modifier.fillMaxSize().background(lagom.bg)) { SettingsScreen(model) { todaySettings = false } }
                     }
                     AppSection.MAIL -> MailScreen(model, twoPane)
                     // The tablet layouts' breakpoint: a phone, also in landscape, keeps the one-day grid.
