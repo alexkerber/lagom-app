@@ -2,6 +2,10 @@
 
 ## Brand and site
 
+- [ ] Google Calendar on a password Gmail account: Calendar asked for a Google account, and Google sign-in for the same address failed with "This account is already in lagom." Branch `fix/signin-upgrades-password-account` upgrades such an account in place (provider's own IMAP host only). Not ready: a Codex security review found seven issues, the main ones being that the mobile calendar button does not carry the account it was tapped for and that repeat sign-ins are not bound to a stable provider identity. Workaround today: remove the account and add it again with Google, which drops local-only drafts and the outbox.
+- [ ] Settings from Today's title on a phone (iOS and Android), beside the mailbox menu's entry. `ui/native-back`.
+- [ ] iOS sheets use the system bar: Cancel and the primary action in Liquid Glass on iOS 26 (Compose, New event, New task, Add account, Signature). The Duo keeps its rail. `ui/native-back`.
+- [ ] Text buttons are text on Mac and iOS; only the message actions keep icons. Android has the same rule still to check. `ui/native-back`.
 - [x] Use lowercase "lagom" in desktop, mobile and site UI, package display names, CLI help, OAuth pages and shared errors.
 
 - [x] Domain: `lagommail.app`, chosen 2026-11-09 (`lagom.app`, `.se`, `.dev` and `.email` are taken). Bundle id `app.lagommail.desktop`. Registration not confirmed in the registry on 2026-11-09.
