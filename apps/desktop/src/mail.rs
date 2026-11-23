@@ -384,6 +384,7 @@ pub fn demo_accounts() -> Vec<lagom_core::account::Account> {
         .map(|(name, email, domain)| Account {
             id: name.to_lowercase(),
             auth: Auth::Password,
+            provider_subject: None,
             credential_key: None,
             display_name: name.into(),
             email: email.into(),

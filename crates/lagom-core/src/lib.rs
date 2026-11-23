@@ -27,6 +27,8 @@ pub mod unsubscribe;
 /// `Display` is the text the person reads; `Debug` keeps the technical detail for logs.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Google signed in as {0}, which is not this account.")]
+    GoogleAccountMismatch(String),
     #[error("{}", plain(.0))]
     Invalid(&'static str),
     #[error("lagom could not read or save its data on this device")]

@@ -1896,40 +1896,6 @@ async fn create_folder_checks_the_name_as_desktop_and_creates_it_on_the_server()
 }
 
 #[test]
-fn a_calendar_grant_keeps_the_granted_scopes_and_a_removed_account_loses_its_new_secret() {
-    let (_dir, core) = fixture();
-    let s = core.stores.local.lock().unwrap();
-    let a = fixture_account(&s, "grant@gmail.com", 1);
-    let granted = format!("https://mail.google.com/ {}", lagom_core::oauth::GOOGLE_CALENDAR_SCOPES);
-    assert_eq!(save_grant(&s, &a.id, a.clone(), &granted).unwrap().id, a.id);
-    assert_eq!(s.account_scopes(&a.id).unwrap(), granted);
-    assert_eq!(&*a.password().unwrap(), "fixture", "the saved account keeps its secret");
-    s.delete_account(&a.id).unwrap();
-    assert!(matches!(save_grant(&s, &a.id, a.clone(), &granted), Err(lagom_core::Error::NotFound)));
-    assert!(a.password().is_err(), "no secret stays behind for a removed account");
-}
-
-#[test]
-fn browser_sign_in_refuses_a_password_account_on_its_own_server() {
-    use lagom_core::{account::Auth, oauth::Provider};
-    let (_dir, core) = fixture();
-    let store = core.stores.local.lock().unwrap();
-    let old = fixture_account(&store, "work@gmail.com", 3143);
-    for (provider, name, host) in [(Provider::Google, "Google", "imap.gmail.com"), (Provider::Microsoft, "Microsoft", "outlook.office365.com")] {
-        let mut signed = Account::new(old.email.clone(), old.imap.clone(), old.smtp.clone()).unwrap();
-        signed.imap.host = host.into();
-        signed.imap.security = Security::Tls;
-        signed.auth = Auth::OAuth(provider);
-        signed.set_password("token").unwrap();
-        let error = store.save_browser_sign_in(signed.clone(), "mail").unwrap_err();
-        assert_eq!(error.to_string(), format!("This address is already in lagom with its own mail server. Remove it first to sign in with {name}."));
-        assert_eq!(store.accounts().unwrap(), [old.clone()]);
-        assert_eq!(old.password().unwrap().as_str(), "fixture");
-        assert!(signed.password().is_err());
-    }
-}
-
-#[test]
 fn browser_sign_in_upgrades_password_account() {
     let (dir, core) = fixture();
     let mut store = core.stores.local.lock().unwrap();
@@ -1943,41 +1909,49 @@ fn browser_sign_in_upgrades_password_account() {
     store.save_draft(&draft).unwrap();
     let queued = store.enqueue(&old, &Outgoing { to: vec!["reader@example.com".into()], text: "Queued".into(), ..Default::default() }, 0).unwrap();
     let message = mail(&mut store, &old, 1, 1);
-    let browser_account = || {
-        let mut a = Account::new("WORK@example.com".into(), old.imap.clone(), old.smtp.clone()).unwrap();
-        a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
-        a.imap.host = "imap.gmail.com".into();
-        a.imap.security = Security::Tls;
-        a
+    let browser = |source: &Account, email: &str, subject: &str| {
+        let mut account = source.clone();
+        account.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+        account.provider_subject = Some(subject.into());
+        lagom_core::oauth::SignedIn { account, email: email.into(), display_name: "Provider".into(),
+            scopes: "mail".into(), refresh_token: Zeroizing::new("replacement".into()),
+            access_token: Zeroizing::new("access".into()), expires_in: 3600 }
     };
-    let signed = browser_account();
+    let email = "WORK@example.com";
+    assert!(store.save_browser_sign_in(browser(&old, email, "one"), None).is_err());
+    for wrong in ["else@example.com", email] {
+        let mut target = old.clone();
+        if wrong == email { target.imap.username = "else@example.com".into(); }
+        store.save_account(&target).unwrap();
+        let error = store.save_browser_sign_in(browser(&target, wrong, "one"), Some(&old.id)).unwrap_err();
+        assert_eq!(error.to_string(), format!("Google signed in as {wrong}, which is not this account."));
+        assert_eq!(old.password().unwrap().as_str(), "fixture");
+    }
+    store.save_account(&old).unwrap();
     let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_scopes BEFORE UPDATE OF scopes ON accounts
         BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
-    signed.set_password("token").unwrap();
-    assert!(store.save_browser_sign_in(signed.clone(), "first").is_err());
+    assert!(store.save_browser_sign_in(browser(&old, email, "one"), Some(&old.id)).is_err());
     db.execute_batch("DROP TRIGGER fail_scopes").unwrap();
-    signed.set_password("token").unwrap();
-    memory_secrets::fail_next_delete(&old.id);
-    assert!(store.save_browser_sign_in(signed.clone(), "first").is_err());
-    assert_eq!(store.account_scopes(&old.id).unwrap(), "");
-    assert_eq!(store.accounts().unwrap(), [old.clone()]);
+    let pending: String = db.query_row("SELECT credential_key FROM pending_credentials", [], |r| r.get(0)).unwrap();
+    let mut orphan = old.clone();
+    orphan.credential_key = Some(pending);
+    orphan.set_password("interrupted").unwrap();
+    drop(Store::open(store.path()).unwrap());
+    assert!(orphan.password().is_err());
     assert_eq!(old.password().unwrap().as_str(), "fixture");
-    signed.set_password("token").unwrap();
-    assert_eq!(store.save_browser_sign_in(signed.clone(), "first").unwrap().id, old.id);
+    memory_secrets::fail_next_delete(&old.id);
+    let saved = store.save_browser_sign_in(browser(&old, email, "one"), Some(&old.id)).unwrap();
+    assert!(old.password().is_ok());
+    db.execute("INSERT INTO pending_credentials VALUES (?1,?2)", rusqlite::params![saved.id, saved.credential_key]).unwrap();
+    drop(Store::open(store.path()).unwrap());
+    assert_eq!(saved.password().unwrap().as_str(), "replacement");
     assert!(old.password().is_err());
-    assert!(signed.password().is_err());
-    // A process can exit after the database commits and before the base password is deleted.
-    old.set_password("leftover").unwrap();
-    let again = browser_account();
-    again.set_password("replacement").unwrap();
-    store.save_browser_sign_in(again, "second").unwrap();
-    assert!(old.password().is_err());
-    let mut wrong = browser_account();
-    wrong.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Microsoft);
-    wrong.set_password("wrong").unwrap();
-    assert!(store.save_browser_sign_in(wrong.clone(), "wrong").is_err());
-    assert!(wrong.password().is_err());
+    assert!(store.save_browser_sign_in(browser(&saved, email, "two"), Some(&saved.id)).is_err());
+    let renewed = store.save_browser_sign_in(browser(&saved, email, "one"), Some(&saved.id)).unwrap();
+    Store::persist_rotated_token(store.path(), &saved, "stale").unwrap();
+    assert!(saved.password().is_err());
+    assert_eq!(renewed.provider_subject.as_deref(), Some("one"));
     let accounts = store.accounts().unwrap();
     assert_eq!(accounts.len(), 1);
     let a = &accounts[0];
@@ -1986,13 +1960,44 @@ fn browser_sign_in_upgrades_password_account() {
     assert_eq!(store.signature(&a.id).unwrap(), "Work signature");
     assert_eq!(store.draft(&draft.id).unwrap(), draft);
     assert_eq!(store.due_outbox(&a.id, 0).unwrap(), [queued]);
-    assert_eq!(a.imap, signed.imap);
-    assert_eq!(a.auth, signed.auth);
+    assert_eq!(a.imap.host, "imap.gmail.com");
+    assert_eq!(a.auth, renewed.auth);
     assert_eq!(a.password().unwrap().as_str(), "replacement");
-    assert_eq!(store.account_scopes(&a.id).unwrap(), "second");
+    assert_eq!(store.account_scopes(&a.id).unwrap(), "mail");
     assert_eq!(store.message(message).unwrap().summary.account, old.id);
-    old.set_password("leftover").unwrap();
-    a.delete_password().unwrap();
+    db.execute("INSERT INTO pending_credentials VALUES (?1,?2)", rusqlite::params![old.id, orphan.credential_key]).unwrap();
+    orphan.set_password("leftover").unwrap();
+    store.remove_credentials_and_account(&a.id, Account::delete_password).unwrap();
+    assert!(matches!(store.save_browser_sign_in(browser(a, email, "one"), Some(&a.id)), Err(lagom_core::Error::NotFound)));
+    Store::persist_rotated_token(store.path(), a, "removed").unwrap();
+    assert!(orphan.password().is_err());
     assert!(old.password().is_err());
     assert!(a.password().is_err());
+}
+
+#[test]
+fn rotated_token_waits_for_credential_replacement() {
+    let (_dir, core) = fixture();
+    let store = core.stores.local.lock().unwrap();
+    let account = fixture_account(&store, "rotation@example.com", 1);
+    let path = store.path().to_path_buf();
+    let mut writer = rusqlite::Connection::open(&path).unwrap();
+    let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+    tx.execute("UPDATE accounts SET credential_key='replacement' WHERE id=?1", [&account.id]).unwrap();
+
+    std::thread::scope(|scope| {
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let account = &account;
+        scope.spawn(move || {
+            started.send(()).unwrap();
+            Store::persist_rotated_token(&path, account, "stale").unwrap();
+            finished.send(()).unwrap();
+        });
+        ready.recv().unwrap();
+        assert!(matches!(done.recv_timeout(std::time::Duration::from_millis(50)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        tx.commit().unwrap();
+        done.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    });
+    assert_eq!(account.password().unwrap().as_str(), "fixture");
 }

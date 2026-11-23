@@ -298,6 +298,8 @@ impl AddAccount {
         let email = self.typed_email(cx);
         self.state = if !email.split_once('@').is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.')) {
             State::Failed("Enter your full email address.".into())
+        } else if self.existing.contains(&email.to_lowercase()) {
+            State::Failed(format!("{email} is already in lagom."))
         } else {
             cx.emit(Discover(email));
             State::Discovering
@@ -310,7 +312,6 @@ impl AddAccount {
         if self.screen != Screen::Address || self.state != State::Discovering || email != self.typed_email(cx) { return; }
         match discovery {
             Discovery::OAuth(p) if (self.available)(p) => self.browser(p, false, window, cx),
-            _ if self.existing.contains(&email.to_lowercase()) => self.state = State::Failed(format!("{email} is already in lagom.")),
             Discovery::OAuth(oauth::Provider::Google) => self.form(Provider::Gmail, window, cx),
             Discovery::OAuth(oauth::Provider::Microsoft) => self.form(Provider::Outlook, window, cx),
             Discovery::Password { preset, help_url } => {
@@ -329,7 +330,7 @@ impl AddAccount {
     }
 
     /// Browser sign-in for `p`; `start` opens the browser at once, as "Continue with Google" does.
-    pub(crate) fn browser(&mut self, p: oauth::Provider, start: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn browser(&mut self, p: oauth::Provider, start: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy() && self.state != State::Discovering { return; }
         self.screen = Screen::Browser(p);
         self.state = State::Idle;
@@ -946,9 +947,8 @@ mod tests {
         typed("me", &view, cx);
         assert!(view.read_with(cx, |v, _| v.state == State::Failed("Enter your full email address.".into())));
         typed(" me@example.com ", &view, cx);
-        view.update_in(cx, |v, window, cx| v.discovered("me@example.com", Discovery::Manual, window, cx));
         assert!(view.read_with(cx, |v, _| v.state == State::Failed("me@example.com is already in lagom.".into())));
-        assert_eq!(*asked.borrow(), ["me@example.com"]);
+        assert!(asked.borrow().is_empty());
         // Google with a client: the browser step, without opening the browser yet.
         typed("a@gmail.com", &view, cx);
         view.update_in(cx, |v, window, cx| v.discovered("b@gmail.com", Discovery::Manual, window, cx));
@@ -973,7 +973,7 @@ mod tests {
             let s = v.servers(cx);
             assert_eq!((s.imap_host.as_str(), s.smtp_port.as_str(), s.smtp_security), ("mail.corp.example", "465", Security::Tls));
         });
-        assert_eq!(*asked.borrow(), ["me@example.com", "a@gmail.com", "a@outlook.com", "a@corp.example"]);
+        assert_eq!(*asked.borrow(), ["a@gmail.com", "a@outlook.com", "a@corp.example"]);
         // Discovery's login names reach the account, but only for the address they were found for.
         let users = events(&view, cx, |Connect(a, _): &Connect| format!("{} {}", a.imap.username, a.smtp.username));
         view.update(cx, |v, cx| v.password.update(cx, |f, cx| f.set_text("pw", cx)));

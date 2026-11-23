@@ -63,7 +63,7 @@ impl Provider {
             Self::Microsoft => "outlook.office365.com",
         }
     }
-    fn servers(self, email: &str) -> (ServerConfig, ServerConfig) {
+    pub(crate) fn servers(self, email: &str) -> (ServerConfig, ServerConfig) {
         let smtp = match self {
             Self::Google => "smtp.gmail.com",
             Self::Microsoft => "smtp.office365.com",
@@ -146,12 +146,14 @@ struct Config {
     token: String,
     scope: String,
 }
-#[derive(Debug)]
 pub struct SignedIn {
     pub email: String,
     pub display_name: String,
     pub account: Account,
     pub scopes: String,
+    pub refresh_token: Zeroizing<String>,
+    pub access_token: Zeroizing<String>,
+    pub expires_in: u64,
 }
 
 fn random() -> String {
@@ -171,9 +173,11 @@ pub async fn sign_in(provider: Provider, open_url: impl FnOnce(&str)) -> Result<
     sign_in_with(provider, provider.config(), None, open_url).await
 }
 /// Replaces credentials only after the provider confirms the existing account's email.
-pub async fn reauthenticate(account: &Account, scopes: &str, open_url: impl FnOnce(&str)) -> Result<SignedIn> {
-    let Auth::OAuth(provider) = account.auth else {
-        return Err(Error::Invalid("not an OAuth account"));
+pub async fn reauthenticate(account: &Account, scopes: &str, calendar_consent: bool, open_url: impl FnOnce(&str)) -> Result<SignedIn> {
+    let provider = match account.auth {
+        Auth::OAuth(provider) => provider,
+        Auth::Password if calendar_consent && account.google_hosted_password() => Provider::Google,
+        _ => return Err(Error::Invalid("not an OAuth account")),
     };
     let mut config = provider.config();
     if provider == Provider::Google {
@@ -295,9 +299,9 @@ pub fn begin(provider: Provider) -> Result<(String, Pending)> {
     begin_with(provider, config, redirect, None)
 }
 /// As desktop's calendar consent: the same Google account signs in again for mail, Calendar and Tasks.
-/// `finish` replaces its refresh token only when the same email address comes back.
+/// The pending flow keeps the selected account through the redirect.
 pub fn begin_calendar_access(account: &Account) -> Result<(String, Pending)> {
-    if account.auth != Auth::OAuth(Provider::Google) { return Err(Error::Invalid("Google calendar requires a Google account")); }
+    if account.auth != Auth::OAuth(Provider::Google) && !account.google_hosted_password() { return Err(Error::Invalid("Google calendar requires a Google account")); }
     let (mut config, redirect) = mobile_config(Provider::Google)?;
     config.scope.push(' ');
     config.scope.push_str(GOOGLE_CALENDAR_SCOPES);
@@ -308,24 +312,21 @@ fn begin_with(provider: Provider, config: Config, redirect: String, existing: Op
     let url = authorize_url(provider, &pending.config, &pending.redirect, &pending.state, &pending.verifier, pending.existing.as_ref().map(|a| a.email.as_str()))?;
     Ok((url, pending))
 }
-/// Exchanges the redirect's code and stores the refresh token. Consumes the sign-in: a code is single use.
+/// Exchanges the single-use code. The store commits the credential after checking the target.
 pub async fn finish(pending: Pending, callback: &str) -> Result<SignedIn> {
     let code = pending.code(callback)?;
     redeem(pending.provider, &pending.config, pending.existing.as_ref(), &pending.redirect, &code, &pending.verifier).await
 }
 
 async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token: &mut Token) -> Result<SignedIn> {
-    let (email, display_name) = claims(
+    let (email, display_name, subject) = claims(
         token
             .id_token
             .as_deref()
             .ok_or(Error::Invalid("ID token missing"))?,
     )?;
-    let account = if let Some(account) = existing {
-        if account.auth != Auth::OAuth(provider) || !account.email.eq_ignore_ascii_case(&email) {
-            return Err(Error::Invalid("Sign in with the same email address as this account"));
-        }
-        account.clone()
+    let mut account = if let Some(account) = existing {
+        account.with_provider_identity(provider, &email, &subject)?
     } else {
         let (imap, smtp) = provider.servers(&email);
         let mut account = Account::new(email.clone(), imap, smtp)?;
@@ -333,6 +334,7 @@ async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token:
         account.display_name = display_name.clone();
         account
     };
+    account.provider_subject = Some(subject);
     account.validate()?;
     if provider == Provider::Google && token.scope.as_ref().is_some_and(|scopes| !has_scope(scopes, "https://mail.google.com/")) {
         return Err(Error::Invalid("Mail access is required; saved credentials were not replaced"));
@@ -342,12 +344,10 @@ async fn complete_sign_in(provider: Provider, existing: Option<&Account>, token:
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or(Error::ReauthRequired)?;
-    let cache = cache(account.secret_key());
-    let mut cached = cache.lock().await;
-    // No cancellation point between persisting the credential and returning its account.
-    account.set_password(refresh)?;
-    *cached = Some(Cached::from_token(token));
     Ok(SignedIn {
+        refresh_token: Zeroizing::new(refresh.to_owned()),
+        access_token: Zeroizing::new(std::mem::take(&mut token.access_token)),
+        expires_in: token.expires_in,
         email,
         display_name,
         account,
@@ -453,12 +453,13 @@ async fn callback(listener: &TcpListener, v6: Option<&TcpListener>, state: &str)
 
 #[derive(Deserialize)]
 struct Claims {
+    sub: String,
     email_verified: Option<bool>,
     email: Option<String>,
     preferred_username: Option<String>,
     name: Option<String>,
 }
-fn claims(jwt: &str) -> Result<(String, String)> {
+fn id_token_claims(jwt: &str) -> Result<Claims> {
     let parts: Vec<_> = jwt.split('.').collect();
     if parts.len() != 3 {
         return Err(Error::Invalid("invalid ID token"));
@@ -471,6 +472,11 @@ fn claims(jwt: &str) -> Result<(String, String)> {
     );
     let claims: Claims =
         serde_json::from_slice(&payload).map_err(|_| Error::Invalid("invalid ID token claims"))?;
+    if claims.sub.is_empty() { return Err(Error::Invalid("invalid ID token claims")); }
+    Ok(claims)
+}
+fn claims(jwt: &str) -> Result<(String, String, String)> {
+    let claims = id_token_claims(jwt)?;
     if claims.email_verified == Some(false) {
         return Err(Error::Invalid("Email address has not been verified"));
     }
@@ -487,7 +493,7 @@ fn claims(jwt: &str) -> Result<(String, String)> {
     if name.chars().any(char::is_control) {
         return Err(Error::Invalid("invalid ID token name"));
     }
-    Ok((email, name))
+    Ok((email, name, claims.sub))
 }
 
 pub(crate) fn http(timeout: Duration) -> Result<reqwest::Client> {
@@ -582,6 +588,16 @@ impl Cached {
         }
     }
 }
+impl SignedIn {
+    pub(crate) fn cache_access(&mut self, account: &Account) {
+        let cached = Cached {
+            token: std::mem::take(&mut self.access_token),
+            expires: Instant::now() + Duration::from_secs(self.expires_in.min(86400).saturating_sub(30)),
+        };
+        caches().lock().unwrap_or_else(|e| e.into_inner()).insert(account.secret_key().into(),
+            Arc::new(tokio::sync::Mutex::new(Some(cached))));
+    }
+}
 type TokenCache = Arc<tokio::sync::Mutex<Option<Cached>>>;
 fn caches() -> &'static Mutex<HashMap<String, TokenCache>> {
     static CACHE: OnceLock<Mutex<HashMap<String, TokenCache>>> = OnceLock::new();
@@ -600,6 +616,11 @@ pub(crate) fn forget(id: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(id);
+}
+thread_local! { static REFRESH_STORE: std::cell::OnceCell<std::path::PathBuf> = const { std::cell::OnceCell::new() }; }
+/// The desktop mail worker runs its refresh tasks on one dedicated thread.
+pub fn configure_refresh_store(path: &std::path::Path) {
+    REFRESH_STORE.with(|store| store.set(path.to_owned()).expect("refresh store already configured"));
 }
 /// `rejected` is the token refused by the server. Concurrent IMAP/SMTP retries share one refresh.
 pub(crate) async fn access_token(account: &Account, rejected: Option<&str>) -> Result<Zeroizing<String>> {
@@ -630,8 +651,14 @@ async fn access_token_with(
     // Google refreshes keep the grant; mail must not narrow a calendar-enabled token.
     if account.auth != Auth::OAuth(Provider::Google) { fields.push(("scope", config.scope.as_str())); }
     let mut token = exchange(config, &fields).await?;
+    if let (Some(subject), Some(jwt)) = (&account.provider_subject, &token.id_token) {
+        if id_token_claims(jwt)?.sub != *subject { return Err(Error::ReauthRequired); }
+    }
     if let Some(refresh) = token.refresh_token.as_deref().filter(|s| !s.is_empty()) {
-        account.set_password(refresh)?;
+        REFRESH_STORE.with(|store| match store.get() {
+            Some(path) => crate::store::Store::persist_rotated_token(path, account, refresh),
+            None => account.set_password(refresh),
+        })?;
     }
     let c = Cached::from_token(&mut token);
     let result = c.token.clone();

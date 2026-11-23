@@ -65,7 +65,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 20 {
+        if version > 21 {
             return Err(Error::Invalid("store was created by a newer lagom version"));
         }
         if version == 0 {
@@ -145,6 +145,12 @@ impl Store {
         if version < 20 {
             store.db.execute_batch(include_str!("schema_v20.sql"))?;
         }
+        if version < 21 {
+            store.db.execute_batch(include_str!("schema_v21.sql"))?;
+        }
+        if store.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_credentials)", [], |r| r.get(0))? {
+            store.clean_pending(None)?;
+        }
         Ok(store)
     }
     pub fn signature(&self, account: &str) -> Result<String> {
@@ -216,76 +222,115 @@ impl Store {
             params![account.id,account.display_name,account.email,account.imap.host,account.imap.port,account.imap.security.as_str(),account.imap.username,account.smtp.host,account.smtp.port,account.smtp.security.as_str(),account.smtp.username,account.auth.as_str()])?;
         Ok(())
     }
-    /// A browser sign-in owns a fresh account id and its refresh token until it is saved.
-    pub fn save_browser_sign_in(&self, signed: Account, scopes: &str) -> Result<Account> {
-        let result = (|| {
-            let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
-            let Auth::OAuth(provider) = signed.auth else { return Err(Error::Invalid("Expected a provider sign-in")); };
-            let mut matching = self.accounts()?.into_iter().filter(|a| a.email.eq_ignore_ascii_case(&signed.email));
-            let Some(old) = matching.next() else {
-                self.save_account(&signed)?;
-                self.set_account_scopes(&signed.id, scopes)?;
-                tx.commit()?;
-                return Ok(signed.clone());
-            };
-            if matching.next().is_some() {
-                return Err(Error::Invalid("More than one saved account has this address."));
-            }
-            if old.auth != Auth::Password && old.auth != signed.auth {
-                return Err(Error::Invalid("This address signs in with another provider."));
-            }
-            let old_scopes = self.account_scopes(&old.id)?;
-            let mut account = old.clone();
-            account.auth = signed.auth;
-            if old.auth == Auth::Password {
-                if !old.imap.host.eq_ignore_ascii_case(provider.imap_host()) {
-                    return Err(Error::Invalid(match provider {
-                        crate::oauth::Provider::Google => "This address is already in lagom with its own mail server. Remove it first to sign in with Google.",
-                        crate::oauth::Provider::Microsoft => "This address is already in lagom with its own mail server. Remove it first to sign in with Microsoft.",
-                    }));
-                }
-                account.imap = signed.imap.clone();
-                account.smtp = signed.smtp.clone();
-            }
-            // A separate key keeps the working credential intact until SQLite commits.
-            account.credential_key = Some(format!("{}:{}", old.id, signed.id));
-            account.set_password(&signed.password()?)?;
-            let save = || -> Result<()> {
-                self.replace_sign_in(&old, &account, scopes)?;
-                if old.auth == account.auth {
-                    self.resume_outbox(&account.id, chrono::Utc::now().timestamp_millis())?;
-                }
-                signed.delete_password()?;
-                tx.commit()?;
-                Ok(())
-            };
-            if let Err(error) = save() {
-                account.delete_secret(account.credential_key.as_deref())?;
-                return Err(error);
-            }
-            if let Err(error) = old.delete_secret(old.credential_key.as_deref()) {
-                self.replace_sign_in(&account, &old, &old_scopes)?;
-                account.delete_secret(account.credential_key.as_deref())?;
-                return Err(error);
-            }
-            // An interrupted previous upgrade may have left the base password behind.
-            if old.credential_key.is_some() { let _ = old.delete_secret(None); }
-            Ok(account)
-        })();
-        if result.is_err() { signed.delete_password()?; }
-        result
+    fn credential_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?)
     }
 
-    fn replace_sign_in(&self, before: &Account, after: &Account, scopes: &str) -> Result<()> {
-        let changed = self.db.execute("UPDATE accounts SET auth=?3, scopes=?4, credential_key=?5,
-            imap_host=?6, imap_port=?7, imap_security=?8, imap_username=?9,
-            smtp_host=?10, smtp_port=?11, smtp_security=?12, smtp_username=?13
-            WHERE id=?1 AND credential_key IS ?2",
-            params![before.id, before.credential_key, after.auth.as_str(), scopes, after.credential_key,
-                after.imap.host, after.imap.port, after.imap.security.as_str(), after.imap.username,
-                after.smtp.host, after.smtp.port, after.smtp.security.as_str(), after.smtp.username])?;
-        if changed == 0 { return Err(Error::NotFound); }
+    fn clean_pending(&self, id: Option<&str>) -> Result<()> {
+        let tx = self.credential_transaction()?;
+        self.clean_pending_locked(id)?;
+        Ok(tx.commit()?)
+    }
+
+    fn clean_pending_locked(&self, id: Option<&str>) -> Result<()> {
+        let mut stmt = self.db.prepare("SELECT p.account,p.credential_key,
+            EXISTS(SELECT 1 FROM accounts a WHERE a.id=p.account AND coalesce(a.credential_key,'')=p.credential_key)
+            FROM pending_credentials p WHERE ?1 IS NULL OR account=?1")?;
+        let pending = stmt.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (account, key, current) in pending {
+            if !current { Account::delete_key(&account, (!key.is_empty()).then_some(key.as_str()))?; }
+            self.db.execute("DELETE FROM pending_credentials WHERE account=?1 AND credential_key=?2", params![account, key])?;
+        }
         Ok(())
+    }
+
+    // Commit the reservation before touching the keychain. Recovery and installation then
+    // compete for the same SQLite write lock, so a recovered key can never be installed.
+    fn reserve_credential<T>(&self, id: &str, key: &str, validate: impl Fn() -> Result<T>)
+        -> Result<(rusqlite::Transaction<'_>, T)> {
+        loop {
+            let reservation = self.credential_transaction()?;
+            validate()?;
+            self.db.execute("INSERT OR IGNORE INTO pending_credentials VALUES (?1,?2)", params![id, key])?;
+            reservation.commit()?;
+            let tx = self.credential_transaction()?;
+            if self.db.execute("DELETE FROM pending_credentials WHERE account=?1 AND credential_key=?2", params![id, key])? == 1 {
+                return Ok((tx, validate()?));
+            }
+        }
+    }
+
+    fn check_new_account(&self, account: &Account) -> Result<()> {
+        if self.db.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1 OR email=?2 COLLATE NOCASE)",
+            params![account.id, account.email], |r| r.get(0))? {
+            return Err(Error::Invalid("This account is already in lagom."));
+        }
+        Ok(())
+    }
+
+    pub fn save_browser_sign_in(&self, mut signed: crate::oauth::SignedIn, target: Option<&str>) -> Result<Account> {
+        let Auth::OAuth(provider) = signed.account.auth else { return Err(Error::Invalid("Expected a provider sign-in.")); };
+        let subject = signed.account.provider_subject.as_deref().filter(|s| !s.is_empty()).ok_or(Error::Invalid("invalid ID token claims"))?;
+        let key = uuid::Uuid::new_v4().to_string();
+        let (tx, mut account) = self.reserve_credential(&signed.account.id, &key, || {
+            if let Some(id) = target {
+                let current = self.accounts()?.into_iter().find(|a| a.id == id).ok_or(Error::NotFound)?;
+                if current.id != signed.account.id || current.credential_key != signed.account.credential_key {
+                    return Err(Error::Invalid("Account changed during sign-in."));
+                }
+                current.with_provider_identity(provider, &signed.email, subject)
+            } else {
+                self.check_new_account(&signed.account)?;
+                Ok(signed.account.clone())
+            }
+        })?;
+        if target.is_some() {
+            self.db.execute("INSERT OR IGNORE INTO pending_credentials VALUES (?1,?2)",
+                params![account.id, account.credential_key.as_deref().unwrap_or("")])?;
+            self.resume_outbox(&account.id, chrono::Utc::now().timestamp_millis())?;
+        }
+        account.credential_key = Some(key);
+        account.provider_subject = Some(subject.to_owned());
+        self.save_account(&account)?;
+        self.db.execute("UPDATE accounts SET credential_key=?2,provider_subject=?3,scopes=?4 WHERE id=?1",
+            params![account.id, account.credential_key, subject, signed.scopes])?;
+        account.set_password(&signed.refresh_token)?;
+        tx.commit()?;
+        signed.cache_access(&account);
+        // The sign-in is committed. Failed deletions remain journaled for recovery.
+        if let Err(error) = self.clean_pending(Some(&account.id)) {
+            eprintln!("lagom: credential cleanup pending: {error}");
+        }
+        Ok(account)
+    }
+
+    pub fn save_password_account(&self, account: &Account, password: &str) -> Result<()> {
+        let (tx, ()) = self.reserve_credential(&account.id, "", || self.check_new_account(account))?;
+        self.save_account(account)?;
+        account.set_password(password)?;
+        Ok(tx.commit()?)
+    }
+
+    pub fn remove_credentials_and_account(&self, id: &str, delete: impl FnOnce(&Account) -> Result<()>) -> Result<()> {
+        let tx = self.credential_transaction()?;
+        self.clean_pending_locked(Some(id))?;
+        if let Some(account) = self.accounts()?.into_iter().find(|a| a.id == id) {
+            delete(&account)?;
+            self.delete_account(id)?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// SQLite's write lock also covers keychain writes during replacement and removal.
+    pub fn persist_rotated_token(path: &Path, account: &Account, token: &str) -> Result<()> {
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let store = Self { db };
+        let tx = store.credential_transaction()?;
+        let current = tx.query_row("SELECT credential_key FROM accounts WHERE id=?1", [&account.id],
+            |r| r.get::<_, Option<String>>(0)).optional()?;
+        if current == Some(account.credential_key.clone()) { account.set_password(token)?; }
+        Ok(tx.commit()?)
     }
 
     pub fn set_account_name(&self, account: &Account) -> Result<()> {
@@ -339,12 +384,13 @@ impl Store {
                 r.get::<_, String>(10)?,
                 r.get::<_, String>(11)?,
                 r.get::<_, Option<String>>("credential_key")?,
+                r.get::<_, Option<String>>("provider_subject")?,
             ))
         })?;
         rows.map(|r| {
-            let (id, display_name, email, ih, ip, is, iu, sh, sp, ss, su, auth, credential_key) = r?;
+            let (id, display_name, email, ih, ip, is, iu, sh, sp, ss, su, auth, credential_key, provider_subject) = r?;
             Ok(Account {
-                credential_key,
+                credential_key, provider_subject,
                 auth: Auth::parse(&auth)?,
                 id,
                 display_name,
@@ -442,7 +488,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -1097,7 +1143,7 @@ mod mail_tests {
         let folders = [old.folder(inbox).unwrap(), old.folder(custom).unwrap()];
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
         for message in &messages {
             assert_eq!(store.message(message.summary.id).unwrap(), *message);
             assert!(!store.inline_loaded(message.summary.id).unwrap());
@@ -1141,7 +1187,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -1223,7 +1269,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -1380,7 +1426,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1452,7 +1498,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1530,7 +1576,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            20
+            21
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1559,7 +1605,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 20);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

@@ -332,11 +332,7 @@ fn account(store: &Store, id: &str) -> lagom_core::Result<Account> {
 async fn add(store: &Store, account: Account, password: Zeroizing<String>) -> lagom_core::Result<MailAccount> {
     let session = ImapSync::login(&account, &password).await?;
     smtp::verify(&account, &password).await?;
-    account.set_password(&password)?;
-    if let Err(error) = store.save_account(&account) {
-        account.delete_password()?;
-        return Err(error);
-    }
+    store.save_password_account(&account, &password)?;
     let _ = session.logout().await;
     Ok(account.into())
 }
@@ -381,14 +377,6 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     if let Some(session) = session { let _ = network(session.logout()); }
     if let Some(error) = first { return Err(error); }
     match error { Some(error) => Err(error), None => Ok(()) }
-}
-/// After a calendar grant, which already replaced this account's refresh token: keep the scopes Google granted this time.
-fn save_grant(s: &Store, id: &str, account: Account, scopes: &str) -> lagom_core::Result<MailAccount> {
-    match s.set_account_scopes(id, scopes) {
-        // Removed while the browser was open: its new secret must not stay behind.
-        Err(lagom_core::Error::NotFound) => { let _ = account.delete_password(); Err(lagom_core::Error::NotFound) }
-        other => other.map(|()| account.into()),
-    }
 }
 /// Mail, then Calendar and Google Tasks, which run even when mail failed.
 fn sync_with_google(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
@@ -513,9 +501,7 @@ impl LagomCore {
             let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = &*stores.folder_lock();
             let signed = network(lagom_core::oauth::finish(pending, &callback_url))?;
-            let account = signed.account;
-            if let Some(id) = grant { return save_grant(s, &id, account, &signed.scopes); }
-            s.save_browser_sign_in(account, &signed.scopes).map(Into::into)
+            s.save_browser_sign_in(signed, grant.as_deref()).map(Into::into)
         }).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
@@ -523,10 +509,9 @@ impl LagomCore {
         self.run_sync(move |stores| {
             let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = &mut *stores.folder_lock();
-            account(s, &id)?.delete_password()?;
             // Serialize with refresh, and evict even if the caller cancels this future.
             let _local = stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            s.delete_account(&id)?;
+            s.remove_credentials_and_account(&id, Account::delete_password)?;
             stores.contacts.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
             stores.unsaved_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(account, _, _)| *account != id);
             Ok(())

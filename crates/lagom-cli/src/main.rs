@@ -322,8 +322,8 @@ async fn main() -> Result<()> {
         },
         Command::SignIn { provider } => {
             let signed = sign_in(provider.into()).await?;
-            let account = store.save_browser_sign_in(signed.account, &signed.scopes)?;
-            println!("Signed in {} ({})", clean(&signed.email), account.id);
+            let account = store.save_browser_sign_in(signed, None)?;
+            println!("Signed in {} ({})", clean(&account.email), account.id);
         }
         Command::Discover { email } => match discover(&email).await {
             Discovery::OAuth(provider) => println!(
@@ -382,11 +382,7 @@ async fn main() -> Result<()> {
                 bail!("Password cannot be empty");
             }
             ImapSync::login(&account, &password).await?.logout().await?;
-            account.set_password(&password)?;
-            if let Err(error) = store.save_account(&account) {
-                let _ = account.delete_password();
-                return Err(error.into());
-            }
+            store.save_password_account(&account, &password)?;
             println!("Added {} ({})", account.email, account.id);
         }
         Command::Accounts => {

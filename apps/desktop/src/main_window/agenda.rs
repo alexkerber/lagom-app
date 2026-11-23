@@ -23,7 +23,7 @@ impl MainWindow {
         match result {
             Ok((events, accounts)) => {
                 self.today.events = events;
-                self.today.calendar_sync.retain(|id, _| accounts.iter().any(|(a, _)| a.id == *id));
+                self.today.calendar_sync.retain(|id, _| accounts.iter().any(|(a, _)| a.id == *id) || live.accounts.iter().any(|a| a.google_hosted_password() && a.id == *id));
                 self.today.calendar_accounts = accounts;
             }
             Err(e) => self.notify(format!("Could not read calendar: {e}"), cx),
@@ -34,27 +34,20 @@ impl MainWindow {
         if self.demo && self.live.is_none() { return div(); }
         let t = self.theme;
         let mut controls = div().id("calendar-accounts").flex_shrink_0().max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap(px(8.));
-        if self.today.calendar_accounts.is_empty() && self.today.events.is_empty() {
-            if self.live.as_ref().is_some_and(|live| live.accounts.iter().any(|a| a.google_hosted_password())) {
-                controls = controls.child(mono("Sign in with the same address to keep your mail.", t.ink2))
-                    .child(button(&t, "Sign in with Google", None).on_click(cx.listener(|this, _, window, cx| {
-                        this.add_account(window, cx);
-                        if let Page::AddAccount(add) = &this.page {
-                            add.update(cx, |add, cx| add.browser(Provider::Google, true, window, cx));
-                        }
-                    })));
-            } else {
-                controls = controls.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
-            }
+        let upgrades = self.live.iter().flat_map(|live| live.accounts.iter())
+            .filter(|a| a.google_hosted_password()).map(|a| (a, false));
+        let mut accounts = self.today.calendar_accounts.iter().map(|(a, allowed)| (a, *allowed)).chain(upgrades).peekable();
+        if accounts.peek().is_none() && self.today.events.is_empty() {
+            controls = controls.child(button(&t, "Show your Google Calendar", None).on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))));
         }
-        for (ix, (account, allowed)) in self.today.calendar_accounts.iter().enumerate() {
+        for (ix, (account, allowed)) in accounts.enumerate() {
             let id = account.id.clone();
             let state = self.today.calendar_sync.get(&id);
             let signing_in = state == Some(&SyncState::SigningIn);
             controls = controls.child(div().flex().items_center().gap(px(8.))
                 .children(state.map(|state| icon(polish::sync_icon(state), t.ink2, 16.)))
                 .child(mono(account.email.clone(), t.ink2))
-                .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else { "Show your Google Calendar" }, None)
+                .when(!allowed || signing_in, |d| d.child(button(&t, if signing_in { "Cancel sign-in" } else if account.google_hosted_password() { "Sign in with Google" } else { "Show your Google Calendar" }, None)
                     .debug_selector(move || format!("allow-calendar-{ix}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let cmd = if signing_in { Cmd::CancelSignIn } else { Cmd::AllowCalendar(id.clone()) };

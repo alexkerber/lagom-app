@@ -33,11 +33,11 @@ fn jwt(payload: &str) -> String {
 #[test]
 fn jwt_identity() {
     assert_eq!(
-        claims(&jwt(r#"{"email":"a@gmail.com","name":"Alice","email_verified":true}"#)).unwrap(),
-        ("a@gmail.com".into(), "Alice".into())
+        claims(&jwt(r#"{"sub":"fixture-sub","email":"a@gmail.com","name":"Alice","email_verified":true}"#)).unwrap(),
+        ("a@gmail.com".into(), "Alice".into(), "fixture-sub".into())
     );
     assert_eq!(
-        claims(&jwt(r#"{"preferred_username":"a@outlook.com"}"#))
+        claims(&jwt(r#"{"sub":"fixture-sub","preferred_username":"a@outlook.com"}"#))
             .unwrap()
             .0,
         "a@outlook.com"
@@ -46,8 +46,9 @@ fn jwt_identity() {
         "invalid".into(),
         "a.%.c".into(),
         jwt("{}"),
-        jwt(r#"{"email":"a@gmail.com","email_verified":false}"#),
-        jwt(r#"{"email":"a\n@b.com"}"#),
+        jwt(r#"{"email":"a@gmail.com"}"#),
+        jwt(r#"{"sub":"fixture-sub","email":"a@gmail.com","email_verified":false}"#),
+        jwt(r#"{"sub":"fixture-sub","email":"a\n@b.com"}"#),
     ] {
         assert!(claims(&token).is_err());
     }
@@ -121,6 +122,13 @@ fn memory() -> &'static Memory {
     })
 }
 
+fn save(signed: SignedIn, existing: Option<&Account>) -> Account {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path().join("mail.db")).unwrap();
+    if let Some(a) = existing { store.save_account(a).unwrap(); }
+    store.save_browser_sign_in(signed, existing.map(|a| a.id.as_str())).unwrap()
+}
+
 #[tokio::test]
 async fn reauthentication_preserves_account_and_rejects_another_identity_before_writing() {
     let memory = memory();
@@ -134,15 +142,15 @@ async fn reauthentication_preserves_account_and_rejects_another_identity_before_
             scope: None,
             access_token: "new-access".into(), expires_in: 3600, token_type: "Bearer".into(),
             refresh_token: Some("reauth-fixture-refresh".into()),
-            id_token: Some(jwt(&serde_json::json!({"email": email, "name": "Provider label"}).to_string())),
+            id_token: Some(jwt(&serde_json::json!({"sub":"fixture-sub","email": email, "name": "Provider label"}).to_string())),
         };
         let mut wrong = token("other@example.com");
         wrong.refresh_token = Some("must-not-save".into());
         assert!(matches!(complete_sign_in(provider, Some(&account), &mut wrong).await,
-            Err(Error::Invalid("Sign in with the same email address as this account"))));
+            Err(Error::Invalid("Sign in with the same email address as this account") | Error::GoogleAccountMismatch(_))));
         assert_eq!(&*account.password().unwrap(), "old-refresh");
         assert!(!memory.0.lock().unwrap().values().any(|value| value == "must-not-save"));
-        assert!(cache(&account.id).lock().await.is_none());
+        assert!(cache(account.secret_key()).lock().await.is_none());
         let mut missing = token(&account.email);
         missing.refresh_token = None;
         assert!(matches!(complete_sign_in(provider, Some(&account), &mut missing).await, Err(Error::ReauthRequired)));
@@ -150,13 +158,18 @@ async fn reauthentication_preserves_account_and_rejects_another_identity_before_
         let other_provider = if provider == Provider::Google { Provider::Microsoft } else { Provider::Google };
         assert!(complete_sign_in(other_provider, Some(&account), &mut token(&account.email)).await.is_err());
         let signed = complete_sign_in(provider, Some(&account), &mut token("FIXTURE@example.com")).await.unwrap();
-        assert_eq!(signed.account, account);
+        assert_eq!(signed.account.id, account.id);
+        let account = save(signed, Some(&account));
+        assert_eq!(account.provider_subject.as_deref(), Some("fixture-sub"));
+        let mut swapped = token(&account.email);
+        swapped.id_token = Some(jwt(r#"{"email":"fixture@example.com","sub":"different"}"#));
+        assert!(complete_sign_in(provider, Some(&account), &mut swapped).await.is_err());
         assert_eq!(&*account.password().unwrap(), "reauth-fixture-refresh");
-        assert_eq!(cache(&account.id).lock().await.as_ref().unwrap().token.as_str(), "new-access");
+        assert_eq!(cache(account.secret_key()).lock().await.as_ref().unwrap().token.as_str(), "new-access");
         assert_eq!(memory.0.lock().unwrap().values().filter(|value| *value == "reauth-fixture-refresh").count(), 1);
         assert!(complete_sign_in(provider, Some(&account), &mut wrong).await.is_err());
         assert_eq!(&*account.password().unwrap(), "reauth-fixture-refresh");
-        assert_eq!(cache(&account.id).lock().await.as_ref().unwrap().token.as_str(), "new-access");
+        assert_eq!(cache(account.secret_key()).lock().await.as_ref().unwrap().token.as_str(), "new-access");
         account.delete_password().unwrap();
     }
 }
@@ -189,6 +202,9 @@ async fn respond(stream: &mut (impl AsyncWriteExt + Unpin), status: &str, body: 
 #[tokio::test]
 async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
     memory();
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path().join("mail.db")).unwrap();
+    configure_refresh_store(store.path());
     for provider in [Provider::Google, Provider::Microsoft] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -244,7 +260,7 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
             let mut response = String::new();
             callback.read_to_string(&mut response).await.unwrap();
             assert!(response.contains("You can close this tab and return to lagom."));
-            for n in 0..3 {
+            for n in 0..4 {
                 let (socket, _) = listener.accept().await.unwrap();
                 let (mut socket, _, form) = request(socket).await;
                 let form: HashMap<_, _> = url::form_urlencoded::parse(form.as_bytes())
@@ -269,6 +285,10 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
                     );
                 }
                 if n == 2 {
+                    let body = serde_json::json!({"access_token":"wrong-access", "token_type":"Bearer", "expires_in":3600,
+                        "refresh_token":"wrong-refresh", "id_token":jwt(r#"{"sub":"different"}"#)}).to_string();
+                    respond(&mut socket, "200 OK", &body).await;
+                } else if n == 3 {
                     respond(
                         &mut socket,
                         "400 Bad Request",
@@ -276,7 +296,7 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
                     )
                     .await;
                 } else {
-                    let body = serde_json::json!({"access_token": format!("access-{n}"), "token_type":"Bearer", "expires_in":3600, "refresh_token":format!("refresh-{}", n+1), "id_token":jwt(r#"{"email":"alice@example.com","name":"Alice"}"#)}).to_string();
+                    let body = serde_json::json!({"access_token": format!("access-{n}"), "token_type":"Bearer", "expires_in":3600, "refresh_token":format!("refresh-{}", n+1), "id_token":jwt(r#"{"sub":"fixture-sub","email":"alice@example.com","name":"Alice"}"#)}).to_string();
                     respond(&mut socket, "200 OK", &body).await;
                 }
             }
@@ -296,40 +316,42 @@ async fn browser_loopback_exchange_refresh_rotation_and_revocation() {
         .unwrap();
         assert_eq!(signed.email, "alice@example.com");
         assert_eq!(signed.account.auth, Auth::OAuth(provider));
-        assert_eq!(&*signed.account.password().unwrap(), "refresh-1");
+        let account = store.save_browser_sign_in(signed, None).unwrap();
+        assert_eq!(&*account.password().unwrap(), "refresh-1");
         assert_eq!(
-            &*access_token_with(&signed.account, None, &config())
+            &*access_token_with(&account, None, &config())
                 .await
                 .unwrap(),
             "access-0"
         );
         assert_eq!(
-            &*access_token_with(&signed.account, Some("access-0"), &config())
+            &*access_token_with(&account, Some("access-0"), &config())
                 .await
                 .unwrap(),
             "access-1"
         );
-        assert_eq!(&*signed.account.password().unwrap(), "refresh-2");
+        assert_eq!(&*account.password().unwrap(), "refresh-2");
         // A concurrent rejection of the old token reuses the refresh already completed.
         assert_eq!(
-            &*access_token_with(&signed.account, Some("access-0"), &config())
+            &*access_token_with(&account, Some("access-0"), &config())
                 .await
                 .unwrap(),
             "access-1"
         );
-        cache(&signed.account.id)
+        cache(account.secret_key())
             .lock()
             .await
             .as_mut()
             .unwrap()
             .expires = Instant::now();
-        let error = access_token_with(&signed.account, None, &config())
+        assert!(matches!(access_token_with(&account, None, &config()).await, Err(Error::ReauthRequired)));
+        assert_eq!(&*account.password().unwrap(), "refresh-2");
+        let error = access_token_with(&account, None, &config())
             .await
             .unwrap_err();
         assert!(matches!(error, Error::ReauthRequired));
         assert!(!format!("{error:?}").contains("secret-must-not-leak"));
-        signed.account.delete_password().unwrap();
-        forget(&signed.account.id);
+        store.remove_credentials_and_account(&account.id, Account::delete_password).unwrap();
         server.await.unwrap();
     }
 }
@@ -356,7 +378,7 @@ async fn sign_in_after_a_stray_request(provider: Provider, host: &'static str, e
         let (socket, _) = listener.accept().await.unwrap();
         let (mut socket, _, form) = request(socket).await;
         assert!(form.contains("code=test-code"), "{form}");
-        let body = serde_json::json!({"access_token": "access", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "refresh", "id_token": jwt(&format!(r#"{{"email":"{email}"}}"#))}).to_string();
+        let body = serde_json::json!({"access_token": "access", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "refresh", "id_token": jwt(&format!(r#"{{"sub":"fixture-sub","email":"{email}"}}"#))}).to_string();
         respond(&mut socket, "200 OK", &body).await;
     });
     let signed = sign_in_with(provider, config, None, |url| {
@@ -411,16 +433,17 @@ async fn calendar_granular_consent_preserves_mail_and_saves_only_granted_scopes(
     account.set_password("original-fixture").unwrap();
     let mut token = Token {
         access_token: "fixture-access".into(), expires_in: 3600, token_type: "Bearer".into(),
-        refresh_token: Some("replacement-fixture".into()), id_token: Some(jwt(r#"{"email":"fixture@example.com"}"#)),
+        refresh_token: Some("replacement-fixture".into()), id_token: Some(jwt(r#"{"sub":"fixture-sub","email":"fixture@example.com"}"#)),
         scope: Some(GOOGLE_CALENDAR_SCOPES.into()),
     };
     assert!(complete_sign_in(Provider::Google, Some(&account), &mut token).await.is_err());
     assert_eq!(&*account.password().unwrap(), "original-fixture");
-    assert!(cache(&account.id).lock().await.is_none());
+    assert!(cache(account.secret_key()).lock().await.is_none());
     token.scope = Some("https://mail.google.com/ https://www.googleapis.com/auth/calendar.events".into());
     let signed = complete_sign_in(Provider::Google, Some(&account), &mut token).await.unwrap();
     assert_eq!(signed.scopes, token.scope.as_deref().unwrap());
     assert!(!calendar_allowed(&signed.scopes));
+    let account = save(signed, Some(&account));
     assert_eq!(&*account.password().unwrap(), "replacement-fixture");
     assert!(calendar_allowed(GOOGLE_CALENDAR_SCOPES));
     assert!(!calendar_allowed("https://www.googleapis.com/auth/calendar.events.extra https://www.googleapis.com/auth/calendar.calendarlist.readonly"));
@@ -544,7 +567,7 @@ async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
         assert_eq!(form["client_id"], "123-abc.apps.googleusercontent.com");
         assert_eq!(challenge(&form["code_verifier"]), params["code_challenge"]);
         assert!(!form.contains_key("client_secret"));
-        let body = serde_json::json!({"access_token":"mobile-access", "token_type":"Bearer", "expires_in":3600, "refresh_token":"mobile-refresh", "id_token":jwt(r#"{"email":"mobile@example.com","name":"Mobile"}"#)}).to_string();
+        let body = serde_json::json!({"access_token":"mobile-access", "token_type":"Bearer", "expires_in":3600, "refresh_token":"mobile-refresh", "id_token":jwt(r#"{"sub":"fixture-sub","email":"mobile@example.com","name":"Mobile"}"#)}).to_string();
         respond(&mut socket, "200 OK", &body).await;
     });
     let signed = finish(pending, &callback).await.unwrap();
@@ -552,18 +575,16 @@ async fn mobile_sign_in_exchanges_the_code_with_its_verifier_and_no_secret() {
     assert_eq!(signed.email, "mobile@example.com");
     assert_eq!(signed.account.auth, Auth::OAuth(Provider::Google));
     assert_eq!(signed.scopes, "https://mail.google.com/ openid email profile");
-    assert_eq!(&*signed.account.password().unwrap(), "mobile-refresh");
-    signed.account.delete_password().unwrap();
+    let account = save(signed, None);
+    assert_eq!(&*account.password().unwrap(), "mobile-refresh");
+    account.delete_password().unwrap();
 }
 
 #[tokio::test]
 async fn mobile_calendar_grant_needs_google_hints_the_account_and_keeps_its_identity() {
     memory();
     let (imap, smtp) = Provider::Google.servers("grant@example.com");
-    let password = Account::new("grant@example.com".into(), imap.clone(), smtp.clone()).unwrap();
-    assert!(begin_calendar_access(&password).is_err(), "a password account has no Google grant");
-    let mut account = Account::new("grant@example.com".into(), imap, smtp).unwrap();
-    account.auth = Auth::OAuth(Provider::Google);
+    let account = Account::new("grant@example.com".into(), imap, smtp).unwrap();
     account.set_password("mail-only-refresh").unwrap();
     let redirect = "com.googleusercontent.apps.123-abc:/oauth2redirect";
     for (email, ok) in [("other@example.com", false), ("grant@example.com", true)] {
@@ -576,7 +597,7 @@ async fn mobile_calendar_grant_needs_google_hints_the_account_and_keeps_its_iden
         assert_eq!(params["login_hint"], "grant@example.com");
         assert!(calendar_allowed(&params["scope"]) && has_scope(&params["scope"], "https://mail.google.com/"));
         let callback = format!("{redirect}?state={}&code=grant-code", params["state"]);
-        let id_token = jwt(&format!(r#"{{"email":"{email}"}}"#));
+        let id_token = jwt(&format!(r#"{{"sub":"fixture-sub","email":"{email}"}}"#));
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let (mut socket, _, _) = request(socket).await;
@@ -589,7 +610,9 @@ async fn mobile_calendar_grant_needs_google_hints_the_account_and_keeps_its_iden
         if let Ok(signed) = result {
             assert_eq!(signed.account.id, account.id);
             assert!(calendar_allowed(&signed.scopes));
-            assert_eq!(&*account.password().unwrap(), "grant-refresh");
+            let saved = save(signed, Some(&account));
+            assert_eq!(saved.auth, Auth::OAuth(Provider::Google));
+            assert_eq!(&*saved.password().unwrap(), "grant-refresh");
         } else {
             assert_eq!(&*account.password().unwrap(), "mail-only-refresh", "another account never replaces the secret");
         }

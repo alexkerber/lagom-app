@@ -166,7 +166,7 @@ struct CalendarAccessButtons: View {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(accounts, id: \.id) { account in
                     CalendarAccessButton(planner: planner, model: model, account: account, icon: tasks ? "todo" : "calendar",
-                                         title: accounts.count == 1 ? (tasks ? "Allow Google Tasks access" : "Show your Google Calendar")
+                                         title: account.googleHostedPassword ? "Sign in with Google · \(account.email)" : accounts.count == 1 ? (tasks ? "Allow Google Tasks access" : "Show your Google Calendar")
                                             : "\(tasks ? "Allow Google Tasks" : "Show calendar") · \(account.email)")
                 }
             }
@@ -199,12 +199,7 @@ private struct CalendarAccessButton: View {
         defer { connecting = false }
         do {
             // The button stays busy until the sync has fetched the calendar and tasks.
-            let finished: Bool
-            if account.googleHostedPassword {
-                finished = try await model.signIn(.google, browser: browser, exchanging: { connecting = true })
-            } else {
-                finished = try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true })
-            }
+            let finished = try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true })
             guard finished else { return }
             await model.sync()
             await planner.reload()
@@ -875,27 +870,23 @@ private struct WeekGrid: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             if oneDay { strip(week) }
-            if !planner.calendarConnected && planner.week.isEmpty, let account = planner.calendarAccess.first {
+            let access = planner.calendarAccess + model.accounts.filter(\.googleHostedPassword)
+            if !planner.calendarConnected && planner.week.isEmpty, let account = access.first {
                 EmptyState(icon: "calendar", title: "Calendar is not connected",
-                           detail: planner.calendarAccess.count == 1 ? "Google asks once for access to \(account.email)." : "Google asks once for each account.") {
-                    CalendarAccessButtons(planner: planner, model: model, accounts: planner.calendarAccess)
+                           detail: access.count == 1 ? "Google asks once for access to \(account.email)." : "Google asks once for each account.") {
+                    CalendarAccessButtons(planner: planner, model: model, accounts: access)
                 }
                 .frame(maxHeight: .infinity)
             } else if !planner.calendarConnected && planner.week.isEmpty && planner.calendarGranted {
                 EmptyState(icon: "calendar", title: "Calendar not synced yet", detail: "Your calendar shows here after the next sync.")
                     .frame(maxHeight: .infinity)
             } else if !planner.calendarConnected && planner.week.isEmpty {
-                let upgrade = model.accounts.first(where: \.googleHostedPassword)
                 EmptyState(icon: "calendar", title: "Calendar needs a Google account",
-                           detail: upgrade == nil ? "Add a Google account to see your calendar here." : "Sign in with the same address to keep your mail.") {
-                    if let upgrade {
-                        CalendarAccessButton(planner: planner, model: model, account: upgrade, icon: "calendar", title: "Sign in with Google")
-                    }
-                }
+                           detail: "Add a Google account to see your calendar here.")
                     .frame(maxHeight: .infinity)
             } else {
-                if !planner.calendarAccess.isEmpty {
-                    CalendarAccessButtons(planner: planner, model: model, accounts: planner.calendarAccess)
+                if !access.isEmpty {
+                    CalendarAccessButtons(planner: planner, model: model, accounts: access)
                 }
                 if !oneDay {
                     HStack(spacing: 0) {
