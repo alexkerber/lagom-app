@@ -1927,8 +1927,8 @@ impl MainWindow {
                         .child(all[f].name.clone()))
                     // A zero count is calm: no number at all.
                     .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}"))))
-                    // Trailing, as on Sent and Done: 6 px right padding puts the centre on a one-digit count's
-                    //. A negative margin here collapsed the label to a few letters.
+                    // Trailing, as on Sent and Done: 6 px right padding puts the centre on a one-digit count's.
+                    // A negative margin here collapsed the label to a few letters.
                     .when(chevron.is_some(), |d| d.pr(px(6.)))
                     .children(chevron.map(|c| div().flex_shrink_0().child(c))),
             );

@@ -24,8 +24,7 @@ struct AddAccountView: View {
 
     var body: some View {
         SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() },
-                      confirm: !providers || form ? SheetConfirm(title: passwordStep ? "Sign in" : "Continue", systemImage: passwordStep ? "checkmark" : "arrow.right",
-                          icon: "account-add", disabled: email.isEmpty || connecting || (passwordStep && password.isEmpty)) {
+                      confirm: !providers || form ? SheetConfirm(title: passwordStep ? "Sign in" : "Continue", systemImage: passwordStep ? "checkmark" : "arrow.right", disabled: email.isEmpty || connecting || (passwordStep && password.isEmpty)) {
                           if passwordStep { Task { await connect() } }
                           else { passwordStep = true; imapUser = email; smtpUser = email }
                       } : nil) {
@@ -187,7 +186,7 @@ struct SignatureView: View {
 
     var body: some View {
         SheetScaffold(title: "Signature", cancelDisabled: saving, cancel: { dismiss() },
-                      confirm: SheetConfirm(title: "Save", systemImage: "checkmark", icon: "done", disabled: !loaded || saving) { Task { await save() } }) {
+                      confirm: SheetConfirm(title: "Save", systemImage: "checkmark", disabled: !loaded || saving) { Task { await save() } }) {
             VStack(alignment: .leading, spacing: 0) {
                 FieldRow(label: "Account") { Text(account.email).lineLimit(1) }
                     .padding(.horizontal, 16)

@@ -301,11 +301,10 @@ struct SearchField: View {
     }
 }
 
-/// A sheet's primary action: Send, Save, Add. `systemImage` for the system bar, `icon` for the Duo's footer.
+/// A sheet's primary action: Send, Save, Add. `systemImage` is for the system bar.
 struct SheetConfirm {
     let title: String
     let systemImage: String
-    let icon: String
     var disabled = false
     let action: () -> Void
 }
@@ -348,7 +347,7 @@ struct SheetScaffold<Content: View, Footer: View>: View {
                 content
                 HStack(spacing: 10) {
                     if let confirm {
-                        HouseButton(title: confirm.title, icon: confirm.icon, primary: true, action: confirm.action).disabled(confirm.disabled)
+                        Button(confirm.title, action: confirm.action).buttonStyle(HouseButtonStyle(primary: true)).disabled(confirm.disabled)
                     }
                     footer
                 }

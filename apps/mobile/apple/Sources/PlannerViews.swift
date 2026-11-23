@@ -663,7 +663,7 @@ struct NewTaskView: View {
 
     var body: some View {
         SheetScaffold(title: "New task", cancel: { dismiss() },
-                      confirm: SheetConfirm(title: "Add task", systemImage: "checkmark", icon: "plus",
+                      confirm: SheetConfirm(title: "Add task", systemImage: "checkmark",
                                             disabled: saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty, action: save)) {
             VStack(spacing: 0) {
                 FieldRow(label: "Task") {
@@ -733,7 +733,7 @@ struct NewEventView: View {
     var body: some View {
         let calendars = planner.eventCalendars
         SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() },
-                      confirm: SheetConfirm(title: "Save event", systemImage: "checkmark", icon: "done", disabled: saving || calendars.isEmpty, action: save)) {
+                      confirm: SheetConfirm(title: "Save event", systemImage: "checkmark", disabled: saving || calendars.isEmpty, action: save)) {
             ScrollView {
                 VStack(spacing: 0) {
                     FieldRow(label: "Title", labelWidth: 84) {

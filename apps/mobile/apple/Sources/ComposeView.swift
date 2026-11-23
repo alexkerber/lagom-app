@@ -53,7 +53,7 @@ struct ComposeView: View {
     var body: some View {
         // On the Duo, Send and Attach sit at the bottom of the right column.
         SheetScaffold(title: draft.title, cancelDisabled: sending, cancel: { cancelling = true },
-                      confirm: railInset == 0 ? SheetConfirm(title: "Send", systemImage: "arrow.up", icon: "send", disabled: cannotSend, action: send) : nil) {
+                      confirm: railInset == 0 ? SheetConfirm(title: "Send", systemImage: "arrow.up", disabled: cannotSend, action: send) : nil) {
             // An open quote can outgrow a short sheet or the space above the keyboard: then the message scrolls.
             if quoteOpen && draft.quoted != nil {
                 ScrollView { form(scrolls: true) }.scrollBounceBehavior(.basedOnSize)

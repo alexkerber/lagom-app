@@ -71,7 +71,7 @@ impl MainWindow {
             let account = self.today.calendar_accounts.first().map(|(a, _)| a.id.clone());
             return agenda.child(pressable(div().id("home-calendar-consent"), &t, false)
                 .debug_selector(|| "Show your Google Calendar".into()).flex().items_center().gap(px(8.)).min_h(px(32.)).text_color(t.ink2)
-                .child(icon("icons/calendar.svg", t.ink2, 16.)).child("Show your Google Calendar")
+                .child("Show your Google Calendar")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if let Some(id) = &account {
                         if let Some(live) = &this.live {
