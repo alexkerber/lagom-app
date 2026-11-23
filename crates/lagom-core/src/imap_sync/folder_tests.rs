@@ -304,6 +304,46 @@ async fn move_and_copy_return_the_destination_uid_from_copyuid() {
 }
 
 #[tokio::test]
+async fn move_without_copyuid_requires_one_exact_header_and_size_match() {
+    for (duplicate, validity) in [(false, 7), (true, 7), (false, 8)] {
+        let mut steps = login("MOVE");
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        steps.push(step("UID MOVE 1 \"Projects\"", ""));
+        steps.push(step("SELECT \"Projects\"", selected()));
+        steps.push(step("UID SEARCH ALL", "* SEARCH 2 3 4 5\r\n"));
+        steps.push(step("UID FETCH 5,4,3,2 (UID FLAGS)", ""));
+        steps.push(step("UID SEARCH ALL", "* SEARCH 2 3 4 5\r\n"));
+        steps.extend(empty_sync("INBOX"));
+        steps.push(step("SELECT \"Projects\"", &selected().replace("UIDVALIDITY 7", &format!("UIDVALIDITY {validity}"))));
+        if validity == 7 {
+            steps.push(step(r#"UID SEARCH OR (SENTSINCE 31-Dec-2019 SENTBEFORE 03-Jan-2020) (SINCE 31-Dec-2019 BEFORE 03-Jan-2020) FROM "me@example.test" SUBJECT "Fixture""#, "* SEARCH 2 3 4 5\r\n"));
+            for uid in 2..=5 {
+                let size = if uid == 2 { 124 } else { 123 };
+                let seconds = if uid == 3 && !duplicate { "01" } else { "00" };
+                let subject = if uid == 4 { "Fixture details" } else { "Fixture" };
+                let header = format!("Date: Wed, 1 Jan 2020 00:00:{seconds} +0000\r\nFrom: me@example.test\r\nSubject: {subject}\r\n\r\n");
+                steps.push(step(&format!("UID FETCH {uid} (UID RFC822.SIZE BODY.PEEK[HEADER]<0.262144>)"),
+                    &format!("* 1 FETCH (UID {uid} RFC822.SIZE {size} BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())));
+            }
+        }
+        let (mut imap, mut store, _temp, server) = fixture(steps).await;
+        let inbox = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let target = store.save_folder(&imap.account.id, "Projects", None, FolderRole::Other).unwrap();
+        for folder in [inbox, target] { store.reset_uidvalidity(folder, 7).unwrap(); }
+        let mail = Message { summary: MessageSummary {
+            account: imap.account.id.clone(), folder: inbox, uid: 1, from_address: "me@example.test".into(),
+            subject: "Fixture".into(), date: 1577836800, size: 123, ..Default::default()
+        }, ..Default::default() };
+        let id = store.save_message(&mail).unwrap();
+        for uid in 2..=5 { message(&store, &imap.account.id, target, uid); }
+        let moved = imap.move_message(&mut store, id, target).await.unwrap();
+        assert_eq!(moved.uid, if duplicate || validity != 7 { None } else { Some((7, 5)) });
+        assert!(imap.take_refresh_error().is_none());
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn confirmed_move_is_not_rolled_back_when_refresh_is_refused() {
     let mut steps = login("MOVE");
     steps.push(step("SELECT \"INBOX\"", selected()));
@@ -319,6 +359,78 @@ async fn confirmed_move_is_not_rolled_back_when_refresh_is_refused() {
     server.await.unwrap();
 }
 
+fn fetch_steps(uid: u32, header: &str) -> [(String, String); 2] {
+    [
+        step(&metadata_fetch(uid), &format!("* 1 FETCH (UID {uid} FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())),
+        step(&format!("UID FETCH {uid} (UID BODY.PEEK[TEXT])"), &format!("* 1 FETCH (UID {uid} BODY[TEXT] {{4}}\r\nbody)\r\n")),
+    ]
+}
+fn metadata_fetch(uid: u32) -> String {
+    format!("UID FETCH {uid} (UID ENVELOPE FLAGS BODYSTRUCTURE RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER]<0.262144>)")
+}
+
+#[tokio::test]
+async fn omitted_uid_advances_checkpoint_and_recovers_outside_the_window() {
+    let mut steps = login("");
+    let header = "Subject: Recovered\r\n\r\n";
+    for (all, newest) in [("1 2", 2), ("1 2 3", 3), ("1 2 3 4", 4)] {
+        steps.push(step("SELECT \"INBOX\"", selected()));
+        steps.push(step("UID SEARCH ALL", &format!("* SEARCH {all}\r\n")));
+        if newest < 4 {
+            steps.push(step(&metadata_fetch(2), ""));
+        } else {
+            steps.extend(fetch_steps(2, header));
+        }
+        if newest != 2 {
+            steps.extend(fetch_steps(newest, header));
+        }
+        steps.push(step(&format!("UID FETCH {newest} (UID FLAGS)"), ""));
+        if newest == 2 {
+            steps.push(("UID SEARCH ALL".into(), "{tag} NO retry later\r\n".into()));
+        } else {
+            steps.push(step("UID SEARCH ALL", &format!("* SEARCH {all}\r\n")));
+        }
+    }
+    let (mut imap, mut store, temp, server) = fixture(steps).await;
+    let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    assert!(matches!(imap.sync_folder(&mut store, folder, 1).await, Err(Error::Network("IMAP search failed"))));
+    assert_eq!(store.folder(folder).unwrap().last_uid, 0);
+    assert!(store.known_uids(folder).unwrap().is_empty());
+    drop(store);
+    let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+    imap.sync_folder(&mut store, folder, 1).await.unwrap();
+    assert_eq!(store.folder(folder).unwrap().last_uid, 3);
+    assert_eq!(store.known_uids(folder).unwrap(), [3]);
+    imap.sync_folder(&mut store, folder, 1).await.unwrap();
+    assert_eq!(store.known_uids(folder).unwrap(), [2, 3, 4]);
+    assert!(store.omitted_uids(folder).unwrap().is_empty());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn body_refetch_keeps_thread_after_parent_deletion() {
+    let header = "Subject: Changed subject\r\nReferences: <1@fixture.test>\r\nMessage-ID: <2@fixture.test>\r\n\r\n";
+    let mut steps = login("");
+    steps.push(step("SELECT \"INBOX\"", selected()));
+    steps.extend(fetch_steps(2, header));
+    let (mut imap, mut store, _temp, server) = fixture(steps).await;
+    let folder = store.save_folder(&imap.account.id, "INBOX", None, FolderRole::Inbox).unwrap();
+    store.reset_uidvalidity(folder, 7).unwrap();
+    let parent = message(&store, &imap.account.id, folder, 1);
+    let mut reply = mime::parse(header.as_bytes()).unwrap();
+    reply.summary.account = imap.account.id.clone();
+    reply.summary.folder = folder;
+    reply.summary.uid = 2;
+    let id = store.save_synced_message(&reply, &[]).unwrap();
+    let original = store.message(id).unwrap().summary.thread_id;
+    store.delete_message(parent).unwrap();
+    imap.fetch_inline(&mut store, id).await.unwrap();
+    let refreshed = store.message(id).unwrap();
+    assert_eq!(refreshed.body_text.trim(), "body");
+    assert_eq!(refreshed.summary.thread_id, original);
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn custom_folder_fetches_only_the_initial_window_then_new_mail() {
     let mut steps = login("");
@@ -327,9 +439,7 @@ async fn custom_folder_fetches_only_the_initial_window_then_new_mail() {
         steps.push(step("UID SEARCH ALL", &format!("* SEARCH {all}\r\n")));
         for uid in fetched {
             let header = format!("From: fixture@example.com\r\nSubject: Project {uid}\r\nMessage-ID: <{uid}@fixture.test>\r\n\r\n");
-            steps.push(step(&format!("UID FETCH {uid} (UID ENVELOPE FLAGS BODYSTRUCTURE RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER]<0.262144>)"),
-                &format!("* 1 FETCH (UID {uid} FLAGS () RFC822.SIZE 200 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) BODY[HEADER]<0> {{{}}}\r\n{header})\r\n", header.len())));
-            steps.push(step(&format!("UID FETCH {uid} (UID BODY.PEEK[TEXT])"), &format!("* 1 FETCH (UID {uid} BODY[TEXT] {{4}}\r\nbody)\r\n")));
+            steps.extend(fetch_steps(uid, &header));
         }
         steps.push(step(&format!("UID FETCH {flags} (UID FLAGS)"), ""));
         steps.push(step("UID SEARCH ALL", &format!("* SEARCH {all}\r\n")));

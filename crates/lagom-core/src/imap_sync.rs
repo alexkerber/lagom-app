@@ -148,8 +148,8 @@ impl async_imap::Authenticator for Xoauth2 {
     }
 }
 
-/// Where a move put a message: the destination folder, and its (UIDVALIDITY, UID) there when
-/// the server reported UIDPLUS COPYUID.
+/// Where a move put a message: the destination folder, and its (UIDVALIDITY, UID) there,
+/// reported by COPYUID or confirmed by a unique header and size match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moved { pub folder: i64, pub uid: Option<(u32, u32)> }
 
@@ -226,7 +226,11 @@ impl ImapSync {
     async fn try_fetch(&mut self, store: &mut Store, folder: &Folder, uid: u32) -> Result<bool> {
         for retry in [false, true] {
             match self.fetch_message(store, folder, uid, mime::MAX_MIME_BYTES).await {
-                Ok(_) => return Ok(true),
+                Ok(saved) => {
+                    // Keep the retry across an interrupted initial sync and a moving fetch window.
+                    if !saved { store.record_omitted_uid(folder, uid)?; }
+                    return Ok(true);
+                }
                 Err(e) if e.is_account_wide() || matches!(e, Error::Store(_) | Error::Io(_)) => return Err(e),
                 // The network's fault, not the message's: keep the checkpoint and try again next sync.
                 Err(e) if matches!(e, Error::Network(TIMED_OUT)) || (retry && matches!(e, Error::Network(DROPPED))) => return Err(e),
@@ -371,12 +375,17 @@ impl ImapSync {
         let known: HashSet<_> = store.known_uids(id)?.into_iter().collect();
         let last = folder.last_uid;
         let initial = last == 0;
+        let omitted = store.omitted_uids(id)?;
         let candidates: Vec<_> = if initial {
             sorted.iter().rev().take(limit).copied().collect()
         } else {
             sorted.iter().filter(|u| **u > last).copied().collect()
         };
-        for &uid in &candidates {
+        for &uid in omitted.difference(&present) {
+            store.forget_omitted_uid(&folder, uid)?;
+        }
+        let fresh = candidates.iter().copied().filter(|uid| !omitted.contains(uid));
+        for uid in omitted.intersection(&present).copied().chain(fresh) {
             if !known.contains(&uid) && !self.try_fetch(store, &folder, uid).await? {
                 // Otherwise one unreadable message holds the checkpoint below it on every sync.
                 let mut message = mime::placeholder();
@@ -429,13 +438,9 @@ impl ImapSync {
         // SEARCH again catches expunges that occurred while bodies were fetched.
         let present = self.all_uids().await?;
         let saved: HashSet<_> = store.known_uids(id)?.into_iter().collect();
-        if candidates
-            .iter()
-            .any(|uid| present.contains(uid) && !saved.contains(uid))
-        {
-            return Err(Error::Network(
-                "server omitted a message; sync checkpoint retained",
-            ));
+        let pending = store.omitted_uids(id)?;
+        if candidates.iter().any(|uid| present.contains(uid) && !saved.contains(uid) && !pending.contains(uid)) {
+            return Err(Error::Network("server omitted a message; sync checkpoint retained"));
         }
         store.finish_sync(
             id,
@@ -771,7 +776,53 @@ impl ImapSync {
         if let Err(error) = self.sync_folder(store, message.folder, DEFAULT_LIMIT).await {
             self.refresh_error = Some(error);
         }
+        if copied.is_none() && message.message_id.is_empty() && self.refresh_error.is_none() {
+            match self.match_moved_headers(store, target, &message).await {
+                Ok(found) => return Ok(found),
+                Err(error) => self.refresh_error = Some(error),
+            }
+        }
         Ok(copied)
+    }
+
+    async fn match_moved_headers(&mut self, store: &Store, target: i64, source: &crate::store::MessageSummary) -> Result<Option<(u32, u32)>> {
+        if source.size == 0 || source.date == 0 || source.from_address.is_empty() || source.subject.is_empty() {
+            return Ok(None);
+        }
+        // SENT* ignores time zones. The stored UTC instant can fall on an adjacent header date.
+        let since = chrono::DateTime::from_timestamp(source.date.saturating_sub(86400), 0);
+        let before = chrono::DateTime::from_timestamp(source.date.saturating_add(2 * 86400), 0);
+        let (Some(since), Some(before)) = (since, before) else { return Ok(None) };
+        // SEARCH strings are substrings. Keep the wire query ASCII and compare the full decoded headers below.
+        let term = |value: &str| {
+            let ascii = value.split(|c: char| !c.is_ascii() || c.is_ascii_control()).max_by_key(|s| s.len()).unwrap_or_default();
+            quoted(&ascii[..ascii.len().min(256)])
+        };
+        let (since, before) = (since.format("%d-%b-%Y"), before.format("%d-%b-%Y"));
+        // Sync stores INTERNALDATE when Date is missing. Include those candidates so a dated twin cannot win.
+        let query = format!("OR (SENTSINCE {since} SENTBEFORE {before}) (SINCE {since} BEFORE {before}) FROM {} SUBJECT {}",
+            term(&source.from_address)?, term(&source.subject)?);
+        let (folder, _, validity) = self.select_only(store, target).await?;
+        if folder.uidvalidity != Some(validity) { return Ok(None); }
+        let mut candidates: Vec<_> = self.search_uids(&query).await?.into_iter().collect();
+        candidates.sort_unstable();
+        let mut found = None;
+        for uid in candidates {
+            let fetch = self.fetch_one(uid, "(UID RFC822.SIZE BODY.PEEK[HEADER]<0.262144>)", |f| f.size.is_some() && f.header().is_some()).await?;
+            let Some(fetch) = fetch else { return Ok(None) };
+            let Some(size) = fetch.size else { return Ok(None) };
+            if size != source.size { continue; }
+            let Some(header) = fetch.header().filter(|h| h.len() < 262144) else { return Ok(None) };
+            let candidate = mime::parse(header)?.summary;
+            if !candidate.message_id.is_empty() || candidate.subject != source.subject
+                || candidate.from_address != source.from_address || candidate.from_name != source.from_name { continue; }
+            if candidate.date == 0 { return Ok(None); }
+            if candidate.date == source.date {
+                if found.is_some() { return Ok(None); }
+                found = Some((validity, uid));
+            }
+        }
+        Ok(found)
     }
     /// Runs UID COPY or UID MOVE for one `uid` and reads UIDPLUS COPYUID (RFC 4315, RFC 6851)
     /// from an untagged or the tagged OK. A set other than exactly that one UID gives None.

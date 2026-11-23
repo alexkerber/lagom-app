@@ -2,7 +2,7 @@
 //! Later times and reply headers. Plain Rust, so tests run without a window.
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
-use lagom_core::{attachment::Attachment, store::MessageSummary};
+use lagom_core::{attachment::Attachment, contacts::Contact, store::MessageSummary};
 
 /// One message in the list and the reading pane.
 /// A folder a message can be in. `New`: one ⌘K is creating, known by its full name until the
@@ -195,6 +195,11 @@ pub fn reply_headers(message_id: &str, thread_key: &str) -> (Option<String>, Vec
 /// Comma-separated recipients, empty parts dropped.
 pub fn recipients(field: &str) -> Vec<String> {
     lagom_core::contacts::split_recipients(field)
+}
+
+pub(crate) fn selected_contact(matches: &[Contact], selected: usize, tab: bool) -> Option<&Contact> {
+    // Tab can pick a suggestion implicitly only if the user has written to that address.
+    matches.get(selected).filter(|contact| !tab || contact.written)
 }
 
 /// The list the UI shows, as the store has it now.

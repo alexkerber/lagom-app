@@ -36,20 +36,72 @@ pub fn metadata_only(header: &[u8]) -> Result<Message> {
 const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
 
 /// The visible text of mail HTML: hidden elements dropped, block structure kept as line breaks.
-/// One pass over html5ever's tokens, without a tree builder: a tree builder re-creates every
-/// unclosed formatting element in each later block, so a 20 KB mail can build millions of nodes
-/// at sync. Time and memory here are linear in the input.
 pub fn html_to_text(html: &str) -> String {
-    clean_lines(read(html, None).text.trim_end())
+    if !within_dom_budget(html) {
+        return clean_lines(read(html, None).text.trim_end());
+    }
+    let document = dom_query::Document::from(html);
+    // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
+    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden]").remove();
+    for node in document.select("[style]").iter() {
+        if style_hides(&node.attr_or("style", "")) { node.remove(); }
+    }
+    // Document::formatted_text trims by byte and panics on trailing multibyte whitespace in `pre`
+    // (dom_query 0.28); the selection form skips that trim and clean_lines trims instead.
+    clean_lines(&document.select("html").formatted_text())
+}
+
+/// Work units for input bytes, stack scans and reconstructed formatting nodes.
+const DOM_BUDGET: usize = 256 * 1024;
+
+#[derive(Default)]
+struct DomCost {
+    markup: std::cell::Cell<usize>,
+    formatting: std::cell::Cell<usize>,
+}
+
+impl TokenSink for DomCost {
+    type Handle = ();
+    fn process_token(&self, token: Token, _: u64) -> TokenSinkResult<()> {
+        match token {
+            Token::TagToken(tag) => {
+                // A later block can reconstruct every formatting element, including its attributes. A repeated
+                // `html` or `body` merges its attributes into the first by a scan of all of them, so it costs the same.
+                if tag.kind == TagKind::StartTag && (formatting(&tag.name) || matches!(tag.name, local_name!("html") | local_name!("body"))) {
+                    let attrs: usize = tag.attrs.iter().map(|a| 64 + a.name.local.len() + a.value.len()).sum();
+                    self.formatting.set(self.formatting.get() + 128 + attrs);
+                }
+            }
+            Token::CommentToken(_) | Token::DoctypeToken(_) => {}
+            _ => return TokenSinkResult::Continue,
+        }
+        self.markup.set(self.markup.get() + 1);
+        TokenSinkResult::Continue
+    }
+}
+
+fn within_dom_budget(html: &str) -> bool {
+    if html.len() > DOM_BUDGET { return false; }
+    let opens = html.bytes().filter(|&b| b == b'<').count();
+    // Each tag can scan the entire stack of open elements.
+    if opens.saturating_mul(opens) > DOM_BUDGET { return false; }
+    let cost = tokenize(html, DomCost::default());
+    // A raw-text or foreign-content boundary can hide markup from a standalone tokenizer.
+    let copies = if cost.markup.get() == opens { cost.formatting.get() } else { html.len().max(cost.formatting.get()) };
+    opens.saturating_mul(opens + copies) <= DOM_BUDGET - html.len()
 }
 
 fn read(html: &str, marks: Option<Vec<Mark>>) -> TextState {
+    tokenize(html, TextSink(TextState { marks, ..Default::default() }.into())).0.into_inner()
+}
+
+fn tokenize<S: TokenSink>(html: &str, sink: S) -> S {
     let queue = BufferQueue::default();
     queue.push_back(html.into());
-    let tokenizer = Tokenizer::new(TextSink(TextState { marks, ..Default::default() }.into()), Default::default());
+    let tokenizer = Tokenizer::new(sink, Default::default());
     let _ = tokenizer.feed(&queue);
     tokenizer.end();
-    tokenizer.sink.0.into_inner()
+    tokenizer.sink
 }
 
 /// Text with one style: a native view draws mail HTML as paragraphs of these.
@@ -96,7 +148,7 @@ fn mark_index(c: char) -> Option<usize> {
     (c as u32).checked_sub(MARK).map(|i| i as usize).filter(|&i| i < MARKS)
 }
 
-/// The visible part of mail HTML as blocks for a native view: the text of `html_to_text`, with
+/// The streaming converter's visible text as blocks for a native view, with
 /// bold, italic, links and images. Styles, scripts and hidden elements show nothing. At most
 /// 100 000 characters and 256 images, as GPUI lays out all text on screen.
 pub fn html_to_blocks(html: &str) -> Vec<Block> {
@@ -1124,6 +1176,7 @@ mod tests {
         let blocks = "<p>Shown</p><div hidden>".to_string() + &"<span>".repeat(255) + &"<div>".repeat(200_000);
         let closed = "<p>Shown</p><div hidden>".to_string() + &"<span><b><i><u></span>".repeat(50_000);
         for (html, text) in [(formatting, "x\n\nx"), ("<div>".repeat(30_000) + "Deep", "Deep"), (attributes, "Tail"), (spaces, "Spaces"), (stray, "Shown"), (blocks, "Shown"), (closed, "Shown")] {
+            assert!(!within_dom_budget(&html));
             let start = std::time::Instant::now();
             let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
             assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?} for {} bytes", start.elapsed(), html.len());
@@ -1131,6 +1184,54 @@ mod tests {
             let start = std::time::Instant::now();
             html_to_blocks(&html);
             assert!(start.elapsed() < std::time::Duration::from_secs(10), "blocks: {:?} for {} bytes", start.elapsed(), html.len());
+        }
+    }
+
+    #[test]
+    fn dom_budget_charges_for_formatting_reconstruction() {
+        assert!(within_dom_budget(&"<q>text</q>".repeat(40)));
+        assert!(!within_dom_budget(&"<b>text</b>".repeat(40)));
+        // Attribute merging on repeated `body` took seconds at 200 copies.
+        let attrs: String = (1..=256).map(|n| format!(" a{n}")).collect();
+        assert!(!within_dom_budget(&format!("<body{attrs}>").repeat(200)));
+        assert!(within_dom_budget("<html lang=en><body style=\"margin:0\"><p>Hi</p></body></html>"));
+    }
+
+    #[test]
+    fn trailing_multibyte_whitespace_does_not_panic() {
+        assert_eq!(html_to_text("<pre>x\u{3000}</pre>"), "x");
+        assert_eq!(html_to_text("<pre>x\u{2003}\u{2003}</pre>"), "x");
+    }
+
+    #[test]
+    fn svg_and_math_text_stays_hidden() {
+        for html in ["<svg>Secret</svg>", "<svg><desc>Secret</desc></svg>", "<svg><metadata>Secret</metadata></svg>",
+            "<svg><![CDATA[<div hidden>]]>Secret</svg>", "<math><annotation>Secret</annotation></math>", "<svg><text>Logo</text></svg>"] {
+            assert_eq!(html_to_text(html), "", "{html}");
+        }
+    }
+
+    #[test]
+    fn documented_html_leaks() {
+        for html in [
+            "<div><ul></div><li hidden>x</ul>Secret",
+            "<button><ul></button><li hidden>x</ul>Secret",
+            "<table><tr><td><ul></td></tr></table><li hidden>x</ul>Secret",
+            "<dd><dl></dd><dd hidden></dl>Secret",
+            "<template><select></template><select hidden></template>Secret",
+            "<svg><select></svg><select hidden></svg>Secret",
+            "<svg><summary></svg></summary><summary hidden/></svg>Secret",
+            "<math><plaintext></math></plaintext><plaintext hidden/></math>Secret",
+            "<div hidden><table><table></table><div></table></div>Secret",
+            "<div hidden><button><button></button><div></button></div>Secret",
+            "<span hidden><h1><div hidden></h1><h1></div></span>Secret",
+            "<table><font hidden/></table><h1 hidden/>w49 <h1></h1></font>Secret",
+            "<table><tr><td><template></table></template><td hidden>Secret",
+            "<svg><td><form></td></svg><form hidden>Secret",
+        ] {
+            let message = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
+            assert_eq!(message.body_text, "", "{html}");
+            assert_eq!(message.summary.snippet, "", "{html}");
         }
     }
 
@@ -1189,21 +1290,21 @@ mod tests {
             ("<form><p hidden/><form>Secret", ""),
             ("<ul><select><li hidden/></ul>Secret", ""),
             ("<ol><li hidden></menu>Secret", ""),
-            ("<noscript hidden><div></noscript>Secret", ""),
             ("<noframes>Secret", ""),
         ] {
+            assert_eq!(clean_lines(read(html, None).text.trim_end()), text, "{html} (streaming)");
             assert_eq!(html_to_text(html), text, "{html}");
         }
-        // Where the tree builder's result depends on state not tracked here, the text stays
-        // hidden: some text the DOM converter showed is lost.
+        // The streaming fallback can lose visible text on these inputs.
         for (html, dom) in [
+            ("<noscript hidden><div></noscript>Secret", "Secret"),
             // A heading start may close a hidden heading, unless reopened formatting is in it.
             ("<h1 hidden>Hidden<h2>Shown</h2>", "Shown"),
             // HTML tags in `svg` end it; `svg` text is hidden.
             ("<svg><g/><span hidden>a</span>Shown</svg>", "Shown"),
-            ("<svg><text>Logo</text></svg>", "Logo"),
         ] {
-            assert_eq!(html_to_text(html), "", "{html}, {dom:?} in a DOM");
+            assert_eq!(html_to_text(html), dom, "{html}");
+            assert_eq!(clean_lines(read(html, None).text.trim_end()), "", "{html} (streaming)");
         }
         // `hidden` and `style` count after the tokenizer's 256-attribute cap.
         let many: String = (0..256).map(|i| format!(" x{i}")).collect();

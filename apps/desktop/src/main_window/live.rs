@@ -1667,7 +1667,7 @@ fn test_hook(add: &Entity<AddAccount>, window: &mut Window, cx: &mut Context<Mai
     add.update(cx, |add, cx| {
         add.fill(email, password, &servers, window, cx);
         if connect {
-            add.connect(cx);
+            add.connect(window, cx);
         }
     });
 }

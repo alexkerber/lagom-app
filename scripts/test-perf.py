@@ -16,15 +16,28 @@ class Perf(unittest.TestCase):
 
     def test_fails_over_limit_and_when_not_measured(self):
         budgets = {"a": {"max": 10, "unit": "ms"}, "b": {"max": 10, "unit": "ms"}}
-        self.assertTrue(perf.report(budgets, 2.0, {"a": 20.0, "b": 1.0, "extra": 5.0})[1])
-        self.assertFalse(perf.report(budgets, 2.0, {"a": 20.1, "b": 1.0})[1])
-        table, ok = perf.report(budgets, 2.0, {"a": 1.0})
+        # Linux: Windows reports times without gating them.
+        self.assertTrue(perf.report(budgets, 2.0, {"a": 20.0, "b": 1.0, "extra": 5.0}, "linux")[1])
+        self.assertFalse(perf.report(budgets, 2.0, {"a": 20.1, "b": 1.0}, "linux")[1])
+        table, ok = perf.report(budgets, 2.0, {"a": 1.0}, "linux")
         self.assertFalse(ok)
         self.assertIn("| b | not measured | 10 ms | 20 ms | FAIL |", table)
         self.assertFalse(perf.report({"size": {"max": 30, "unit": "MB"}}, 2.0, {"size": 30.1})[1])
         linux = {"size": {"max": 30, "max_linux": 55, "unit": "MB"}}
         self.assertTrue(perf.report(linux, 2.0, {"size": 53.2}, "linux")[1])
         self.assertFalse(perf.report(linux, 2.0, {"size": 53.2}, "darwin")[1])
+
+    def test_windows_binary_size_budget(self):
+        config = perf.tomllib.loads((perf.ROOT / "docs/performance-budgets.toml").read_text(encoding="utf-8"))
+        budgets = {"binary.size": config["budgets"]["binary.size"]}
+        for size, expected in [(32, True), (32 + 1e-6, False)]:
+            with self.subTest(size=size):
+                self.assertEqual(perf.report(budgets, config["tolerance"], {"binary.size": size}, "win32")[1], expected)
+        times = {"sync": {"max": 10, "unit": "ms"}}
+        self.assertTrue(perf.report(times, 2.0, {"sync": 9000.0}, "win32")[1])
+        self.assertFalse(perf.report(times, 2.0, {"sync": 9000.0}, "linux")[1])
+        # A time that was not measured still fails on Windows.
+        self.assertFalse(perf.report(times, 2.0, {}, "win32")[1])
 
 
 if __name__ == "__main__":

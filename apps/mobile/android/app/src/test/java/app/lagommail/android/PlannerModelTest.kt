@@ -37,6 +37,22 @@ class PlannerModelTest {
         assertNull(core.addedTodos.last().third)
     }
 
+    @Test fun editingPreservesSyncedDueAndBlankTitleStillSavesDate() = runTest(dispatcher) {
+        val core = FakeCore()
+        val planner = planner(core)
+        val day = LocalDate.of(2026, 11, 12)
+        val stamp = "2026-11-12T08:00:00Z"
+        core.tasks += Todo(7, 1, "Milk", stamp, false, false, null)
+        planner.edit(7, "Milk", day, "  Bread  ", day)
+        val renamed = planner.todos.getValue(1).single()
+        assertEquals("Bread", renamed.title)
+        assertEquals(stamp, renamed.due)
+        planner.edit(7, renamed.title, day, "  ", null)
+        assertEquals(renamed.copy(due = null), planner.todos.getValue(1).single())
+        planner.edit(7, renamed.title, null, "Oats", day.plusDays(1))
+        assertEquals(renamed.copy(title = "Oats", due = "2026-11-13"), planner.todos.getValue(1).single())
+    }
+
     @Test fun toggleAndDeleteReloadEveryListWithCompletedTasks() = runTest(dispatcher) {
         val core = FakeCore(); val planner = planner(core); planner.reload()
         planner.addList("Home")

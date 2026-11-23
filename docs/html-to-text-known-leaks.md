@@ -1,6 +1,8 @@
 # HTML to text: known hidden-text cases
 
-`crates/lagom-core/src/mime.rs` `html_to_text` is a streaming pass that models the tree builder's closes so it can skip hidden elements. A Claude review on 2026-11-13 found these crafted inputs. Each one prints `Secret`, but the DOM (dom_query 0.28 on the same html5ever 0.39) shows nothing. They affect previews and search text only. Rendering is not affected.
+Lagom builds a DOM for preview and search text when the estimated tree-building cost fits 262,144 work units. The estimate counts input bytes, potential stack scans, and formatting elements and attributes that later blocks could recreate. Larger estimates use the streaming converter.
+
+All 14 inputs below produce empty text on the DOM path. **All 14 can still expose `Secret` above budget.** The table describes the streaming fallback.
 
 | Class | Cause | Inputs |
 |---|---|---|
@@ -10,6 +12,4 @@
 | D | `</table>` inside a template lowers the table counter | `<table><tr><td><template></table></template><td hidden>Secret` |
 | E | `<form>` in foreign content sets the form pointer | `<svg><td><form></td></svg><form hidden>Secret` |
 
-The review found no panic in about 47 million short random inputs. It found no super-linear path: the worst 1 MB input took 0.24 s.
-
-Better design (TODO.md): estimate the tree builder's cost in one tokenizer pass. Under a budget, use the DOM, which is exact. Above it, use the streaming or `mail_parser` text.
+The November 2026 review of the streaming converter found no panic in about 47 million short random inputs. It found no super-linear path: the worst 1 MB input took 0.24 s.
