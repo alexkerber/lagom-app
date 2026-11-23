@@ -1562,6 +1562,11 @@ pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Statefu
 
 /// A push button. `fill`: the colour of a primary button; `None` is a borderless one that fills on hover. Shortcuts
 /// live in the menus and the command palette, not on the button.
+/// The title row every page starts with, as on iOS and Android: Calendar's month, at the height of its buttons.
+pub(crate) fn page_title(text: &'static str) -> Div {
+    div().min_h(px(30.)).flex().items_center().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::SUBJECT)).child(text)
+}
+
 pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
     button_label(t, label, fill, None)
 }

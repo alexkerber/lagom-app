@@ -129,9 +129,10 @@ impl MainWindow {
         let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
         let schedule = events > 0 || !has_calendar;
         div().flex_1().min_w(px(0.)).flex().flex_col()
+            .child(div().px(px(24.)).pt(px(24.)).child(page_title("Today")))
             .child(div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll)
                 .child(// A block, not a flex column: inside a column, taffy sized task titles to their shortest sibling and cut them.
-                    div().w_full().px(px(48.)).pt(px(40.)).pb(px(48.))
+                    div().w_full().px(px(24.)).pt(px(16.)).pb(px(48.))
                     .child(self.today_sentence(now, events, due, cx))
                     .child(div().flex().gap(px(48.)).when(stacked || !schedule, |d| d.flex_col())
                         .when(schedule, |d| d.child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx))))

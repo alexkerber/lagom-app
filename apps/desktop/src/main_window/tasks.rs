@@ -658,9 +658,7 @@ impl MainWindow {
                 .on_click(cx.listener(|this, _, window, cx| this.edit_task(Edit::AddList, window, cx))).into_any_element(),
         });
         div().relative().flex_1().min_w(px(0.)).p(px(24.)).flex().flex_col().gap(px(16.))
-            // As tall as the icon button that stood here, so the page does not move.
-            .child(div().min_h(px(28.)).flex().items_center()
-                .child(div().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::TITLE)).child("To-do")))
+            .child(page_title("To-do"))
                 .when(matches!(self.page, Page::Todo), |d| d.children(self.today.calendar_accounts.iter().filter_map(|(account, _)| {
                     let state = self.today.task_sync.get(&account.id);
                     let text = task_sync_label(self.today.task_access.contains(&account.id), state)?;
