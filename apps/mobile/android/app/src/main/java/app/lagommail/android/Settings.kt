@@ -70,8 +70,8 @@ import app.lagommail.core.MailAccount
                             if (at > 0) Hairline()
                             SettingsRow(account.email, detail = accountKind(account), mark = { Avatar(account, accountAccent(at), 32) }) { open = account.id }
                         }
-                        if (model.accounts.isNotEmpty()) Hairline()
-                        SettingsRow("Add account", mark = { LagomIcon(R.drawable.ic_account_add) }, chevron = false, enabled = model.core != null) {
+                        if (model.accounts.isNotEmpty()) Hairline(16)
+                        SettingsRow("Add account", chevron = false, tint = lagom.accent, enabled = model.core != null) {
                             model.accountForm = AccountForm(choosing = true)
                         }
                     }
@@ -139,7 +139,7 @@ internal fun accountKind(account: MailAccount): String =
         SettingsRow("Signature", detail = "Added to new mail, replies and forwards.") { sign(account) }
     }
     Column {
-        Rows { SettingsRow("Remove account", mark = { LagomIcon(R.drawable.ic_account_remove, tint = lagom.danger) }, chevron = false,
+        Rows { SettingsRow("Remove account", chevron = false,
             tint = lagom.danger) { remove(account) } }
         Text("Removes the account and its saved mail from this device. Your mail stays with your provider.", Modifier.padding(top = 8.dp),
             color = lagom.ink2, style = MaterialTheme.typography.bodySmall)

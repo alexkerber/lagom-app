@@ -227,8 +227,8 @@ internal val SplashIcon = 160.dp
         Rows {
             listOf("iCloud", "Fastmail", "Yahoo", "Other (IMAP)")
                 .forEachIndexed { index, name ->
-                    if (index > 0) Hairline()
-                    Choice(name, { LagomIcon(R.drawable.ic_mail, size = 18.dp) }, enabled = !model.signingIn) { other() }
+                    if (index > 0) Hairline(16)
+                    Choice(name, enabled = !model.signingIn) { other() }
                 }
         }
         // The browser has returned and the core is adding the account; the rows wait for it.
@@ -254,11 +254,11 @@ internal val SplashIcon = 160.dp
 /** Between rows, from the text's edge: 16 inset + 32 mark + 16 gap; 16 where rows have no mark. */
 @Composable internal fun Hairline(inset: Int = 64) = HorizontalDivider(Modifier.padding(start = inset.dp), thickness = 1.dp, color = lagom.line)
 
-/** One account kind: its mark, the name and a chevron. */
-@Composable private fun Choice(title: String, mark: @Composable () -> Unit, enabled: Boolean = true, onClick: () -> Unit) {
+/** One account kind: a brand's mark if it has one, the name and a chevron. */
+@Composable private fun Choice(title: String, mark: (@Composable () -> Unit)? = null, enabled: Boolean = true, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).alpha(if (enabled) 1f else 0.5f).clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Box(Modifier.width(32.dp), contentAlignment = Alignment.Center) { mark() }
+        mark?.let { Box(Modifier.width(32.dp), contentAlignment = Alignment.Center) { it() } }
         Text(title, Modifier.weight(1f), color = lagom.ink, fontSize = TextSize.body, lineHeight = TextSize.body * Leading, fontWeight = FontWeight.Medium)
         LagomIcon(R.drawable.ic_chevron_right, size = 14.dp)
     }

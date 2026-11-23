@@ -209,11 +209,14 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
             .semantics { if (iconOnly) contentDescription = text }
             .padding(horizontal = if (iconOnly) 9.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
-            icon?.let { LagomIcon(it, tint = if (primary) c.accentFillInk else if (danger) c.danger else c.ink2) }
+            icon?.takeIf { iconOnly || text in IconActions }?.let { LagomIcon(it, tint = if (primary) c.accentFillInk else if (danger) c.danger else c.ink2) }
             if (!iconOnly) Text(text, color = ink, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
+
+/** Text buttons are text, as on iOS and the Mac; the message actions keep their icons, being the reading toolbar. */
+private val IconActions = setOf("Reply", "Reply all", "Forward", "Later", "Done", "Move", "Move to Inbox", "Mark unread", "Mark read", "Delete", "More")
 
 /** A borderless glyph, desktop `icon_button`: 36 dp drawn, 48 dp to touch. */
 @Composable internal fun LagomIconButton(label: String, @DrawableRes icon: Int, modifier: Modifier = Modifier, enabled: Boolean = true,
