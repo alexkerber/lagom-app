@@ -2003,3 +2003,45 @@ fn rotated_token_waits_for_credential_replacement() {
     });
     assert_eq!(account.password().unwrap().as_str(), "fixture");
 }
+
+#[tokio::test]
+async fn calendar_grant_waits_for_planner_but_not_mail_locks() {
+    let (_dir, core) = fixture();
+    let store = core.stores.local.lock().unwrap();
+    let mut a = fixture_account(&store, "grant@example.test", 1);
+    a.imap.host = "imap.gmail.com".into();
+    a.imap.security = Security::Tls;
+    store.save_account(&a).unwrap();
+    drop(store);
+    let target = a.id.clone();
+    a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+    a.provider_subject = Some("subject".into());
+    let signed = lagom_core::oauth::SignedIn { email: a.email.clone(), display_name: a.display_name.clone(),
+        account: a, scopes: lagom_core::oauth::GOOGLE_CALENDAR_SCOPES.into(), refresh_token: Zeroizing::new("new".into()),
+        access_token: Zeroizing::new("access".into()), expires_in: 3600 };
+    let _sync = core.stores.sync.lock().unwrap();
+    let _folder = core.stores.network.lock().await;
+    let calendar = core.stores.calendar.lock().unwrap();
+    let mut install = std::pin::pin!(core.install_sign_in(signed, Some(target.clone())));
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut install).await.is_err());
+    core.stores.local.lock().unwrap().drop_calendar_scopes(&target).unwrap();
+    drop(calendar);
+    let result = tokio::time::timeout(HANG, install).await.unwrap().unwrap();
+    assert!(result.calendar_grant);
+    assert_eq!(result.account.id, target);
+    assert_eq!(core.stores.local.lock().unwrap().account_scopes(&target).unwrap(), lagom_core::oauth::GOOGLE_CALENDAR_SCOPES);
+}
+
+#[tokio::test]
+async fn planner_sync_reports_failure_when_both_granted_services_fail() {
+    let (_dir, core) = fixture();
+    let id = {
+        let s = core.stores.local.lock().unwrap();
+        let mut a = fixture_account(&s, "planner@example.test", 1);
+        a.auth = lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google);
+        s.save_authorized_account(&a, lagom_core::oauth::GOOGLE_CALENDAR_SCOPES).unwrap();
+        a.delete_password().unwrap();
+        a.id
+    };
+    assert!(core.sync_google(id).await.is_err());
+}

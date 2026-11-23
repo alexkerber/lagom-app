@@ -615,10 +615,10 @@ pub(crate) fn forget(id: &str) {
         .unwrap_or_else(|e| e.into_inner())
         .remove(id);
 }
-thread_local! { static REFRESH_STORE: std::cell::OnceCell<std::path::PathBuf> = const { std::cell::OnceCell::new() }; }
-/// The desktop mail worker runs its refresh tasks on one dedicated thread.
+thread_local! { static REFRESH_STORE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) }; }
+/// Selects the database for token rotations on this worker thread.
 pub fn configure_refresh_store(path: &std::path::Path) {
-    REFRESH_STORE.with(|store| store.set(path.to_owned()).expect("refresh store already configured"));
+    REFRESH_STORE.with_borrow_mut(|store| *store = Some(path.to_owned()));
 }
 /// `rejected` is the token refused by the server. Concurrent IMAP/SMTP retries share one refresh.
 pub(crate) async fn access_token(account: &Account, rejected: Option<&str>) -> Result<Zeroizing<String>> {
@@ -653,7 +653,7 @@ async fn access_token_with(
         if id_token_claims(jwt)?.sub != *subject { return Err(Error::ReauthRequired); }
     }
     if let Some(refresh) = token.refresh_token.as_deref().filter(|s| !s.is_empty()) {
-        REFRESH_STORE.with(|store| match store.get() {
+        REFRESH_STORE.with_borrow(|store| match store {
             Some(path) => crate::store::Store::persist_rotated_token(path, account, refresh),
             None => account.set_password(refresh),
         })?;

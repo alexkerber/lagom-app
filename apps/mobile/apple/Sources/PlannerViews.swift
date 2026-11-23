@@ -200,8 +200,10 @@ private struct CalendarAccessButton: View {
         model.grantingCalendar = true
         defer { connecting = false; model.grantingCalendar = false }
         do {
-            guard try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true }) else { return }
-            try await core.syncGoogle(accountId: account.id)
+            let finished = try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true })
+            guard finished else { return }
+            do { try await core.syncGoogle(accountId: account.id) }
+            catch { planner.error = error.localizedDescription }
             await planner.reload()
             Task { await model.sync() }
         } catch { planner.error = error.localizedDescription }

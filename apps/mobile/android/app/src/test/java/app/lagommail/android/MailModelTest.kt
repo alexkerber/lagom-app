@@ -62,32 +62,49 @@ class MailModelTest {
     @Test fun finishedSignInClosesTheFormAndARefusedRedirectKeepsIt() = runTest(dispatcher) {
         val core = FakeCore(); val model = model(core); model.start()
         val form = AccountForm(); model.accountForm = form; model.signInForm = form
-        model.finishSignIn("msauth.com.example.app://auth?code=c&state=guess"); runCurrent()
+        model.finishSignIn("msauth.com.example.app://auth?code=c&state=guess", PlannerModel()); runCurrent()
         assertEquals("Sign-in was interrupted. Try again.", model.error)
         assertSame(form, model.accountForm); assertFalse(form.connecting)
         assertTrue(core.redirects.isEmpty())
         val syncs = core.syncs
-        model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending"); runCurrent()
+        model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending", PlannerModel()); runCurrent()
         assertNull(model.accountForm); assertFalse(form.connecting)
         assertEquals(1, core.redirects.size); assertEquals(syncs + 1, core.syncs)
     }
 
     @Test fun calendarGrantReloadsPlannerBeforeMailSyncFinishes() = runTest(dispatcher) {
-        val core = FakeCore(); val model = model(core); model.start()
+        val core = FakeCore()
+        core.calendarGrant = true
+        val model = model(core)
+        val planner = PlannerModel()
+        val google = CompletableDeferred<Unit>(); core.googleGate = google
         val mail = CompletableDeferred<Unit>(); core.syncGate = mail
-        var reloaded = false
-        model.reloadAfterCalendarGrant = {
-            assertEquals(listOf("fixture"), core.googleSyncs)
-            model.setForeground(true)
-            assertEquals(0, core.syncs)
-            assertTrue(model.signingIn)
-            reloaded = true
-        }
-        model.finishSignIn("com.googleusercontent.apps.fixture:/oauth2redirect?state=pending"); runCurrent()
-        assertTrue(reloaded)
+        model.setForeground(true, redirectPending = true)
+        assertEquals(0, core.syncs)
+        model.finishSignIn("com.googleusercontent.apps.fixture:/oauth2redirect?state=pending", planner); runCurrent()
+        assertEquals(listOf("fixture"), core.googleSyncs)
+        assertTrue(model.signingIn)
+        model.setForeground(true)
+        assertEquals(0, core.syncs)
+        google.complete(Unit); runCurrent()
+        assertNotNull(planner.today)
         assertFalse(model.signingIn)
         assertTrue(model.syncing)
         mail.complete(Unit); runCurrent()
+    }
+
+    @Test fun failedPlannerRefreshShowsErrorAndStartsMail() = runTest(dispatcher) {
+        val core = FakeCore()
+        core.calendarGrant = true
+        core.googleGate = CompletableDeferred<Unit>().apply { completeExceptionally(IllegalStateException("Planner unavailable")) }
+        core.syncGate = CompletableDeferred()
+        val model = model(core); model.start()
+        val planner = PlannerModel()
+        model.finishSignIn("com.googleusercontent.apps.fixture:/oauth2redirect?state=pending", planner); runCurrent()
+        assertEquals("Planner unavailable", planner.error)
+        assertFalse(model.signingIn)
+        assertEquals(1, core.syncs)
+        core.syncGate?.complete(Unit); runCurrent()
     }
 
     @Test fun signInRedirectLeavesAFormOpenedSinceOpen() = runTest(dispatcher) {
@@ -95,7 +112,7 @@ class MailModelTest {
         val list = AccountForm(choosing = true); model.accountForm = list; model.signInForm = list
         // Fastmail opened while Google's page was still in the browser.
         val typed = AccountForm(fromList = true).apply { email = "me@fastmail.example" }; model.accountForm = typed
-        model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending"); runCurrent()
+        model.finishSignIn("msauth.com.example.app://auth?code=c&state=pending", PlannerModel()); runCurrent()
         assertSame(typed, model.accountForm); assertEquals("me@fastmail.example", typed.email)
     }
 
@@ -1325,8 +1342,9 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun backgroundSync(): List<MailRow> { syncAll(); return emptyList() }
     var syncs = 0
     override suspend fun syncAll() { syncs++; syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }
+    var googleGate: CompletableDeferred<Unit>? = null
     val googleSyncs = mutableListOf<String>()
-    override suspend fun syncGoogle(accountId: String) { googleSyncs += accountId }
+    override suspend fun syncGoogle(accountId: String) { googleSyncs += accountId; googleGate?.await() }
     override suspend fun sync(accountId: String) = syncAll()
     var conversationIds = emptyList<Long>()
     override suspend fun conversation(messageId: Long) = (conversationIds.ifEmpty { listOf(messageId) }).map { message(it) }
@@ -1402,11 +1420,12 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun addAccountManual(email: String, password: String, imap: MailServer, smtp: MailServer) = error("unused fixture operation")
     override fun beginSignIn(provider: SignInProvider) = error("unused fixture operation")
     override fun beginCalendarAccess(accountId: String) = error("unused fixture operation")
+    var calendarGrant = false
     var redirects = listOf<String>()
-    override suspend fun finishSignIn(callbackUrl: String): MailAccount {
+    override suspend fun finishSignIn(callbackUrl: String): SignInResult {
         check(callbackUrl.endsWith("state=pending")) { "Sign-in was interrupted. Try again." }
         redirects += callbackUrl
-        return MailAccount("fixture", "fixture@example.test", "Fixture")
+        return SignInResult(MailAccount("fixture", "fixture@example.test", "Fixture"), calendarGrant)
     }
 }
 

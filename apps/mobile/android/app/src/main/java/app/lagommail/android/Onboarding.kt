@@ -204,7 +204,6 @@ internal fun MailModel.startSignIn(context: Context, provider: SignInProvider) {
     perform {
         val start = requireNotNull(core).beginSignIn(provider)
         signInForm = accountForm
-        reloadAfterCalendarGrant = null
         openSignIn(context, start.url)
     }
 }

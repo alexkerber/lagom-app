@@ -60,6 +60,8 @@ impl From<SignInProvider> for lagom_core::oauth::Provider {
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SignInStart { pub url: String, pub callback_scheme: String }
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SignInResult { pub account: MailAccount, pub calendar_grant: bool }
 /// Call once at app start, before a core syncs: token refresh needs the client IDs too.
 /// `app_id` is the bundle or application ID; an empty client ID turns that provider off.
 #[uniffi::export]
@@ -231,6 +233,22 @@ struct Stores { path: std::path::PathBuf, local: Mutex<Store>,
     unsaved_events: Mutex<Vec<(String, String, lagom_core::calendar::Event)>> }
 
 impl LagomCore {
+    async fn install_sign_in(&self, signed: lagom_core::oauth::SignedIn, grant: Option<String>) -> Result<SignInResult> {
+        let calendar_grant = grant.is_some();
+        let account = if let Some(target) = grant {
+            self.run_stores(move |stores| {
+                let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                Store::open(&stores.path)?.save_browser_sign_in(signed, Some(&target))
+            }).await?
+        } else {
+            self.run_sync(move |stores| {
+                let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                stores.folder_lock().save_browser_sign_in(signed, None)
+            }).await?
+        };
+        Ok(SignInResult { account: account.into(), calendar_grant })
+    }
     async fn attachment_bytes(&self, id: i64, section: String) -> Result<Vec<u8>> {
         let key = section.clone();
         let cached = self.run(move |s| {
@@ -265,9 +283,8 @@ impl LagomCore {
         self.run_on(Lane::Own, action).await
     }
     async fn run_on<T: Send + 'static>(&self, lane: Lane, action: impl FnOnce(&mut Store) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
-        let stores = self.stores.clone();
         // Network futures borrow SQLite across awaits; a separate WAL connection keeps local work available.
-        tokio::task::spawn_blocking(move || {
+        self.run_stores(move |stores| {
             // A panic in one action must not disable the app: SQLite transactions keep the store consistent.
             match lane {
                 Lane::Local => action(&mut stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner)),
@@ -276,13 +293,20 @@ impl LagomCore {
                     let _removal = stores.removal.read().unwrap_or_else(std::sync::PoisonError::into_inner);
                     Store::open(&stores.path).and_then(|mut store| action(&mut store))
                 }
-            }.map_err(MailError::from)
-        }).await.map_err(|_| failure("something went wrong; try again"))?
+            }
+        }).await
     }
     async fn run_sync<T: Send + 'static>(&self, action: impl FnOnce(&Stores) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
+        self.run_stores(move |stores| {
+            let _sync = stores.sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            action(stores)
+        }).await
+    }
+    async fn run_stores<T: Send + 'static>(&self, action: impl FnOnce(&Stores) -> lagom_core::Result<T> + Send + 'static) -> Result<T> {
         let stores = self.stores.clone();
         tokio::task::spawn_blocking(move || {
-            let _sync = stores.sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A mail request can finish rotating its old token after a calendar grant replaces it.
+            lagom_core::oauth::configure_refresh_store(&stores.path);
             action(&stores).map_err(MailError::from)
         }).await.map_err(|_| failure("something went wrong; try again"))?
     }
@@ -383,24 +407,30 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
 /// Mail, then Calendar and Google Tasks, which run even when mail failed.
 fn sync_with_google(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
     let mail = sync_account(stores, a);
-    sync_google(stores, a);
+    if a.auth == lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) {
+        let _ = sync_google(stores, &a.id);
+    }
     mail
 }
-/// Calendar and Google Tasks, on their own connection as on desktop.
-// shortcut: a failure only reaches the log and never fails the mail sync; show a calendar sync state, as desktop does, if people miss it.
-fn sync_google(stores: &Stores, a: &Account) {
-    if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return; }
-    let log = |what: &str, result: lagom_core::Result<()>| if let Err(error) = result { eprintln!("lagom: Google {what} sync failed: {error:?}"); };
-    let mut store = match Store::open(&stores.path) { Ok(store) => store, Err(error) => return log("Calendar", Err(error)) };
-    // Also serializes a grant's own fetch with the one in a mail sync.
+/// Both granted services get a turn, even if the first fetch fails.
+fn sync_google(stores: &Stores, id: &str) -> lagom_core::Result<()> {
     let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Before the fetch, so an event deleted in Google since then leaves again with its window.
-    planner::cache_unsaved(stores, &store, &a.id);
-    log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
-    match store.account_scopes(&a.id) {
-        Ok(scopes) if lagom_core::oauth::tasks_allowed(&scopes) => log("Tasks", network(lagom_core::google::sync_tasks(&mut store, a))),
-        Ok(_) => {}
-        Err(error) => log("Tasks", Err(error)),
+    let mut store = Store::open(&stores.path)?;
+    // Mail may have started before the grant replaced the credential.
+    let a = account(&store, id)?;
+    if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return Ok(()); }
+    let scopes = store.account_scopes(id)?;
+    planner::cache_unsaved(stores, &store, id);
+    let calendar = lagom_core::oauth::calendar_allowed(&scopes).then(||
+        network(lagom_core::google::sync_calendar(&store, &a, now()))
+            .inspect_err(|e| eprintln!("lagom: Google Calendar sync failed: {e:?}")));
+    let tasks = lagom_core::oauth::tasks_allowed(&scopes).then(||
+        network(lagom_core::google::sync_tasks(&mut store, &a))
+            .inspect_err(|e| eprintln!("lagom: Google Tasks sync failed: {e:?}")));
+    match (calendar, tasks) {
+        (Some(calendar), Some(tasks)) => calendar.or(tasks),
+        (Some(result), None) | (None, Some(result)) => result,
+        (None, None) => Ok(()),
     }
 }
 
@@ -488,7 +518,7 @@ impl LagomCore {
     }
     /// `callback_url` is the redirect the browser handed back. Only the pending sign-in's own redirect
     /// (its URI and state) is taken; anything else is refused and leaves the sign-in pending.
-    pub async fn finish_sign_in(&self, callback_url: String) -> Result<MailAccount> {
+    pub async fn finish_sign_in(&self, callback_url: String) -> Result<SignInResult> {
         let callback_url = Zeroizing::new(callback_url);
         let pending = {
             let mut slot = self.stores.sign_in.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -499,11 +529,7 @@ impl LagomCore {
         };
         let grant = pending.account().map(|a| a.id.clone());
         let signed = lagom_core::oauth::finish(pending, &callback_url).await?;
-        self.run_sync(move |stores| {
-            let _removal = stores.removal.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let s = &*stores.folder_lock();
-            s.save_browser_sign_in(signed, grant.as_deref()).map(Into::into)
-        }).await
+        self.install_sign_in(signed, grant).await
     }
     pub async fn remove_account(&self, id: String) -> Result<()> {
         // A running sync finishes its account, and running one-message actions their token refresh, before the rows go.
@@ -527,14 +553,10 @@ impl LagomCore {
     }
     /// Calendar and Google Tasks for one account. It waits for no mail sync: its own lock serializes it.
     pub async fn sync_google(&self, account_id: String) -> Result<()> {
-        let stores = self.stores.clone();
-        tokio::task::spawn_blocking(move || {
-            // As a one-message action: a removal waits, so no token refresh writes a removed account's secret back.
+        self.run_stores(move |stores| {
             let _removal = stores.removal.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let a = account(&stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &account_id)?;
-            sync_google(&stores, &a);
-            Ok(())
-        }).await.map_err(|_| failure("something went wrong; try again"))?
+            sync_google(stores, &account_id)
+        }).await
     }
     pub async fn sync_all(&self) -> Result<()> {
         self.run_sync(|stores| {

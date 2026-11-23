@@ -709,7 +709,6 @@ private const val NEW_LIST = Long.MIN_VALUE
                 planner.perform {
                     val start = requireNotNull(planner.core).beginCalendarAccess(account.id)
                     model.signInForm = null
-                    model.reloadAfterCalendarGrant = planner::reload
                     openSignIn(context, start.url)
                 }
             }
