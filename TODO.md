@@ -285,5 +285,5 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [ ] "Meet with" guest field: do not accept an unwritten address on Tab, as in compose.
 - [x] Threading: common localised reply and forward prefixes, leading list tags and numbered replies ("[list] Re:", "Antw:", "TR:", "Re[2]:") count as the same subject.
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
-- [ ] iOS: no MX lookup in account discovery (hickory 0.26 needs SCDynamicStore, unavailable on iOS). Use a platform resolver if presets and autoconfig are not enough.
+- [x] iOS account setup asks the system resolver for MX records using only the domain (`fix/ios-mx-lookup`). Discovery tests passed. Both iOS libraries built, and the unsigned device app linked. Live DNS on an iPhone or iPad remains unverified.
 - [ ] `cargo audit` warnings: 18 unmaintained dependency warnings and two unsound `git2 0.20.4` advisories (RUSTSEC-2026-0183, RUSTSEC-2026-0184), still reported without ignores; update the upstream dependency chains.
