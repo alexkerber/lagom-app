@@ -204,12 +204,12 @@ private fun openLink(context: android.content.Context, planner: PlannerModel, li
 private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
 
 /** The calm Today page, as iOS `TodayView`: schedule, what is due, and a short look at unread mail. */
-@Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
+@Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, open: (AppSection) -> Unit, openSettings: (() -> Unit)? = null, openMail: (Long?) -> Unit) {
     var newTask by rememberSaveable { mutableStateOf(false) }
     val now = nowSeconds()
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
-        PageTitle(AppSection.TODAY.title)
+        PageTitle(AppSection.TODAY.title) { openSettings?.let { LagomIconButton("Settings", R.drawable.ic_settings, onClick = it) } }
         Refreshable(planner, { planner.reload() }, Modifier.weight(1f)) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(32.dp)) {
                 TodaySentence(planner, open, openMail)

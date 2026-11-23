@@ -329,6 +329,8 @@ class MainActivity : ComponentActivity() {
         if (section == AppSection.TODAY) planner.reloadMail()
         if (section == AppSection.TODO) planner.reloadTodos()
     }
+    var todaySettings by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(section) { if (section != AppSection.TODAY) todaySettings = false }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
     Scaffold(containerColor = if (sidebar) lagom.sidebar else lagom.bg,
@@ -338,7 +340,9 @@ class MainActivity : ComponentActivity() {
             // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop and iPad.
             Box(Modifier.weight(1f).fillMaxHeight().background(lagom.bg)) {
                 when (section) {
-                    AppSection.TODAY -> TodayScreen(planner, model, open = ::show) { id ->
+                    // A phone reaches Settings from Today's title too (Alex 2026-11-23); a tablet has its sidebar row.
+                    AppSection.TODAY -> if (todaySettings) SettingsScreen(model) { todaySettings = false }
+                    else TodayScreen(planner, model, open = ::show, openSettings = if (sidebar) null else ({ todaySettings = true })) { id ->
                         show(AppSection.MAIL)
                         opening = model.perform { model.openInbox(id) }
                     }
