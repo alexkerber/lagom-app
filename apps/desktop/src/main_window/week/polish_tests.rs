@@ -122,6 +122,32 @@ fn mini_month_navigation_does_not_change_week_until_a_date_is_clicked(cx: &mut T
 }
 
 #[gpui::test]
+fn meet_with_requires_an_explicit_choice_for_an_unwritten_contact(cx: &mut TestAppContext) {
+    use lagom_core::contacts::{Contact, Contacts};
+
+    cx.update(|cx| crate::text_input::bind_keys(cx));
+    let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));
+    view.update(cx, |v, cx| { v.week.panel = Some(true); cx.notify(); });
+    click(cx, "meet-with");
+    view.update(cx, |v, _| {
+        v.week.contacts = Contacts::new(vec![Contact {
+            name: "Anna".into(), address: "anna@example.test".into(), score: 1., written: false,
+        }]);
+    });
+    cx.simulate_input("ann");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("meet-suggestion-0").is_some());
+    cx.simulate_keystrokes("tab");
+    view.read_with(cx, |v, cx| {
+        assert!(v.week.guests.is_empty());
+        assert_eq!(v.week.guest_input.as_ref().unwrap().read(cx).text(), "ann");
+    });
+    click(cx, "meet-with");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(view.read_with(cx, |v, _| v.week.guests.clone()), ["Anna <anna@example.test>"]);
+}
+
+#[gpui::test]
 fn meet_with_uses_contact_suggestions_validates_and_keeps_uncommitted_guests(cx: &mut TestAppContext) {
     cx.update(|cx| { super::super::bind_keys(cx); crate::text_input::bind_keys(cx); });
     let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "calendar", window, cx));

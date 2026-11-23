@@ -2,6 +2,9 @@ use crate::{oauth::Provider, Error, Result};
 use std::net::IpAddr;
 use zeroize::Zeroizing;
 
+#[cfg(any(target_os = "ios", all(test, target_os = "macos")))]
+mod ios_keychain;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Security {
     Tls,
@@ -159,8 +162,7 @@ impl Account {
     }
     pub fn set_password(&self, password: &str) -> Result<()> {
         let entry = Self::secret_entry(&self.id, self.credential_key.as_deref())?;
-        // iOS: readable only while unlocked and never in backups or device migration. Reads stay with
-        // keyring, which matches service and account only, so older items keep working.
+        // iOS: readable only while unlocked and never in backups or device migration.
         #[cfg(target_os = "ios")]
         {
             use security_framework::{access_control::{ProtectionMode, SecAccessControl}, passwords::{set_generic_password_options, PasswordOptions}};
@@ -175,8 +177,14 @@ impl Account {
         entry.set_password(password).map_err(|_| Error::Secret)
     }
     pub fn password(&self) -> Result<Zeroizing<String>> {
-        Self::secret_entry(&self.id, self.credential_key.as_deref())?
-            .get_password()
+        let entry = Self::secret_entry(&self.id, self.credential_key.as_deref())?;
+        #[cfg(target_os = "ios")]
+        if let Some(native) = entry.get_credential().downcast_ref::<keyring::ios::IosCredential>() {
+            if let Some(password) = ios_keychain::read(&native.service, &native.account) {
+                return Ok(password);
+            }
+        }
+        entry.get_password()
             .map(Zeroizing::new)
             .map_err(|_| Error::Secret)
     }

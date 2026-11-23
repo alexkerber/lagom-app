@@ -174,6 +174,11 @@ final class PresentationTests: XCTestCase {
         tasks.append(todo)
         return todo
     }
+    override func editTodo(id: Int64, title: String?, changeDue: Bool, dueDate: String?) async throws {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { throw MailError.Failed(reason: "not found") }
+        if let title { tasks[index].title = title }
+        if changeDue { tasks[index].due = dueDate }
+    }
     override func setTodoDone(id: Int64, done: Bool) async throws {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { throw MailError.Failed(reason: "not found") }
         tasks[index].done = done
@@ -247,6 +252,22 @@ extension PresentationTests {
 }
 
 extension PresentationTests {
+    @MainActor func testEditingPreservesSyncedDueAndBlankTitleStillSavesDate() async throws {
+        let core = PlannerFixtureCore(noHandle: .init())
+        let planner = PlannerModel()
+        planner.core = core
+        let stamp = "2026-11-12T08:00:00Z"
+        let task = Todo(id: 7, list: 1, title: "Milk", due: stamp, done: false, fromMail: false, mailSubject: nil)
+        core.tasks = [task]
+        await planner.edit(task, title: "  Bread  ", due: DateWords().day(stamp))
+        let renamed = try XCTUnwrap(planner.todos[1]?.first)
+        XCTAssertEqual(renamed.title, "Bread")
+        XCTAssertEqual(renamed.due, stamp)
+        await planner.edit(renamed, title: "  ", due: nil)
+        XCTAssertEqual(planner.todos[1]?.first?.title, "Bread")
+        XCTAssertNil(planner.todos[1]?.first?.due)
+    }
+
     @MainActor func testPlannerAddsTrimmedTasksAndSkipsBlankOnes() async {
         let core = PlannerFixtureCore(noHandle: .init())
         let planner = PlannerModel()
