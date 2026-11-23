@@ -392,12 +392,11 @@ fn sync_google(stores: &Stores, a: &Account) {
     if a.auth != lagom_core::account::Auth::OAuth(lagom_core::oauth::Provider::Google) { return; }
     let log = |what: &str, result: lagom_core::Result<()>| if let Err(error) = result { eprintln!("lagom: Google {what} sync failed: {error:?}"); };
     let mut store = match Store::open(&stores.path) { Ok(store) => store, Err(error) => return log("Calendar", Err(error)) };
-    {
-        let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Before the fetch, so an event deleted in Google since then leaves again with its window.
-        planner::cache_unsaved(stores, &store, &a.id);
-        log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
-    }
+    // Also serializes a grant's own fetch with the one in a mail sync.
+    let _calendar = stores.calendar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Before the fetch, so an event deleted in Google since then leaves again with its window.
+    planner::cache_unsaved(stores, &store, &a.id);
+    log("Calendar", network(lagom_core::google::sync_calendar(&store, a, now())));
     match store.account_scopes(&a.id) {
         Ok(scopes) if lagom_core::oauth::tasks_allowed(&scopes) => log("Tasks", network(lagom_core::google::sync_tasks(&mut store, a))),
         Ok(_) => {}
@@ -526,12 +525,16 @@ impl LagomCore {
     pub async fn sync(&self, account_id: String) -> Result<()> {
         self.run_sync(move |stores| { let a = account(&stores.folder_lock(), &account_id)?; sync_with_google(stores, &a) }).await
     }
+    /// Calendar and Google Tasks for one account. It waits for no mail sync: its own lock serializes it.
     pub async fn sync_google(&self, account_id: String) -> Result<()> {
-        self.run_sync(move |stores| {
-            let a = account(&stores.folder_lock(), &account_id)?;
-            sync_google(stores, &a);
+        let stores = self.stores.clone();
+        tokio::task::spawn_blocking(move || {
+            // As a one-message action: a removal waits, so no token refresh writes a removed account's secret back.
+            let _removal = stores.removal.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let a = account(&stores.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &account_id)?;
+            sync_google(&stores, &a);
             Ok(())
-        }).await
+        }).await.map_err(|_| failure("something went wrong; try again"))?
     }
     pub async fn sync_all(&self) -> Result<()> {
         self.run_sync(|stores| {
