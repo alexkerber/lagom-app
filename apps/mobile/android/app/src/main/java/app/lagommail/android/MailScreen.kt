@@ -133,7 +133,7 @@ internal fun Mailbox.label(): String = when (this) {
                 Column(Modifier.clip(RoundedCornerShape(Radius.control)).clickable(onClickLabel = "Mailboxes and accounts") { menu = true }
                     .padding(horizontal = 8.dp, vertical = 4.dp).semantics(mergeDescendants = true) {}) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(title, Modifier.weight(1f, fill = false).semantics { heading() }, style = MaterialTheme.typography.titleLarge.copy(fontFamily = DisplayFace, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         LagomIcon(R.drawable.ic_chevron, Modifier.padding(start = 4.dp), size = 14.dp)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -181,7 +181,8 @@ internal fun Mailbox.label(): String = when (this) {
                         onClick = { menu = false; onSettings() })
                 }
             }
-            if (!model.searching && model.searchText.isEmpty()) {
+            // Drafts has no search row, so a query kept from the Inbox must not hide New message there.
+            if (model.showingDrafts || (!model.searching && model.searchText.isEmpty())) {
                 if (!model.showingDrafts) LagomIconButton("Search", R.drawable.ic_search) { model.searching = true }
                 LagomIconButton("New message", R.drawable.ic_compose, enabled = model.accounts.isNotEmpty()) {
                     val account = model.accountId ?: model.accounts.first().id
@@ -350,8 +351,8 @@ internal fun Mailbox.label(): String = when (this) {
             SearchField(model.searchText, focus, Modifier.weight(1f).onFocusChanged {
                 focused = if (it.hasFocus) true else if (focused == true) false else focused
             }) { model.perform { model.changeSearch(it) } }
-            // The keyboard rises with the field the button opened, not with a search that is only kept.
-            LaunchedEffect(Unit) { if (searching) focus.requestFocus() }
+            // The keyboard rises with the field the button opened, not with a search kept across a tab switch.
+            LaunchedEffect(Unit) { if (searching && model.searchText.isEmpty()) focus.requestFocus() }
             LaunchedEffect(focused, model.searchText) { if (focused == false && model.searchText.isEmpty()) searching = false }
             // Ink, as on iOS; its text ends on the same 16 dp line as the title above.
             TextButton(onClick = { searching = false; model.perform { model.changeSearch("") } }, Modifier.heightIn(min = 48.dp).padding(end = 2.dp),
