@@ -25,6 +25,8 @@ targets:
     sources:
       - Sources
       - Assets.xcassets
+      - path: ../../../brand/app-icon/AppIcon.icon
+        buildPhase: resources
       - PrivacyInfo.xcprivacy
       # The desktop's bundled faces (OFL, licences beside them): titles and labels. Body text is the system font.
       - path: ../../desktop/assets/fonts/Hauora-Bold.ttf
