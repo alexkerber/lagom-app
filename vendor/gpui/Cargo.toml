@@ -56,7 +56,6 @@ test-support = [
     "leak-detection",
     "collections/test-support",
     "rand",
-    "util/test-support",
     "http_client/test-support",
     "wayland",
     "x11",
@@ -209,11 +208,12 @@ version = "0.2.2"
 package = "gpui_refineable"
 
 [dependencies.resvg]
-version = "0.45.0"
+version = "0.50"
 features = [
     "text",
     "system-fonts",
     "memmap-fonts",
+    "svgz",
 ]
 default-features = false
 
@@ -253,7 +253,7 @@ features = ["union"]
 version = "2.0"
 
 [dependencies.stacksafe]
-version = "0.1"
+version = "1"
 
 [dependencies.strum]
 version = "0.27.2"
@@ -274,7 +274,7 @@ version = "2.0.12"
 version = "1.10"
 
 [dependencies.usvg]
-version = "0.45.0"
+version = "0.50"
 default-features = false
 
 [dependencies.util]
