@@ -385,18 +385,12 @@ impl Worker {
                 self.calendar_consent = calendar_consent;
                 match self.account(&id) {
                     Ok(account) => {
+                        if calendar_consent && account.auth != lagom_core::account::Auth::OAuth(Provider::Google) && !account.google_hosted_password() {
+                            self.signed_in(Err(Error::Invalid("Google calendar requires a Google account")));
+                            return;
+                        }
                         let scopes = match self.store.account_scopes(&id) {
-                            Ok(mut scopes) => {
-                                if calendar_consent {
-                                    if account.auth != lagom_core::account::Auth::OAuth(Provider::Google) && !account.google_hosted_password() {
-                                        self.signed_in(Err(Error::Invalid("Google calendar requires a Google account")));
-                                        return;
-                                    }
-                                    scopes.push(' ');
-                                    scopes.push_str(oauth::GOOGLE_CALENDAR_SCOPES);
-                                }
-                                scopes
-                            }
+                            Ok(scopes) => scopes,
                             Err(e) => { self.signed_in(Err(e)); return; }
                         };
                         self.emit(if calendar_consent { Event::CalendarSync(id, SyncState::SigningIn) } else { Event::Sync(id, SyncState::SigningIn) });

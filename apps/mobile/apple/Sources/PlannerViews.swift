@@ -192,16 +192,19 @@ private struct CalendarAccessButton: View {
             }
         }
         .buttonStyle(HouseButtonStyle(primary: true))
-        .disabled(connecting)
+        .disabled(model.grantingCalendar)
     }
 
     private func allow() async {
-        defer { connecting = false }
+        guard let core = model.core, !model.grantingCalendar else { return }
+        model.grantingCalendar = true
+        // Mail syncs after the planner, also when the grant was cancelled or failed: the foreground sync waited for it.
+        defer { connecting = false; model.grantingCalendar = false; Task { await model.sync() } }
         do {
-            // The button stays busy until the sync has fetched the calendar and tasks.
             let finished = try await model.allowCalendar(account.id, browser: browser, exchanging: { connecting = true })
             guard finished else { return }
-            await model.sync()
+            do { try await core.syncGoogle(accountId: account.id) }
+            catch { planner.error = error.localizedDescription }
             await planner.reload()
         } catch { planner.error = error.localizedDescription }
     }

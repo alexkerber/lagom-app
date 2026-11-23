@@ -101,6 +101,12 @@ internal class PlannerModel : ViewModel() {
         catch (e: Exception) { error = e.mailMessage() }
     }
 
+    suspend fun refreshGrant(core: LagomCoreInterface, account: String) {
+        this.core = core
+        guard { core.syncGoogle(account) }
+        reload()
+    }
+
     suspend fun reload() { reloadMail(); reloadTodos(); reloadAgenda() }
 
     // Loads overlap (start, pull, a change); only the newest request of each kind lands.

@@ -405,6 +405,8 @@ final class MailModel {
         }
     }
 
+    var grantingCalendar = false
+
     func setForeground(_ active: Bool) async {
         foreground = active
         wakeTask?.cancel()
@@ -412,7 +414,8 @@ final class MailModel {
         if !active, let draft = composeDraft { await keep(draft) }
         if active {
             await reload()
-            await sync()
+            // Returning from consent starts mail sync after the planner refresh.
+            if !grantingCalendar { await sync() }
         }
     }
 

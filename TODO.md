@@ -1,5 +1,10 @@
 # Todo
 
+- [x] Google sign-in requests mail, Calendar and Tasks together. Accounts missing Calendar access keep the consent button.
+  After consent, mobile refreshes that account’s planner before starting mail sync. Branch `fix/google-one-consent`.
+  OAuth, FFI, desktop Calendar and sign-in tests passed. iOS built for testing. Android debug assembly and JVM tests passed.
+  Live Google consent and device timing remain unverified.
+
 ## Brand and site
 
 - [ ] Windows: sync.parse_save_1000 took 9.2 s on the CI runner against 1.3 s on Linux. Find out whether it is the runner (Defender, NTFS fsync) or lagom, then gate Windows times in `scripts/perf.py`.
@@ -43,6 +48,7 @@
   The selected account keeps its mail and settings after Google confirms its identity.
 - [ ] Make iOS keychain token rotation atomic. The current backend deletes the existing item before adding its replacement.
 - [ ] Accounts from older builds have no stored provider subject until their next sign-in, which binds by email address. A desktop calendar event created during re-authentication appears locally at the next sync.
+- [ ] A send that is refreshing its token when a Calendar grant replaces the credential records `ReauthRequired`, and the follow-up sync skips the failed row. Requeue the send when the credential changed during the attempt (before SMTP submission).
 - [x] Mobile: Google sign-in, Calendar access and event creation landed in #106, #194 and #209. On `feat/mobile-task-edit`, tap a task title to edit it and its due date. Return or leaving the field saves. A blank title keeps the original. Both mobile builds, focused Rust tests, host planner XCTests and Android JVM tests passed. On-device editing and live Google sign-in, event creation and sync remain unverified.
 - [ ] Mobile acceptance: verify native layout/gestures (including regular-size phones), accessibility, WKWebView privacy and signed-device Keychain/provider behavior. Generic simulator builds and a headless Swift FFI smoke check do not establish runtime iOS acceptance.
 - [x] First native Android phone/tablet slice in `apps/mobile/android`: Compose system theme and adaptive icon, window-size list/detail, unified/account paged mailboxes, discovery/manual TLS setup, Done/Later/Delete/read, private WebView, Markdown reply/Send with Cc and durable outbox. Kotlin/JNA on the existing Rust FFI; Android Keystore AES-GCM backend through keyring. Gradle wrapper, two-ABI builder, fixture JVM tests and independent Android CI job. Review fixes guard delayed replies against newer compose/selection revisions, use Android system DNS for custom-domain MX discovery, and prepare HTML off the UI thread keyed by message and appearance; fixture regressions cover all three. Follow-up review fixes rebuild loaded pages when pagination overlaps an unapplied refresh, and move both message reads and the Later deadline calculation off Main. JVM regressions cover archived-row removal without skipped rows and execution threads before/after message suspension and marking read.

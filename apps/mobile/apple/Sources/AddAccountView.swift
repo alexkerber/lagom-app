@@ -162,10 +162,11 @@ extension MailModel {
     /// Adds Google Calendar and Tasks to a Google account on Google's own page; false when the user closed it.
     func allowCalendar(_ account: String, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
         guard let core else { return false }
-        return try await authenticate(core.beginCalendarAccess(accountId: account), browser: browser, exchanging: exchanging)
+        // No mailbox reload here: the planner refreshes first and the mail sync that follows reloads.
+        return try await authenticate(core.beginCalendarAccess(accountId: account), browser: browser, exchanging: exchanging, reload: false)
     }
 
-    private func authenticate(_ start: SignInStart, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
+    private func authenticate(_ start: SignInStart, browser: WebAuthenticationSession, exchanging: () -> Void, reload reloads: Bool = true) async throws -> Bool {
         guard let core else { return false }
         guard let url = URL(string: start.url) else { return false }
         let redirect: URL
@@ -176,7 +177,7 @@ extension MailModel {
         } catch let stopped as ASWebAuthenticationSessionError where stopped.code == .canceledLogin { return false }
         exchanging()
         _ = try await core.finishSignIn(callbackUrl: redirect.absoluteString)
-        await reload()
+        if reloads { await reload() }
         return true
     }
 }
