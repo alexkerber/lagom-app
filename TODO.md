@@ -2,6 +2,7 @@
 
 ## Brand and site
 
+- [ ] Windows: sync.parse_save_1000 took 9.2 s on the CI runner against 1.3 s on Linux. Find out whether it is the runner (Defender, NTFS fsync) or lagom, then gate Windows times in `scripts/perf.py`.
 - [x] Use lowercase "lagom" in desktop, mobile and site UI, package display names, CLI help, OAuth pages and shared errors.
 
 - [x] Domain: `lagommail.app`, chosen 2026-11-09 (`lagom.app`, `.se`, `.dev` and `.email` are taken). Bundle id `app.lagommail.desktop`. Registration not confirmed in the registry on 2026-11-09.
