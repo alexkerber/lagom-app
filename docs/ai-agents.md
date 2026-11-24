@@ -185,7 +185,7 @@ effective(resource) = min( global level,   # the account's row, else the group d
   created. Every other draft is read-only. `draft edit` names the revision it read; a draft that
   changed since gives `conflict`. The Drafts list marks a draft an agent created. An agent draft
   syncs to the account's Drafts folder on the server like any draft. List and show expose the revision only to its owner.
-  Other drafts omit both the revision and update time. Within each account, drafts sort by creation time descending, then ID ascending.
+  Other drafts omit both the revision and update time. Within each account, drafts sort by creation time descending, then ID ascending. Drafts predating v22 share creation time zero.
 - Agent drafts carry no files from disk. A forward keeps the attachments of its original, and
   needs Read on the original's account.
 - `action archive`, `move` and `trash` need a server with `MOVE` or `UIDPLUS`. Without both, a
@@ -344,13 +344,18 @@ The Confirmation toggle in Settings controls mail sends for all agents.
    goes out the way Compose sends, with its Undo window. After Approve the send continues even
    when the client is gone; `draft show` then gives `not_found`.
 
+The worker queues the send only if the policy generation still matches the approval snapshot inside the enqueue transaction.
 On the authenticated connection, immediately before MAIL FROM, the outbox checks the recorded policy generation, token and effective Send access.
-Revocation after this check cannot recall the transaction. SUBMIT_DEADLINE bounds the wait for acceptance to 60 seconds.
+Revocation after this check cannot recall the transaction. `SUBMIT_DEADLINE` bounds the wait for acceptance to 60 seconds.
 Disabling access or changing a grant invalidates queued approvals even if access is later restored.
 Only agent-initiated sends carry the agent and token IDs. A person can send an agent draft from Compose.
 Revocation, Disconnect, token replacement and disabling access commit the authority change before restoring drafts.
-Cleanup restores unclaimed sends during Undo, on failure and while waiting for retry or reauthentication.
-If Compose already saved a draft with that ID, cleanup keeps it. Removing the queued send and auditing `revoked` are atomic.
+Grant and token changes sweep all stale unclaimed sends, including failed sends. Startup recovery repeats the sweep.
+A worker releasing a claim after a definite failure restores stale mail in the same transaction.
+Uncertain deliveries stay available for the person to review. Each restoration has its own savepoint.
+A failed restoration rolls back that draft, logs the failure and drops its queue row.
+Undo and revocation keep any newer Compose draft. Successful revocation cleanup audits `revoked`.
+Sending from Compose replaces an unclaimed, unsent agent message and audits `superseded` in the enqueue transaction.
 Reconnecting cannot release an old send. A message already submitted to SMTP stays submitted.
 
 The agent cannot approve: the protocol has no such command. Confirmations queue one at a time. A

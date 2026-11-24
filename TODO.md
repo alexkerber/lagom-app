@@ -254,6 +254,12 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     Draft lists keep creation order. Agent reads preserve text shaping. Base64 fetches check wire and decoded sizes.
     Core, desktop and FFI tests passed on macOS. The desktop build passed.
     Live providers, native window activation and Linux remain unverified.
+  - [x] Completed the final agent write review on `feat/agents-write`.
+    Approved sends retain their policy generation. SMTP checks access after login on the connection that sends the message.
+    Authority changes take the write lock first. Cleanup restores stale sends individually, including failed sends and released claims.
+    Undo preserves newer drafts. Compose sends replace queued agent sends. Pre-v22 drafts sort by ID.
+    Regression tests covered all eight fixes. Core, desktop and FFI tests passed on macOS. The desktop build passed.
+    Live providers and Linux remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
     Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
     Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
