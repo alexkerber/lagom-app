@@ -360,7 +360,12 @@ mod tests {
             assert!(store.claim_send(&id,0).unwrap());
             store.authorize_queued_send(&id).unwrap();
             match change {
-                "rotate_claimed" => { store.issue_token(&agent, TokenScope::Local).unwrap(); }
+                "rotate_claimed" => {
+                    let original = store.authenticate(Some(&token),None).unwrap();
+                    store.issue_token(&agent, TokenScope::Local).unwrap();
+                    // Even a later token with the same public ID cannot authorize the claimed send.
+                    store.db.execute("UPDATE agent_tokens SET id=? WHERE agent=?", params![original.token_id(),agent]).unwrap();
+                }
                 "disable" => store.disable_agents().unwrap(),
                 "lower" => store.set_agent_access("", &Access { level:Level::Read, ..grant }).unwrap(),
                 "scope" => { store.db.execute("UPDATE agent_tokens SET accounts='[]'",[]).unwrap(); }
