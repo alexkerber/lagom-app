@@ -170,7 +170,7 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
 }
 
 async fn frame(stream: &mut UnixStream) -> Result<Request, Code> {
-    let mut buf = Vec::new();
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
     let mut reader = BufReader::new(stream.take((MAX_REQUEST + 1) as u64));
     reader
         .read_until(b'\n', &mut buf)
@@ -333,7 +333,7 @@ fn process(
             who.as_ref(),
             account.as_deref(),
             target.as_ref(),
-            result.as_ref().map(|_| ()).map_err(|e| *e),
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
         )
     });
     audited

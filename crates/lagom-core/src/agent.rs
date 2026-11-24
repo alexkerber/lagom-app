@@ -45,16 +45,21 @@ impl Store {
 
     pub fn disable_agents(&self) -> Result<(), Code> {
         let tx = self.db.unchecked_transaction()?;
-        tx.execute(
+        self.disable_agent_listener()?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn disable_agent_listener(&self) -> Result<(), Code> {
+        self.db.execute(
             "UPDATE agent_settings SET value='0' WHERE key='enabled'",
             [],
         )?;
-        tx.execute(
+        self.db.execute(
             "INSERT INTO agent_settings VALUES('generation',1)
             ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
             [],
         )?;
-        tx.commit()?;
         Ok(())
     }
 

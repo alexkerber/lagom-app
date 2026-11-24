@@ -2,7 +2,10 @@ use super::{protocol::Code, token::Identity};
 use crate::store::Store;
 use rusqlite::params;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 #[repr(i64)]
 pub enum Level {
     None,
@@ -61,6 +64,9 @@ impl Store {
     }
 
     pub fn set_agent_setting(&self, setting: Setting, on: bool) -> Result<(), Code> {
+        if matches!(setting, Setting::Enabled) && !on {
+            return self.disable_agents();
+        }
         self.db.execute(
             "INSERT OR REPLACE INTO agent_settings VALUES(?,?)",
             params![setting.key(), if on { "1" } else { "0" }],
@@ -106,10 +112,7 @@ impl Store {
     pub fn revoke_all_agents(&self) -> Result<(), Code> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute("DELETE FROM agent_tokens", [])?;
-        tx.execute(
-            "INSERT OR REPLACE INTO agent_settings VALUES('enabled','0')",
-            [],
-        )?;
+        self.disable_agent_listener()?;
         tx.commit()?;
         Ok(())
     }

@@ -308,6 +308,11 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
     assert_eq!(first["truncated"], true);
     let part = ok("attachment", json!({"id":first["attachments"][0]["id"]}));
     assert_eq!(part["data"], "YWJj");
+    let audited: String = db.query_row(
+        "SELECT target FROM agent_audit WHERE command='attachment' AND result='ok' ORDER BY rowid DESC LIMIT 1",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(audited, mail["id"]);
     db.execute("UPDATE attachment_cache SET data=zeroblob(20971521)", [])
         .unwrap();
     assert_eq!(

@@ -22,9 +22,11 @@ pub(crate) fn error(e: Error) -> Code {
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
         Error::Invalid("attachment exceeds 64 MiB" | "attachment is too large") => Code::TooLarge,
-        Error::Invalid("unavailable") | Error::Network(_) | Error::Authentication | Error::ReauthRequired | Error::Secret => {
-            Code::Unavailable
-        }
+        Error::Invalid("unavailable")
+        | Error::Network(_)
+        | Error::Authentication
+        | Error::ReauthRequired
+        | Error::Secret => Code::Unavailable,
         _ => Code::Internal,
     }
 }
@@ -46,13 +48,15 @@ impl Attachment {
         if store.agent_generation()? != Some(self.generation) {
             return Err(Code::Unavailable);
         }
-        store.resolve_agent_message(
+        store
+            .resolve_agent_message(
                 Some(&self.token),
                 self.ip.as_deref(),
                 &self.message.encode(),
                 self.folder.as_deref(),
                 Level::Read,
             )
+            .map_err(Code::from)
     }
 }
 
@@ -166,7 +170,9 @@ pub(super) fn dispatch(
             return Err(Failure::OutsideScope);
         }
         Some(key)
-    } else { None };
+    } else {
+        None
+    };
     let account_id = touched.as_deref().or(selector.filter(|s| !s.contains('@')));
     let mut accounts = store.agent_accounts(who, resources, account_id)?;
     if let Some(sel) = selector {
@@ -198,7 +204,9 @@ pub(super) fn dispatch(
     match cmd {
         "accounts" => {
             for (id, email) in accounts {
-                push(json!({"id":id,"email":clean(&email)}))?;
+                push(json!({"id":id,"email":clean(&email),
+                    "mail":store.agent_level(who,Resource::Mail,&id)?,
+                    "calendar":store.agent_level(who,Resource::Calendar,&id)?}))?;
             }
         }
         "folders" => {
@@ -235,7 +243,8 @@ pub(super) fn dispatch(
                     .transpose()
             };
             let ids = accounts.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-            let (messages, next) = FilterReader::open(store.path()).map_err(error)?
+            let (messages, next) = FilterReader::open(store.path())
+                .map_err(error)?
                 .filtered_messages(
                     &ids,
                     &filter,
