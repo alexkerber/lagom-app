@@ -40,10 +40,14 @@ pub fn recipient_address(value: &str) -> Option<String> {
 
 /// Keep invalid pieces too: silently dropping a pasted recipient could send incomplete mail.
 pub fn split_recipients(value: &str) -> Vec<String> {
-    let (mut quoted, mut escaped, mut angle, mut comments, mut start) = (false, false, false, 0usize, 0);
-    let mut parts = Vec::new();
-    for (at, c) in value.char_indices() {
-        if escaped { escaped = false; continue; }
+    recipient_parts(value).map(str::to_owned).collect()
+}
+
+fn recipient_parts(value: &str) -> impl Iterator<Item=&str> {
+    let (mut quoted, mut escaped, mut angle, mut comments, mut start) = (false, false, false, 0usize, 0usize);
+    value.char_indices().chain(std::iter::once((value.len(), ','))).filter_map(move |(at,c)| {
+        if at == value.len() { return Some(value[start..].trim()); }
+        if escaped { escaped = false; return None; }
         match c {
             '\\' if quoted || comments > 0 => escaped = true,
             '"' if comments == 0 => quoted = !quoted,
@@ -53,15 +57,22 @@ pub fn split_recipients(value: &str) -> Vec<String> {
             '>' if !quoted && comments == 0 => angle = false,
             ',' | ';' | '\n' | '\r' if !quoted && !angle && comments == 0 => {
                 let part = value[start..at].trim();
-                if !part.is_empty() { parts.push(part.to_owned()); }
                 start = at + c.len_utf8();
+                return Some(part);
             }
             _ => {}
         }
-    }
-    let part = value[start..].trim();
-    if !part.is_empty() { parts.push(part.to_owned()); }
-    parts
+        None
+    }).filter(|part| !part.is_empty())
+}
+
+fn correspondent(value: &str) -> Option<(String,String)> {
+    if value.chars().any(char::is_control) { return None; }
+    let mailbox = value.parse::<Mailbox>().ok()?;
+    let address = mailbox.email.to_string().to_lowercase();
+    let local = address.split('@').next().unwrap_or_default();
+    if ["noreply", "no-reply", "donotreply", "mailer-daemon"].iter().any(|s| local.contains(s)) { return None; }
+    Some((mailbox.name.unwrap_or_default(),address))
 }
 
 fn folded(value: &str) -> String {
@@ -103,6 +114,28 @@ impl Contacts {
 }
 
 impl Store {
+    /// Stream distinct correspondents until the caller's reply budget is exhausted.
+    pub fn agent_contacts(&self, account: &str, mut visit: impl FnMut(&str,&str) -> Result<()>) -> Result<()> {
+        let own: String = self.db.query_row("SELECT email FROM accounts WHERE id=?", [account], |r| r.get(0))?;
+        let mut seen = HashSet::new();
+        let mut stmt = self.db.prepare("SELECT m.from_name,m.from_address,m.to_addresses,m.cc FROM messages m
+            JOIN folders f ON f.id=coalesce(m.move_target,m.folder) AND f.account=m.account
+            WHERE m.account=? AND f.role NOT IN ('junk','trash')")?;
+        let mut rows = stmt.query([account])?;
+        while let Some(row) = rows.next()? {
+            let field = |i| row.get_ref(i)?.as_str().map_err(rusqlite::Error::from);
+            let from = format_recipient(field(0)?,field(1)?);
+            for value in std::iter::once(from.as_str()).chain(recipient_parts(field(2)?)).chain(recipient_parts(field(3)?)) {
+                let Some((name,address)) = correspondent(value) else { continue; };
+                if !address.eq_ignore_ascii_case(&own) && !seen.contains(&address) {
+                    visit(&name,&address)?;
+                    seen.insert(address);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Snapshot of known correspondents, excluding the configured account address.
     // shortcut: aliases are not inferred from mail; include them when explicit send-as identities are supported.
     // shortcut: old cached To/Cc have no names; learn them from From or subsequent sync.
@@ -135,12 +168,8 @@ impl Store {
             addresses.push(format_recipient(&row.get::<_, String>(0)?, &from));
             let mut seen = HashSet::new();
             for value in addresses {
-                if value.chars().any(char::is_control) { continue; }
-                let Ok(mailbox) = value.parse::<Mailbox>() else { continue; };
-                let address = mailbox.email.to_string().to_lowercase();
-                let local = address.split('@').next().unwrap_or_default();
-                if own.contains(&address) || ["noreply", "no-reply", "donotreply", "mailer-daemon"].iter().any(|s| local.contains(s)) { continue; }
-                let name = mailbox.name.unwrap_or_default();
+                let Some((name,address)) = correspondent(&value) else { continue; };
+                if own.contains(&address) { continue; }
                 let named = !name.trim().is_empty() && !name.eq_ignore_ascii_case(&address);
                 let first = seen.insert(address.clone());
                 let (contact, named_at, received) = entries.entry(address.clone()).or_insert_with(|| (Contact { name: String::new(), address, score: 0., written: false }, (false, i64::MIN), 0.));
@@ -176,6 +205,22 @@ mod tests {
         let inbox = store.save_folder(&account.id, "INBOX", Some("/"), FolderRole::Inbox).unwrap();
         let sent = store.save_folder(&account.id, "Sent", Some("/"), FolderRole::Sent).unwrap();
         (temp, store, account, inbox, sent)
+    }
+
+    #[test]
+    fn agent_contact_budget_stops_inside_a_recipient_list() {
+        let (_temp, store, account, inbox, _) = fixture();
+        store.save_message(&Message { summary: MessageSummary {
+            account: account.id.clone(), folder: inbox, uid: 1, from_address: account.email.clone(),
+            to: "first@example.org, second@example.org, third@example.org".into(), ..Default::default()
+        }, ..Default::default() }).unwrap();
+        let mut visited = Vec::new();
+        let result = store.agent_contacts(&account.id, |_, address| {
+            visited.push(address.to_owned());
+            Err(crate::Error::Invalid("budget"))
+        });
+        assert!(matches!(result, Err(crate::Error::Invalid("budget"))));
+        assert_eq!(visited, ["first@example.org"]);
     }
 
     #[test]

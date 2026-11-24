@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use lagom_core::{
     agent::{
         audit::Failure,
-        filter::{Filter, FilterReader},
+        filter::Filter,
         id::{MessageId, ObjectId, ResolvedMessage},
         policy::{Level, Resource},
         protocol::{Code, Request},
@@ -21,7 +21,7 @@ pub(crate) fn error(e: Error) -> Code {
         Error::Store(e) => e.into(),
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
-        Error::Invalid("attachment exceeds 64 MiB" | "attachment is too large") => Code::TooLarge,
+        Error::Invalid("attachment exceeds 64 MiB" | "attachment is too large" | "agent response too large") => Code::TooLarge,
         Error::Invalid("unavailable")
         | Error::Network(_)
         | Error::Authentication
@@ -75,16 +75,9 @@ fn clean(s: &str) -> String {
     out
 }
 
-fn message(store: &Store, req: &Request, mut m: MessageSummary, body: bool) -> Result<Value> {
-    let (key, mut folder) = store.agent_message_key(&m.account, m.id)?;
+fn message(store: &Store, mut m: MessageSummary, body: bool) -> Result<Value> {
+    let (key, mut folder, resolved) = store.agent_message_row(&m.account, m.id)?;
     let id = key.encode();
-    let resolved = store.resolve_agent_message(
-        req.token.as_deref().map(String::as_str),
-        req.source_ip.as_deref(),
-        &id,
-        None,
-        Level::Read,
-    )?;
     if body && resolved.row != m.id {
         let preferred = store.message_summary(resolved.row).map_err(error)?;
         if preferred.thread_id == m.thread_id {
@@ -161,19 +154,22 @@ pub(super) fn dispatch(
     let key = if matches!(cmd, "thread" | "attachment") {
         let key = ObjectId::decode(string("id")?.ok_or(Code::InvalidRequest)?)?;
         let account = match (&key, cmd) {
-            (ObjectId::Thread(a, _), "thread") => a,
-            (ObjectId::Attachment(m, _), "attachment") => m.account(),
+            (ObjectId::Thread(a, _) | ObjectId::ThreadHash(a, _), "thread") => a,
+            (ObjectId::Attachment(m, _) | ObjectId::SectionHash(m, _), "attachment") => m.account(),
             _ => return Err(Code::NotFound.into()),
         };
-        *touched = Some(account.to_owned());
+
         if store.agent_level(who, Resource::Mail, account)? < Level::Read {
             return Err(Failure::OutsideScope);
         }
-        Some(key)
+        Some((account.to_owned(), key))
     } else {
         None
     };
-    let account_id = touched.as_deref().or(selector.filter(|s| !s.contains('@')));
+    let account_id = key
+        .as_ref()
+        .map(|(a, _)| a.as_str())
+        .or(selector.filter(|s| !s.contains('@')));
     let mut accounts = store.agent_accounts(who, resources, account_id)?;
     if let Some(sel) = selector {
         accounts.retain(|(id, email)| id == sel || email.eq_ignore_ascii_case(sel));
@@ -183,11 +179,11 @@ pub(super) fn dispatch(
         if accounts.len() != 1 {
             return Err(Code::Conflict.into());
         }
-        if touched.as_ref().is_some_and(|a| a != &accounts[0].0) {
+        if key.as_ref().is_some_and(|(a, _)| a != &accounts[0].0) {
             return Err(Failure::OutsideScope);
         }
     }
-    if accounts.len() == 1 {
+    if key.is_none() && accounts.len() == 1 {
         *touched = Some(accounts[0].0.clone());
     }
     let now = chrono::Utc::now().timestamp();
@@ -220,9 +216,10 @@ pub(super) fn dispatch(
         }
         "contacts" => {
             for (id, _) in accounts {
-                for c in store.contacts(&id, now).map_err(error)?.entries() {
-                    push(json!({"account":id,"name":clean(&c.name),"address":clean(&c.address)}))?;
-                }
+                store.agent_contacts(&id, |name,address| {
+                    push(json!({"account":id,"name":clean(name),"address":clean(address)}))
+                        .map_err(|_| Error::Invalid("agent response too large"))
+                }).map_err(error)?;
             }
         }
         "emails" | "search" => {
@@ -243,8 +240,7 @@ pub(super) fn dispatch(
                     .transpose()
             };
             let ids = accounts.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-            let (messages, next) = FilterReader::open(store.path())
-                .map_err(error)?
+            let (messages, next) = store
                 .filtered_messages(
                     &ids,
                     &filter,
@@ -255,38 +251,44 @@ pub(super) fn dispatch(
                 )
                 .map_err(error)?;
             for m in messages {
-                push(message(store, req, m, false)?)?;
+                push(message(store, m, false)?)?;
             }
             return Ok(json!({"messages":rows,"next_page":next}));
         }
         "thread" => {
-            let Some(ObjectId::Thread(account, thread)) = &key else {
-                return Err(Code::NotFound.into());
+            let (account, key) = key.as_ref().ok_or(Code::NotFound)?;
+            let thread = match key {
+                ObjectId::Thread(_, thread) => thread.clone(),
+                ObjectId::ThreadHash(_, hash) => store.agent_thread_key(account, hash)?,
+                _ => return Err(Code::NotFound.into()),
             };
             let mut headers = std::collections::HashSet::new();
-            for m in store.thread_messages(account, thread).map_err(error)? {
+            for m in store.thread_messages(account, &thread).map_err(error)? {
                 if !m.message_id.is_empty() && !headers.insert(m.message_id.clone()) {
                     continue;
                 }
-                push(message(store, req, m, true)?)?;
+                push(message(store, m, true)?)?;
             }
             if rows.is_empty() {
                 return Err(Code::NotFound.into());
             }
+            *touched = Some(account.clone());
             return Ok(json!({"messages":rows}));
         }
         "attachment" => {
-            let Some(ObjectId::Attachment(message, section)) = &key else {
-                return Err(Code::NotFound.into());
+            let (account, key) = key.as_ref().ok_or(Code::NotFound)?;
+            let message = match key {
+                ObjectId::Attachment(m, _) | ObjectId::SectionHash(m, _) => m,
+                _ => return Err(Code::NotFound.into()),
             };
             let (reply, rx) = oneshot::channel();
-            let request = Attachment {
+            let mut request = Attachment {
                 token: req.token.clone().ok_or(Code::Unauthorized)?,
                 ip: req.source_ip.clone(),
                 message: message.clone(),
                 folder: string("folder")?.map(str::to_owned),
                 generation: store.agent_generation()?.ok_or(Code::Unauthorized)?,
-                section: section.clone(),
+                section: String::new(),
                 reply,
             };
             let resolved = request.resolve(store)?;
@@ -294,9 +296,17 @@ pub(super) fn dispatch(
                 .attachments(resolved.row)
                 .map_err(error)?
                 .into_iter()
-                .find(|p| p.section == *section)
+                .find(|p| match key {
+                    ObjectId::Attachment(_, section) => &p.section == section,
+                    _ => {
+                        ObjectId::Attachment(message.clone(), p.section.clone()).encode()
+                            == key.encode()
+                    }
+                })
                 .ok_or(Code::NotFound)?;
+            request.section = part.section.clone();
             *target = Some(resolved);
+            *touched = Some(account.clone());
             if !fetch(request) {
                 return Err(Code::Unavailable.into());
             }

@@ -23,6 +23,9 @@ processes of the same user, and neither does anything else in this design. Per-a
 between local agents are guardrails against mistakes and prompt injection. They are not a
 boundary against a hostile local process.
 
+Full-text search uses a shared index. Response timing can reveal that a term is frequent in another account.
+A process running as the same user can occupy all eight socket connections and prevent other agents from connecting.
+
 Keychain. Linux Secret Service and Windows Credential Manager give any process of the same user
 the stored secrets. macOS asks before another program reads an item. Not verified for lagom's
 release builds.

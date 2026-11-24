@@ -22,6 +22,8 @@ impl Store {
     ) -> Result<Self, Code> {
         let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.execute_batch("PRAGMA query_only=ON; BEGIN")?;
+        filter::register_casefold(&db)?;
+        db.busy_timeout(std::time::Duration::ZERO)?;
         db.progress_handler(1024, Some(cancelled))?;
         Ok(Self { db })
     }

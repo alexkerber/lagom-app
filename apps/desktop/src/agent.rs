@@ -294,8 +294,11 @@ fn process(
     let mut result = (|| -> read::Result<Vec<u8>> {
         let req = parsed.as_ref().map_err(|e| *e)?;
         let stop = off.clone();
+        let query_deadline = if matches!(req.cmd.as_str(), "emails" | "search") {
+            deadline.min(tokio::time::Instant::now() + Duration::from_secs(2))
+        } else { deadline };
         let store = Store::agent_reader(path, move || {
-            stop.has_changed().is_err() || tokio::time::Instant::now() >= deadline
+            stop.has_changed().is_err() || tokio::time::Instant::now() >= query_deadline
         })?;
         let identity =
             who.insert(store.authenticate(req.token.as_deref().map(String::as_str), req.source_ip.as_deref())?);

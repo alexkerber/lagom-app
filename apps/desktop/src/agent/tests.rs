@@ -97,7 +97,7 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
                     account: account.id.clone(),
                     folder,
                     uid: 3,
-                    message_id: "<fixture>".into(),
+                    message_id: if n == 0 { "x".repeat(1500) } else { "<fixture>".into() },
                     subject: format!("needle-{n}"),
                     from_address: format!("writer{n}@example.com"),
                     flagged: true,
@@ -299,6 +299,7 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
         json!({"filter":"subject:needle-0","page":1,"limit":1,"account":a.email}),
     );
     let mail = &list["messages"][0];
+    assert!(mail["id"].as_str().unwrap().len() <= 2048);
     let thread_id = mail["thread"].as_str().unwrap();
     let thread = ok("thread", json!({"id":thread_id}));
     let first = &thread["messages"][0];

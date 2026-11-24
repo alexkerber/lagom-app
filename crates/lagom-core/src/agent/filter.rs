@@ -1,5 +1,5 @@
 use crate::{
-    store::{summary_row, MessageSummary, VISIBLE_SUMMARY_COLUMNS},
+    store::{Store,summary_row, MessageSummary, VISIBLE_SUMMARY_COLUMNS},
     Error, Result,
 };
 use chrono::NaiveDate;
@@ -245,7 +245,7 @@ impl Predicate {
 
 /// The dispatcher opens a dedicated query-only connection for agent searches.
 pub struct FilterReader {
-    db: Connection,
+    store: Store,
 }
 
 impl FilterReader {
@@ -254,19 +254,43 @@ impl FilterReader {
         db.pragma_update(None, "query_only", true)?;
         // A lock wait cannot be interrupted by the progress handler.
         db.busy_timeout(Duration::ZERO)?;
-        db.create_scalar_function(
-            "casefold",
-            1,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            |ctx| Ok(UniCase::new(ctx.get_raw(0).as_str()?).to_folded_case()),
-        )?;
-        Ok(Self { db })
+        register_casefold(&db)?;
+        Ok(Self { store: Store { db } })
     }
 
     /// The largest permitted offset is 10,000 rows.
     /// Returns the page and its successor, if another matching row exists.
     pub fn filtered_messages(
         &mut self,
+        accounts: &[String],
+        filter: &Filter,
+        scope: Option<&str>,
+        now: i64,
+        page: u32,
+        limit: Option<u32>,
+    ) -> Result<(Vec<MessageSummary>, Option<u32>)> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        self.store.db.progress_handler(100, Some(move || Instant::now() >= deadline))?;
+        let result = self.store.filtered_messages(accounts, filter, scope, now, page, limit);
+        self.store.db.progress_handler(0, None::<fn() -> bool>)?;
+        result
+    }
+}
+
+pub(super) fn register_casefold(db: &Connection) -> rusqlite::Result<()> {
+        db.create_scalar_function(
+            "casefold",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(UniCase::new(ctx.get_raw(0).as_str()?).to_folded_case()),
+        )
+}
+
+impl Store {
+    /// The largest permitted offset is 10,000 rows.
+    /// Returns the page and its successor, if another matching row exists.
+    pub fn filtered_messages(
+        &self,
         accounts: &[String],
         filter: &Filter,
         scope: Option<&str>,
@@ -330,7 +354,7 @@ impl FilterReader {
         sql.push_str(" ORDER BY m.date DESC,m.id DESC LIMIT ? OFFSET ?");
         args.push((limit + 1).into());
         args.push(offset.into());
-        let mut rows = self.rows(&sql, args, Instant::now() + Duration::from_secs(2))?;
+        let mut rows = self.filter_rows(&sql,args)?;
         let next = if rows.len() > limit as usize {
             rows.pop();
             (offset + i64::from(limit) <= MAX_OFFSET).then_some(page + 1)
@@ -340,19 +364,15 @@ impl FilterReader {
         Ok((rows, next))
     }
 
-    fn rows(
-        &mut self,
+    fn filter_rows(
+        &self,
         sql: &str,
         args: Vec<Value>,
-        deadline: Instant,
     ) -> Result<Vec<MessageSummary>> {
-        self.db
-            .progress_handler(100, Some(move || Instant::now() >= deadline))?;
         let result = self.db.prepare(sql).and_then(|mut stmt| {
             stmt.query_map(params_from_iter(args), summary_row)?
                 .collect()
         });
-        self.db.progress_handler(0, None::<fn() -> bool>)?;
         match result {
             Err(e)
                 if matches!(
@@ -378,7 +398,7 @@ mod tests {
     #[test]
     fn agent_filter_deadline_interrupts_sqlite_and_releases_handler() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let mut reader = FilterReader::open(file.path()).unwrap();
+        let reader = Store::agent_reader(file.path(), || true).unwrap();
         assert!(reader
             .db
             .pragma_query_value(None, "query_only", |r| r.get::<_, bool>(0))
@@ -386,9 +406,11 @@ mod tests {
         let sql = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000)
                    SELECT sum(x) FROM n HAVING sum(x)=0";
         assert!(matches!(
-            reader.rows(sql, vec![], Instant::now()),
+            reader.filter_rows(sql, vec![]),
             Err(Error::Invalid("unavailable"))
         ));
+        drop(reader);
+        let reader = Store::agent_reader(file.path(), || false).unwrap();
         assert!(reader
             .db
             .prepare(sql)
