@@ -3,7 +3,7 @@ use lagom_core::{
     agent::{
         audit::Failure,
         filter::{Filter, FilterReader},
-        id::{MessageId, ObjectId, ResolvedMessage},
+        id::{AuditTarget, MessageId, ObjectId, ResolvedMessage},
         policy::{Level, Resource},
         protocol::{Code, Request},
         token::Identity,
@@ -60,7 +60,7 @@ impl Attachment {
     }
 }
 
-fn clean(s: &str) -> String {
+pub(super) fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if c.is_control() && c != '\n' && c != '\t' {
@@ -120,12 +120,13 @@ pub(super) fn dispatch(
     req: &Request,
     fetch: impl FnOnce(Attachment) -> bool,
     touched: &mut Option<String>,
-    target: &mut Option<ResolvedMessage>,
+    target: &mut Option<AuditTarget>,
     mut off: tokio::sync::watch::Receiver<()>,
 ) -> Result<Value> {
     let cmd = req.cmd.as_str();
     let keys: &[&str] = match cmd {
-        "accounts" | "folders" | "contacts" => &[],
+        "draft.show" => &["id"],
+        "draft.list" | "accounts" | "folders" | "contacts" => &[],
         "emails" => &["filter", "page", "limit"],
         "search" => &["query", "in", "page", "limit"],
         "thread" => &["id"],
@@ -158,10 +159,10 @@ pub(super) fn dispatch(
         "events" | "availability" => &[Resource::Calendar],
         _ => &[Resource::Mail],
     };
-    let key = if matches!(cmd, "thread" | "attachment") {
+    let key = if matches!(cmd, "thread" | "attachment" | "draft.show") {
         let key = ObjectId::decode(string("id")?.ok_or(Code::InvalidRequest)?)?;
         let account = match (&key, cmd) {
-            (ObjectId::Thread(a, _), "thread") => a,
+            (ObjectId::Draft(a, _), "draft.show") | (ObjectId::Thread(a, _), "thread") => a,
             (ObjectId::Attachment(m, _), "attachment") => m.account(),
             _ => return Err(Code::NotFound.into()),
         };
@@ -208,6 +209,28 @@ pub(super) fn dispatch(
                     "mail":store.agent_level(who,Resource::Mail,&id)?,
                     "calendar":store.agent_level(who,Resource::Calendar,&id)?}))?;
             }
+        }
+        "draft.show" | "draft.list" => {
+            for (a, _) in accounts {
+                let ids = if let Some(ObjectId::Draft(_, id)) = &key {
+                    vec![id.clone()]
+                } else {
+                    store.agent_draft_ids(&a)?
+                };
+                for id in ids {
+                    let (revision, agent) = store.agent_draft_meta(&a, &id)?;
+                    let d = store.draft(&id).map_err(error)?;
+                    let mut value = json!({"id":ObjectId::Draft(a.clone(),id).encode(),"account":a,"agent":agent,"revision":revision,"subject":clean(&d.subject),"to":clean(&d.to)});
+                    if cmd == "draft.show" {
+                        value["cc"] = json!(clean(&d.cc));
+                        value["bcc"] = json!(clean(&d.bcc));
+                        value["body"] = json!(clean(&d.text));
+                        return Ok(value);
+                    }
+                    push(value)?;
+                }
+            }
+            return Ok(json!({"drafts":rows}));
         }
         "folders" => {
             for (id, _) in accounts {
@@ -296,7 +319,7 @@ pub(super) fn dispatch(
                 .into_iter()
                 .find(|p| p.section == *section)
                 .ok_or(Code::NotFound)?;
-            *target = Some(resolved);
+            *target = Some(resolved.target);
             if !fetch(request) {
                 return Err(Code::Unavailable.into());
             }

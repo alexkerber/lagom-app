@@ -151,6 +151,13 @@ impl Mail {
             handle.update(cx, |this, window, cx| this.on_events(events, window, cx)).ok();
         } else {
             let messages = events.into_iter().filter_map(|event| match event {
+                #[cfg(unix)]
+                Event::AgentConfirm(sheet) => {
+                    if cx.default_global::<crate::agent::confirm::Waiting>().push(sheet) {
+                        cx.global_mut::<crate::notifications::State>().service.agent_waiting();
+                    }
+                    None
+                }
                 Event::NewMail(messages) => Some(messages),
                 Event::Op { op, .. } => {
                     cx.global::<Self>().pending.borrow_mut().remove(&op);
@@ -526,6 +533,23 @@ impl MainWindow {
         let mut new_mail = Vec::new();
         for event in events {
             match event {
+                #[cfg(unix)]
+                Event::AgentConfirm(sheet) => {
+                    if self.agent_sheets.push(sheet) {
+                        if !window.is_window_active() && cx.try_global::<crate::notifications::State>().is_some() {
+                            cx.global_mut::<crate::notifications::State>().service.agent_waiting();
+                        }
+                        self.watch_agent_sheets(window,cx);
+                    }
+                }
+                #[cfg(unix)]
+                Event::AgentQueued(id) => {
+                    self.agent_sends.push(id.clone());
+                    cx.spawn(async move |this,cx| {
+                        cx.background_executor().timer(crate::compose::UNDO_WINDOW).await;
+                        this.update(cx,|this,cx| {this.agent_sends.retain(|v|v!=&id);cx.notify();}).ok();
+                    }).detach();
+                }
                 Event::OpenUrl(url) => cx.open_url(&url),
                 Event::ForwardAttachments { draft, result } => {
                     for compose in self.compose.iter().chain(&self.drafts) {
@@ -820,6 +844,11 @@ impl MainWindow {
     pub(super) fn open_notification(&mut self, target: crate::notifications::Target, window: &mut Window, cx: &mut Context<Self>) {
         cx.activate(true);
         window.activate_window();
+        #[cfg(unix)]
+        if target.account == crate::settings::agents::AGENTS && target.message.is_none() {
+            if self.agent_sheets.0.is_empty(){self.open_agents(window,cx);} else {self.agent_deny.focus(window);}
+            return;
+        }
         let Some(live) = &mut self.live else { return };
         if !live.ops.is_empty() {
             live.notification_target = Some(target);
@@ -4343,6 +4372,39 @@ mod tests {
         let summary = MessageSummary { account: a.id.clone(), folder, uid, date: uid as i64, ..Default::default() };
         let id = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
         live.store.message(id).unwrap().summary
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn agent_sheet_focus_keys_and_background_notice(cx: &mut TestAppContext) {
+        use crate::agent::{confirm::Sheet,write::Snapshot};
+        use lagom_core::agent::{protocol::{Code,Request},token::AgentRow};
+        use std::{os::unix::net::UnixStream,sync::Arc};
+        let (view,cx,_)=window(cx);
+        let (client,server)=UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let server=Arc::new(server);
+        let req:Request=serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
+        let agent=AgentRow{id:"a".into(),name:"Writer".into(),kind:"fixture".into(),remote:false,host:"here".into(),active:true};
+        cx.deactivate_window();
+        for key in ["escape","secondary-enter"] {
+            let (lifetime,done)=tokio::sync::oneshot::channel();
+            let mut answer=view.update_in(cx,|v,w,cx|{
+                let account=v.live.as_ref().unwrap().account().unwrap();
+                let (sheet,answer)=Sheet::new(agent.clone(),account,&req,&Snapshot::Mail("rev".into(),Default::default()),done,Arc::downgrade(&server));
+                v.on_events(vec![Event::AgentConfirm(sheet)],w,cx);
+                assert!(v.agent_deny.is_focused(w));
+                answer
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter space");
+            assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+            cx.simulate_keystrokes(key);
+            assert_eq!(answer.try_recv().unwrap(),if key=="escape"{Err(Code::Denied)}else{Ok(())});
+            drop(lifetime);
+        }
+        view.update(cx,|_,cx|assert!(cx.global::<crate::notifications::State>().service.posted_count()>0));
+        drop(client);
     }
 
     #[gpui::test]

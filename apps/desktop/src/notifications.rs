@@ -107,6 +107,11 @@ impl Service {
         (Self { platform: platform::Service::new(tx), requested: false, answered: false, authorized: false, pending: Vec::new() }, rx)
     }
 
+    #[cfg(unix)]
+    pub fn agent_waiting(&mut self) {
+        self.platform.show(Notice{title:"lagom".into(),body:"An agent is waiting for your approval.".into(),target:Target{account:crate::settings::agents::AGENTS.into(),message:None}});
+    }
+
     pub fn show(&mut self, messages: Vec<MessageSummary>) {
         if messages.is_empty() { return; }
         if self.authorized {

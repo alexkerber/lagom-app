@@ -81,6 +81,7 @@ impl MainWindow {
                         .child(div().font_weight(FontWeight::SEMIBOLD).one_line().child(if draft.subject.is_empty() { "(no subject)".into() } else { draft.subject.clone() }))
                         .child(div().text_color(t.ink2).one_line().child(format!("{account} · To: {}", draft.to)))
                         .child(div().text_color(t.ink2).one_line().child(lagom_core::mime::clean_snippet(&draft.snippet)))
+                        .when_some(draft.agent.as_ref(), |d,agent| d.child(div().text_color(t.ink2).child(format!("Created by {agent}"))))
                         .child(button(t, "Edit draft", None).on_click(cx.listener(move |this, _, window, cx| this.open_draft(&id, window, cx))))
                 })))
     }

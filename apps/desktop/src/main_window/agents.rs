@@ -205,3 +205,120 @@ impl MainWindow {
         cx.notify();
     }
 }
+
+#[cfg(unix)]
+impl MainWindow {
+    pub(super) fn watch_agent_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.agent_sheets.0.retain(|s| !s.answer.is_closed());
+        for sheet in &mut self.agent_sheets.0 {
+            if let Some(done) = sheet.closed.take() {
+                cx.spawn(async move |this, cx| {
+                    let _ = done.await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+        }
+        if !self.agent_sheets.0.is_empty() {
+            self.agent_deny.focus(window);
+        }
+    }
+
+    fn answer_agent(&mut self, serial: usize, approve: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent_sheets.0.front().is_none_or(|s| s.serial != serial) {
+            return;
+        }
+        if let Some(sheet) = self.agent_sheets.0.pop_front() {
+            sheet.decide(approve);
+        }
+        if self.agent_sheets.0.is_empty() {
+            self.focus.focus(window);
+        } else {
+            self.agent_deny.focus(window);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn agent_sheet(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sheet = &self.agent_sheets.0[0];
+        let serial = sheet.serial;
+        let t = self.theme;
+        let truncated = !sheet.expanded && sheet.body.chars().nth(2000).is_some();
+        let body = if truncated {
+            sheet.body.chars().take(2000).collect()
+        } else {
+            sheet.body.clone()
+        };
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(t.subtle)
+            .text_color(t.ink)
+            .on_key_down(cx.listener(move |this, e: &gpui::KeyDownEvent, window, cx| {
+                let k = &e.keystroke;
+                if k.key == "escape" {
+                    this.answer_agent(serial, false, window, cx);
+                }
+                if crate::shortcuts::submit().matches(k) && !e.is_held {
+                    this.answer_agent(serial, true, window, cx);
+                }
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .id("agent-confirmation")
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(t.raised)
+                    .w(px(560.))
+                    .max_h_full()
+                    .child(sheet.heading.clone())
+                    .child(
+                        div()
+                            .id("agent-preview")
+                            .overflow_y_scroll()
+                            .flex_col()
+                            .child(sheet.details.clone())
+                            .child(body)
+                            .when(truncated, |d| {
+                                d.child(button(&t, "Show all", None).on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(s) = this.agent_sheets.0.front_mut() {
+                                        s.expanded = true;
+                                    }
+                                    cx.notify();
+                                })))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                button(&t, "Deny", None)
+                                    .track_focus(&self.agent_deny)
+                                    .border_1()
+                                    .border_color(t.accent)
+                                    .on_click(
+                                        cx.listener(move |this, _, w, cx| this.answer_agent(serial, false, w, cx)),
+                                    ),
+                            )
+                            .child(
+                                button(
+                                    &t,
+                                    sheet.approve_label,
+                                    Some(t.accent),
+                                )
+                                .id(("approve-agent", serial))
+                                .on_click(
+                                    cx.listener(move |this, _, w, cx| this.answer_agent(serial, true, w, cx)),
+                                ),
+                            ),
+                    ),
+            )
+    }
+}

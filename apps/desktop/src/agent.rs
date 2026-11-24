@@ -1,16 +1,19 @@
 //! The listener belongs to the app, including while its main window is closed.
+pub(crate) mod confirm;
 pub(crate) mod read;
+pub(crate) mod write;
 
 use crate::sync::Bridge;
 use lagom_core::{
     agent::{
-        audit::{AuditRow, Failure},
-        id::ResolvedMessage,
+        audit::{Address, AuditRow, Failure},
+        id::AuditTarget,
         protocol::{Code, Request, Response, VERSION},
         token::Identity,
     },
     store::Store,
 };
+use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{self, File},
@@ -32,7 +35,7 @@ use tokio::{
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 32 * 1024 * 1024;
 const ANSWER: Duration = Duration::from_secs(30);
-type Rates = Arc<Mutex<HashMap<String, VecDeque<Instant>>>>;
+type Rates = Arc<Mutex<HashMap<String, VecDeque<(Instant, bool)>>>>;
 
 pub(crate) struct Server {
     stop: Option<oneshot::Sender<()>>,
@@ -155,7 +158,7 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                 let permit = permits.clone().try_acquire_owned();
                 let failure = if !same_user { Some(Code::Unauthorized) } else if permit.is_err() { Some(Code::Busy) } else { None };
                 if let Some(code) = failure {
-                    let code = audit(&settings,None,None,None,None,Err(code.into())).err().unwrap_or(code);
+                    let code = Audit::default().record(&settings,None,None,Err(code.into())).err().unwrap_or(code);
                     let mut stream=stream;
                     let _ = timeout(Duration::from_millis(100),stream.write_all(&line(Response::Failure(code)))).await;
                 } else {
@@ -185,44 +188,52 @@ async fn frame(stream: &mut UnixStream) -> Result<Request, Code> {
     serde_json::from_slice(&buf).map_err(|_| Code::InvalidRequest)
 }
 
-fn audit(
-    store: &Store,
-    req: Option<&Request>,
-    who: Option<&Identity>,
-    account: Option<&str>,
-    target: Option<&ResolvedMessage>,
-    outcome: Result<(), Failure>,
-) -> Result<(), Code> {
-    store.record_agent_audit(AuditRow {
-        identity: who,
-        account: account.and_then(|s| s.parse().ok()),
-        command: req.map_or("", |r| &r.cmd),
-        target,
-        outcome,
-        source_ip: req.and_then(|r| r.source_ip.as_ref()?.parse().ok()),
-        recipients: &[],
-    })
+#[derive(Default)]
+struct Audit {
+    account: Option<String>,
+    target: Option<AuditTarget>,
+    recipients: Vec<Address>,
 }
 
-fn rate(rates: &Rates, who: &Identity) -> Result<(), Code> {
+impl Audit {
+    fn record(
+        &self,
+        store: &Store,
+        req: Option<&Request>,
+        who: Option<&Identity>,
+        outcome: Result<(), Failure>,
+    ) -> Result<(), Code> {
+        store.record_agent_audit(AuditRow {
+            identity: who,
+            account: self.account.as_deref().and_then(|s| s.parse().ok()),
+            command: req.map_or("", |r| &r.cmd),
+            target: self.target.as_ref(),
+            outcome,
+            source_ip: req.and_then(|r| r.source_ip.as_ref()?.parse().ok()),
+            recipients: &self.recipients,
+        })
+    }
+}
+
+fn rate(rates: &Rates, who: &Identity, write: bool) -> Result<(), Code> {
     let mut rates = rates.lock().map_err(|_| Code::Internal)?;
     let now = Instant::now();
     rates.retain(|_, times| {
         times
             .back()
-            .is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60))
+            .is_some_and(|last| now.duration_since(last.0) < Duration::from_secs(60))
     });
     let times = rates.entry(who.token_id().to_owned()).or_default();
     while times
         .front()
-        .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+        .is_some_and(|at| now.duration_since(at.0) >= Duration::from_secs(60))
     {
         times.pop_front();
     }
-    if times.len() >= 300 {
+    if times.len() >= 300 || write && times.iter().filter(|(_, w)| *w).count() >= 30 {
         return Err(Code::Busy);
     }
-    times.push_back(now);
+    times.push_back((now, write));
     Ok(())
 }
 
@@ -246,13 +257,32 @@ async fn call(
         _ = off.changed() => Err(Code::Unavailable),
         parsed = timeout(Duration::from_secs(5),frame(&mut stream)) => parsed.unwrap_or(Err(Code::InvalidRequest)),
     };
-    let deadline = tokio::time::Instant::now() + ANSWER;
+    let confirming = parsed
+        .as_ref()
+        .is_ok_and(|r| r.cmd == "draft.send" || r.cmd.starts_with("event."));
+    let deadline = tokio::time::Instant::now()
+        + if confirming {
+            Duration::from_secs(130)
+        } else {
+            ANSWER
+        };
+    let peer = if confirming {
+        stream
+            .as_fd()
+            .try_clone_to_owned()
+            .ok()
+            .map(std::os::unix::net::UnixStream::from)
+            .map(Arc::new)
+    } else {
+        None
+    };
     let (cancel, cancelled) = watch::channel(());
     let mut job = task::spawn_blocking(move || {
         process(
-            &path, parsed, &bridge, &rates, cancelled, deadline, generation,
+            &path, parsed, &bridge, &rates, cancelled, deadline, generation, peer,
         )
     });
+    let mut extra = [0u8; 1];
     let bytes = tokio::select! {
         biased;
         _ = off.changed() => {
@@ -260,6 +290,11 @@ async fn call(
             let _ = job.await;
             return;
         },
+        _ = stream.read(&mut extra), if confirming => {
+            drop(cancel);
+            let _=job.await;
+            return;
+        }
         result = timeout_at(deadline,&mut job) => match result {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(_)) => line(Response::Failure(Code::Internal)),
@@ -286,10 +321,10 @@ fn process(
     off: watch::Receiver<()>,
     deadline: tokio::time::Instant,
     generation: i64,
+    peer: Option<Arc<std::os::unix::net::UnixStream>>,
 ) -> Vec<u8> {
     let mut who = None;
-    let mut account = None;
-    let mut target = None;
+    let mut audit = Audit::default();
     let cancelled = || off.has_changed().is_err() || tokio::time::Instant::now() >= deadline;
     let mut result = (|| -> read::Result<Vec<u8>> {
         let req = parsed.as_ref().map_err(|e| *e)?;
@@ -297,24 +332,39 @@ fn process(
         let store = Store::agent_reader(path, move || {
             stop.has_changed().is_err() || tokio::time::Instant::now() >= deadline
         })?;
-        let identity =
-            who.insert(store.authenticate(req.token.as_deref().map(String::as_str), req.source_ip.as_deref())?);
+        let identity = who.insert(store.authenticate(
+            req.token.as_deref().map(String::as_str),
+            req.source_ip.as_deref(),
+        )?);
         if store.agent_generation()? != Some(generation) {
             return Err(Code::Unauthorized.into());
         }
-        rate(rates, identity)?;
+        rate(rates, identity, write::handles(&req.cmd))?;
         if req.v != VERSION {
             return Err(Code::Unsupported.into());
         }
-        let value = read::dispatch(
-            &store,
-            identity,
-            req,
-            |request| bridge.send(crate::sync::Cmd::AgentAttachment(request)),
-            &mut account,
-            &mut target,
-            off.clone(),
-        )?;
+        let value = if write::handles(&req.cmd) {
+            write::dispatch(
+                &store,
+                identity,
+                req,
+                bridge,
+                generation,
+                &mut audit,
+                off.clone(),
+                peer.as_ref(),
+            )?
+        } else {
+            read::dispatch(
+                &store,
+                identity,
+                req,
+                |request| bridge.send(crate::sync::Cmd::AgentAttachment(request)),
+                &mut audit.account,
+                &mut audit.target,
+                off.clone(),
+            )?
+        };
         let mut bytes =
             serde_json::to_vec(&Response::Success(value)).map_err(|_| Code::Internal)?;
         if bytes.len() >= MAX_RESPONSE {
@@ -324,15 +374,15 @@ fn process(
         Ok(bytes)
     })();
     let audited = Store::agent_writer(path).and_then(|store| {
-        if cancelled() || (result.is_ok() && store.agent_generation()? != Some(generation)) {
+        if !parsed.as_ref().is_ok_and(|r| write::handles(&r.cmd))
+            && (cancelled() || result.is_ok() && store.agent_generation()? != Some(generation))
+        {
             result = Err(Code::Unavailable.into());
         }
-        audit(
+        audit.record(
             &store,
             parsed.as_ref().ok(),
             who.as_ref(),
-            account.as_deref(),
-            target.as_ref(),
             result.as_ref().map(|_| ()).map_err(Clone::clone),
         )
     });

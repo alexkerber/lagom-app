@@ -360,6 +360,12 @@ pub struct MainWindow {
     new_password: Option<crate::settings::NewPassword>,
     /// Settings > AI Agents, and the sidebar row it can add.
     agents: crate::settings::agents::Agents,
+    #[cfg(unix)]
+    agent_sheets: crate::agent::confirm::Waiting,
+    #[cfg(unix)]
+    agent_deny: FocusHandle,
+    #[cfg(unix)]
+    agent_sends: Vec<String>,
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
     message_menu: Option<usize>,
@@ -506,6 +512,12 @@ impl MainWindow {
             default_mail: None,
             new_password: None,
             agents: crate::settings::agents::Agents::new(),
+            #[cfg(unix)]
+            agent_sheets: Default::default(),
+            #[cfg(unix)]
+            agent_deny: cx.focus_handle(),
+            #[cfg(unix)]
+            agent_sends: Vec::new(),
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
             message_menu: None,
@@ -663,6 +675,11 @@ impl MainWindow {
             _ => {}
         }
         this.retint();
+        #[cfg(unix)]
+        if this.live.is_some() {
+            this.agent_sheets=std::mem::take(cx.default_global::<crate::agent::confirm::Waiting>());
+            this.watch_agent_sheets(window,cx);
+        }
         this
     }
 
@@ -2647,6 +2664,14 @@ fn reading_view(
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        #[cfg(unix)]
+        {
+            self.agent_sheets.0.retain(|s|!s.answer.is_closed());
+            if !self.agent_sheets.0.is_empty() {
+                self.web.hide();
+                return self.agent_sheet(window,cx).into_any_element();
+            }
+        }
         // Reveal the final height before pruning, even if a late frame skipped the expansion.
         if self.entering.iter().any(|g| Some(g.id) == self.inbox.current()) {
             self.reveal_row(self.inbox.selected);
@@ -2783,6 +2808,10 @@ impl Render for MainWindow {
             // The guard hands ⌫ to the palette, where it edits the query.
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| if !this.overlay_open(cx) { this.act(Move::Delete, cx) }))
             .on_action(cx.listener(|this, _: &Undo, window, cx| {
+                #[cfg(unix)]
+                if this.palette.is_none() && this.compose.is_none() {
+                    if let Some(id)=this.agent_sends.pop() {this.edit_failed(&id,window,cx);return;}
+                }
                 if this.palette.is_some() || this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) || matches!(this.page, Page::AddAccount(_) | Page::Settings(_)) {
                     cx.propagate();
                     return;
@@ -2866,7 +2895,7 @@ impl Render for MainWindow {
             .child(self.resize_events(cx))
             .children(self.palette.clone())
             .children(self.sending.clone())
-            .children(self.compose.clone())
+            .children(self.compose.clone()).into_any_element()
     }
 }
 
@@ -2885,6 +2914,14 @@ impl MainWindow {
             });
             // Nothing has left yet: it goes when the Undo window ends.
             out.push(scoped(i, crate::compose::toast(&t, "Sending", Some(undo().on_click(on_undo).into_any_element())).into_any_element()));
+        }
+        #[cfg(unix)]
+        for id in &self.agent_sends {
+            let id=id.clone();
+            out.push(crate::compose::toast(&t,"Sending",Some(undo().on_click(cx.listener(move |this,_,window,cx| {
+                this.agent_sends.retain(|d|d!=&id);
+                this.edit_failed(&id,window,cx);
+            })).into_any_element())).into_any_element());
         }
         if let Some(live) = &self.live {
             for (i, pending) in live.failed.iter().enumerate() {

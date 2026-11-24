@@ -289,8 +289,8 @@ worker.
 
 ## 9. Confirmation pop-ups
 
-On by default. They cover `draft send` and every `event` change. Only the Settings toggle turns
-them off, for all agents.
+Every calendar change requires approval in the app. Mail sends also require approval by default.
+The Confirmation toggle in Settings controls mail sends for all agents.
 
 1. The app checks token and level, then snapshots what would leave. Mail: the `Outgoing` built
    from the draft, with the draft's revision. Event: the new values, and for a change or a
@@ -313,7 +313,7 @@ them off, for all agents.
    when the client is gone; `draft show` then gives `not_found`.
 
 The agent cannot approve: the protocol has no such command. Confirmations queue one at a time. A
-remote agent needs a person at the app, or confirmations off.
+remote agent needs a person at the app for calendar changes and for mail sends with confirmations enabled.
 
 ## 10. Audit log
 
