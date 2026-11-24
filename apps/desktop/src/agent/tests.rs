@@ -691,9 +691,21 @@ fn draft_confirmation_sends_only_the_reviewed_revision_and_undo_restores_ownersh
     sheet.answer.send(Err(Code::Denied)).unwrap();
     assert_eq!(response(s)["error"]["code"], "denied");
     let (s, sheet) = f.sending(id);
+    let mut waiting = crate::agent::confirm::Waiting::default();
+    let mut denials = crate::agent::confirm::Denials::default();
+    assert!(waiting.push(sheet, &mut denials));
     drop(s);
+    let sheet = waiting.sheets.front_mut().unwrap();
     wait(|| sheet.answer.is_closed());
-    assert!(sheet.answer.send(Ok(())).is_err());
+    assert!(sheet.withdrawn_at.get().is_some());
+    // Simulate a window reopening after the entire cooldown has elapsed.
+    sheet.withdrawn_at = std::sync::Arc::new(std::sync::OnceLock::from(
+        std::time::Instant::now() - Duration::from_secs(31)));
+    let (next, replacement) = f.sending(id);
+    assert!(waiting.push(replacement, &mut denials));
+    assert!(!waiting.withdrawn);
+    waiting.sheets.pop_front().unwrap().answer.send(Err(Code::Denied)).unwrap();
+    assert_eq!(response(next)["error"]["code"], "denied");
     let (s, sheet) = f.sending(id);
     let edited = f.write(
         "draft.edit",
@@ -1042,7 +1054,7 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
     f.store.set_agent_setting(Setting::Confirm, false).unwrap();
     let id = ObjectId::Event(f.account.id.clone(), "primary".into(), "existing".into()).encode();
     let create = json!({"guests":"guest@xn--bcher-kva.example,GUEST@bücher.example","title":"New event","start":"2026-11-24","end":"2026-11-25","calendar":"primary"});
-    let update = json!({"id":id,"title":"Updated"});
+    let update = json!({"id":id,"title":"Updated","description":r"\u{202e}"});
     let delete = json!({"id":id});
     f.level(1);
     for (cmd, args) in [
@@ -1066,7 +1078,7 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         .insert(f.account.id.clone(), base);
     let policy_path = f.store.path().to_owned();
     let peer = thread::spawn(move || {
-        let remote = json!({"id":"existing","etag":"\"old\"","summary":"Old event","description":"Original details",
+        let remote = json!({"id":"existing","etag":"\"old\"","summary":"Old event","description":"\u{202e}",
             "attendees":[{"email":"hidden@example.org"}],"start":{"date":"2026-11-24"},"end":{"date":"2026-11-25"}});
         let created = json!({"id":"created","summary":"New event","start":{"date":"2026-11-24"},"end":{"date":"2026-11-25"}});
         let updated =
@@ -1145,9 +1157,15 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         assert!(row("Calendar", "Fixture").is_some());
         if cmd == "event.create" { assert_eq!(sheet.rows.iter().filter(|r| r.label == "Guest").count(),1); }
         if cmd != "event.create" {
-            // Google's current guest shows once, untagged; the unchanged description is the body.
+            // Google's current guest shows once, untagged.
             assert!(row("Guest", "hidden@example.org").is_some_and(|r| r.tag.is_none()));
-            assert!(sheet.previous_description.is_none() && sheet.body == "Original details");
+            if cmd == "event.update" {
+                assert_eq!(sheet.previous_description.as_deref(), Some(r"\u{202e}"));
+                assert_eq!(sheet.body, r"\\u{202e}");
+            } else {
+                assert!(sheet.previous_description.is_none());
+                assert_eq!(sheet.body, r"\u{202e}");
+            }
         }
         if cmd == "event.update" {
             assert_eq!(row("Title", "Updated").and_then(|r| r.old.as_deref()), Some("Old event"));

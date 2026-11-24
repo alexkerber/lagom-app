@@ -440,7 +440,7 @@ pub(super) fn dispatch(
             .find(|a| a.id == who.agent_id())
             .ok_or(Code::Unauthorized)?;
         let (_closed, done) = oneshot::channel();
-        let (sheet, answer) = Sheet::new(
+        let (sheet, mut answer) = Sheet::new(
             agent,
             &account,
             req,
@@ -449,16 +449,19 @@ pub(super) fn dispatch(
             std::sync::Arc::downgrade(peer.ok_or(Code::Denied)?),
         )?;
         let expires = sheet.expires;
+        let withdrawn = sheet.withdrawn_at.clone();
         if !bridge.send(Cmd::AgentConfirm(sheet)) {
             return Err(Code::Unavailable.into());
         }
         rt.block_on(async {
             tokio::select! {
                 biased;
-                answer=tokio::time::timeout_at(expires,answer) =>
-                    answer.map_err(|_|Code::Denied)?.map_err(|_|Code::Denied)?,
-                _=off.changed()=>Err(Code::Denied),
+                result = &mut answer => return result.unwrap_or(Err(Code::Denied)),
+                _ = tokio::time::sleep_until(expires) => {},
+                _ = off.changed() => {},
             }
+            withdrawn.set(std::time::Instant::now()).ok();
+            Err(Code::Denied)
         })?;
     }
     let writer = Store::agent_writer(store.path())?;

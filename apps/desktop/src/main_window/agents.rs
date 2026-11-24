@@ -234,7 +234,7 @@ impl MainWindow {
             let agent = sheet.agent.clone();
             let approved = sheet.decide(approve);
             self.agent_sheets.scroll = Default::default();
-            self.agent_sheets.withdrawn = approve && !approved;
+            self.agent_sheets.answered(approve && !approved);
             if !approved { cx.default_global::<crate::agent::confirm::Denials>().deny(agent); }
         }
         if self.agent_sheets.sheets.is_empty() {
@@ -363,6 +363,7 @@ impl MainWindow {
                     .child(
                         div()
                             .id("agent-preview")
+                            .track_scroll(&self.agent_sheets.scroll[2])
                             .overflow_y_scroll()
                             .flex_col()
                             .flex()
@@ -372,7 +373,7 @@ impl MainWindow {
                                 .child(text_box(1, "current-description", description, if sheet.expanded { 320. } else { 120. }, t.ink2)))
                             .child(caption(if sheet.approve_label == "Send" { "Message" } else { "Description" }))
                             .child(text_box(0, "confirmation-body", sheet.body.clone(), if sheet.expanded { 320. } else { 180. }, t.ink))
-                            .when(!sheet.expanded && status.iter().any(|s| s.0), |d| {
+                            .when(!sheet.expanded && status[..2].iter().any(|s| s.0), |d| {
                                 d.child(div().flex().child(button(&t, "Expand", None).ml(px(-12.)).text_color(t.ink2).on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(s) = this.agent_sheets.sheets.front_mut() {
                                         s.expanded = true;
@@ -381,6 +382,7 @@ impl MainWindow {
                                 }))))
                             }),
                     )
+                    .when(status[2].1, |d| d.child(caption("More below ↓").debug_selector(|| "more-agent-preview".into())))
                     .child(
                         div()
                             .flex()

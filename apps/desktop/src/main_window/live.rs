@@ -4388,7 +4388,10 @@ mod tests {
                 let agent = AgentRow { id:id.into(),name:id.into(),kind:"fixture".into(),host:"here".into(),remote:false,active:true };
                 let req: Request = serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
                 let (done,closed) = tokio::sync::oneshot::channel();
-                let mail = lagom_core::smtp::Outgoing {text:text.into(),..Default::default()};
+                let mail = lagom_core::smtp::Outgoing {
+                    to: if id == "three" { (0..80).map(|n| format!("person{n}@example.org")).collect() } else { vec![] },
+                    text:text.into(), ..Default::default()
+                };
                 let (sheet, answer) = Sheet::new(agent,v.live.as_ref().unwrap().account().unwrap(),&req,
                     &Snapshot::Mail(String::new(),mail),closed,Default::default()).unwrap();
                 v.on_events(vec![Event::AgentConfirm(sheet)],w,cx);
@@ -4418,6 +4421,19 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("more-confirmation-body").is_none());
+        cx.simulate_keystrokes("escape");
+        let _later = show("three","later",cx);
+        view.read_with(cx,|v,_| assert!(!v.agent_sheets.withdrawn));
+        cx.run_until_parked();
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds("more-agent-preview").is_some());
+        view.update(cx,|v,cx| {
+            let scroll = &v.agent_sheets.scroll[2];
+            scroll.set_offset(gpui::point(px(0.),-scroll.max_offset().height));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("more-agent-preview").is_none());
     }
 
     #[cfg(unix)]

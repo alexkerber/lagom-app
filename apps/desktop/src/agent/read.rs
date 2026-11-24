@@ -89,14 +89,26 @@ impl Attachment {
 }
 
 pub(super) fn clean(s: &str) -> String {
-    use icu_properties::{CodePointMapData, CodePointSetData, props::{DefaultIgnorableCodePoint, GeneralCategory}};
+    escape_text(s, false)
+}
+
+pub(super) fn sheet_text(s: &str) -> String {
+    escape_text(s, true)
+}
+
+fn escape_text(s: &str, sheet: bool) -> String {
+    use icu_properties::{CodePointMapData, CodePointSetData, props::{BidiControl, DefaultIgnorableCodePoint, GeneralCategory}};
     let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
     let category = CodePointMapData::<GeneralCategory>::new();
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() && c != '\n' {
+        if c == '\\' {
+            out.push_str(r"\\");
+        } else if c.is_control() && c != '\n' {
             out.extend(c.escape_default());
-        } else if ignorable.contains(c) || category.get(c) == GeneralCategory::Format || matches!(c, '\u{2028}' | '\u{2029}')
+        } else if CodePointSetData::new::<BidiControl>().contains(c)
+            || matches!(c, '\u{2028}' | '\u{2029}' | '\u{e0000}'..='\u{e007f}')
+            || sheet && (ignorable.contains(c) || category.get(c) == GeneralCategory::Format)
         {
             out.extend(c.escape_unicode());
         } else {

@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 
 pub(crate) struct Sheet {
     peer: std::sync::Weak<std::os::unix::net::UnixStream>,
+    pub withdrawn_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>>,
     pub expires: tokio::time::Instant,
     pub serial: usize,
     pub closed: Option<oneshot::Receiver<()>>,
@@ -39,7 +40,7 @@ pub(crate) struct Row {
 }
 
 fn line(value: &str) -> String {
-    super::read::clean(value).replace('\n', "\\n")
+    super::read::sheet_text(value).replace('\n', "\\n")
 }
 
 fn address(value: &str) -> Result<String, Code> {
@@ -118,6 +119,10 @@ fn local_time(value: &str) -> String {
 }
 
 impl Sheet {
+    fn withdrawal_time(&self) -> std::time::Instant {
+        self.withdrawn_at.get().copied().unwrap_or_else(std::time::Instant::now)
+    }
+
     pub fn decide(self, approve: bool) -> bool {
         use std::io::{ErrorKind, Read};
         // Check the socket at the click even if the listener has not handled EOF yet.
@@ -191,8 +196,8 @@ impl Sheet {
                     Some(e) => e.description.as_deref().unwrap_or(current).to_owned(),
                     None => current.to_owned(),
                 };
-                if new.is_some() && !current.is_empty() && super::read::clean(current) != super::read::clean(&body) {
-                    previous_description = Some(super::read::clean(current));
+                if old.is_some() && new.is_some() && current != body {
+                    previous_description = Some(super::read::sheet_text(current));
                 }
             }
             Snapshot::None => unreachable!(),
@@ -208,6 +213,7 @@ impl Sheet {
         Ok((
             Self {
                 peer,
+                withdrawn_at: Default::default(),
                 expires: tokio::time::Instant::now() + std::time::Duration::from_secs(120),
                 serial: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 closed: Some(closed),
@@ -216,7 +222,7 @@ impl Sheet {
                 approve_label,
                 rows,
                 previous_description,
-                body: super::read::clean(&body),
+                body: super::read::sheet_text(&body),
                 expanded: false,
                 answer,
             },
@@ -290,7 +296,8 @@ pub(crate) struct Waiting {
     pub sheets: std::collections::VecDeque<Sheet>,
     pub pressed: Option<(usize, bool)>,
     pub withdrawn: bool,
-    pub scroll: [gpui::ScrollHandle; 2],
+    pending_withdrawal: Option<std::time::Instant>,
+    pub scroll: [gpui::ScrollHandle; 3],
     pub front_since: Option<(usize, std::time::Instant)>,
 }
 
@@ -313,14 +320,30 @@ impl Waiting {
     pub fn prune(&mut self, denials: &mut Denials) {
         if self.sheets.front().is_some_and(|s| s.answer.is_closed()) {
             self.scroll = Default::default();
-            self.withdrawn = true;
+            self.pending_withdrawal = Some(self.sheets[0].withdrawal_time());
+            self.withdrawn = false;
             self.pressed = None;
         }
         self.sheets.retain(|s| {
             if !s.answer.is_closed() { return true; }
-            denials.deny(s.agent.clone());
+            denials.0.insert(s.agent.clone(), s.withdrawal_time());
             false
         });
+        if !self.sheets.is_empty() {
+            self.show_replacement();
+        }
+    }
+
+    pub fn answered(&mut self, withdrawn: bool) {
+        self.withdrawn = false;
+        self.pending_withdrawal = withdrawn.then(std::time::Instant::now);
+        if !self.sheets.is_empty() { self.show_replacement(); }
+    }
+
+    fn show_replacement(&mut self) {
+        if let Some(at) = self.pending_withdrawal.take() {
+            self.withdrawn = at.elapsed() < std::time::Duration::from_secs(30);
+        }
     }
 
     pub fn delay(&self) -> std::time::Duration {
@@ -338,7 +361,8 @@ impl Waiting {
     pub fn push(&mut self, sheet: Sheet, denials: &mut Denials) -> bool {
         self.prune(denials);
         if sheet.answer.is_closed() {
-            denials.deny(sheet.agent);
+            let at = sheet.withdrawal_time();
+            denials.0.insert(sheet.agent, at);
             return false;
         }
         if denials.cooling_down(&sheet.agent)
@@ -349,6 +373,7 @@ impl Waiting {
             return false;
         }
         self.sheets.push_back(sheet);
+        self.show_replacement();
         true
     }
 }
@@ -356,6 +381,16 @@ impl Waiting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_preserve_text_shaping_but_escape_direction_and_tags() {
+        let text = "\u{200d}\u{fe0f}\u{ad}";
+        assert_eq!(super::super::read::clean(text), text);
+        assert_eq!(line(text), r"\u{200d}\u{fe0f}\u{ad}");
+        let hidden = "\t\u{61c}\u{202e}\u{e0000}\u{e007f}\u{2028}\u{2029}";
+        assert_eq!(super::super::read::clean(hidden), r"\t\u{61c}\u{202e}\u{e0000}\u{e007f}\u{2028}\u{2029}");
+        assert_ne!(line(r"\u{202e}"), line("\u{202e}"));
+    }
 
     #[test]
     fn identity_fields_escape_invisible_text_and_show_ascii_domain_first() {
