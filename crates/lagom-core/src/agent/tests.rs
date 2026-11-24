@@ -421,3 +421,65 @@ fn replies_accept_only_one_payload_and_fixed_error_text() {
         assert!(serde_json::from_str::<Response>(line).is_err());
     }
 }
+
+#[test]
+fn settings_apis_store_switches_matrices_receipts_and_revoke_all() {
+    use super::policy::{Access, Setting};
+    let (_dir, s, a, _) = setup();
+    assert!(!s.agent_setting(Setting::Enabled).unwrap());
+    assert!(s.agent_setting(Setting::Confirm).unwrap());
+    assert!(!s.agent_setting(Setting::Sidebar).unwrap());
+    s.set_agent_setting(Setting::Enabled, true).unwrap();
+    assert!(s.agent_setting(Setting::Enabled).unwrap());
+    let agent = s.create_agent("Codex", "Codex", "host", false).unwrap();
+    let other = s.create_agent("Cursor", "Cursor", "host", false).unwrap();
+    s.issue_token(&agent, TokenScope::Local).unwrap();
+    s.issue_token(&other, TokenScope::Local).unwrap();
+    assert!(s.agents().unwrap().iter().all(|r| r.active && !r.remote));
+    let send = Access {
+        resource: Calendar,
+        account: a.id.clone(),
+        level: Level::Send,
+    };
+    s.set_agent_access("", &send).unwrap();
+    assert!(s.agent_access("").unwrap().contains(&send));
+    let triage = Access {
+        level: Level::Triage,
+        ..send.clone()
+    };
+    assert!(matches!(
+        s.set_agent_access("", &triage),
+        Err(Code::InvalidRequest)
+    ));
+    // A new agent starts at Read for both resources.
+    assert_eq!(
+        s.agent_access(&agent)
+            .unwrap()
+            .iter()
+            .map(|r| r.level)
+            .collect::<Vec<_>>(),
+        [Level::Read; 2]
+    );
+    s.set_agent_connection(&agent, Some("{}")).unwrap();
+    assert_eq!(s.agent_connection(&agent).unwrap().as_deref(), Some("{}"));
+    assert_eq!(s.agent_connection(&other).unwrap(), None);
+    s.db.execute("UPDATE agent_tokens SET expires=1 WHERE agent=?", [&other]).unwrap();
+    assert_eq!(s.agents().unwrap().iter().filter(|r| r.active).count(), 1, "an expired token is not active");
+    s.revoke_all_agents().unwrap();
+    assert!(s.agents().unwrap().iter().all(|r| !r.active));
+    assert!(!s.agent_setting(Setting::Enabled).unwrap());
+    s.set_agent_connection(&agent, None).unwrap();
+    assert_eq!(s.agent_connection(&agent).unwrap(), None);
+    for (at, command) in [(1, "emails"), (2, "search")] {
+        s.db.execute(
+            "INSERT INTO agent_audit(at,agent,command,result) VALUES(?,?,?,'ok')",
+            params![at, agent, command],
+        )
+        .unwrap();
+    }
+    let log = s.agent_audit(10).unwrap();
+    assert_eq!(
+        log.iter().map(|e| e.command.as_str()).collect::<Vec<_>>(),
+        ["search", "emails"]
+    );
+}

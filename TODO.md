@@ -217,6 +217,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
+- [ ] AI Agents: local and remote agents read and act on mail and calendar through the running app. Settings > AI Agents (off by default, per-account and per-agent levels None/Read/Triage/Send, confirmation before send and calendar changes, sidebar toggle), a socket-only CLI with `--json`, `skill install` and `mcp`, scoped tokens for remote agents (accounts, level, CIDR, expiry), an audit log with Revoke. Spec: `docs/ai-agents.md`. Branch `wip/ai-agents`.
 
 ## Calendar
 

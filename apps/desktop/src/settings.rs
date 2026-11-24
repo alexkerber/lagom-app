@@ -3,6 +3,8 @@
 //! app, not in a system dialog, and deletes the saved password and the local mail; the server
 //! keeps its mail.
 
+pub mod agents;
+
 use std::time::Duration;
 
 use std::collections::HashMap;
@@ -39,6 +41,7 @@ pub struct Data<'a> {
     pub password: Option<&'a NewPassword>,
     /// Keyboard shortcuts scrolls it to the end.
     pub scroll: &'a gpui::ScrollHandle,
+    pub agents: &'a agents::Agents,
 }
 
 /// A new password on its way to the provider.
@@ -91,6 +94,7 @@ fn plate(t: &Theme) -> Div {
 pub fn view(t: &Theme, d: Data, cx: &mut Context<MainWindow>) -> Div {
     let content = match d.open.and_then(|id| d.accounts.iter().position(|a| a.id == id)) {
         Some(ix) => account_page(t, &d, ix, cx),
+        None if d.open == Some(agents::AGENTS) => agents::view(t, d.agents, d.accounts, &d.colors, cx),
         None => main_page(t, &d, cx),
     };
     div().flex_1().min_w(px(0.)).flex().child(
@@ -142,7 +146,13 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .child(plate(t).px(px(14.)).py(px(6.))
             .child(stop(t, toggle_row(t, "Group by conversation", d.group)).on_click(cx.listener(|this, _, _, cx| this.toggle_conversations(cx))))
             .child(stop(t, toggle_row(t, "Notifications for new mail", d.notifications)).on_click(cx.listener(|this, _, _, cx| this.toggle_notifications(cx))))
-            .children(d.default_mail.map(|on| default_mail_row(t, on, cx))));
+            .children(d.default_mail.map(|on| default_mail_row(t, on, cx)))
+            .child(stop(t, pressable(div().id("open-agents"), t, false)).debug_selector(|| "open-agents".into())
+                .flex().items_center().gap(px(8.)).min_h(px(32.)).py(px(4.)).border_t_1().border_color(t.line).cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| this.open_agents(window, cx)))
+                .child(div().flex_1().child("AI Agents"))
+                .child(div().text_color(t.ink2).child(if d.agents.enabled { "On" } else { "Off" }))
+                .child(icon("icons/chevron-right.svg", t.ink2, 16.))));
     let lists = (!d.task_lists.is_empty()).then(|| div().debug_selector(|| "default-task-lists".into()).flex().flex_col().gap(px(12.))
         .child(section(t, "Default task list", Some("New tasks go here.")))
         .child(plate(t).p(px(4.)).children(d.task_lists.iter().map(|list| {
