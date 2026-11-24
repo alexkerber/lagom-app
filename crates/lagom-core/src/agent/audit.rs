@@ -1,19 +1,25 @@
-use super::{id::ObjectId, protocol::Code, token::Identity};
+use super::{id::ResolvedMessage, protocol::Code, token::Identity};
 use crate::store::Store;
 use rusqlite::{params, OptionalExtension};
 use std::net::IpAddr;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Failure {
     Error(Code),
     Unauthorized(TokenFailure),
+    #[non_exhaustive]
+    VerifiedRefusal {
+        reason: TokenFailure,
+        agent: String,
+        token: String,
+    },
     OutsideScope,
 }
 
 impl From<Failure> for Code {
     fn from(error: Failure) -> Self {
         match error {
-            Failure::Unauthorized(_) => Code::Unauthorized,
+            Failure::Unauthorized(_) | Failure::VerifiedRefusal { .. } => Code::Unauthorized,
             Failure::OutsideScope => Code::NotFound,
             Failure::Error(code) => code,
         }
@@ -61,7 +67,7 @@ pub struct AuditRow<'a> {
     pub identity: Option<&'a Identity>,
     pub account: Option<uuid::Uuid>,
     pub command: &'a str,
-    pub target: Option<&'a ObjectId>,
+    pub target: Option<&'a ResolvedMessage>,
     pub outcome: Result<(), Failure>,
     pub source_ip: Option<IpAddr>,
     pub recipients: &'a [lettre::Address],
@@ -70,27 +76,8 @@ pub struct AuditRow<'a> {
 impl Store {
     pub fn prune_agent_audit(&self, now: i64) -> rusqlite::Result<()> {
         let keep_since = now.saturating_sub(90 * 86400);
-        let excess: Option<i64> = self
-            .db
-            .query_row(
-                "SELECT id FROM agent_audit ORDER BY at DESC,id DESC LIMIT 1 OFFSET 50000",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if excess.is_some()
-            || self.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agent_audit WHERE at<?)",
-                [keep_since],
-                |r| r.get::<_, bool>(0),
-            )?
-        {
-            self.db.execute(
-                "DELETE FROM agent_audit WHERE at<?1 OR (at,id) <=
-                (SELECT at,id FROM agent_audit ORDER BY at DESC,id DESC LIMIT 1 OFFSET 50000)",
-                [keep_since],
-            )?;
-        }
+        self.db
+            .execute("DELETE FROM agent_audit WHERE at<?", [keep_since])?;
         Ok(())
     }
 
@@ -112,7 +99,17 @@ impl Store {
             | "event.update" | "event.delete" => row.command,
             _ => "unknown",
         };
-        let result = match row.outcome {
+        let (agent, token) = match &row.outcome {
+            Err(Failure::VerifiedRefusal { agent, token, .. }) => {
+                (Some(agent.as_str()), Some(token.as_str()))
+            }
+            Err(Failure::Unauthorized(_)) => (None, None),
+            _ => (
+                row.identity.map(Identity::agent_id),
+                row.identity.map(Identity::token_id),
+            ),
+        };
+        let result = match &row.outcome {
             Ok(()) => "ok".into(),
             Err(Failure::Error(code)) => serde_json::to_value(code)
                 .map_err(|_| Code::Internal)?
@@ -120,10 +117,12 @@ impl Store {
                 .ok_or(Code::Internal)?
                 .into(),
             Err(Failure::OutsideScope) => "not_found:outside_scope".into(),
-            Err(Failure::Unauthorized(reason)) => format!("unauthorized:{}", reason.label()),
+            Err(Failure::Unauthorized(reason) | Failure::VerifiedRefusal { reason, .. }) => {
+                format!("unauthorized:{}", reason.label())
+            }
         };
         let mut aggregate = false;
-        if row.identity.is_none() {
+        if agent.is_none() {
             let minute = now - now.rem_euclid(60);
             let count: i64 = tx.query_row(
                 "SELECT count(*) FROM agent_audit WHERE at>=? AND agent IS NULL",
@@ -160,9 +159,19 @@ impl Store {
             } else {
                 None
             };
+            let target = match &row.outcome {
+                Err(
+                    Failure::OutsideScope
+                    | Failure::Error(Code::NotFound | Code::Unauthorized)
+                    | Failure::Unauthorized(_)
+                    | Failure::VerifiedRefusal { .. },
+                ) => None,
+                _ if row.identity.is_some() => row.target.map(ResolvedMessage::audit_target),
+                _ => None,
+            };
             tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail) VALUES(?,?,?,?,?,?,?,?,?)",
-                params![now,row.identity.map(Identity::agent_id),row.identity.map(Identity::token_id),row.account.map(|id| id.to_string()),command,
-                    row.target.map(ObjectId::encode),result,row.source_ip.map(|ip|ip.to_string()),detail])?;
+                params![now,agent,token,row.account.map(|id| id.to_string()),command,
+                    target,result,row.source_ip.map(|ip|ip.to_string()),detail])?;
         }
         let last: Option<i64> = tx
             .query_row(

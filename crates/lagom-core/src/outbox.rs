@@ -99,8 +99,8 @@ impl Store {
         let id = mail.message_id.get_or_insert_with(|| smtp::message_id(&account.email)).clone();
         let raw = smtp::compose(account, &mail)?.formatted();
         let tx = self.db.unchecked_transaction()?;
-        tx.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at)
-            VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5)",
+        tx.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent)
+            VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,(SELECT agent FROM agent_drafts WHERE draft=?1))",
             params![id, account.id, encode(&mail)?, raw, ready_at])?;
         tx.execute("DELETE FROM drafts WHERE id=?1 AND account=?2", params![id, account.id])?;
         tx.commit()?;
@@ -112,6 +112,8 @@ impl Store {
         let tx = self.db.unchecked_transaction()?;
         tx.execute("INSERT INTO drafts(id,account,content,revision)
             SELECT id,account,draft,lower(hex(randomblob(16))) FROM outbox WHERE id=?1 AND started=0 AND submitted=0 AND draft IS NOT NULL", [id])?;
+        tx.execute("INSERT INTO agent_drafts(draft,agent) SELECT id,draft_agent FROM outbox
+            WHERE id=?1 AND started=0 AND submitted=0 AND draft IS NOT NULL AND draft_agent IS NOT NULL", [id])?;
         let removed = tx.execute("DELETE FROM outbox WHERE id=?1 AND started=0 AND submitted=0 AND draft IS NOT NULL", [id])?;
         tx.commit()?;
         Ok(removed == 1)
@@ -219,6 +221,8 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.drafts().unwrap(), [draft.clone()]);
         let mail = Outgoing { to: vec!["recipient@example.com".into()], bcc: vec!["hidden@example.com".into()], text: draft.text.clone(), message_id: Some(draft.id.clone()), ..Default::default() };
+        let agent = store.create_agent("test", "owner", "host", false).unwrap();
+        store.db.execute("INSERT INTO agent_drafts VALUES(?,?)", params![draft.id, agent]).unwrap();
         let id = store.enqueue(&account, &mail, 5000).unwrap();
         assert!(store.drafts().unwrap().is_empty());
         assert!(store.due_outbox(&account.id, 4999).unwrap().is_empty());
@@ -226,6 +230,7 @@ mod tests {
         assert!(!String::from_utf8_lossy(&store.pending(&id).unwrap().raw).contains("hidden@example.com"));
         assert!(store.undo_send(&id).unwrap());
         assert_eq!(store.drafts().unwrap(), [draft]);
+        assert_eq!(store.db.query_row("SELECT agent FROM agent_drafts WHERE draft=?", [&id], |r| r.get::<_, String>(0)).unwrap(), agent);
         store.enqueue(&account, &mail, 5000).unwrap();
         assert!(!store.claim_send(&id, 4999).unwrap());
         assert!(store.claim_send(&id, 5000).unwrap());

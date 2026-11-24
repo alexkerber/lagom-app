@@ -109,7 +109,11 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
         s.db.query_row("SELECT hash FROM agent_tokens", [], |r| r.get(0))
             .unwrap();
     assert_eq!(hash, Sha256::digest(token.as_bytes()).as_slice());
-    for ip in ["203.0.113.255", "2001:db8:0:ffff::1"] {
+    for ip in [
+        "203.0.113.255",
+        "::ffff:203.0.113.255",
+        "2001:db8:0:ffff::1",
+    ] {
         assert_eq!(auth(Some(&token), Some(ip)), Ok(()));
     }
     for ip in [
@@ -120,6 +124,14 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
     ] {
         assert_eq!(auth(Some(&token), ip), Err(Code::Unauthorized));
     }
+    s.db.execute("UPDATE agent_tokens SET cidr='[\"::/0\"]'", [])
+        .unwrap();
+    for ip in ["203.0.113.1", "::ffff:203.0.113.1"] {
+        assert_eq!(auth(Some(&token), Some(ip)), Err(Code::Unauthorized));
+    }
+    assert_eq!(auth(Some(&token), Some("::1")), Ok(()));
+    s.db.execute("UPDATE agent_tokens SET cidr='[]'", [])
+        .unwrap();
     let ip = Some("203.0.113.1");
     let wrong = format!("{}_{}", &token[..12], "A".repeat(43));
     let other = if &token[4..12] == "00000000" {
@@ -131,9 +143,46 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
     for raw in [None, Some("lgm_bad"), Some(&wrong), Some(&unknown)] {
         assert_eq!(auth(raw, ip), Err(Code::Unauthorized));
     }
+    let check_refusal = |source, reason: &str| {
+        let failure = s.authenticate(Some(&token), source).err().unwrap();
+        assert_eq!(Code::from(failure.clone()), Code::Unauthorized);
+        s.record_agent_audit(AuditRow {
+            identity: None,
+            account: None,
+            command: "emails",
+            target: None,
+            outcome: Err(failure),
+            source_ip: None,
+            recipients: &[],
+        })
+        .unwrap();
+        let actual =
+            s.db.query_row(
+                "SELECT agent,token,result FROM agent_audit ORDER BY id DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            actual,
+            (
+                remote.clone(),
+                token[4..12].into(),
+                format!("unauthorized:{reason}")
+            )
+        );
+    };
+    check_refusal(None, "source");
     s.db.execute("UPDATE agent_tokens SET expires=unixepoch()", [])
         .unwrap();
     assert_eq!(auth(Some(&token), ip), Err(Code::Unauthorized));
+    check_refusal(ip, "expired");
     s.db.execute("UPDATE agent_tokens SET expires=created+86400", [])
         .unwrap();
     assert_eq!(auth(Some(&token), ip), Ok(()));
@@ -144,6 +193,7 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
     let new = s.issue_token(&local, TokenScope::Local).unwrap();
     assert_eq!(auth(Some(&old), None), Err(Code::Unauthorized));
     assert_eq!(auth(Some(&new), None), Ok(()));
+    assert_eq!(auth(Some(&new), ip), Err(Code::Unauthorized));
 }
 
 #[test]
@@ -197,6 +247,45 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
         .unwrap();
     let row = s.save_message(&mail(&a, inbox, 3)).unwrap();
     assert_eq!(lookup(&uid, None, Level::Read).unwrap().row, row);
+    let identity = s.authenticate(Some(&token), Some("::1")).unwrap();
+    let noncanonical = format!("m1.{}", {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_string_pretty(&(&a.id, "m@example.org")).unwrap())
+    });
+    let found = s
+        .resolve_agent_message(Some(&token), Some("::1"), &noncanonical, None, Level::Read)
+        .unwrap();
+    for (outcome, target, expected) in [
+        (Ok(()), Some(&found), Some(key.encode())),
+        (Err(Failure::OutsideScope), Some(&found), None),
+        (Err(Code::NotFound.into()), None, None),
+    ] {
+        s.record_agent_audit(AuditRow {
+            identity: Some(&identity),
+            account: None,
+            command: "thread",
+            target,
+            outcome,
+            source_ip: None,
+            recipients: &[],
+        })
+        .unwrap();
+        let stored: Option<String> =
+            s.db.query_row(
+                "SELECT target FROM agent_audit ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, expected);
+    }
+    let long = MessageId::Header(a.id.clone(), "x".repeat(2048)).encode();
+    assert_eq!(MessageId::decode(&long), Err(Code::NotFound));
+    assert_eq!(
+        ObjectId::decode(&ObjectId::Draft(a.id.clone(), "x".repeat(2048)).encode()),
+        Err(Code::NotFound)
+    );
     for id in [
         ObjectId::Message(key),
         ObjectId::Message(uid.clone()),
@@ -230,7 +319,7 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
 }
 
 #[test]
-fn audit_limits_anonymous_refusals_and_prunes_by_age_and_count() {
+fn audit_limits_anonymous_refusals() {
     let (_dir, s, _, _) = setup();
     let now = chrono::Utc::now().timestamp();
     for _ in 0..63 {
@@ -266,27 +355,36 @@ fn audit_limits_anonymous_refusals_and_prunes_by_age_and_count() {
         .unwrap(),
         "unauthorized:3"
     );
-    let now = chrono::Utc::now().timestamp() + 1;
+}
+
+#[test]
+fn audit_caps_reads_per_agent_at_append_and_expires_writes_by_age() {
+    let (_dir, s, _, _) = setup();
+    let now = chrono::Utc::now().timestamp();
+    s.db.execute("INSERT INTO agent_audit(at,agent,command,result) VALUES
+        (?1,'quiet','emails','ok'),(?1,'quiet','draft.send','ok'),(?1,NULL,'unknown','unauthorized:missing'),
+        (?1,'busy','draft.send','ok'),(?1,'busy','draft.edit','ok'),
+        (?1,'busy','action.move','ok'),(?1,'busy','event.update','ok'),(0,'busy','draft.send','ok')",[now]).unwrap();
     s.db.execute(
-        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<50001)
-        INSERT INTO agent_audit(at,command,result) SELECT ?,'emails','ok' FROM n",
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<60000)
+        INSERT INTO agent_audit(at,agent,command,result) SELECT ?,'busy','emails','ok' FROM n",
         [now],
     )
     .unwrap();
-    s.db.execute(
-        "INSERT INTO agent_audit(at,command,result) VALUES(0,'old','ok')",
-        [],
-    )
-    .unwrap();
+    let count = |condition: &str| {
+        s.db.query_row(
+            &format!("SELECT count(*) FROM agent_audit WHERE {condition}"),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count("agent='busy' AND command='emails'"), 50_000);
+    assert_eq!(count("agent='busy' AND command<>'emails'"), 5);
+    assert_eq!(count("agent='quiet'"), 2);
+    assert_eq!(count("agent IS NULL"), 1);
     s.prune_agent_audit(now).unwrap();
-    assert_eq!(
-        s.db.query_row("SELECT count(*),min(at) FROM agent_audit", [], |r| Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?
-        )))
-        .unwrap(),
-        (50000, now)
-    );
+    assert_eq!(count("agent='busy' AND command<>'emails'"), 4);
 }
 
 #[test]

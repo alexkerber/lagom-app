@@ -66,7 +66,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 22 {
+        if version > 23 {
             return Err(Error::Invalid("store was created by a newer lagom version"));
         }
         if version == 0 {
@@ -152,15 +152,21 @@ impl Store {
         if version < 22 {
             store.db.execute_batch(include_str!("schema_v22.sql"))?;
         }
-        store.prune_agent_audit(chrono::Utc::now().timestamp())?;
+        if version < 23 {
+            store.db.execute_batch(include_str!("schema_v23.sql"))?;
+        }
+        store.db.busy_timeout(std::time::Duration::ZERO)?;
+        match store.prune_agent_audit(chrono::Utc::now().timestamp()) {
+            Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
+            result => result?,
+        }
         if store.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_credentials)", [], |r| r.get(0))? {
-            store.db.busy_timeout(std::time::Duration::ZERO)?;
             match store.clean_pending(None) {
                 Err(Error::Store(e)) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
                 result => result?,
             }
-            store.db.busy_timeout(busy_timeout)?;
         }
+        store.db.busy_timeout(busy_timeout)?;
         Ok(store)
     }
     pub fn signature(&self, account: &str) -> Result<String> {
@@ -445,9 +451,15 @@ mod tests {
         let path = temp.path().join("busy.sqlite3");
         let writer = Store::open(&path).unwrap();
         writer.db.execute("INSERT INTO pending_credentials VALUES ('account','key')", []).unwrap();
-        let _tx = writer.credential_transaction().unwrap();
+        writer.db.execute("INSERT INTO agent_audit(at,command,result) VALUES(0,'emails','ok')", []).unwrap();
+        let tx = writer.credential_transaction().unwrap();
         let reader = Store::open(&path).unwrap();
         assert_eq!(reader.db.query_row("SELECT credential_key FROM pending_credentials", [], |r| r.get::<_, String>(0)).unwrap(), "key");
+        let rows = |store: &Store| store.db.query_row("SELECT count(*) FROM agent_audit", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(rows(&reader), 1);
+        drop(tx);
+        reader.prune_agent_audit(chrono::Utc::now().timestamp()).unwrap();
+        assert_eq!(rows(&reader), 0);
     }
 
     #[test]
@@ -515,7 +527,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -1189,7 +1201,7 @@ pub(crate) mod mail_tests {
         let folders = [old.folder(inbox).unwrap(), old.folder(custom).unwrap()];
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
         for message in &messages {
             assert_eq!(store.message(message.summary.id).unwrap(), *message);
             assert!(!store.inline_loaded(message.summary.id).unwrap());
@@ -1233,7 +1245,7 @@ pub(crate) mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -1310,12 +1322,14 @@ pub(crate) mod mail_tests {
         legacy.as_object_mut().unwrap().remove("forward_source");
         old.db.execute("INSERT INTO drafts(id,account,content,revision) VALUES (?1,?2,?3,'revision')", params![draft.id, account.id, legacy.to_string()]).unwrap();
         let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "Queued".into(), ..Default::default() };
-        let queued = old.enqueue(&account, &outgoing, 123).unwrap();
-        let raw = old.pending(&queued).unwrap().raw;
+        let queued = "queued@example.com";
+        let raw = crate::smtp::compose(&account, &outgoing).unwrap().formatted();
+        old.db.execute("INSERT INTO outbox(id,account,content,raw,ready_at) VALUES(?,?,?,?,123)",
+            params![queued, account.id, serde_json::to_string(&outgoing).unwrap(), raw]).unwrap();
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -1323,7 +1337,7 @@ pub(crate) mod mail_tests {
         assert_eq!(store.drafts().unwrap(), [draft.clone()]);
         assert_eq!(store.owned_drafts().unwrap(), [draft.clone()]);
         assert_eq!(store.due_drafts(&account.id, 0).unwrap(), [draft.id.clone()]);
-        assert_eq!(store.pending(&queued).unwrap().raw, raw);
+        assert_eq!(store.pending(queued).unwrap().raw, raw);
         assert_eq!(store.tasks(task.list, false).unwrap(), [task]);
         assert_eq!(store.signature(&account.id).unwrap(), if version == 11 { "Existing signature" } else { "" });
         store.set_signature(&account.id, "**Team**\nContact").unwrap();
@@ -1472,7 +1486,7 @@ pub(crate) mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1544,7 +1558,7 @@ pub(crate) mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1622,7 +1636,7 @@ pub(crate) mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            22
+            23
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1651,7 +1665,7 @@ pub(crate) mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 23);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

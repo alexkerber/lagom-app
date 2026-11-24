@@ -7,7 +7,7 @@ pub const VERSION: u32 = 1;
 pub struct Request {
     pub v: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
+    pub token: Option<zeroize::Zeroizing<String>>,
     pub cmd: String,
     pub args: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

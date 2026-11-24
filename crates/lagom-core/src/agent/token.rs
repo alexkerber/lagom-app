@@ -127,7 +127,7 @@ impl Store {
     ) -> Result<Identity, Failure> {
         use Failure::Unauthorized as Refused;
         use TokenFailure::*;
-        let invalid = Refused(InvalidScope);
+
         let raw = raw.ok_or(Refused(Missing))?;
         let (id, secret) = raw
             .strip_prefix("lgm_")
@@ -148,7 +148,7 @@ impl Store {
                 [id],
                 |r| {
                     Ok((
-                        r.get(0)?,
+                        r.get::<_, String>(0)?,
                         r.get::<_, i64>(1)?,
                         r.get::<_, Vec<u8>>(2)?,
                         r.get(3)?,
@@ -164,35 +164,47 @@ impl Store {
         if !bool::from(hash.ct_eq(Sha256::digest(raw.as_bytes()).as_slice())) {
             return Err(Refused(WrongSecret));
         }
+        let refused = |reason| Failure::VerifiedRefusal {
+            reason,
+            agent: agent.clone(),
+            token: id.into(),
+        };
         let now = chrono::Utc::now().timestamp();
         let accounts = match remote {
+            0 if source_ip.is_some() => return Err(refused(Source)),
             0 if expires.is_none() && accounts.is_none() && cidr.is_none() => None,
             1 => {
-                let end = expires.ok_or(invalid)?;
+                let end = expires.ok_or_else(|| refused(InvalidScope))?;
                 if end <= now {
-                    return Err(Refused(Expired));
+                    return Err(refused(Expired));
                 }
                 if end <= created || end > created.saturating_add(365 * DAY) {
-                    return Err(invalid);
+                    return Err(refused(InvalidScope));
                 }
-                let ip: IpAddr = source_ip
-                    .ok_or(Refused(Source))?
-                    .parse()
-                    .map_err(|_| Refused(Source))?;
+                let ip = source_ip
+                    .ok_or_else(|| refused(Source))?
+                    .parse::<IpAddr>()
+                    .map_err(|_| refused(Source))?
+                    .to_canonical();
                 if let Some(cidr) = cidr {
-                    let nets: Vec<IpNet> = serde_json::from_str(&cidr).map_err(|_| invalid)?;
+                    let nets: Vec<IpNet> =
+                        serde_json::from_str(&cidr).map_err(|_| refused(InvalidScope))?;
                     if !nets.is_empty() && !nets.iter().any(|n| n.contains(&ip)) {
-                        return Err(Refused(Source));
+                        return Err(refused(Source));
                     }
                 }
-                Some(serde_json::from_str(&accounts.ok_or(invalid)?).map_err(|_| invalid)?)
+                Some(
+                    serde_json::from_str(&accounts.ok_or_else(|| refused(InvalidScope))?)
+                        .map_err(|_| refused(InvalidScope))?,
+                )
             }
-            _ => return Err(invalid),
+            _ => return Err(refused(InvalidScope)),
         };
+        let level = Level::from_db(level).ok_or_else(|| refused(InvalidScope))?;
         Ok(Identity {
             agent,
             token: id.into(),
-            level: Level::from_db(level).ok_or(invalid)?,
+            level,
             accounts,
         })
     }

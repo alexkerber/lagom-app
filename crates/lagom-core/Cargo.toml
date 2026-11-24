@@ -15,7 +15,7 @@ tempfile = "3"
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 uuid = { version = "1", features = ["v4"] }
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
-zeroize = "1"
+zeroize = { version = "1", features = ["serde"] }
 unicode-normalization = "0.1"
 
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
