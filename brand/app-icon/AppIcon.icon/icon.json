@@ -20,17 +20,7 @@
       "layers": [
         {
           "image-name": "background.png",
-          "name": "background",
-          "hidden-specializations": [
-            {
-              "appearance": "dark",
-              "value": true
-            },
-            {
-              "appearance": "tinted",
-              "value": true
-            }
-          ]
+          "name": "background"
         }
       ]
     }
@@ -41,15 +31,6 @@
   "fill-specializations": [
     {
       "value": "automatic"
-    },
-    {
-      "appearance": "dark",
-      "value": {
-        "linear-gradient": [
-          "srgb:0.04706,0.10196,0.20784,1.00000",
-          "srgb:0.16863,0.11765,0.14902,1.00000"
-        ]
-      }
     }
   ]
 }
