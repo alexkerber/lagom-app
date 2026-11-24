@@ -695,12 +695,7 @@ impl ImapSync {
         if part.size as usize > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
         }
-        let estimated = if part.encoding.eq_ignore_ascii_case("base64") {
-            u64::from(part.size) * 3 / 4
-        } else {
-            u64::from(part.size)
-        };
-        if estimated > limit as u64 {
+        if matches!(part.encoding.to_ascii_lowercase().as_str(), "7bit" | "8bit" | "binary") && part.size as usize > limit {
             return Err(Error::Invalid("attachment is too large"));
         }
         // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
@@ -726,6 +721,10 @@ impl ImapSync {
         }
         if bytes.len() != part.size as usize {
             return Err(Error::Network("attachment size changed or download incomplete"));
+        }
+        if part.encoding.eq_ignore_ascii_case("base64") {
+            let digits = bytes.iter().filter(|b| !b.is_ascii_whitespace() && **b != b'=').count();
+            if digits * 3 / 4 > limit { return Err(Error::Invalid("attachment is too large")); }
         }
         let data = attachment::decode(bytes, &part.encoding)?;
         if data.len() > limit { return Err(Error::Invalid("attachment is too large")); }
@@ -760,14 +759,9 @@ impl ImapSync {
     }
     pub async fn create_folder(&mut self, store: &Store, name: &str) -> Result<i64> {
         validate_folder(name)?;
-        net(self.session.create(&encode_mailbox(name))).await?;
-        self.list_folders(store).await?;
-        store
-            .folders(&self.account.id, 0)?
-            .into_iter()
-            .find(|f| f.name == name)
-            .map(|f| f.id)
-            .ok_or(Error::NotFound)
+        mutation(self.session.create(&encode_mailbox(name))).await?;
+        self.list_folders(store).await.map_err(|_| Error::Uncertain)?
+            .into_iter().find(|f| f.name == name).map(|f| f.id).ok_or(Error::Uncertain)
     }
     pub async fn move_message(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Moved> {
         self.move_checked(store,id,Destination::Folder(target), |_|Ok(())).await
@@ -947,6 +941,7 @@ impl ImapSync {
         let result = tokio::time::timeout(TIMEOUT, self.session.run_command_and_check_ok(command)).await
             .map_err(|_| Error::Network("IMAP operation timed out"))?;
         if restore_on_refusal && matches!(&result, Err(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_))) {
+            check()?;
             // A refused move must not leave the original waiting for another client's EXPUNGE.
             net(self.session.run_command_and_check_ok(format!("UID STORE {set} -FLAGS.SILENT (\\Deleted)"))).await?;
         }

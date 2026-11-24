@@ -42,7 +42,7 @@ async fn attachment_roundtrip(cached: Option<bool>) {
                 "* CAPABILITY IMAP4rev1\r\n".into()
             } else if command == "SELECT \"INBOX\"" {
                 selections += 1;
-                let validity = if selections > 4 { 8 } else { 7 };
+                let validity = if selections > 5 { 8 } else { 7 };
                 format!("* 1 EXISTS\r\n* OK [UIDVALIDITY {validity}] valid\r\n* OK [UIDNEXT 2] next\r\n")
             } else if command == "UID SEARCH ALL" {
                 searches += 1;
@@ -62,7 +62,7 @@ async fn attachment_roundtrip(cached: Option<bool>) {
             } else if command == "UID FETCH 1 (UID BODY.PEEK[2.1])" {
                 assert!(synced);
                 downloads += 1;
-                if downloads == 3 {
+                if downloads == 4 {
                     "* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAP9o)\r\n".into()
                 } else {
                     "* 2 FETCH (UID 2 BODY[2.1] {4}\r\nAAAA)\r\n* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n* 1 FETCH (UID 1 BODY[2.2] {4}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQ==)\r\n* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAAAA)\r\n".into()
@@ -72,7 +72,7 @@ async fn attachment_roundtrip(cached: Option<bool>) {
                 downloads += 1;
                 "* 1 FETCH (UID 1 BODY[2.2] {9}\r\n=00=FFhi!)\r\n".into()
             } else if command == "LOGOUT" {
-                assert_eq!(downloads, 3);
+                assert_eq!(downloads, 4);
                 write.write_all(format!("* BYE bye\r\n{tag} OK logout\r\n").as_bytes()).await.unwrap();
                 break;
             } else {
@@ -106,10 +106,10 @@ async fn attachment_roundtrip(cached: Option<bool>) {
     assert_eq!(parts.len(), 2);
     assert_eq!((&*parts[0].section, &*parts[0].filename, &*parts[0].mime_type, parts[0].size, &*parts[0].encoding),
         ("2.1", "data.bin", "application/octet-stream", 10, "base64"));
-    assert!(matches!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 6).await,
+    assert!(matches!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 3).await,
         Err(lagom_core::Error::Invalid("attachment is too large"))));
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1] UID FETCH 2").await.is_err());
-    assert_eq!(imap.fetch_attachment(&mut store, message.id, "2.1").await.unwrap(), b"\0\xffhi");
+    assert_eq!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 4).await.unwrap(), b"\0\xffhi");
     assert_eq!(imap.fetch_attachment(&mut store, message.id, "2.2").await.unwrap(), b"\0\xffhi!");
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1").await.is_err());
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1").await.is_err());

@@ -455,6 +455,31 @@ async fn custom_folder_fetches_only_the_initial_window_then_new_mail() {
 }
 
 #[tokio::test]
+async fn role_creation_needs_acknowledgement_and_rediscovery() {
+    for ack in [false,true] {
+        let mut steps = login("");
+        steps.push(step("LIST \"\" \"*\"", ""));
+        steps.push(if ack { step("CREATE \"Archive\"", "") } else { ("CREATE \"Archive\"".into(), String::new()) });
+        if ack { steps.push(step("LIST \"\" \"*\"", "")); }
+        let (mut imap, store, _temp, server) = fixture(steps).await;
+        assert!(matches!(imap.ensure_role(&store, FolderRole::Archive, "Archive").await, Err(Error::Uncertain)));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn refused_expunge_checks_authority_before_restoring_flags() {
+    let mut steps = login("UIDPLUS");
+    steps.push(step("UID STORE 1 +FLAGS.SILENT (\\Deleted)", ""));
+    steps.push(("UID EXPUNGE 1".into(), "{tag} NO refused\r\n".into()));
+    let (mut imap, _store, _temp, server) = fixture(steps).await;
+    let checked = std::cell::Cell::new(false);
+    let result = imap.delete_uids("1", true, || if checked.replace(true) { Err(Error::Conflict) } else { Ok(()) }).await;
+    assert!(matches!(result, Err(Error::Conflict)));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn rejected_create_and_interrupted_list_do_not_change_the_cache() {
     let mut steps = login("");
     steps.push(("CREATE \"Rejected\"".into(), "{tag} NO permission denied\r\n".into()));
