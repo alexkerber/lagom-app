@@ -16,7 +16,7 @@ use std::path::Path;
 
 impl Store {
     pub fn agent_change<T>(&self, change: impl FnOnce() -> Result<T, audit::Failure>) -> Result<T, audit::Failure> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self.write_transaction()?;
         let value = change()?;
         tx.commit()?;
         Ok(value)
@@ -77,11 +77,15 @@ impl Store {
     }
 
     pub fn disable_agents(&self) -> Result<(), Code> {
-        let tx = self.db.unchecked_transaction()?;
-        self.disable_agent_listener()?;
+        self.change_authority(|| self.disable_agent_listener())
+    }
+
+    fn change_authority<T>(&self, change: impl FnOnce() -> Result<T, Code>) -> Result<T, Code> {
+        let tx = self.write_transaction()?;
+        let value = change()?;
         tx.commit()?;
-        self.cleanup_revoked_queue(None);
-        Ok(())
+        self.cleanup_revoked_queue();
+        Ok(value)
     }
 
     fn disable_agent_listener(&self) -> Result<(), Code> {

@@ -150,6 +150,10 @@ impl Store {
         host: &str,
         remote: bool,
     ) -> Result<String, Code> {
+        self.change_authority(|| self.insert_agent(kind, name, host, remote))
+    }
+
+    fn insert_agent(&self, kind: &str, name: &str, host: &str, remote: bool) -> Result<String, Code> {
         let id = hex(&random::<6>()?);
         self.db.execute(
             "INSERT INTO agents(id,kind,name,host,remote,created) VALUES(?,?,?,?,?,unixepoch())",
@@ -163,12 +167,7 @@ impl Store {
         agent: &str,
         scope: TokenScope<'_>,
     ) -> Result<Zeroizing<String>, Code> {
-        let tx = self.db.unchecked_transaction()?;
-        let local = matches!(scope, TokenScope::Local);
-        let raw = self.issue_token_inner(agent, scope)?;
-        tx.commit()?;
-        if local { self.cleanup_revoked_queue(Some(agent)); }
-        Ok(raw)
+        self.change_authority(|| self.issue_token_inner(agent, scope))
     }
 
     fn issue_token_inner(
@@ -220,7 +219,7 @@ impl Store {
     }
 
     pub fn provision_read_agent(&self, account: &str) -> Result<Zeroizing<String>, Code> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
             [account],
@@ -229,7 +228,7 @@ impl Store {
         if !exists {
             return Err(Code::NotFound);
         }
-        let agent = self.create_agent("developer", "Manual test", "local", false)?;
+        let agent = self.insert_agent("developer", "Manual test", "local", false)?;
         tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&agent])?;
         for kind in ["mail", "calendar"] {
             if self.matrix("", kind, account)? < Level::Read {
@@ -246,13 +245,15 @@ impl Store {
             [],
         )?;
         tx.commit()?;
+        self.cleanup_revoked_queue();
         Ok(token)
     }
 
     pub fn revoke_agent_tokens(&self, agent: &str) -> Result<(), Code> {
-        self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
-        self.cleanup_revoked_queue(Some(agent));
-        Ok(())
+        self.change_authority(|| {
+            self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+            Ok(())
+        })
     }
 
     pub(crate) fn agent_may_send(&self, agent: &str, token: Option<&str>, account: &str) -> crate::Result<bool> {

@@ -249,12 +249,9 @@ impl Store {
             params![account.id,account.display_name,account.email,account.imap.host,account.imap.port,account.imap.security.as_str(),account.imap.username,account.smtp.host,account.smtp.port,account.smtp.security.as_str(),account.smtp.username,account.auth.as_str()])?;
         Ok(())
     }
-    fn credential_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
-        Ok(rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?)
-    }
 
     fn clean_pending(&self, id: Option<&str>) -> Result<()> {
-        let tx = self.credential_transaction()?;
+        let tx = self.write_transaction()?;
         self.clean_pending_locked(id)?;
         Ok(tx.commit()?)
     }
@@ -283,11 +280,11 @@ impl Store {
     fn reserve_credential<T>(&self, id: &str, key: &str, validate: impl Fn() -> Result<T>)
         -> Result<(rusqlite::Transaction<'_>, T)> {
         loop {
-            let reservation = self.credential_transaction()?;
+            let reservation = self.write_transaction()?;
             validate()?;
             self.db.execute("INSERT OR IGNORE INTO pending_credentials VALUES (?1,?2)", params![id, key])?;
             reservation.commit()?;
-            let tx = self.credential_transaction()?;
+            let tx = self.write_transaction()?;
             if self.db.execute("DELETE FROM pending_credentials WHERE account=?1 AND credential_key=?2", params![id, key])? == 1 {
                 return Ok((tx, validate()?));
             }
@@ -346,7 +343,7 @@ impl Store {
     }
 
     pub fn remove_credentials_and_account(&self, id: &str, delete: impl FnOnce(&Account) -> Result<()>) -> Result<()> {
-        let tx = self.credential_transaction()?;
+        let tx = self.write_transaction()?;
         self.clean_pending_locked(Some(id))?;
         if let Some(account) = self.accounts()?.into_iter().find(|a| a.id == id) {
             delete(&account)?;
@@ -359,7 +356,7 @@ impl Store {
     pub fn persist_rotated_token(path: &Path, account: &Account, token: &str) -> Result<()> {
         let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let store = Self { db };
-        let tx = store.credential_transaction()?;
+        let tx = store.write_transaction()?;
         let current = tx.query_row("SELECT credential_key FROM accounts WHERE id=?1", [&account.id],
             |r| r.get::<_, Option<String>>(0)).optional()?;
         if current == Some(account.credential_key.clone()) { account.set_password(token)?; }
@@ -469,7 +466,7 @@ mod tests {
         let writer = Store::open(&path).unwrap();
         writer.db.execute("INSERT INTO pending_credentials VALUES ('account','key')", []).unwrap();
         writer.db.execute("INSERT INTO agent_audit(at,command,result) VALUES(0,'emails','ok')", []).unwrap();
-        let tx = writer.credential_transaction().unwrap();
+        let tx = writer.write_transaction().unwrap();
         let reader = Store::open(&path).unwrap();
         assert_eq!(reader.db.query_row("SELECT credential_key FROM pending_credentials", [], |r| r.get::<_, String>(0)).unwrap(), "key");
         let rows = |store: &Store| store.db.query_row("SELECT count(*) FROM agent_audit", [], |r| r.get::<_, i64>(0)).unwrap();
@@ -768,8 +765,8 @@ impl Store {
     }
     /// Takes the write lock first. A deferred transaction that reads before it writes fails at once
     /// (busy_timeout does not apply) when another WAL connection wrote meanwhile.
-    fn write_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
-        Ok(rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?)
+    pub(crate) fn write_transaction(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)
     }
     fn save_synced(&self, message: &Message, attachments: &[crate::attachment::Attachment], existing: Option<(i64, u32)>) -> Result<i64> {
         let tx = self.write_transaction()?;

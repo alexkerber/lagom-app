@@ -16,6 +16,51 @@ use rusqlite::params;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn v22_lists_legacy_drafts_by_id_regardless_of_edit_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mail.db");
+    let store = crate::store::Store { db:rusqlite::Connection::open(&path).unwrap() };
+    for version in 1..=21 {
+        let schema = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("src/schema_v{version}.sql"));
+        store.db.execute_batch(&std::fs::read_to_string(schema).unwrap()).unwrap();
+    }
+    let (imap, smtp) = crate::presets::servers("sender@gmail.com").unwrap();
+    let account = Account::new("sender@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    for id in ["a","b"] {
+        store.save_draft(&crate::outbox::Draft { id:id.into(), account:account.id.clone(), ..Default::default() }).unwrap();
+    }
+    store.db.execute("UPDATE drafts SET updated=CASE id WHEN 'b' THEN 100 ELSE 1 END", []).unwrap();
+    drop(store);
+    let store = crate::store::Store::open(path).unwrap();
+    assert_eq!(store.agent_draft_ids(&account.id).unwrap(), ["a","b"]);
+}
+
+#[test]
+fn token_rotation_waits_for_a_concurrent_writer() {
+    use std::{sync::mpsc, time::Duration};
+    let (_dir, store, _, _) = setup();
+    let agent = store.create_agent("test","rotating","local",false).unwrap();
+    let old = store.issue_token(&agent, TokenScope::Local).unwrap();
+    let mut rotating = crate::store::Store::agent_writer(store.path()).unwrap();
+    let (busy, waiting) = mpsc::channel();
+    rotating.db.busy_handler(Some(move |attempt: i32| {
+        if attempt == 0 { let _ = busy.send(()); }
+        std::thread::sleep(Duration::from_millis(2));
+        attempt < 2000
+    })).unwrap();
+    let tx = store.write_transaction().unwrap();
+    tx.execute("UPDATE agent_tokens SET last_used=1", []).unwrap();
+    let rotation = std::thread::spawn(move || rotating.issue_token(&agent, TokenScope::Local));
+    let contended = waiting.recv_timeout(Duration::from_secs(3));
+    tx.commit().unwrap();
+    let new = rotation.join().unwrap().unwrap();
+    contended.unwrap();
+    assert!(store.authenticate(Some(&old), None).is_err());
+    assert!(store.authenticate(Some(&new), None).is_ok());
+}
+
+#[test]
 fn draft_list_keeps_creation_order_across_autosaves() {
     let (_dir, store, account, _) = setup();
     for id in ["c", "b", "a"] {

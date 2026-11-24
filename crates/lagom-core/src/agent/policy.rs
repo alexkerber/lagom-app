@@ -71,10 +71,12 @@ impl Store {
         if matches!(setting, Setting::Enabled) && !on {
             return self.disable_agents();
         }
-        self.db.execute(
+        let tx = self.write_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO agent_settings VALUES(?,?)",
             params![setting.key(), if on { "1" } else { "0" }],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -105,21 +107,21 @@ impl Store {
             (Resource::Mail, _) => "mail",
             (Resource::Calendar, _) => "calendar",
         };
-        self.db.execute(
-            "INSERT OR REPLACE INTO agent_access VALUES(?,?,?,?)",
-            params![agent, kind, access.account, access.level as i64],
-        )?;
-        Ok(())
+        self.change_authority(|| {
+            self.db.execute(
+                "INSERT OR REPLACE INTO agent_access VALUES(?,?,?,?)",
+                params![agent, kind, access.account, access.level as i64],
+            )?;
+            Ok(())
+        })
     }
 
     /// Disconnect all: every token goes and access switches off, in one transaction.
     pub fn revoke_all_agents(&self) -> Result<(), Code> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM agent_tokens", [])?;
-        self.disable_agent_listener()?;
-        tx.commit()?;
-        self.cleanup_revoked_queue(None);
-        Ok(())
+        self.change_authority(|| {
+            self.db.execute("DELETE FROM agent_tokens", [])?;
+            self.disable_agent_listener()
+        })
     }
 
     /// Reauthenticate and read both policy matrices in one store snapshot.

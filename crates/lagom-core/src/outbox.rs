@@ -1,7 +1,7 @@
 //! Local drafts and durable sends. Network work starts only after the queue transaction commits.
 
 use crate::{account::Account, smtp::{self, Outgoing}, store::Store, Error, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ pub struct Pending {
     pub error: Option<String>,
 }
 
-const REVOKED: Error = Error::Invalid("Agent access revoked. Message returned to Drafts.");
+const REVOKED: Error = Error::Invalid("Agent access revoked. Send cancelled.");
 
 fn encode(value: &impl Serialize) -> Result<String> {
     serde_json::to_string(value).map_err(|_| Error::Invalid("could not encode local mail"))
@@ -109,7 +109,13 @@ impl Store {
         let mut mail = mail.clone();
         let id = mail.message_id.get_or_insert_with(|| smtp::message_id(&account.email)).clone();
         let raw = smtp::compose_message(account, &mail, None, origin.is_some())?.formatted();
-        let tx = self.db.is_autocommit().then(|| self.db.unchecked_transaction()).transpose()?;
+        let tx = self.db.is_autocommit().then(|| self.write_transaction()).transpose()?;
+        if origin.is_none() {
+            let owner: Option<String> = self.db.query_row("DELETE FROM outbox WHERE id=?1 AND account=?2
+                AND draft_agent IS NOT NULL AND started=0 AND submitted=0 AND state<>'uncertain'
+                RETURNING draft_agent", params![id, account.id], |row| row.get(0)).optional()?;
+            if let Some(agent) = owner { self.audit_queue_change(&id, &agent, &account.id, "superseded")?; }
+        }
         self.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent,agent_token,agent_policy_generation)
             VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,?6,?7,
                 CASE WHEN ?6 IS NOT NULL THEN (SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation') END)",
@@ -128,6 +134,10 @@ impl Store {
     }
 
     fn restore_queued_draft(&self, id: &str) -> Result<bool> {
+        if self.db.execute("DELETE FROM outbox WHERE id=?1 AND started=0 AND submitted=0
+            AND EXISTS(SELECT 1 FROM drafts WHERE id=?1)", [id])? == 1 {
+            return Ok(true);
+        }
         self.db.execute("INSERT INTO drafts(id,account,content,revision)
             SELECT id,account,draft,lower(hex(randomblob(16))) FROM outbox WHERE id=?1 AND started=0 AND submitted=0 AND draft IS NOT NULL", [id])?;
         self.db.execute("INSERT INTO agent_drafts(draft,agent) SELECT id,draft_agent FROM outbox
@@ -151,75 +161,91 @@ impl Store {
     }
 
     pub fn claim_send(&self, id: &str, now: i64) -> Result<bool> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let mut tx = self.write_transaction()?;
         let agent: Option<bool> = tx.query_row("UPDATE outbox SET started=1
             WHERE id=?1 AND started=0 AND state='ready' AND ready_at<=?2
             RETURNING draft_agent IS NOT NULL AND submitted=0", params![id, now], |r| r.get(0)).optional()?;
-        let revoked = agent == Some(true) && self.restore_revoked_send(id)?;
+        let revoked = agent == Some(true) && self.restore_revoked_send(&mut tx, id)?;
         tx.commit()?;
         if revoked { return Err(REVOKED); }
         Ok(agent.is_some())
     }
 
     pub(crate) fn authorize_queued_send(&self, id: &str) -> Result<()> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
-        let revoked = self.restore_revoked_send(id)?;
+        let mut tx = self.write_transaction()?;
+        let revoked = self.restore_revoked_send(&mut tx, id)?;
         tx.commit()?;
         if revoked { return Err(REVOKED); }
         Ok(())
     }
 
-    fn restore_revoked_send(&self, id: &str) -> Result<bool> {
+    fn restore_revoked_send(&self, tx: &mut Transaction<'_>, id: &str) -> Result<bool> {
         let (agent, account, token, current): (Option<String>, String, Option<String>, bool) = self.db.query_row(
             "SELECT draft_agent,account,agent_token,coalesce(agent_policy_generation =
                 (SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation'),0) FROM outbox WHERE id=? AND submitted=0", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         if let Some(agent) = agent {
             if !current || !self.agent_may_send(&agent, token.as_deref(), &account)? {
                 self.db.execute("UPDATE outbox SET started=0 WHERE id=?", [id])?;
-                self.return_revoked_draft(id, &agent, &account)?;
+                self.return_revoked_draft(tx, id, &agent, &account)?;
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    fn return_revoked_draft(&self, id: &str, agent: &str, account: &str) -> Result<()> {
-        let collision = self.db.execute("DELETE FROM outbox WHERE id=?1 AND started=0 AND submitted=0
-            AND EXISTS(SELECT 1 FROM drafts WHERE id=?1)", [id])?;
-        if collision == 0 && !self.restore_queued_draft(id)? { return Err(Error::Invalid("missing queued draft")); }
-        let target = crate::agent::id::ObjectId::Draft(account.to_owned(), id.into()).encode();
-        self.db.execute("INSERT INTO agent_audit(at,agent,account,command,target,result,dispatched_write)
-            VALUES(unixepoch(),?,?,'draft.send',?,'revoked',1)", params![agent, account, target])?;
+    fn return_revoked_draft(&self, tx: &mut Transaction<'_>, id: &str, agent: &str, account: &str) -> Result<()> {
+        let mut row = tx.savepoint()?;
+        let restored = self.restore_queued_draft(id).and_then(|removed| {
+            if !removed { return Err(Error::Invalid("missing queued draft")); }
+            self.audit_queue_change(id, agent, account, "revoked")
+        });
+        if let Err(error) = restored {
+            row.rollback()?;
+            row.execute("DELETE FROM outbox WHERE id=?1", [id])?;
+            eprintln!("Could not restore revoked agent send {id}: {error}");
+        }
+        row.commit()?;
         Ok(())
     }
 
-    pub(crate) fn cleanup_revoked_queue(&self, agent: Option<&str>) {
-        // Authority is already committed. A failed restoration still fails the SMTP check.
-        if let Err(error) = self.return_agent_queue(agent) {
+    fn audit_queue_change(&self, id: &str, agent: &str, account: &str, result: &str) -> Result<()> {
+        let target = crate::agent::id::ObjectId::Draft(account.to_owned(), id.into()).encode();
+        self.db.execute("INSERT INTO agent_audit(at,agent,account,command,target,result,dispatched_write)
+            VALUES(unixepoch(),?,?,'draft.send',?,?,1)", params![agent, account, target, result])?;
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_revoked_queue(&self) {
+        // Authority is already committed. SMTP checks the generation independently.
+        let cleanup = || -> Result<()> {
+            let mut tx = self.write_transaction()?;
+            self.return_agent_queue(&mut tx)?;
+            Ok(tx.commit()?)
+        };
+        if let Err(error) = cleanup() {
             eprintln!("Could not restore revoked agent sends: {error}");
         }
     }
 
-    fn return_agent_queue(&self, agent: Option<&str>) -> Result<()> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+    fn return_agent_queue(&self, tx: &mut Transaction<'_>) -> Result<()> {
         let mut stmt = self.db.prepare("SELECT id,draft_agent,account FROM outbox
             WHERE started=0 AND submitted=0 AND state<>'uncertain' AND draft_agent IS NOT NULL
-              AND (agent_token IS NULL OR agent_policy_generation IS NOT (SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation'))
-              AND (?1 IS NULL OR draft_agent=?1)")?;
-        let rows = stmt.query_map([agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
+              AND (agent_token IS NULL OR NOT EXISTS (SELECT 1 FROM agent_settings WHERE key='policy_generation' AND CAST(value AS INTEGER)=agent_policy_generation))")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (id, owner, account) in rows {
-            self.return_revoked_draft(&id, &owner, &account)?;
+            self.return_revoked_draft(tx, &id, &owner, &account)?;
         }
-        drop(stmt);
-        tx.commit()?;
         Ok(())
     }
 
     // shortcut: one mail worker per store; add a process lease before supporting concurrent app instances.
     /// Only the worker starting up calls this; in-flight sends belong to its previous process.
     pub fn recover_outbox(&self) -> Result<()> {
+        let mut tx = self.write_transaction()?;
         self.db.execute("UPDATE outbox SET started=0,state=CASE WHEN submitted=0 THEN 'uncertain' ELSE 'ready' END,error=CASE WHEN submitted=0 THEN 'Delivery uncertain after interruption' ELSE error END WHERE started=1", [])?;
+        self.return_agent_queue(&mut tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -239,12 +265,14 @@ impl Store {
             Error::Rejected | Error::Authentication | Error::ReauthRequired | Error::Invalid(_) => "failed",
             _ => "ready",
         };
-        let agent: Option<String> = self.db.query_row("UPDATE outbox SET started=0,error=?2,state=?3,
+        let mut tx = self.write_transaction()?;
+        let agent: Option<bool> = tx.query_row("UPDATE outbox SET started=0,error=?2,state=?3,
             ready_at=?4+min(60000*(1 << min(attempts,6)),3600000),attempts=attempts+1
-            WHERE id=?1 AND started=1 RETURNING CASE WHEN submitted=0 AND state<>'uncertain' THEN draft_agent END",
-            params![id, error.to_string(), state, now], |r| r.get(0)).optional()?.flatten();
+            WHERE id=?1 AND started=1 RETURNING submitted=0 AND state<>'uncertain' AND draft_agent IS NOT NULL",
+            params![id, error.to_string(), state, now], |r| r.get(0)).optional()?;
         // Revocation may have skipped this row while the worker held its claim.
-        if let Some(agent) = agent { self.cleanup_revoked_queue(Some(&agent)); }
+        if agent == Some(true) { self.restore_revoked_send(&mut tx, id)?; }
+        tx.commit()?;
         Ok(())
     }
 
@@ -364,6 +392,32 @@ mod tests {
     }
 
     #[test]
+    fn undo_preserves_a_compose_resave() {
+        let (_dir, store, account, id, ..) = queued_agent(false);
+        let personal = Draft { id:id.clone(), account:account.id.clone(), text:"My edits".into(), ..Default::default() };
+        store.save_draft(&personal).unwrap();
+        assert!(store.undo_send(&id).unwrap());
+        assert_eq!(store.draft(&id).unwrap(), personal);
+        assert_eq!(store.agent_draft_meta(&account.id, &id).unwrap().1, None);
+        assert!(!store.claim_send(&id, i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn compose_send_supersedes_queued_agent_mail() {
+        let (_dir, store, account, id, agent, ..) = queued_agent(false);
+        let personal = Draft { id:id.clone(), account:account.id.clone(), text:"My version".into(), ..Default::default() };
+        store.save_draft(&personal).unwrap();
+        let mail = Outgoing { message_id:Some(id.clone()), text:personal.text.clone(), to:vec!["me@example.org".into()], ..Default::default() };
+        store.enqueue(&account, &mail, 0).unwrap();
+        store.revoke_agent_tokens(&agent).unwrap();
+        assert_eq!(store.due_outbox(&account.id, 0).unwrap(), [id.clone()]);
+        assert_eq!(store.pending(&id).unwrap().mail, mail);
+        assert_eq!(store.agent_audit(1).unwrap()[0].result, "superseded");
+        assert!(store.undo_send(&id).unwrap());
+        assert_eq!(store.draft(&id).unwrap(), personal);
+    }
+
+    #[test]
     fn compose_resave_survives_agent_revocation() {
         let (_dir, store, account, id, agent, token, _) = queued_agent(false);
         let personal = Draft { id:id.clone(), account:account.id.clone(), text:"My new draft".into(), ..Default::default() };
@@ -380,8 +434,12 @@ mod tests {
     #[test]
     fn cleanup_failure_cannot_reverse_an_authority_change() {
         for action in ["revoke","disable","all","reissue"] {
-            let (_dir, store, _, id, agent, token, _) = queued_agent(false);
-            store.db.execute_batch("CREATE TRIGGER refuse_restore BEFORE INSERT ON drafts BEGIN
+            let (_dir, store, account, id, agent, token, _) = queued_agent(false);
+            let mut other = store.pending(&id).unwrap().mail;
+            other.message_id = Some("other".into());
+            store.save_draft(&Draft { id:"other".into(), account:account.id.clone(), ..Default::default() }).unwrap();
+            store.enqueue_agent(&store.authenticate(Some(&token), None).unwrap(), &account, &other, 0).unwrap();
+            store.db.execute_batch("CREATE TRIGGER refuse_restore BEFORE INSERT ON agent_drafts WHEN NEW.draft<>'other' BEGIN
                 SELECT RAISE(ABORT,'injected restore failure'); END").unwrap();
             match action {
                 "disable" => store.disable_agents().unwrap(),
@@ -391,10 +449,32 @@ mod tests {
             }
             if action == "disable" { assert!(!store.agent_enabled().unwrap()); }
             else { assert!(store.authenticate(Some(&token),None).is_err()); }
-            assert!(store.claim_send(&id,0).is_err());
-            store.db.execute_batch("DROP TRIGGER refuse_restore").unwrap();
-            assert!(store.claim_send(&id,0).is_err());
-            assert!(store.pending(&id).is_err());
+            assert!(!store.claim_send(&id,0).unwrap());
+            assert!(store.draft(&id).is_err());
+            assert!(store.pending("other").is_err());
+            assert_eq!(store.agent_draft_meta(&account.id, "other").unwrap().1, Some(agent));
+        }
+    }
+
+    #[test]
+    fn failed_send_is_restored_on_policy_change_or_startup() {
+        for change in ["lower", "issue", "startup"] {
+            let (_dir, store, account, id, agent, _, grant) = queued_agent(change == "issue");
+            assert!(store.claim_send(&id, 0).unwrap());
+            store.send_failed(&id, &Error::Rejected, 0).unwrap();
+            match change {
+                "lower" => store.set_agent_access("", &Access { level:Level::Read, ..grant }).unwrap(),
+                "issue" => {
+                    store.issue_token(&agent, TokenScope::Remote { accounts:std::slice::from_ref(&account.id),
+                        level:Level::Read, ranges:&[], expires:None }).unwrap();
+                }
+                _ => {
+                    store.db.execute("UPDATE agent_access SET level=1 WHERE agent=''", []).unwrap();
+                    Store::open(store.path()).unwrap().recover_outbox().unwrap();
+                }
+            }
+            assert!(store.failed_outbox().unwrap().is_empty());
+            assert_eq!(store.agent_draft_meta(&account.id,&id).unwrap().1,Some(agent));
         }
     }
 
@@ -414,6 +494,21 @@ mod tests {
             assert!(store.pending(&id).is_err());
             assert_eq!(store.agent_audit(1).unwrap()[0].result,"revoked");
         }
+    }
+
+    #[test]
+    fn claim_release_rolls_back_if_cleanup_cannot_remove_the_row() {
+        let (_dir, store, _, id, agent, ..) = queued_agent(false);
+        assert!(store.claim_send(&id, 0).unwrap());
+        store.revoke_agent_tokens(&agent).unwrap();
+        store.db.execute_batch("CREATE TRIGGER refuse_delete BEFORE DELETE ON outbox BEGIN
+            SELECT RAISE(ABORT,'injected delete failure'); END").unwrap();
+        assert!(store.send_failed(&id, &Error::Rejected, 0).is_err());
+        assert!(store.db.query_row("SELECT started FROM outbox WHERE id=?", [&id], |r| r.get::<_,bool>(0)).unwrap());
+        store.db.execute_batch("DROP TRIGGER refuse_delete").unwrap();
+        store.send_failed(&id, &Error::Rejected, 0).unwrap();
+        assert!(store.pending(&id).is_err());
+        assert!(store.draft(&id).is_ok());
     }
 
     #[test]

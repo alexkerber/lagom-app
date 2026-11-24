@@ -27,7 +27,7 @@ CREATE INDEX agent_audit_reads ON agent_audit(agent,read_seq) WHERE read_seq IS 
 CREATE UNIQUE INDEX anonymous_refusal_minute ON agent_audit(at) WHERE agent IS NULL AND command='refusals';
 CREATE INDEX agent_refusal_bucket ON agent_audit(agent,at) WHERE refusals>0;
 CREATE TRIGGER agent_audit_cap AFTER INSERT ON agent_audit
- WHEN NEW.dispatched_write=0 OR NEW.result NOT IN ('ok','pending','revoked')
+ WHEN NEW.dispatched_write=0 OR NEW.result NOT IN ('ok','pending','revoked','superseded')
 BEGIN
  UPDATE agent_audit SET read_seq=1+coalesce(
   (SELECT max(read_seq) FROM agent_audit WHERE agent IS NEW.agent AND read_seq IS NOT NULL),0)
@@ -56,7 +56,6 @@ CREATE TRIGGER agent_policy_remove AFTER DELETE ON agent_access BEGIN
  UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
 END;
 ALTER TABLE drafts ADD COLUMN created INTEGER NOT NULL DEFAULT 0;
-UPDATE drafts SET created=updated;
 CREATE TRIGGER draft_created AFTER INSERT ON drafts BEGIN
  UPDATE drafts SET created=unixepoch() WHERE id=NEW.id;
 END;
