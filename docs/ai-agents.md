@@ -181,7 +181,8 @@ effective(resource) = min( global level,   # the account's row, else the group d
 - Drafts. `draft edit`, `draft delete` and `draft send` work only on a draft that the same agent
   created. Every other draft is read-only. `draft edit` names the revision it read; a draft that
   changed since gives `conflict`. The Drafts list marks a draft an agent created. An agent draft
-  syncs to the account's Drafts folder on the server like any draft.
+  syncs to the account's Drafts folder on the server like any draft. List and show expose the revision only to its owner.
+  Other drafts omit both the revision and update time.
 - Agent drafts carry no files from disk. A forward keeps the attachments of its original, and
   needs Read on the original's account.
 - `action archive`, `move` and `trash` need a server with `MOVE` or `UIDPLUS`. Without both, a
@@ -210,8 +211,10 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
   version 1. An unknown `cmd` or argument key gives `invalid_request`.
 - Sizes: request at most 1 MiB, response at most 32 MiB, attachment at most 20 MiB. A message
   body, including `draft.show`, is cut at 100 000 characters and marked `truncated`.
-  Forwarded attachments share one 20 MiB budget. A send accepts up to 100 recipients across To, Cc and Bcc.
-  An event accepts up to 100 guests. Duplicate addresses are removed, keeping the first occurrence.
+  Agent writes reject bodies over 100 000 characters, descriptions over 8 192 and locations over 1 024 with `invalid_request`.
+  Forwarded attachments share one 20 MiB budget measured after decoding. A send accepts up to 100 recipients across To, Cc and Bcc.
+  An event accepts up to 100 guests. Mail and event writes deduplicate by the whole case-insensitive address with its punycode domain, keeping the first occurrence.
+  Recipients and guests with quoted or non-ASCII local parts give `invalid_request`.
   Subjects and event titles allow 998 characters. Subjects, titles and locations reject line breaks with `invalid_request`.
 - Timeouts: 5 s to deliver the request and 30 s to answer. A command that waits for a person
   answers within 130 s, and the client waits that long for it.
@@ -308,21 +311,23 @@ The Confirmation toggle in Settings controls mail sends for all agents.
    is not in front, a system notification says that an agent waits. The notification has no
    Approve button.
 3. Fixed rows show the agent, the account and each recipient or guest. A mail labels the account
-   From. Addresses appear first, one per row. Display names are limited to 64 characters.
+   From. Addresses appear first, one per row. Display names show up to 64 characters followed by the exact number omitted.
    Internationalized domains use punycode with a warning mark.
-   The sheet escapes control, direction, zero-width and Unicode line separator characters.
-   Subjects and titles occupy one line with an ellipsis. Calendars appear by display name.
+   The sheet escapes controls, Unicode format and default-ignorable characters, and Unicode line separators.
+   Long subjects and titles wrap. Calendars appear by display name.
    Timed events show local start and end with the weekday and UTC offset. All-day events show calendar dates.
    An event change compares with Google's current event. Each guest appears once. A guest the
    change adds is marked Added, and one it removes is marked Removed. The comparison uses the
    whole address: punycode domain, any case, no display name. An unchanged field shows once. A
    changed field shows one row with the current value struck through, an arrow and the new value.
    The current description appears only when the change replaces it. Body and description appear
-   last in height-limited areas with Show all. Replies and forwards send only the reviewed plain text and listed attachments.
+   last in scrollable boxes with the complete reviewed text. Expand appears only on overflow.
+   Each box shows “More below” while text remains below the viewport. Replies and forwards send only the reviewed plain text and listed attachments.
 4. **Deny** has focus and Escape declines. **Deny and revoke** also revokes the agent's tokens.
-   After either denial the same agent receives `busy` for 30 seconds.
-   Approval requires a mouse click in the active window. Each front sheet and window activation
-   starts a 700 ms delay. Activation clicks and keyboard shortcuts cannot approve.
+   After either denial or a disconnect while waiting, the same agent receives `busy` for 30 seconds.
+   Approval and revocation require a mouse click in the active window. Each front sheet and window activation
+   starts a 700 ms delay. A replacement for a withdrawn request says “The previous request was withdrawn”
+   and waits 1.5 seconds. Activation clicks and keyboard shortcuts cannot approve or revoke.
 5. While the sheet awaits approval, a decline, a 120 s timeout or a client disconnect ends the request.
    The audit records `denied` and the app sends nothing.
 6. On Approve the app authorizes again (token, expiry, levels, master switch) and compares the
@@ -331,10 +336,10 @@ The Confirmation toggle in Settings controls mail sends for all agents.
    goes out the way Compose sends, with its Undo window. After Approve the send continues even
    when the client is gone; `draft show` then gives `not_found`.
 
-Before SMTP submission, the outbox checks the master switch, a valid token and effective Send
-access for the sending account. This applies to every queued message with a draft agent,
-including sends with confirmation disabled. On revocation the outbox restores the owned draft
-and records `revoked` in the same transaction. A message already submitted to SMTP stays submitted.
+Before SMTP submission, the outbox checks the master switch, the exact originating token and its effective Send
+access for the sending account. Only agent-initiated sends carry the agent and token IDs. A person can send an agent draft from Compose.
+Revocation, Disconnect and switching access off return unclaimed sends to their owners, including during Undo.
+Draft restoration and the `revoked` audit entry commit with the access change. Reconnecting cannot release an old send. A message already submitted to SMTP stays submitted.
 
 The agent cannot approve: the protocol has no such command. Confirmations queue one at a time. A
 remote agent needs a person at the app for calendar changes and for mail sends with confirmations enabled.
@@ -358,6 +363,9 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
   Remote writes finalize the reserved row even after a client disconnect. A lost mutation reply gives `uncertain`.
   A new listener marks interrupted pending writes uncertain. A confirmed calendar update stays successful if cache refresh fails.
   On UIDPLUS-only servers the worker rechecks authorization after COPY. Losing access leaves the copy and gives `uncertain`.
+  Losing access after STORE marks the original deleted also gives `uncertain`. The original may retain its deleted flag.
+  Restoring the flag after a refused UID EXPUNGE requires fresh authorization.
+  A lost CREATE reply or failure to rediscover an acknowledged folder gives `uncertain`.
 - A send uses the draft ID, shared with the outbox row and the sent Message-ID.
 - Never logged: subjects, bodies, filter and search text, attachment bytes, tokens.
 - The decoder rejects IDs longer than 2 KiB before decoding.
@@ -392,7 +400,9 @@ CREATE INDEX messages_account_message_id ON messages(account, message_id);
 ```
 
 Migration `schema_v22.sql` also indexes counted read rows by agent and sequence.
-Enqueue copies the draft owner into `outbox.draft_agent`. Undo restores ownership in the draft transaction.
+An agent send stores its owner in `outbox.draft_agent` and the originating token ID in `outbox.agent_token`.
+Deleting that token clears the reference, including on claimed sends. Undo restores the agent's draft in one transaction.
+Compose leaves both fields empty, including when the person sends an agent-created draft.
 
 `Store::delete_account` also deletes the account's `agent_access` rows.
 
