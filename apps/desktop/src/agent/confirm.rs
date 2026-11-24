@@ -1,6 +1,7 @@
 use super::write::Snapshot;
 use lagom_core::{
     account::Account,
+    calendar::NewEvent,
     agent::{
         protocol::{Code, Request},
         token::AgentRow,
@@ -14,7 +15,7 @@ pub(crate) struct Sheet {
     pub serial: usize,
     pub closed: Option<oneshot::Receiver<()>>,
     pub agent: String,
-    pub heading: String,
+    pub heading: &'static str,
     pub approve_label: &'static str,
     pub rows: Vec<(&'static str, String)>,
     pub previous_description: Option<String>,
@@ -57,8 +58,10 @@ fn address(value: &str) -> Result<String, Code> {
 fn local_time(value: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M:%S %:z")
+            use chrono::Timelike;
+            let t = t.with_timezone(&chrono::Local);
+            // Seconds only when set, so an odd time is never rounded away.
+            t.format(if t.second() == 0 { "%a %Y-%m-%d %H:%M %:z" } else { "%a %Y-%m-%d %H:%M:%S %:z" })
                 .to_string()
         })
         .unwrap_or_else(|_| format!("{value} (all day)"))
@@ -91,7 +94,8 @@ impl Sheet {
         let mut rows = Vec::new();
         let mut row = |label, value: &str| rows.push((label, line(value)));
         row("Agent", &format!("{} ({})", agent.name, agent.host));
-        row("Account", &address(&account.email)?);
+        let from = if matches!(snapshot, Snapshot::Mail(..)) { "From" } else { "Account" };
+        row(from, &address(&account.email)?);
         let mut previous_description = None;
         let body;
         match snapshot {
@@ -123,47 +127,41 @@ impl Sheet {
                         row("Guest", &address(guest)?);
                     }
                 }
-                if let Some(s) = old {
-                    row("Current title", &s.event.title);
+                let was = old.as_ref().map(|s| &s.event);
+                let location = |e: &NewEvent| e.location.as_deref().or_else(|| was?.location.as_deref()).unwrap_or("").to_owned();
+                // Each current value sits right above its new one, so a change reads as a pair.
+                let fields = [
+                    ("Current title", "Title", was.map(|e| e.title.clone()), new.as_ref().map(|e| e.title.clone())),
+                    ("Current start", "Start", was.map(|e| local_time(&e.start)), new.as_ref().map(|e| local_time(&e.start))),
+                    ("Current end", "End", was.map(|e| local_time(&e.end)), new.as_ref().map(|e| local_time(&e.end))),
+                    ("Current location", "Location", was.map(|e| e.location.clone().unwrap_or_default()), new.as_ref().map(location)),
+                    ("Current Meet", "Create Meet link", was.map(|e| e.join_url.clone().unwrap_or_else(|| "None".into())),
+                        new.as_ref().map(|e| if e.meet { "Yes" } else { "No" }.into())),
+                ];
+                for (ix, (current, next, before, after)) in fields.into_iter().enumerate() {
+                    if let Some(v) = before {
+                        row(current, &v);
+                    }
+                    if let Some(v) = after {
+                        row(next, &v);
+                    }
+                    if ix == 0 {
+                        row("Calendar", name);
+                    }
                 }
-                if let Some(e) = new {
-                    row("Title", &e.title);
-                }
-                row("Calendar", name);
-                if let Some(s) = old {
-                    row("Current start", &local_time(&s.event.start));
-                    row("Current end", &local_time(&s.event.end));
-                    row("Current location", s.event.location.as_deref().unwrap_or(""));
-                    row("Current Meet", s.event.join_url.as_deref().unwrap_or("None"));
-                    previous_description = s.description.as_deref().map(super::read::clean);
-                }
-                body = if let Some(e) = new {
-                    row("Start", &local_time(&e.start));
-                    row("End", &local_time(&e.end));
-                    row(
-                        "Location",
-                        e.location
-                            .as_deref()
-                            .or_else(|| old.as_ref()?.event.location.as_deref())
-                            .unwrap_or(""),
-                    );
-                    row("Create Meet link", if e.meet { "Yes" } else { "No" });
-                    e.description
-                        .as_deref()
-                        .or_else(|| old.as_ref()?.description.as_deref())
-                        .unwrap_or("")
-                        .to_owned()
-                } else {
-                    String::new()
+                previous_description = old.as_ref().and_then(|s| s.description.as_deref()).map(super::read::clean);
+                body = match new {
+                    Some(e) => e.description.as_deref().or_else(|| old.as_ref()?.description.as_deref()).unwrap_or("").to_owned(),
+                    None => String::new(),
                 };
             }
             Snapshot::None => unreachable!(),
         }
-        let (purpose, approve_label) = match req.cmd.as_str() {
-            "draft.send" => ("send this message", "Send"),
-            "event.create" => ("create this event", "Create event"),
-            "event.update" => ("update this event", "Update event"),
-            "event.delete" => ("delete this event", "Delete event"),
+        let (heading, approve_label) = match req.cmd.as_str() {
+            "draft.send" => ("Send this message?", "Send"),
+            "event.create" => ("Create this event?", "Create event"),
+            "event.update" => ("Update this event?", "Update event"),
+            "event.delete" => ("Delete this event?", "Delete event"),
             _ => unreachable!(),
         };
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -174,7 +172,7 @@ impl Sheet {
                 serial: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 closed: Some(closed),
                 agent: agent.id,
-                heading: format!("Request to {purpose}"),
+                heading,
                 approve_label,
                 rows,
                 previous_description,
@@ -185,6 +183,63 @@ impl Sheet {
             rx,
         ))
     }
+}
+
+/// `LAGOM_SCREEN=agent-confirm-send` and `agent-confirm-event`: a sample sheet for screenshots.
+pub(crate) fn demo(screen: &str) -> Option<Sheet> {
+    use lagom_core::{calendar::Event, google::EventSnapshot, smtp::Outgoing};
+    let (cmd, snapshot) = match screen {
+        "agent-confirm-send" => ("draft.send", Snapshot::Mail(String::new(), Outgoing {
+            to: vec!["Mia Berg <mia@family.example>".into()],
+            cc: vec!["Ola Berg <ola@family.example>".into(), "noor@friends.example".into()],
+            subject: "Re: Saturday dinner at ours, and who brings dessert this time".into(),
+            text: "Hi Mia,\n\nSaturday works for us. Come at six, dinner is at seven.\n\nWe make the soup. \
+Can you bring bread? Ola said he would bring dessert, but last time that was a bag of crisps.\n\n\
+Noor, you are welcome too. Bring the card game.\n\n"
+                .repeat(14) + "See you then,\nAlex",
+            ..Default::default()
+        })),
+        "agent-confirm-event" => {
+            let old = EventSnapshot {
+                event: Event {
+                    remote_id: String::new(),
+                    title: "Planning: spring trip".into(),
+                    start: "2026-11-26T14:00:00+01:00".into(),
+                    end: "2026-11-26T15:00:00+01:00".into(),
+                    start_utc: 0,
+                    end_utc: 0,
+                    all_day: false,
+                    location: Some("Kitchen table".into()),
+                    join_url: None,
+                    html_link: None,
+                },
+                description: Some("Dates, budget and who books the cabin.".into()),
+                attendees: vec!["you@home.example".into(), "mia@family.example".into()],
+                etag: String::new(),
+            };
+            let new = NewEvent {
+                title: "Planning: spring trip".into(),
+                start: "2026-11-26T15:00:00+01:00".into(),
+                end: "2026-11-26T16:00:00+01:00".into(),
+                time_zone: "Europe/Stockholm".into(),
+                location: None,
+                all_day: false,
+                description: Some("Dates, budget and who books the cabin. Noor joins for the budget part.".into()),
+                attendees: vec!["you@home.example".into(), "mia@family.example".into(), "Noor <noor@friends.example>".into()],
+                meet: false,
+            };
+            ("event.update", Snapshot::Event { calendar: String::new(), name: "Family".into(), old: Some(old), new: Some(new) })
+        }
+        _ => return None,
+    };
+    let agent = AgentRow { id: "3f9a1c0b77de".into(), kind: "ClaudeCode".into(), name: "Claude Code".into(), host: "studio".into(), remote: false, active: true };
+    let req = Request { v: 1, token: None, cmd: cmd.into(), args: Default::default(), source_ip: None };
+    let (done, closed) = oneshot::channel();
+    let account = &crate::mail::demo_accounts()[0];
+    let (sheet, answer) = Sheet::new(agent, account, &req, &snapshot, closed, std::sync::Weak::new()).ok()?;
+    // The sheet stays up while its answer and close channels are open; a demo never answers.
+    std::mem::forget((done, answer));
+    Some(sheet)
 }
 
 #[derive(Default)]
@@ -250,6 +305,9 @@ mod tests {
             address(&format!("{name} <me@bücher.example>")).unwrap(),
             format!("me@xn--bcher-kva.example ⚠ ({}…)", "a".repeat(63))
         );
+        let time = |v| local_time(v).split(' ').nth(2).unwrap().to_owned();
+        assert!(time("2026-11-26T14:00:30+00:00").ends_with(":30"));
+        assert_eq!(time("2026-11-26T14:00:00+00:00").len(), 5);
     }
 
     #[test]

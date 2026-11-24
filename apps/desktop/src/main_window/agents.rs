@@ -240,7 +240,7 @@ impl MainWindow {
         cx.notify();
     }
 
-    pub(super) fn agent_sheet(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn agent_sheet(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sheet = &self.agent_sheets.sheets[0];
         let serial = sheet.serial;
         let t = self.theme;
@@ -250,11 +250,72 @@ impl MainWindow {
         } else {
             sheet.body.clone()
         };
+        // Show the arming state only; the click handlers check it again.
+        let armed = self.agent_sheets.armed(serial, false, false, window.is_window_active());
+        if let Some(left) = self.agent_sheets.front_since.filter(|_| !armed)
+            .and_then(|(_, at)| std::time::Duration::from_millis(700).checked_sub(at.elapsed())) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(left + std::time::Duration::from_millis(10)).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }).detach();
+        }
+        // Who and from where, then who receives it, then what it is.
+        let group = |label: &str| match label {
+            "Agent" | "From" | "Account" => 0,
+            "To" | "Cc" | "Bcc" | "Guest" | "Current guest" => 1,
+            _ => 2,
+        };
+        // On a change, mark guests that the change adds or removes. The address is the first word.
+        let guests = |which: &str| sheet.rows.iter().filter(|(l, _)| *l == which)
+            .map(|(_, v)| v.split(' ').next().unwrap_or_default()).collect::<std::collections::HashSet<_>>();
+        let (before, after) = (guests("Current guest"), guests("Guest"));
+        let compare = !before.is_empty() && !after.is_empty();
+        let mut plates: Vec<Div> = Vec::new();
+        let mut last = None;
+        for (label, value) in &sheet.rows {
+            let g = group(label);
+            let first = last != Some(g);
+            if first {
+                plates.push(div().flex_shrink_0().flex().flex_col().rounded(px(radius::PANEL)).bg(t.subtle).border_1().border_color(t.line).overflow_hidden());
+            }
+            last = Some(g);
+            let current = label.starts_with("Current");
+            let address = value.split(' ').next().unwrap_or_default();
+            let tag = match *label {
+                "Guest" if compare && !before.contains(address) => Some(("Added", t.accent)),
+                "Current guest" if compare && !after.contains(address) => Some(("Removed", t.danger)),
+                _ => None,
+            };
+            let row = div().flex().items_start().gap(px(12.)).px(px(14.)).py(px(7.)).line_height(px(20.))
+                .when(!first, |r| r.border_t_1().border_color(t.line))
+                .child(div().w(px(112.)).flex_shrink_0().text_size(px(size::SNIPPET)).text_color(t.ink2).child(*label))
+                .child(div().flex_1().min_w(px(0.)).text_size(px(size::BASE))
+                    .text_color(if current { t.ink2 } else { t.ink })
+                    .when(matches!(*label, "Agent" | "Title" | "Subject"), |v| v.font_weight(FontWeight::MEDIUM))
+                    .when(matches!(*label, "Title" | "Current title" | "Subject"), |d| d.one_line())
+                    .child(value.clone()))
+                .children(tag.map(|(word, color)| div().flex_shrink_0().text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).text_color(color).child(word)));
+            if let Some(plate) = plates.pop() {
+                plates.push(plate.child(row));
+            }
+        }
+        let caption = |text: &'static str| div().flex_shrink_0().pt(px(4.)).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).text_color(t.ink2).child(text);
+        let text_box = |id: &'static str, text: String, cap: f32, ink: Rgba| div().id(id).flex_shrink_0().max_h(px(cap)).overflow_y_scroll()
+            .px(px(14.)).py(px(10.)).rounded(px(radius::PANEL)).bg(t.subtle).border_1().border_color(t.line)
+            .text_size(px(size::BASE)).line_height(relative(1.45)).text_color(ink).child(text);
+        let delete = sheet.approve_label == "Delete event";
+        let approve = if armed {
+            button(&t, sheet.approve_label, Some(if delete { t.danger } else { t.accent })).border_1().border_color(gpui::transparent_black())
+        } else {
+            // Before arming it is no stronger than Deny.
+            button(&t, sheet.approve_label, None).border_1().border_color(t.line).text_color(t.ink2)
+        };
         div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
+            .p(px(24.))
             .bg(t.subtle)
             .text_color(t.ink)
             .on_key_down(cx.listener(move |this, e: &gpui::KeyDownEvent, window, cx| {
@@ -269,50 +330,43 @@ impl MainWindow {
                     .id("agent-confirmation")
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .p_5()
-                    .rounded_lg()
-                    .bg(t.raised)
+                    .gap(px(16.))
+                    .p(px(20.))
+                    .rounded(px(radius::CARD))
+                    .bg(t.bg)
+                    .border_1()
+                    .border_color(t.line)
                     .w(px(560.))
                     .max_h_full()
-                    .child(sheet.heading.clone())
+                    .child(page_title(sheet.heading))
                     .child(
                         div()
                             .id("agent-preview")
                             .overflow_y_scroll()
                             .flex_col()
                             .flex()
-                            .children(sheet.rows.iter().map(|(label, value)| div().flex().gap_2()
-                                .child(div().w(px(120.)).flex_shrink_0().child(*label))
-                                .child(div().flex_1().when(matches!(*label, "Title" | "Current title" | "Subject"), |d| d.truncate()).child(value.clone()))))
-                            .when_some(sheet.previous_description.clone(), |d, description| d.child("Current description")
-                                .child(div().id("current-description").max_h(px(if sheet.expanded { 320. } else { 120. })).overflow_y_scroll().child(description)))
-                            .child(if sheet.approve_label == "Send" { "Body" } else { "Description" })
-                            .child(div().id("confirmation-body").max_h(px(if sheet.expanded { 320. } else { 180. })).overflow_y_scroll().child(body))
+                            .gap(px(8.))
+                            .children(plates)
+                            .when_some(sheet.previous_description.clone(), |d, description| d.child(caption("Current description"))
+                                .child(text_box("current-description", description, if sheet.expanded { 320. } else { 120. }, t.ink2)))
+                            .child(caption(if sheet.approve_label == "Send" { "Message" } else { "Description" }))
+                            .child(text_box("confirmation-body", body, if sheet.expanded { 320. } else { 180. }, t.ink))
                             .when(truncated, |d| {
-                                d.child(button(&t, "Show all", None).on_click(cx.listener(|this, _, _, cx| {
+                                d.child(div().flex().child(button(&t, "Show all", None).ml(px(-12.)).text_color(t.ink2).on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(s) = this.agent_sheets.sheets.front_mut() {
                                         s.expanded = true;
                                     }
                                     cx.notify();
-                                })))
+                                }))))
                             }),
                     )
                     .child(
                         div()
                             .flex()
-                            .gap_2()
+                            .items_center()
+                            .gap(px(8.))
                             .child(
-                                button(&t, "Deny", None)
-                                    .track_focus(&self.agent_deny)
-                                    .border_1()
-                                    .border_color(t.accent)
-                                    .on_click(
-                                        cx.listener(move |this, _, w, cx| this.answer_agent(serial, false, w, cx)),
-                                    ),
-                            )
-                            .child(
-                                button(&t, "Deny and revoke", None).on_click(cx.listener(move |this, _, w, cx| {
+                                button(&t, "Deny and revoke", None).ml(px(-12.)).text_color(t.danger).on_click(cx.listener(move |this, _, w, cx| {
                                     if let Some(sheet) = this.agent_sheets.sheets.front().filter(|s| s.serial == serial) {
                                         let agent = sheet.agent.clone();
                                         this.answer_agent(serial, false, w, cx);
@@ -320,12 +374,19 @@ impl MainWindow {
                                     }
                                 })),
                             )
+                            .child(div().flex_1())
                             .child(
-                                button(
-                                    &t,
-                                    sheet.approve_label,
-                                    Some(t.accent),
-                                )
+                                button(&t, "Deny", None)
+                                    .track_focus(&self.agent_deny)
+                                    .border_1()
+                                    .border_color(t.line)
+                                    .focus(move |s| s.border_color(t.accent))
+                                    .on_click(
+                                        cx.listener(move |this, _, w, cx| this.answer_agent(serial, false, w, cx)),
+                                    ),
+                            )
+                            .child(
+                                approve
                                 .id(("approve-agent", serial))
                                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, w, _| {
                                     this.agent_sheets.pressed = this.agent_sheets.armed(serial, false, event.first_mouse, w.is_window_active()).then_some(serial);

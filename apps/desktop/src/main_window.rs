@@ -632,6 +632,11 @@ impl MainWindow {
                 this.agent_change(AgentChange::Select(first), cx);
                 this.settings_scroll.scroll_to_bottom();
             }
+            #[cfg(unix)]
+            "agent-confirm-send" | "agent-confirm-event" if demo => {
+                this.agent_sheets.sheets.extend(crate::agent::confirm::demo(screen));
+                this.watch_agent_sheets(window, cx);
+            }
             "shortcuts" => this.show_shortcuts(window, cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
