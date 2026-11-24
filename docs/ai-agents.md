@@ -73,7 +73,7 @@ ssh   ──> lagom remote        ──┘
 - Reads use a separate store connection with `PRAGMA query_only=ON`.
 - Mail actions go to the mail worker (`apps/desktop/src/sync.rs`) as the `Act`s a click sends, so
   they keep the worker's order with sync, moves and sends. An approved send is queued the way
-  Compose does it: `Store::enqueue` with the Undo deadline, then `Cmd::Send`.
+  Compose does it, using the Undo deadline followed by `Cmd::Send`.
 - Authorization happens twice: when the request arrives, and again in the step that makes the
   change. A worker command from an agent carries the agent, the token ID and the level it needs;
   the worker reads the policy again before it acts. A command that waited in the queue through a
@@ -187,8 +187,8 @@ effective(resource) = min( global level,   # the account's row, else the group d
 - `action archive`, `move` and `trash` need a server with `MOVE` or `UIDPLUS`. Without both, a
   move ends in a plain `EXPUNGE`, which also removes mail that another client marked deleted.
   The command then gives `unsupported` and changes nothing.
-- `action move` takes an existing folder of the same account. The store has no labels, so there
-  is no label command. Agents cannot create a folder by name; the app still creates a missing
+- `action move` takes an existing folder of the same account. Drafts and Sent roles give `forbidden`, including localized folder names.
+  The store has no labels, so there is no label command. Agents cannot create a folder by name; the app still creates a missing
   Archive, Trash or Drafts folder, as it does for a person.
 - `availability` is free and busy time from synced events. The sync window is 7 days back and 60
   days ahead; outside it the answer is `unsupported`.
@@ -209,7 +209,10 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
 - Version: `v` is 1. Another value gives `unsupported`. New optional fields may appear in
   version 1. An unknown `cmd` or argument key gives `invalid_request`.
 - Sizes: request at most 1 MiB, response at most 32 MiB, attachment at most 20 MiB. A message
-  body is cut at 100 000 characters and marked `truncated`.
+  body, including `draft.show`, is cut at 100 000 characters and marked `truncated`.
+  Forwarded attachments share one 20 MiB budget. A send accepts up to 100 recipients across To, Cc and Bcc.
+  An event accepts up to 100 guests. Duplicate addresses are removed, keeping the first occurrence.
+  Subjects and event titles allow 998 characters. Subjects, titles and locations reject line breaks with `invalid_request`.
 - Timeouts: 5 s to deliver the request and 30 s to answer. A command that waits for a person
   answers within 130 s, and the client waits that long for it.
 - Concurrency: 8 connections at once. Per token: 300 requests and 30 write commands a minute.
@@ -302,19 +305,29 @@ The Confirmation toggle in Settings controls mail sends for all agents.
 2. A sheet opens in the main window, in the app's own style, not a system dialog. If the window
    is not in front, a system notification says that an agent waits. The notification has no
    Approve button.
-3. The sheet shows the agent's name and host and all that leaves. Mail: the sending account,
-   every recipient as a full address, the subject, the body (2 000 characters, then "Show all"),
-   quoted text, inline parts and attachment names and sizes. Event: title, time, calendar,
-   description, guests, whether a Meet link is made, and the old values on a change.
-4. Buttons: **Don't send** has the focus, and Esc declines. **Send** needs a click or Cmd+Enter.
-   Enter and Space alone do nothing, so a keystroke meant for another field cannot approve.
-5. The request blocks until an answer. Decline, 120 s without an answer or a client that closed
-   the connection end in `denied`. Nothing is sent.
+3. Fixed rows show the agent, account and each recipient or guest. Addresses appear first.
+   Display names are limited to 64 characters. Internationalized domains use punycode with a warning mark.
+   The sheet escapes control, direction, zero-width and Unicode line separator characters.
+   Subjects and titles occupy one line with an ellipsis. Calendars appear by display name.
+   Timed events show local start and end with the UTC offset. All-day events show calendar dates.
+   Event changes include Google's current guests and values. Body and description appear last in
+   height-limited areas with Show all. Replies and forwards send only the reviewed plain text and listed attachments.
+4. **Deny** has focus and Escape declines. **Deny and revoke** also revokes the agent's tokens.
+   After either denial the same agent receives `busy` for 30 seconds.
+   Approval requires a mouse click in the active window. Each front sheet and window activation
+   starts a 700 ms delay. Activation clicks and keyboard shortcuts cannot approve.
+5. While the sheet awaits approval, a decline, a 120 s timeout or a client disconnect ends the request.
+   The audit records `denied` and the app sends nothing.
 6. On Approve the app authorizes again (token, expiry, levels, master switch) and compares the
    snapshot: the draft's revision, or the event's ETag as a precondition on the write. A change
    since step 1 gives `conflict`, sends nothing and keeps the newer draft. Otherwise the snapshot
    goes out the way Compose sends, with its Undo window. After Approve the send continues even
    when the client is gone; `draft show` then gives `not_found`.
+
+Before SMTP submission, the outbox checks the master switch, a valid token and effective Send
+access for the sending account. This applies to every queued message with a draft agent,
+including sends with confirmation disabled. On revocation the outbox restores the owned draft
+and records `revoked` in the same transaction. A message already submitted to SMTP stays submitted.
 
 The agent cannot approve: the protocol has no such command. Confirmations queue one at a time. A
 remote agent needs a person at the app for calendar changes and for mail sends with confirmations enabled.
@@ -334,6 +347,10 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
 | `source_ip`      | As stated by the client                                                                                                           |
 | `detail`         | Recipients of a send or an event. Nothing else.                                                                                   |
 
+- A dispatched write reserves a durable `pending` row. A local change and its final audit result commit together.
+  Remote writes finalize the reserved row even after a client disconnect. A lost mutation reply gives `uncertain`.
+  A new listener marks interrupted pending writes uncertain. A confirmed calendar update stays successful if cache refresh fails.
+  On UIDPLUS-only servers the worker rechecks authorization after COPY. Losing access leaves the copy and gives `uncertain`.
 - A send uses the draft ID, shared with the outbox row and the sent Message-ID.
 - Never logged: subjects, bodies, filter and search text, attachment bytes, tokens.
 - The decoder rejects IDs longer than 2 KiB before decoding.
@@ -341,7 +358,7 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
 - Each append keeps the latest 50 000 non-write rows per agent. Anonymous refusals have their own bucket.
   Draft changes, sends, mail actions and event changes expire only by age.
 - Refusals without a verified digest are limited to 60 rows a minute, then counted in one row.
-- Verified refusals and busy replies share one counter per agent per minute. The first refusal records its reason.
+- Verified refusals before worker dispatch and busy replies share one counter per agent per minute. The first refusal records its reason.
 - Socket admission failures are counted off the listener thread. Settings shows the newest 50 rows for each agent.
 - Rows have no foreign keys: they outlive the agent, the token and the account.
 - Settings shows the log by agent, newest first, with Revoke on each agent.

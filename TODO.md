@@ -202,6 +202,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
+  - [x] read-only slice: `lagom-cli mcp` over stdio with list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos (2026-11-17). Protocol tests and a stdio smoke; not tried in a real MCP client.
   - [x] Closed the agent read security review on `feat/agents-socket`. Settings provisions authenticated MCP access.
     Pending reads recheck permissions. Search uses one snapshot. Contacts, attachments and audit refusals have limits.
     Long identifiers resolve within their account. Settings shows the latest 50 activity rows per agent.
@@ -218,7 +219,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     A fake socket verified framing, identity, output, errors and MCP calls.
     The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
     The live service and Linux remain untested.
+  - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
+  - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
+    The write policy below resolves mail and calendar actions.
   - [ ] Agent task changes are deferred.
 - [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
   - [x] Desktop agents can triage mail, manage their own drafts and change calendar events on `feat/agents-write`.
@@ -227,6 +231,13 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     Scripted providers verified safe moves, guest previews, ETag conflicts, lost replies and cancellation of stale calendar syncs.
     Core, desktop and FFI tests passed. The macOS desktop build passed.
     Live providers, native notification delivery and Linux remain unverified.
+  - [x] Closed the agent write review on `feat/agents-write`.
+    Approval shows individual fields and requires an armed click. Mail uses the reviewed plain text.
+    Writes reserve an audit row. Revoked sends return to the agent’s drafts.
+    Socket and scripted provider tests covered lost replies, partial moves, limits and audit contention.
+    GPUI tests covered keyboard input, click arming, denial and revocation.
+    Core, desktop and FFI tests passed. The macOS desktop build passed.
+    Live providers, native window activation and Linux remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
     Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
     Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
