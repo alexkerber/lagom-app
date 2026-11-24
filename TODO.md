@@ -216,8 +216,14 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     The live service and Linux remain untested.
   - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
-  - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
+  - [ ] Agent task changes are deferred.
 - [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+  - [x] Desktop agents can triage mail, manage their own drafts and change calendar events on `feat/agents-write`.
+    The worker checks access again before writing. Every calendar change requires approval.
+    Socket tests covered revocation, expiry, draft conflicts, disconnects, the two-minute timeout and Undo.
+    Scripted providers verified safe moves, guest previews, ETag conflicts, lost replies and cancellation of stale calendar syncs.
+    Core, desktop and FFI tests passed. The macOS desktop build passed.
+    Live providers, native notification delivery and Linux remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
     Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
     Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
