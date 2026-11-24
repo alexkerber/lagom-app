@@ -4405,7 +4405,7 @@ mod tests {
         let (view,cx,_) = window(cx);
         let show = |id: &str, text: &str, cx: &mut gpui::VisualTestContext| {
             view.update_in(cx, |v,w,cx| {
-                let agent = AgentRow { id:id.into(),name:id.into(),kind:"fixture".into(),host:"here".into(),remote:false,active:true };
+                let agent = AgentRow { id:id.into(),name:id.into(),kind:"fixture".into(),host:"here".into(),remote:false,active:true, expires: None };
                 let req: Request = serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
                 let (done,closed) = tokio::sync::oneshot::channel();
                 let mail = lagom_core::smtp::Outgoing {
@@ -4473,7 +4473,7 @@ mod tests {
         cx.deactivate_window();
         for action in ["deny", "busy", "approve", "revoke"] {
             let agent = AgentRow { id:if matches!(action,"deny"|"busy") { "other".into() } else { id.clone() },
-                name:"Writer".into(), kind:"fixture".into(), remote:false, host:"here".into(),active:true };
+                name:"Writer".into(), kind:"fixture".into(), remote:false, host:"here".into(),active:true, expires: None };
             let (_lifetime,done)=tokio::sync::oneshot::channel();
             let mut answer=view.update_in(cx,|v,w,cx|{
                 let account=v.live.as_ref().unwrap().account().unwrap();

@@ -224,7 +224,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
     The write policy below resolves mail and calendar actions.
   - [ ] Agent task changes are deferred.
-- [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+- [x] Local and SSH agents can triage mail, edit drafts and change calendars on `feat/agents-write`.
+  Both paths enforce token limits, audit refusals and check approved sends against the original policy.
+  Core, desktop and FFI tests passed on macOS. The desktop app built.
+  Live SSH, provider accounts and manual confirmation clicks remain unverified. See `docs/ai-agents.md`.
   - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
     Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
     Settings and the client explain when the socket path is too long.
