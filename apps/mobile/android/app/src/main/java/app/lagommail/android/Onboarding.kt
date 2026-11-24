@@ -201,8 +201,11 @@ internal val SplashIcon = 160.dp
 }
 
 internal fun MailModel.startSignIn(context: Context, provider: SignInProvider) {
-    signInForm = accountForm
-    perform { openSignIn(context, requireNotNull(core).beginSignIn(provider).url) }
+    perform {
+        val start = requireNotNull(core).beginSignIn(provider)
+        signInForm = accountForm
+        openSignIn(context, start.url)
+    }
 }
 
 /** Choose your mail: Google and Microsoft sign in on their own pages; every other kind opens the address form.

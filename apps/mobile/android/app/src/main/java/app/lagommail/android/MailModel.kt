@@ -219,24 +219,35 @@ internal class MailModel(
     var signInForm: AccountForm? = null
     private var redirects = 0
     /** The browser's redirect after "Continue with Google" or Microsoft. The core refuses all but the pending sign-in. */
-    fun finishSignIn(redirect: String) = perform {
+    fun finishSignIn(redirect: String, planner: PlannerModel) = perform {
         val form = signInForm
         form?.connecting = true
         // Redirects can overlap (two sign-ins started); busy ends with the last one.
         redirects++
         signingIn = true
         try {
-            requireNotNull(core).finishSignIn(redirect)
+            val core = requireNotNull(core)
+            val result = core.finishSignIn(redirect)
             signInForm = null
             if (accountForm === form) accountForm = null
-            reload()
-            sync()
+            if (!result.calendarGrant) {
+                reload()
+                sync()
+                return@perform
+            }
+            planner.refreshGrant(core, result.account.id)
+        } catch (e: Exception) {
+            // The redirect held back the foreground sync; a failed sign-in must not leave mail unsynced.
+            perform { sync() }
+            throw e
         } finally {
             redirects--
             if (redirects == 0) { form?.connecting = false; signingIn = false }
         }
+        perform { sync() }
+        reload()
     }
-    /** From the browser's redirect until the sync after it ends: Calendar's grant button shows its progress. */
+    /** The redirect and planner refresh keep the grant button busy. */
     var signingIn by mutableStateOf(false); private set
     fun perform(action: suspend () -> Unit) = viewModelScope.launch {
         try { action() } catch (e: CancellationException) { throw e }
@@ -266,10 +277,14 @@ internal class MailModel(
             return file.takeIf { selection == selectionRevision }
         } finally { downloadingAttachments -= key }
     }
-    suspend fun setForeground(active: Boolean) {
+    suspend fun setForeground(active: Boolean, redirectPending: Boolean = false) {
         foreground = active
         wake?.cancel(); wake = null
-        if (active) { start(); reload(); sync() }
+        if (active) {
+            start(); reload()
+            // Returning from consent starts mail sync after the planner refresh.
+            if (!redirectPending && !signingIn) sync()
+        }
         else if (!sending) draft?.let { persist(it) }
         // Background refresh never sends, so mail inside the Undo window needs its own job.
         if (!active && sendsWaiting > 0) sendLater()

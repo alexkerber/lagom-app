@@ -31,12 +31,12 @@ impl Provider {
             Self::Google => (
                 "https://accounts.google.com/o/oauth2/v2/auth",
                 "https://oauth2.googleapis.com/token",
-                "https://mail.google.com/ openid email profile",
+                format!("https://mail.google.com/ openid email profile {GOOGLE_CALENDAR_SCOPES}"),
             ),
             Self::Microsoft => (
                 "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-                "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid email profile",
+                "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid email profile".into(),
             ),
         };
         let (id, secret) = match (MOBILE.get(), self) {
@@ -54,7 +54,7 @@ impl Provider {
             secret: Zeroizing::new(secret),
             auth: auth.into(),
             token: token.into(),
-            scope: scope.into(),
+            scope,
         }
     }
     pub(crate) fn imap_host(self) -> &'static str {
@@ -302,9 +302,7 @@ pub fn begin(provider: Provider) -> Result<(String, Pending)> {
 /// The pending flow keeps the selected account through the redirect.
 pub fn begin_calendar_access(account: &Account) -> Result<(String, Pending)> {
     if account.auth != Auth::OAuth(Provider::Google) && !account.google_hosted_password() { return Err(Error::Invalid("Google calendar requires a Google account")); }
-    let (mut config, redirect) = mobile_config(Provider::Google)?;
-    config.scope.push(' ');
-    config.scope.push_str(GOOGLE_CALENDAR_SCOPES);
+    let (config, redirect) = mobile_config(Provider::Google)?;
     begin_with(Provider::Google, config, redirect, Some(account.clone()))
 }
 fn begin_with(provider: Provider, config: Config, redirect: String, existing: Option<Account>) -> Result<(String, Pending)> {
@@ -617,10 +615,10 @@ pub(crate) fn forget(id: &str) {
         .unwrap_or_else(|e| e.into_inner())
         .remove(id);
 }
-thread_local! { static REFRESH_STORE: std::cell::OnceCell<std::path::PathBuf> = const { std::cell::OnceCell::new() }; }
-/// The desktop mail worker runs its refresh tasks on one dedicated thread.
+thread_local! { static REFRESH_STORE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) }; }
+/// Selects the database for token rotations on this worker thread.
 pub fn configure_refresh_store(path: &std::path::Path) {
-    REFRESH_STORE.with(|store| store.set(path.to_owned()).expect("refresh store already configured"));
+    REFRESH_STORE.with_borrow_mut(|store| *store = Some(path.to_owned()));
 }
 /// `rejected` is the token refused by the server. Concurrent IMAP/SMTP retries share one refresh.
 pub(crate) async fn access_token(account: &Account, rejected: Option<&str>) -> Result<Zeroizing<String>> {
@@ -655,7 +653,7 @@ async fn access_token_with(
         if id_token_claims(jwt)?.sub != *subject { return Err(Error::ReauthRequired); }
     }
     if let Some(refresh) = token.refresh_token.as_deref().filter(|s| !s.is_empty()) {
-        REFRESH_STORE.with(|store| match store.get() {
+        REFRESH_STORE.with_borrow(|store| match store {
             Some(path) => crate::store::Store::persist_rotated_token(path, account, refresh),
             None => account.set_password(refresh),
         })?;

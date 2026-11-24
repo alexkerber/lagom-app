@@ -147,7 +147,7 @@ for path in [*Path('brand/app-icon/export').rglob('*.png'), *Path('brand/store')
     if len(result) < len(original): path.write_bytes(result)
 PNG
 iconutil -c icns brand/app-icon/export/AppIcon.iconset -o brand/app-icon/export/AppIcon.icns
-# macOS 26 reads light, dark and tinted from this Icon Composer file (package-macos.sh compiles it).
+# macOS and iOS compile the same Icon Composer layers.
 cp brand/app-icon/skymning/3d/layer-bg.png brand/app-icon/AppIcon.icon/Assets/background.png
 cp brand/app-icon/skymning/3d/layer-envelope.png brand/app-icon/AppIcon.icon/Assets/envelope.png
 python3 - <<'PY'
@@ -169,9 +169,6 @@ cp brand/app-icon/export/favicon-32.png site/favicon-32.png
 cp brand/app-icon/export/apple-touch-icon-180.png site/apple-touch-icon-180.png
 # App Store Connect takes the icon from the build; this opaque copy is for listings and press.
 cp brand/app-icon/export/ios-light.png brand/store/app-store-1024.png
-for variant in light dark tinted; do
-    cp "brand/app-icon/export/ios-$variant.png" "apps/mobile/apple/Assets.xcassets/AppIcon.appiconset/ios-$variant.png"
-done
 for layer in background foreground monochrome; do
     cp "brand/app-icon/export/android-$layer.png" "apps/mobile/android/app/src/main/res/drawable-nodpi/icon_$layer.png"
 done

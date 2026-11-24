@@ -67,6 +67,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 class LagomApplication : Application() {
+    // The redirect must be visible before the mail activity starts, including after recreation.
+    internal var pendingSignIn by mutableStateOf<String?>(null)
+
     override fun onCreate() {
         super.onCreate()
         MailRefreshWorker.schedule(this)
@@ -129,9 +132,9 @@ internal fun openSignIn(context: Context, url: String) {
 class SignInRedirectActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // As an extra, not as data: the system logs an intent's data when it starts an activity.
         signInRedirect(intent.action, intent.dataString, packageName)?.let {
-            startActivity(Intent(this, MainActivity::class.java).putExtra("signIn", it)
+            (application as LagomApplication).pendingSignIn = it
+            startActivity(Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         }
         finish()
@@ -150,7 +153,6 @@ private fun java.io.InputStream.readAtMost(limit: Int): ByteArray {
 
 class MainActivity : ComponentActivity() {
     private var notificationTarget by mutableStateOf<MailTarget?>(null)
-    private var signIn by mutableStateOf<String?>(null)
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     private fun readNotification(intent: Intent) {
@@ -167,7 +169,6 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         readNotification(intent)
-        signIn = intent.getStringExtra("signIn") ?: signIn
         if (intent.action in shareActions) shareIntent = intent
     }
 
@@ -207,8 +208,7 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         readNotification(intent)
-        // A recreated activity gets the same intent again; its redirect is already used.
-        if (savedInstanceState == null) signIn = intent.getStringExtra("signIn")
+        val app = application as LagomApplication
         // A recreated activity already opened this share.
         if (savedInstanceState == null && intent.action in shareActions) shareIntent = intent
         val launch = debugLaunch(BuildConfig.DEBUG, intent.getStringExtra("lagomDemo"), intent.getStringExtra("lagomTheme"))
@@ -222,19 +222,25 @@ class MainActivity : ComponentActivity() {
             val model: MailModel = viewModel(factory = object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T = MailModel(open = {
-                    val app = application as LagomApplication
                     withContext(Dispatchers.IO) { launch.demo?.let(app::demoCore) ?: app.core }
                 }, attachmentDirectory = File(cacheDir, "attachments"), sendLater = { if (launch.demo == null) SendWorker.schedule(applicationContext) },
                     demo = launch.demo != null) as T
             })
             val planner: PlannerModel = viewModel()
-            LifecycleEventEffect(Lifecycle.Event.ON_START) { model.perform { model.setForeground(true) }; planner.perform { planner.reload() } }
+            LifecycleEventEffect(Lifecycle.Event.ON_START) {
+                val redirectPending = app.pendingSignIn != null
+                model.perform { model.setForeground(true, redirectPending) }
+                planner.perform { planner.reload() }
+            }
             LifecycleEventEffect(Lifecycle.Event.ON_STOP) { model.perform { model.setForeground(false) } }
             // Demo shows the step without touching the real permission or its setting.
             var notificationsAnswered by rememberSaveable { mutableStateOf(if (launch.demo != null) launch.demo != "notifications" else !needsNotificationPermission()) }
-            LaunchedEffect(signIn, model.core) {
-                val redirect = signIn
-                if (redirect != null && model.core != null) { signIn = null; model.finishSignIn(redirect) }
+            LaunchedEffect(app.pendingSignIn, model.core) {
+                val redirect = app.pendingSignIn
+                if (redirect != null && model.core != null) {
+                    model.finishSignIn(redirect, planner)
+                    app.pendingSignIn = null
+                }
             }
             LaunchedEffect(notificationTarget, model.core) {
                 val target = notificationTarget

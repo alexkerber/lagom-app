@@ -10,6 +10,7 @@ on:
     tags: ["v*"]
   pull_request:
     paths:
+      - brand/app-icon/AppIcon.icon/**
       - apps/mobile/apple/project.yml
       - apps/mobile/apple/release.sh
       - apps/mobile/apple/unpack-ffi.sh
@@ -93,6 +94,7 @@ jobs:
           sparse-checkout: |
             apps/mobile/apple/
             apps/desktop/assets/fonts/
+            brand/app-icon/AppIcon.icon/
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -114,6 +116,12 @@ jobs:
           apps/mobile/apple/release.sh "$VERSION" --unsigned
           plutil -p apps/mobile/apple/build/Lagom.xcarchive/Products/Applications/Lagom.app/Info.plist \
             | grep -E 'CFBundleShortVersionString|CFBundleVersion"'
+      - name: Check layered app icon appearances
+        run: |
+          app=apps/mobile/apple/build/Lagom.xcarchive/Products/Applications/Lagom.app
+          xcrun --sdk iphoneos assetutil --info "$app/Assets.car" | jq -e '
+            [.[] | select(.AssetType == "IconGroup" and (.Name | startswith("AppIcon/"))) | .Appearance]
+            | contains(["UIAppearanceLight", "UIAppearanceDark", "ISAppearanceTintable"])'
 
   # A fresh runner with the App Store Connect key. It runs no cargo, no rustup and nothing from the
   # artifact: the tar holds a static library, headers and one Swift file that Xcode compiles into
@@ -140,6 +148,7 @@ jobs:
           sparse-checkout: |
             apps/mobile/apple/
             apps/desktop/assets/fonts/
+            brand/app-icon/AppIcon.icon/
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

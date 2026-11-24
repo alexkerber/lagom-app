@@ -12,8 +12,9 @@ and the favicon use the approved composite, including its rounded plate and tran
 The Apple touch icon is the opaque full-bleed `ios-light` composite, because iOS shows
 transparent pixels as black. The website copies are also updated by the exporter.
 
-The exporter also copies the iOS icons into `apps/mobile/apple/Assets.xcassets/AppIcon.appiconset`
-and the Android layers into `apps/mobile/android/app/src/main/res/drawable-nodpi/icon_*.png`.
+The exporter updates the layers in `../AppIcon.icon`, shared by macOS, iOS and iPadOS.
+Xcode also generates flat fallback icons for iOS and iPadOS 18 from those layers.
+The exporter copies the Android layers into `apps/mobile/android/app/src/main/res/drawable-nodpi/icon_*.png`.
 Android needs no legacy mipmaps: `minSdk` is 29, so every device uses the adaptive icon.
 
 Store images go to `brand/store/`:

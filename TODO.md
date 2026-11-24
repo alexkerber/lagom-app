@@ -1,5 +1,10 @@
 # Todo
 
+- [x] Google sign-in requests mail, Calendar and Tasks together. Accounts missing Calendar access keep the consent button.
+  After consent, mobile refreshes that account’s planner before starting mail sync. Branch `fix/google-one-consent`.
+  OAuth, FFI, desktop Calendar and sign-in tests passed. iOS built for testing. Android debug assembly and JVM tests passed.
+  Live Google consent and device timing remain unverified.
+
 ## Brand and site
 
 - [ ] Settings from Today's title on a phone (iOS and Android), beside the mailbox menu's entry. `ui/native-back`.
@@ -43,6 +48,7 @@
   The selected account keeps its mail and settings after Google confirms its identity.
 - [ ] Make iOS keychain token rotation atomic. The current backend deletes the existing item before adding its replacement.
 - [ ] Accounts from older builds have no stored provider subject until their next sign-in, which binds by email address. A desktop calendar event created during re-authentication appears locally at the next sync.
+- [ ] A send that is refreshing its token when a Calendar grant replaces the credential records `ReauthRequired`, and the follow-up sync skips the failed row. Requeue the send when the credential changed during the attempt (before SMTP submission).
 - [x] Android: the phone calendar as on iOS: a week strip over one day on the shared hour grid; selected-day month, week/Today navigation, day-specific scroll, accessible date labels and selected state. Tablets retain seven days. Verified `:app:assembleDebug :app:testDebugUnitTest`: build passed; 103 JVM tests passed, 0 failures/errors/skips, including the pure day-selection rule (week boundaries and year rollover). Reused prebuilt native libraries and UniFFI bindings; Rust was not rebuilt. Phone/tablet layout, scrolling, TalkBack and native runtime remain unverified; no emulator or device used. iOS done in `mobile/calendar-rail`.
 - [ ] Store listing: copy for App Store and Google Play on `store/listing-copy`; screenshots in every store size with device mockups; enter both in the consoles (Play after Google's identity check). Play (2026-11-19): app "lagom mail" created; store listing (copy, icon, feature graphic, 15 phone/tablet shots), category, contact details and all 11 App content declarations saved, not sent for review. Review mailbox password entered by Alex. Internal testing live (2026-11-19): 13001 (0.1.30-beta.1) from tag v0.1.30-beta.1, one tester. Open: install from the opt-in link on a phone; retake shots with the To-do label; production review. Store copy and site now say "To-do"; privacy.html has a #delete anchor for Play's deletion link.
 - [ ] Site: replace the screenshots on lagommail.app with current ones from iPhone, iPad and Mac.
@@ -162,6 +168,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [x] Android Add account opens on the intro's Choose your mail, as iOS (shared `ChooseMailList`; Back returns to the list with a fresh form). Verified on the Pixel 9a: list, IMAP form, Back. Not verified: provider rows (the local build has no client IDs), a real sign-in.
 - [ ] Windows FFI tests time out now and then (`done_and_delete_move_through_imap_without_crossing_accounts`, `inline_loading_fetches_legacy_mail_and_reuses_cache`); a rerun passes. The hang guard is now 30 s (`HANG` in `crates/lagom-ffi/src/tests.rs`). Hypothesis, not measured: slow Windows runners, not a deadlock; if a run still times out at 30 s, look for a real hang.
 - [x] Windows now runs the shared performance checks on `ci/perf-windows`. Workflow YAML and the 32 MB boundary passed local tests. The hosted Windows build remains unverified.
+- [x] iPhone and iPad share the Mac’s layered app icon on `feat/ios-glass-icon`. The unsigned build verified light, dark and tintable layers, primary icon names and iOS 18 fallback PNGs. Home Screen appearances remain unchecked on hardware.
 - [x] Mac app icon in dark and tinted styles: Icon Composer file `brand/app-icon/AppIcon.icon`, compiled into Assets.car by package-macos.sh. Measured: NSWorkspace gives the navy dark icon on this Mac (dark icon style).
 - [x] Site screenshots from the current app: main window and detail crops recaptured in demo mode.
 - [ ] Site: iPhone and iPad screenshots. Both devices now take the dev build (bundle `com.alexkerber.lagom.fontcheck`, signed without the data-protection entitlement); light demo shots of the iPhone inbox and the iPad with a message open are taken, not yet on the site.
