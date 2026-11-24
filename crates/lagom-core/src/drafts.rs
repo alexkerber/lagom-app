@@ -124,9 +124,11 @@ impl Store {
     /// JSON extraction still parses attachment arrays, so list refreshes need a worker.
     pub fn draft_summaries(&self) -> Result<Vec<crate::outbox::DraftSummary>> {
         let mut query = self.db.prepare("SELECT id,account,json_extract(content,'$.to'),json_extract(content,'$.subject'),
-            substr(json_extract(content,'$.text'),1,800) FROM drafts ORDER BY rowid")?;
+            substr(json_extract(content,'$.text'),1,800),
+            (SELECT coalesce(a.name,o.agent) FROM agent_drafts o LEFT JOIN agents a ON a.id=o.agent WHERE o.draft=drafts.id)
+            FROM drafts ORDER BY rowid")?;
         let rows = query.query_map([], |r| Ok(crate::outbox::DraftSummary {
-            id: r.get(0)?, account: r.get(1)?, to: r.get(2)?, subject: r.get(3)?, snippet: r.get(4)?,
+            id: r.get(0)?, account: r.get(1)?, to: r.get(2)?, subject: r.get(3)?, snippet: r.get(4)?, agent: r.get(5)?,
         }))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }

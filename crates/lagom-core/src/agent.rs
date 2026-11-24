@@ -15,6 +15,29 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
 impl Store {
+    pub fn agent_change<T>(&self, change: impl FnOnce() -> Result<T, audit::Failure>) -> Result<T, audit::Failure> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let value = change()?;
+        tx.commit()?;
+        Ok(value)
+    }
+
+    pub fn agent_draft_meta(&self, account: &str, id: &str) -> Result<(String, Option<String>), Code> {
+        self.db.query_row("SELECT d.revision,a.agent FROM drafts d LEFT JOIN agent_drafts a ON a.draft=d.id
+            WHERE d.account=? AND d.id=?", [account,id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Code::NotFound)
+    }
+
+    pub fn agent_draft_ids(&self, account: &str) -> Result<Vec<String>, Code> {
+        let mut stmt = self.db.prepare("SELECT id FROM drafts WHERE account=? ORDER BY updated DESC")?;
+        let ids = stmt.query_map([account], |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_draft_agent(&self, draft: &str, who: &token::Identity) -> Result<(), Code> {
+        self.db.execute("INSERT INTO agent_drafts VALUES(?,?)", [draft,who.agent_id()])?;
+        Ok(())
+    }
+
     /// A request sees one snapshot of both authorization and mail.
     pub fn agent_reader(
         path: &Path,

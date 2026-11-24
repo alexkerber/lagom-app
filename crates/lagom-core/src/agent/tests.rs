@@ -257,8 +257,8 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
         .resolve_agent_message(Some(&token), Some("::1"), &noncanonical, None, Level::Read)
         .unwrap();
     for (outcome, target, expected) in [
-        (Ok(()), Some(&found), Some(key.encode())),
-        (Err(Failure::OutsideScope), Some(&found), None),
+        (Ok(()), Some(&found.target), Some(key.encode())),
+        (Err(Failure::OutsideScope), Some(&found.target), None),
         (Err(Code::NotFound.into()), None, None),
     ] {
         s.record_agent_audit(AuditRow {
@@ -427,6 +427,8 @@ fn settings_apis_store_switches_matrices_receipts_and_revoke_all() {
     use super::policy::{Access, Setting};
     let (_dir, s, a, _) = setup();
     assert!(!s.agent_setting(Setting::Enabled).unwrap());
+    assert!(s.agent_setting(Setting::Confirm).unwrap());
+    s.db.execute("DELETE FROM agent_settings WHERE key='confirm'", []).unwrap();
     assert!(s.agent_setting(Setting::Confirm).unwrap());
     assert!(!s.agent_setting(Setting::Sidebar).unwrap());
     s.set_agent_setting(Setting::Enabled, true).unwrap();

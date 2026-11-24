@@ -153,6 +153,10 @@ impl async_imap::Authenticator for Xoauth2 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moved { pub folder: i64, pub uid: Option<(u32, u32)> }
 
+pub enum MailFlag { Seen, Flagged }
+
+pub enum Destination { Archive, Trash, Folder(i64) }
+
 pub struct ImapSync {
     account: Account,
     session: Session<Bounded<Wire>>,
@@ -716,17 +720,30 @@ impl ImapSync {
         store.cache_attachment(id, section, &data)?;
         Ok(data)
     }
-    pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
+    pub fn targeted_move_supported(&self) -> bool {
+        self.capabilities.has_str("MOVE") || self.capabilities.has_str("UIDPLUS")
+    }
+
+    pub async fn set_flag_checked(&mut self, store: &Store, id: i64, flag: MailFlag, on: bool,
+        check: impl Fn(&Store) -> Result<()>) -> Result<()> {
         let message = store.message(id)?.summary;
         self.select_unchanged(store, &message, "mailbox changed; resync before operation").await?;
-        let command = if seen {
-            "+FLAGS.SILENT (\\Seen)"
-        } else {
-            "-FLAGS.SILENT (\\Seen)"
-        };
+        check(store)?;
+        let sign = if on { "+" } else { "-" };
+        let name = match flag { MailFlag::Seen => "Seen", MailFlag::Flagged => "Flagged" };
         // async-imap's STORE stream discards tagged NO/BAD replies.
-        net(self.session.run_command_and_check_ok(format!("UID STORE {} {command}", message.uid))).await?;
-        store.set_seen(message.folder, message.uid, seen)
+        net(self.session.run_command_and_check_ok(format!("UID STORE {} {sign}FLAGS.SILENT (\\{name})", message.uid))).await?;
+        match flag {
+            MailFlag::Seen => store.set_seen(message.folder, message.uid, on),
+            MailFlag::Flagged => {
+                store.db.execute("UPDATE messages SET flagged=? WHERE id=?", (on,id))?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
+        self.set_flag_checked(store,id,MailFlag::Seen,seen, |_|Ok(())).await
     }
     pub async fn create_folder(&mut self, store: &Store, name: &str) -> Result<i64> {
         validate_folder(name)?;
@@ -740,11 +757,27 @@ impl ImapSync {
             .ok_or(Error::NotFound)
     }
     pub async fn move_message(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Moved> {
-        let result = self.move_on_server(store, id, target).await;
+        self.move_checked(store,id,Destination::Folder(target), |_|Ok(())).await
+    }
+    pub async fn move_checked(&mut self, store: &mut Store, id: i64, destination: Destination,
+        check: impl Fn(&Store) -> Result<()>) -> Result<Moved> {
+        if store.message_summary(id)?.account != self.account.id {
+            return Err(Error::Invalid("message belongs to another account"));
+        }
+        let target = match destination {
+            Destination::Folder(id) => id,
+            Destination::Trash => self.ensure_role_checked(store,FolderRole::Trash,"Trash",&check).await?,
+            Destination::Archive => {
+                let fallback = if presets::is_gmail(&self.account) { "[Gmail]/All Mail" } else { "Archive" };
+                self.ensure_role_checked(store,FolderRole::Archive,fallback,&check).await?
+            }
+        };
+        check(store)?;
+        let result = self.move_on_server(store, id, target, check).await;
         if result.is_err() { store.cancel_move(id)?; }
         result.map(|uid| Moved { folder: target, uid })
     }
-    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Option<(u32, u32)>> {
+    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64, check: impl Fn(&Store) -> Result<()>) -> Result<Option<(u32, u32)>> {
         let message = store.message(id)?.summary;
         let destination = store.folder(target)?;
         if message.account != self.account.id || destination.account != self.account.id {
@@ -759,6 +792,7 @@ impl ImapSync {
         if before != source.uidvalidity {
             return Err(Error::Invalid("mailbox changed; resync before operation"));
         }
+        check(store)?;
         if source.role == FolderRole::Trash {
             // An interrupted empty may have marked the message; MOVE and COPY preserve flags.
             net(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
@@ -870,32 +904,22 @@ impl ImapSync {
         wanted: FolderRole,
         fallback: &str,
     ) -> Result<i64> {
+        self.ensure_role_checked(store,wanted,fallback, |_|Ok(())).await
+    }
+    async fn ensure_role_checked(&mut self,store:&Store,wanted:FolderRole,fallback:&str,
+        check:impl Fn(&Store)->Result<()>) -> Result<i64> {
         let folders = self.list_folders(store).await?;
         if let Some(f) = folders.iter().find(|f| f.role == wanted) {
             return Ok(f.id);
         }
+        check(store)?;
         self.create_folder(store, fallback).await
     }
     pub async fn archive(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
-        if store.message(id)?.summary.account != self.account.id {
-            return Err(Error::Invalid("message belongs to another account"));
-        }
-        let fallback = if presets::is_gmail(&self.account) {
-            "[Gmail]/All Mail"
-        } else {
-            "Archive"
-        };
-        let target = self
-            .ensure_role(store, FolderRole::Archive, fallback)
-            .await?;
-        self.move_message(store, id, target).await
+        self.move_checked(store,id,Destination::Archive, |_|Ok(())).await
     }
     pub async fn trash(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
-        if store.message(id)?.summary.account != self.account.id {
-            return Err(Error::Invalid("message belongs to another account"));
-        }
-        let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
-        self.move_message(store, id, target).await
+        self.move_checked(store,id,Destination::Trash, |_|Ok(())).await
     }
     async fn delete_uids(&mut self, set: &str, restore_on_refusal: bool) -> Result<()> {
         // async-imap's STORE/EXPUNGE streams discard tagged NO/BAD replies.

@@ -29,6 +29,7 @@ pub struct Draft {
 }
 
 pub struct DraftSummary {
+    pub agent: Option<String>,
     pub id: String,
     pub account: String,
     pub to: String,
@@ -98,12 +99,12 @@ impl Store {
         let mut mail = mail.clone();
         let id = mail.message_id.get_or_insert_with(|| smtp::message_id(&account.email)).clone();
         let raw = smtp::compose(account, &mail)?.formatted();
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent)
+        let tx = self.db.is_autocommit().then(|| self.db.unchecked_transaction()).transpose()?;
+        self.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent)
             VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,(SELECT agent FROM agent_drafts WHERE draft=?1))",
             params![id, account.id, encode(&mail)?, raw, ready_at])?;
-        tx.execute("DELETE FROM drafts WHERE id=?1 AND account=?2", params![id, account.id])?;
-        tx.commit()?;
+        self.db.execute("DELETE FROM drafts WHERE id=?1 AND account=?2", params![id, account.id])?;
+        if let Some(tx) = tx { tx.commit()?; }
         Ok(id)
     }
 

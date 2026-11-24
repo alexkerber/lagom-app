@@ -399,10 +399,16 @@ impl Store {
         Ok(format!("{kept} Removing the account also deletes what only lagom has: {list}."))
     }
     pub fn accounts(&self) -> Result<Vec<Account>> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT * FROM accounts ORDER BY email,id")?;
-        let rows = stmt.query_map([], |r| {
+        self.account_rows("SELECT * FROM accounts ORDER BY email,id", [])
+    }
+
+    pub fn account(&self, id: &str) -> Result<Account> {
+        self.account_rows("SELECT * FROM accounts WHERE id=?", [id])?.pop().ok_or(Error::NotFound)
+    }
+
+    fn account_rows(&self, sql: &str, args: impl rusqlite::Params) -> Result<Vec<Account>> {
+        let mut stmt = self.db.prepare(sql)?;
+        let rows = stmt.query_map(args, |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,

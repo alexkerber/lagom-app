@@ -28,7 +28,7 @@ pub enum Resource {
     Calendar,
 }
 
-/// A switch in Settings > AI Agents. A missing row is off.
+/// A switch in Settings > AI Agents. Confirmation is on unless explicitly disabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {
     Enabled,
@@ -56,8 +56,12 @@ pub struct Access {
 
 impl Store {
     pub fn agent_setting(&self, setting: Setting) -> Result<bool, Code> {
+        let query = match setting {
+            Setting::Confirm => "SELECT NOT EXISTS(SELECT 1 FROM agent_settings WHERE key=? AND value='0')",
+            _ => "SELECT EXISTS(SELECT 1 FROM agent_settings WHERE key=? AND value='1')",
+        };
         Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_settings WHERE key=? AND value='1')",
+            query,
             [setting.key()],
             |r| r.get(0),
         )?)

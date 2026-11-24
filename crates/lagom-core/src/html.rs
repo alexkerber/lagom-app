@@ -201,7 +201,7 @@ pub fn sanitize(html: &str) -> String {
 }
 
 /// `sanitize`, with each `data:` image moved to an inline part that `src` names as `cid:`.
-pub(crate) fn sanitize_parts(html: &str) -> (String, Vec<crate::inline::InlinePart>) {
+pub fn sanitize_parts(html: &str) -> (String, Vec<crate::inline::InlinePart>) {
     clean(html, Some(Vec::new()))
 }
 

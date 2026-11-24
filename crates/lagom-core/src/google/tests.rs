@@ -187,6 +187,7 @@ fn calendar_links_allow_only_google_calendar_https_without_credentials() {
 
 fn draft() -> crate::calendar::NewEvent {
     crate::calendar::NewEvent {
+        location: None,
         title: "Fixture planning".into(), start: "2026-03-29T01:30:00+01:00".into(), end: "2026-03-29T03:30:00+02:00".into(),
         time_zone: "Europe/Stockholm".into(), all_day: false, description: Some("Fixture notes".into()),
         attendees: vec!["guest@example.test".into()], meet: true,

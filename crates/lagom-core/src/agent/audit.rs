@@ -1,4 +1,4 @@
-use super::{id::ResolvedMessage, protocol::Code, token::Identity};
+use super::{id::AuditTarget, protocol::Code, token::Identity};
 use crate::store::Store;
 use rusqlite::{params, OptionalExtension};
 use std::net::IpAddr;
@@ -63,11 +63,13 @@ impl TokenFailure {
     }
 }
 
+pub use lettre::Address;
+
 pub struct AuditRow<'a> {
     pub identity: Option<&'a Identity>,
     pub account: Option<uuid::Uuid>,
     pub command: &'a str,
-    pub target: Option<&'a ResolvedMessage>,
+    pub target: Option<&'a AuditTarget>,
     pub outcome: Result<(), Failure>,
     pub source_ip: Option<IpAddr>,
     pub recipients: &'a [lettre::Address],
@@ -120,7 +122,7 @@ impl Store {
         let command = match row.command {
             "accounts" | "folders" | "emails" | "search" | "thread" | "attachment" | "contacts"
             | "events" | "availability" | "draft.list" | "draft.show" | "draft.create"
-            | "draft.edit" | "draft.delete" | "draft.send" | "action.archive" | "action.move"
+            | "draft.schedule" | "draft.edit" | "draft.delete" | "draft.send" | "action.archive" | "action.move"
             | "action.read" | "action.unread" | "action.star" | "action.unstar"
             | "action.snooze" | "action.unsnooze" | "action.trash" | "event.create"
             | "event.update" | "event.delete" => row.command,
@@ -130,7 +132,6 @@ impl Store {
             Err(Failure::VerifiedRefusal { agent, token, .. }) => {
                 (Some(agent.as_str()), Some(token.as_str()))
             }
-            Err(Failure::Unauthorized(_)) => (None, None),
             _ => (
                 row.identity.map(Identity::agent_id),
                 row.identity.map(Identity::token_id),
@@ -193,7 +194,7 @@ impl Store {
                     | Failure::Unauthorized(_)
                     | Failure::VerifiedRefusal { .. },
                 ) => None,
-                _ if row.identity.is_some() => row.target.map(ResolvedMessage::audit_target),
+                _ if row.identity.is_some() => row.target.map(AuditTarget::audit_target),
                 _ => None,
             };
             tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail) VALUES(?,?,?,?,?,?,?,?,?)",

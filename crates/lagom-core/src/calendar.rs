@@ -38,6 +38,7 @@ pub struct NewEvent {
     pub start: String,
     pub end: String,
     pub time_zone: String,
+    pub location: Option<String>,
     pub all_day: bool,
     pub description: Option<String>,
     pub attendees: Vec<String>,
