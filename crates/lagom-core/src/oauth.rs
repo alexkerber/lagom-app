@@ -497,6 +497,7 @@ fn claims(jwt: &str) -> Result<(String, String, String)> {
 pub(crate) fn http(timeout: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .use_rustls_tls()
+        .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
         // Never forward credentials to a redirect target.
         .redirect_policy(reqwest::redirect::Policy::none())

@@ -107,10 +107,8 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     let calendars: Vec<RemoteCalendar> = pages(&client, list, &mut token).await?;
     let mut result = Vec::new();
     for remote in calendars.into_iter().filter(|c| !c.hidden && !c.deleted && c.access_role != "freeBusyReader") {
-        if remote.id.is_empty() { return Err(Error::Network("calendar ID missing")); }
-        let mut url = base.clone();
-        url.path_segments_mut().map_err(|_| Error::Invalid("invalid calendar endpoint"))?
-            .pop_if_empty().extend(["calendars", remote.id.as_str(), "events"]);
+        let mut url = change::events_url(base.as_str(), &remote.id)
+            .map_err(|_| Error::Network("invalid calendar response"))?;
         // shortcut: no RRULE, add when CalDAV lands.
         url.query_pairs_mut().extend_pairs([
             ("singleEvents", "true"), ("showDeleted", "false"), ("maxResults", "50"), ("timeZone", "UTC"),

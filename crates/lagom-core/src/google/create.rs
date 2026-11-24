@@ -22,6 +22,19 @@ impl NewEvent {
         }).map_err(|_| Error::Invalid("enter a valid start and later end"))
     }
 
+    pub(super) fn patch_body(&self) -> Result<String> {
+        let mut body = self.body()?;
+        for key in ["start", "end"] {
+            if self.all_day {
+                body[key]["dateTime"] = Value::Null;
+                body[key]["timeZone"] = Value::Null;
+            } else {
+                body[key]["date"] = Value::Null;
+            }
+        }
+        Ok(body.to_string())
+    }
+
     pub(super) fn body(&self) -> Result<Value> {
         self.event("validation".into())?;
         let time = |value: &str| if self.all_day { json!({ "date": value }) }
@@ -47,12 +60,9 @@ pub async fn create_event(account: &Account, calendar: &str, draft: &NewEvent) -
 
 pub async fn create_with<F, Fut>(base: &str, calendar: &str, draft: &NewEvent, token: F) -> Result<CreatedEvent>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
-    if calendar.is_empty() { return Err(Error::Invalid("choose a calendar")); }
+    let mut url = change::events_url(base, calendar)?;
     let body = draft.body()?.to_string();
     let client = oauth::http(Duration::from_secs(30))?;
-    let mut url = Url::parse(base).map_err(|_| Error::Invalid("invalid calendar endpoint"))?;
-    url.path_segments_mut().map_err(|_| Error::Invalid("invalid calendar endpoint"))?
-        .pop_if_empty().extend(["calendars", calendar, "events"]);
     url.query_pairs_mut().append_pair("conferenceDataVersion", "1");
     if !draft.attendees.is_empty() { url.query_pairs_mut().append_pair("sendUpdates", "all"); }
     let response = write_event(token, |access| client.post(url.clone()).bearer_auth(access)

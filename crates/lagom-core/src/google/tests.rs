@@ -2,9 +2,10 @@ use super::*;
 use crate::store::Store;
 use tokio::{net::TcpListener, io::{AsyncReadExt, AsyncWriteExt}};
 
-async fn server(replies: Vec<(&'static str, &'static str)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+async fn server(replies: Vec<(&'static str, &str)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
+    let replies: Vec<_> = replies.into_iter().map(|(status, body)| (status, body.to_owned())).collect();
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
         for (status, body) in replies {
@@ -362,21 +363,14 @@ async fn conference_followup_recognizes_deleted_events_and_rejects_other_ids() {
     server.await.unwrap();
 }
 
-#[tokio::test]
-async fn conditional_event_changes_cache_only_confirmed_writes() {
-    const BEFORE: &str = r#"{"id":"created","etag":"\"old\"","summary":"Before","description":"Notes","attendees":[{"email":"old@example.test"}],"start":{"date":"2026-03-29"},"end":{"date":"2026-03-30"}}"#;
-    let (base, server) = server(vec![("200 OK", BEFORE), ("412 Precondition Failed", ""),
-        ("", ""), ("401 Unauthorized", ""), ("200 OK", CREATED), ("412 Precondition Failed", ""),
-        ("", ""), ("204 No Content", "")]).await;
-    let token = |rejected: Option<String>| std::future::ready(Ok(Zeroizing::new(
-        if rejected.is_some() { "fresh".into() } else { "cached".into() })));
-    let calendar = "fixture/calendar";
-    let id = "created";
-    let snapshot = change::fetch_event_with(&base, calendar, id, token).await.unwrap();
-    assert_eq!(snapshot.attendees, ["old@example.test"]);
-    assert_eq!(snapshot.description.as_deref(), Some("Notes"));
-    assert_eq!(snapshot.etag, r#""old""#);
+const BEFORE: &str = r#"{"id":"created","etag":"\"old\"","recurringEventId":"series","summary":"Before","description":"Notes","attendees":[{"email":"old@example.test"}],"start":{"date":"2026-03-29"},"end":{"date":"2026-03-30"}}"#;
+const OLD: &str = r#""old""#;
 
+fn change_token(rejected: Option<String>) -> std::future::Ready<Result<Zeroizing<String>>> {
+    std::future::ready(Ok(Zeroizing::new(if rejected.is_some() { "fresh".into() } else { "cached".into() })))
+}
+
+fn cached_calendar(calendar: &str) -> (tempfile::TempDir, Store, Account) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("cache.db")).unwrap();
     let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
@@ -384,8 +378,30 @@ async fn conditional_event_changes_cache_only_confirmed_writes() {
     store.save_account(&account).unwrap();
     store.replace_calendar_window(&account.id, 1, 2, &[(Calendar {
         remote_id: calendar.into(), name: "Fixture".into(), color: None, shown: true, writable: true,
-    }, vec![snapshot.event.clone()])]).unwrap();
-    let change = |etag, draft| change::change_with(&store, &account.id, &base, calendar, id, etag, draft, token);
+    }, vec![draft().event("created".into()).unwrap()])]).unwrap();
+    (dir, store, account)
+}
+
+#[tokio::test]
+async fn conditional_event_changes_cache_only_confirmed_writes() {
+    let new = BEFORE.replace("old", "new");
+    let (base, server) = server(vec![("200 OK", BEFORE),
+        ("200 OK", BEFORE), ("412 Precondition Failed", ""),
+        ("200 OK", BEFORE), ("", ""),
+        ("200 OK", BEFORE), ("401 Unauthorized", ""), ("200 OK", CREATED),
+        ("200 OK", BEFORE), ("412 Precondition Failed", ""),
+        ("200 OK", &new), ("", ""),
+        ("200 OK", &new), ("204 No Content", "")]).await;
+    let calendar = "fixture/calendar";
+    let id = "created";
+    let snapshot = change::fetch_event_with(&base, calendar, id, change_token).await.unwrap();
+    assert_eq!(snapshot.attendees, ["old@example.test"]);
+    assert_eq!(snapshot.description.as_deref(), Some("Notes"));
+    assert_eq!(snapshot.etag, r#""old""#);
+
+    let (_dir, store, account) = cached_calendar(calendar);
+    store.insert_calendar_event(&account.id, calendar, &snapshot.event).unwrap();
+    let change = |etag, draft| change::change_with(&store, &account.id, &base, calendar, id, etag, draft, change_token);
     let cached = || store.today_events("2026-03-29", 0, i64::MAX).unwrap()
         .into_iter().map(|row| row.event).collect::<Vec<_>>();
     let draft = draft();
@@ -407,13 +423,158 @@ async fn conditional_event_changes_cache_only_confirmed_writes() {
 
     let requests = server.await.unwrap();
     assert!(requests[0].starts_with("GET /calendars/fixture%2Fcalendar/events/created "));
-    for (index, request) in requests.iter().enumerate().skip(1) {
-        let method = if index <= 4 { "PATCH" } else { "DELETE" };
+    let writes: Vec<_> = requests.iter().filter(|request| !request.starts_with("GET ")).collect();
+    assert_eq!(writes.len(), 7);
+    for (index, request) in writes.iter().enumerate() {
+        let method = if index < 4 { "PATCH" } else { "DELETE" };
         assert!(request.starts_with(&format!("{method} /calendars/fixture%2Fcalendar/events/created?sendUpdates=all")));
-        let tag = if index <= 5 { &snapshot.etag } else { new_tag };
+        let tag = if index < 5 { &snapshot.etag } else { new_tag };
         assert!(request.to_ascii_lowercase().lines().any(|line| line == format!("if-match: {tag}")));
     }
-    assert_eq!(request_body(&requests[3]), request_body(&requests[4]));
-    assert_eq!(request_body(&requests[4])["attendees"][0]["email"], "guest@example.test");
-    assert!(requests[4].contains("Bearer fresh"));
+    assert_eq!(request_body(writes[2]), request_body(writes[3]));
+    let body = request_body(writes[3]);
+    assert_eq!(body["attendees"][0]["email"], "guest@example.test");
+    for key in ["start", "end"] {
+        assert_eq!(body[key].get("date"), Some(&serde_json::Value::Null));
+        assert!(body[key]["dateTime"].is_string() && body[key]["timeZone"].is_string());
+    }
+    assert!(writes[3].contains("Bearer fresh"));
+}
+
+#[tokio::test]
+async fn invalid_event_paths_stop_before_requesting_credentials() {
+    let base = "http://127.0.0.1:1/";
+    let no_token = |_| -> std::future::Ready<Result<Zeroizing<String>>> { panic!("requested credentials") };
+    let (_dir, store, account) = cached_calendar("primary");
+    for invalid in [".\t.", "a\rb", "a\nb", "a\u{85}b", "", ".", ".."] {
+        for (calendar, id) in [("primary", invalid), (invalid, "created")] {
+            let result = change::fetch_event_with(base, calendar, id, no_token).await;
+            assert!(matches!(result, Err(Error::Invalid(_))));
+        }
+        assert!(matches!(create_with(base, invalid, &draft(), no_token).await, Err(Error::Invalid(_))));
+        for form in [None, Some(&draft())] {
+            let result = change::change_with(&store, &account.id, base, "primary", invalid, OLD, form, no_token).await;
+            assert!(matches!(result, Err(Error::Invalid(_))));
+        }
+    }
+    let url = event_url(base, "a/b", "a/b%2F#?").unwrap();
+    assert_eq!(url.path(), "/calendars/a%2Fb/events/a%2Fb%252F%23%3F");
+}
+
+#[tokio::test]
+async fn event_read_rejects_incomplete_or_unusable_snapshots() {
+    let original: serde_json::Value = serde_json::from_str(BEFORE).unwrap();
+    for (field, value) in [
+        ("status", serde_json::json!("cancelled")), ("attendeesOmitted", true.into()),
+        ("etag", serde_json::Value::Null), ("etag", r#"W/"old""#.into()), ("id", "other".into()),
+    ] {
+        let mut reply = original.clone();
+        if value.is_null() { reply.as_object_mut().unwrap().remove(field); } else { reply[field] = value; }
+        let (base, server) = server(vec![("200 OK", &reply.to_string())]).await;
+        let error = change::fetch_event_with(&base, "primary", "created", change_token).await.unwrap_err();
+        if field == "status" { assert!(matches!(error, Error::NotFound)); }
+        else { assert!(matches!(error, Error::Network(_)), "{field}"); }
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn changes_refuse_series_masters_and_unknown_calendars() {
+    let (_dir, store, account) = cached_calendar("primary");
+    let master = BEFORE.replace(r#""recurringEventId":"series""#, r#""recurrence":["RRULE:FREQ=DAILY"]"#);
+    let (base, server) = server(vec![("200 OK", &master); 2]).await;
+    for draft in [None, Some(&draft())] {
+        let result = change::change_with(&store, &account.id, &base, "unknown", "created", OLD, draft,
+            |_| -> std::future::Ready<Result<Zeroizing<String>>> { panic!("requested credentials") }).await;
+        assert!(matches!(result, Err(Error::NotFound)));
+        let result = change::change_with(&store, &account.id, &base, "primary", "created", OLD, draft, change_token).await;
+        assert!(matches!(result, Err(Error::RecurringSeries)));
+    }
+    assert!(server.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+}
+
+#[tokio::test]
+async fn gone_writes_remove_the_cached_event() {
+    let (_dir, store, account) = cached_calendar("primary");
+    for status in ["404 Not Found", "410 Gone"] {
+        for form in [None, Some(&draft())] {
+            store.insert_calendar_event(&account.id, "primary", &draft().event("created".into()).unwrap()).unwrap();
+            let (base, server) = server(vec![("200 OK", BEFORE), (status, "")]).await;
+            let result = change::change_with(&store, &account.id, &base, "primary", "created", OLD, form, change_token).await;
+            assert!(matches!(result, Err(Error::NotFound)));
+            assert!(store.today_events("2026-03-29", 0, i64::MAX).unwrap().is_empty());
+            assert_eq!(server.await.unwrap().len(), 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn calendar_writes_classify_server_and_authorization_failures() {
+    let (_dir, store, account) = cached_calendar("primary");
+    let (base, server_task) = server(vec![("503 Unavailable", "")]).await;
+    assert!(matches!(create_with(&base, "primary", &draft(), change_token).await, Err(Error::Uncertain)));
+    assert_eq!(server_task.await.unwrap().len(), 1);
+    for form in [None, Some(&draft())] {
+        for status in ["503 Unavailable", "403 Forbidden", "401 Unauthorized"] {
+            let mut replies = vec![("200 OK", BEFORE), (status, "")];
+            if status.starts_with("401") { replies.push((status, "")); }
+            let (base, server) = server(replies).await;
+            let error = change::change_with(&store, &account.id, &base, "primary", "created", OLD, form, change_token).await.unwrap_err();
+            match status {
+                "503 Unavailable" => assert!(matches!(error, Error::Uncertain)),
+                "403 Forbidden" => assert!(matches!(error, Error::Network("calendar access refused"))),
+                _ => assert!(matches!(error, Error::ReauthRequired)),
+            }
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), if status.starts_with("401") { 3 } else { 2 });
+        }
+    }
+}
+
+#[tokio::test]
+async fn confirmed_patch_with_unusable_body_refreshes_or_invalidates_only_its_target() {
+    let (_dir, store, account) = cached_calendar("primary");
+    store.insert_calendar_event(&account.id, "primary", &draft().event("other".into()).unwrap()).unwrap();
+    let all_day = crate::calendar::NewEvent { all_day: true, start: "2026-03-29".into(), end: "2026-03-30".into(), ..draft() };
+    let wrong_id = CREATED.replace("created", "other");
+    for (body, refresh) in [("{", ("200 OK", CREATED)), (wrong_id.as_str(), ("503 Unavailable", ""))] {
+        store.insert_calendar_event(&account.id, "primary", &draft().event("created".into()).unwrap()).unwrap();
+        let (base, server) = server(vec![("200 OK", BEFORE), ("200 OK", body), refresh]).await;
+        change::change_with(&store, &account.id, &base, "primary", "created", OLD, Some(&all_day), change_token).await.unwrap();
+        let events = store.today_events("2026-03-29", 0, i64::MAX).unwrap();
+        let other = draft().event("other".into()).unwrap();
+        assert!(events.iter().any(|row| row.event == other));
+        if refresh.0 == "200 OK" {
+            assert_eq!(events.len(), 2);
+            assert!(events.iter().any(|row| row.event.remote_id == "created"
+                && row.event.join_url.as_deref() == Some("https://meet.example.test/new")));
+        } else { assert_eq!(events.len(), 1); }
+        let patch = request_body(&server.await.unwrap()[1]);
+        for (key, date) in [("start", &all_day.start), ("end", &all_day.end)] {
+            assert_eq!(patch[key], serde_json::json!({"date":date, "dateTime":null, "timeZone":null}));
+        }
+    }
+}
+
+#[tokio::test]
+async fn cache_errors_do_not_fail_confirmed_writes() {
+    let (_dir, store, account) = cached_calendar("primary");
+    store.db.execute_batch("PRAGMA query_only=ON").unwrap();
+    for (form, response) in [(Some(&draft()), ("200 OK", CREATED)), (None, ("204 No Content", ""))] {
+        let (base, server) = server(vec![("200 OK", BEFORE), response]).await;
+        change::change_with(&store, &account.id, &base, "primary", "created", OLD, form, change_token).await.unwrap();
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn stalled_tls_connection_is_a_network_failure_before_the_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://{}/", listener.local_addr().unwrap());
+    let create = tokio::spawn(async move { create_with(&url, "primary", &draft(), change_token).await });
+    let (mut socket, _) = listener.accept().await.unwrap();
+    socket.read_u8().await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert!(matches!(create.await.unwrap(), Err(Error::Network("calendar unavailable"))));
 }
