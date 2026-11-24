@@ -246,3 +246,80 @@ fn undecodable_write_replies_have_uncertain_outcomes() {
     }
     server.join().unwrap();
 }
+
+#[test]
+fn remote_uses_sshd_source_and_the_forced_identity() {
+    use lagom_core::{
+        account::{Account, Security, ServerConfig},
+        agent::{policy::Level, protocol::{Code, Request, Response}},
+        store::Store,
+    };
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("lagom.sqlite3");
+    let store = Store::open(&path).unwrap();
+    let config = ServerConfig { host: "localhost".into(), port: 993, username: "test".into(), security: Security::Tls };
+    let account = Account::new("mail@example.org".into(), config.clone(), config).unwrap();
+    store.save_account(&account).unwrap();
+    let create = || store.create_remote_agent("host", std::slice::from_ref(&account.id), Level::Read,
+        &["203.0.113.0/24".parse().unwrap()], chrono::Utc::now().timestamp() + 86400).unwrap();
+    let (id, token) = create();
+    fs::create_dir(dir.path().join("agents")).unwrap();
+    let file = dir.path().join("agents").join(format!("{id}.token"));
+    fs::write(&file, token.as_bytes()).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let forced = ["remote", "--agent", &id];
+    let run = |args: &[&str], original: &str, ip: &str, environment: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lagom"));
+        cmd.args(args).env("LAGOM_DATA_DIR", dir.path()).env("LAGOM_TOKEN", environment)
+            .env("SSH_ORIGINAL_COMMAND", original).env("SSH_CONNECTION", format!("{ip} 1234 192.0.2.1 22"));
+        cmd
+    };
+    let inside = "203.0.113.5";
+    for original in ["sh", "lagom remote", "lagom help", "lagom draft unknown", "lagom skill install", "lagom emails;id",
+        "lagom emails | cat", "lagom search $(id)", "lagom emails\nwhoami", "lagom emails --token NO",
+        "lagom emails --token=NO", "lagom mcp --agent other", "lagom emails --agent=other",
+        "lagom emails --dir /tmp", "lagom draft create --body --file=/tmp", "lagom emails --source-ip=203.0.113.5"] {
+        assert_eq!(run(&forced, original, inside, "").output().unwrap().status.code(), Some(2), "{original}");
+    }
+    assert_eq!(run(&forced, "lagom emails", "invalid", "").output().unwrap().status.code(), Some(2));
+    let listener = UnixListener::bind(dir.path().join("agent.sock")).unwrap();
+    let server = thread::spawn(move || {
+        let store = Store::open(path).unwrap();
+        for _ in 0..4 {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&socket).read_line(&mut line).unwrap();
+            let request: Request = serde_json::from_str(&line).unwrap();
+            let response = if store.authenticate(request.token.as_deref().map(|t| t.as_str()), request.source_ip.as_deref()).is_ok() {
+                Response::Success(json!({"accounts":[]}))
+            } else { Response::Failure(Code::Unauthorized) };
+            writeln!(socket, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+        }
+    });
+    for (args, ip, environment, ok) in [
+        (&forced[..], inside, "wrong", true), (&forced[..], "198.51.100.2", "wrong", false),
+        (&["remote"][..], inside, token.as_str(), true),
+    ] {
+        let out = run(args, "lagom emails --json", ip, environment).output().unwrap();
+        assert_eq!(out.status.success(), ok);
+        assert_eq!(serde_json::from_slice::<Value>(&out.stdout).unwrap()["ok"], ok);
+    }
+    let mut child = run(&forced, "lagom mcp", inside, "wrong").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).unwrap();
+    let mut reply = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut reply).unwrap();
+    assert!(serde_json::from_str::<Value>(&reply).unwrap()["result"]["tools"].is_array());
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    server.join().unwrap();
+
+    store.remove_remote_agent(&id).unwrap();
+    fs::remove_file(file).unwrap();
+    let (_, newer) = create();
+    for original in ["lagom mcp", "lagom emails"] {
+        let out = run(&forced, original, inside, &newer).output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(out.stderr, b"Token missing, invalid, expired or revoked.\n");
+    }
+}

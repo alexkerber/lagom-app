@@ -1,4 +1,5 @@
 mod mcp;
+mod remote;
 mod skill;
 
 use lagom_core::agent::policy::Level::{self, Read, Send, Triage};
@@ -317,6 +318,7 @@ impl Options {
 }
 
 struct Client {
+    source_ip: Option<String>,
     dir: PathBuf,
     identity: Option<(String, String)>,
 }
@@ -363,7 +365,7 @@ impl Client {
             token: Some(self.token()?.into()),
             cmd: cmd.into(),
             args,
-            source_ip: None,
+            source_ip: self.source_ip.clone(),
         };
         let mut bytes = zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| INVALID)?);
         bytes.push(b'\n');
@@ -481,7 +483,7 @@ fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn run(opts: Options) -> Result<i32> {
+fn run(opts: Options, source_ip: Option<String>) -> Result<i32> {
     let Some((name, mut rest)) = opts.words.split_first() else {
         return Err(INVALID);
     };
@@ -505,7 +507,10 @@ fn run(opts: Options) -> Result<i32> {
         _ => {}
     }
     let dir = lagom_core::store::Store::data_dir().map_err(|_| INVALID)?;
-    let client = Client { dir, identity: opts.identity };
+    let client = Client { dir, identity: opts.identity, source_ip };
+    if client.source_ip.is_some() && name == "mcp" {
+        drop(zeroize::Zeroizing::new(client.token()?));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -582,7 +587,7 @@ pub fn dispatch() -> Option<i32> {
         first = probe.next()?;
     }
     let command = first.to_str()?;
-    if !matches!(command, "--help" | "--version" | "mcp" | "skill")
+    if !matches!(command, "--help" | "--version" | "mcp" | "skill" | "remote")
         && !TOOLS.iter().any(|t| t.cmd.split('.').next() == Some(command))
     {
         return None;
@@ -595,7 +600,12 @@ pub fn dispatch() -> Option<i32> {
         }
     };
     let json = words.iter().any(|w| w == "--json");
-    Some(match Options::parse(words).and_then(run) {
+    let result = if command == "remote" {
+        remote::run(&words)
+    } else {
+        Options::parse(words).and_then(|opts| run(opts, None))
+    };
+    Some(match result {
         Ok(status) => status,
         Err(code) => {
             if json {

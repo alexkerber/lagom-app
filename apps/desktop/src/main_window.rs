@@ -359,7 +359,7 @@ pub struct MainWindow {
     /// "Change password" on an email-and-password account's page.
     new_password: Option<crate::settings::NewPassword>,
     /// Settings > AI Agents, and the sidebar row it can add.
-    agents: crate::settings::agents::Agents,
+    pub(crate) agents: crate::settings::agents::Agents,
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
     message_menu: Option<usize>,

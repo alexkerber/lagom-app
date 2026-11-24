@@ -40,6 +40,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 wry = { version = "0.57", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
+ipnet = "2"
 base64 = "0.22"
 libc = "0.2"
 dirs = "6"

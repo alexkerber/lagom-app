@@ -372,6 +372,11 @@ fn parents(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn write_remote_token(path: &Path, token: &str) -> Result<()> {
+    parents(path.parent().context("missing token directory")?, &mut Vec::new())?;
+    atomic_write(path, token, None, Some(0o600))
+}
+
 fn write(path: &Path, contents: &str, previous: Option<&str>) -> Result<()> {
     atomic_write(path, contents, previous, None)
 }

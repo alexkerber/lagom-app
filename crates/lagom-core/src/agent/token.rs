@@ -1,6 +1,6 @@
 use super::{
     audit::{Failure, TokenFailure},
-    policy::Level,
+    policy::{Access, Level, Resource},
     protocol::Code,
 };
 use crate::store::Store;
@@ -59,13 +59,15 @@ pub struct AgentRow {
     pub host: String,
     pub remote: bool,
     pub active: bool,
+    pub expires: Option<i64>,
 }
 
 impl Store {
     pub fn agents(&self) -> Result<Vec<AgentRow>, Code> {
         let mut rows = self.db.prepare(
             "SELECT id,kind,name,host,remote,EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent=a.id
-             AND (t.expires IS NULL OR t.expires>unixepoch()))
+             AND (t.expires IS NULL OR t.expires>unixepoch())),
+             (SELECT max(expires) FROM agent_tokens t WHERE t.agent=a.id)
              FROM agents a ORDER BY created,id",
         )?;
         let rows = rows.query_map([], |r| {
@@ -76,6 +78,7 @@ impl Store {
                 host: r.get(3)?,
                 remote: r.get(4)?,
                 active: r.get(5)?,
+                expires: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -120,6 +123,63 @@ impl Store {
             params![id, kind, name, host, remote],
         )?;
         Ok(id)
+    }
+
+    pub fn create_remote_agent(
+        &self,
+        host: &str,
+        accounts: &[String],
+        level: Level,
+        ranges: &[IpNet],
+        expires: i64,
+    ) -> Result<(String, Zeroizing<String>), Code> {
+        if host.trim().is_empty() || accounts.is_empty() || ranges.is_empty() {
+            return Err(Code::InvalidRequest);
+        }
+        let tx = self.db.unchecked_transaction()?;
+        let id = self.create_agent("remote", host, host, true)?;
+        tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&id])?;
+        for account in accounts {
+            if !tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
+                [account],
+                |r| r.get::<_, bool>(0),
+            )? {
+                return Err(Code::NotFound);
+            }
+            for resource in [Resource::Mail, Resource::Calendar] {
+                let level = if resource == Resource::Calendar && level == Level::Triage {
+                    Level::Read
+                } else {
+                    level
+                };
+                self.set_agent_access(
+                    &id,
+                    &Access {
+                        resource,
+                        account: account.clone(),
+                        level,
+                    },
+                )?;
+            }
+        }
+        let token = self.issue_token_inner(
+            &id,
+            TokenScope::Remote {
+                accounts,
+                level,
+                ranges,
+                expires: Some(expires),
+            },
+        )?;
+        tx.commit()?;
+        Ok((id, token))
+    }
+
+    pub fn remove_remote_agent(&self, id: &str) -> Result<(), Code> {
+        self.db
+            .execute("DELETE FROM agents WHERE id=? AND remote=1", [id])?;
+        Ok(())
     }
 
     pub fn issue_token(

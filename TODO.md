@@ -226,6 +226,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     Tests verified cancellation, EOF, credential checks and interrupted setup.
     The macOS release measured 19.60 MB against the 30 MB budget.
     Live providers, external agent sessions and Linux remain untested.
+  - [x] Step f on `feat/agents-remote` adds scoped SSH agents, one-time token display, expiry and revocation in Settings.
+    CLI and MCP tests verified source ranges, refused inputs, token files and retired agent IDs.
+    Tests checked the generated SSH line. Core and desktop tests passed. The macOS desktop build passed.
+    Live SSH login, visual Settings checks and Linux remain untested.
 
 ## Calendar
 

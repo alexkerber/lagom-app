@@ -211,7 +211,7 @@ mod tests {
         }
         let token = store.provision_read_agent(&allowed.id).unwrap();
         let client =
-            Client { dir: dir.path().into(), identity: Some(("token".into(), token.to_string())) };
+            Client { source_ip: None, dir: dir.path().into(), identity: Some(("token".into(), token.to_string())) };
         let (bridge, _) = Bridge::detached();
         let _server = Server::start(&path, bridge);
         let socket = dir.path().join("agent.sock");
