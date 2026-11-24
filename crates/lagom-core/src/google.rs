@@ -1,3 +1,6 @@
+mod change;
+pub use change::{delete_event, fetch_event, update_event, EventSnapshot};
+use change::{event_url, write_event};
 mod create;
 pub use create::{create_event, create_with, fetch_created, fetch_created_with, CreatedEvent};
 

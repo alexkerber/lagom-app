@@ -18,6 +18,7 @@ async fn server(replies: Vec<(&'static str, &'static str)>) -> (String, tokio::t
             stream.read_exact(&mut body_bytes).await.unwrap();
             request.extend(body_bytes);
             requests.push(String::from_utf8(request).unwrap());
+            if status.is_empty() { continue; } // Drop the connection after reading the complete request.
             stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         }
         requests
@@ -359,4 +360,60 @@ async fn conference_followup_recognizes_deleted_events_and_rejects_other_ids() {
     assert!(fetch_created_with(&base, "primary", "other",
         |_| std::future::ready(Ok(Zeroizing::new("fixture".into())))).await.is_err());
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn conditional_event_changes_cache_only_confirmed_writes() {
+    const BEFORE: &str = r#"{"id":"created","etag":"\"old\"","summary":"Before","description":"Notes","attendees":[{"email":"old@example.test"}],"start":{"date":"2026-03-29"},"end":{"date":"2026-03-30"}}"#;
+    let (base, server) = server(vec![("200 OK", BEFORE), ("412 Precondition Failed", ""),
+        ("", ""), ("401 Unauthorized", ""), ("200 OK", CREATED), ("412 Precondition Failed", ""),
+        ("", ""), ("204 No Content", "")]).await;
+    let token = |rejected: Option<String>| std::future::ready(Ok(Zeroizing::new(
+        if rejected.is_some() { "fresh".into() } else { "cached".into() })));
+    let calendar = "fixture/calendar";
+    let id = "created";
+    let snapshot = change::fetch_event_with(&base, calendar, id, token).await.unwrap();
+    assert_eq!(snapshot.attendees, ["old@example.test"]);
+    assert_eq!(snapshot.description.as_deref(), Some("Notes"));
+    assert_eq!(snapshot.etag, r#""old""#);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("cache.db")).unwrap();
+    let (imap, smtp) = crate::presets::servers("fixture@gmail.com").unwrap();
+    let account = Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    store.replace_calendar_window(&account.id, 1, 2, &[(Calendar {
+        remote_id: calendar.into(), name: "Fixture".into(), color: None, shown: true, writable: true,
+    }, vec![snapshot.event.clone()])]).unwrap();
+    let change = |etag, draft| change::change_with(&store, &account.id, &base, calendar, id, etag, draft, token);
+    let cached = || store.today_events("2026-03-29", 0, i64::MAX).unwrap()
+        .into_iter().map(|row| row.event).collect::<Vec<_>>();
+    let draft = draft();
+    assert!(matches!(change("*", None).await, Err(Error::Invalid(_))));
+    assert!(matches!(change(&snapshot.etag, Some(&draft)).await, Err(Error::Conflict)));
+    assert!(matches!(change(&snapshot.etag, Some(&draft)).await, Err(Error::Uncertain)));
+    assert_eq!(cached(), [snapshot.event]);
+    change(&snapshot.etag, Some(&draft)).await.unwrap();
+    let updated = cached();
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].join_url.as_deref(), Some("https://meet.example.test/new"));
+    assert!(matches!(change(&snapshot.etag, None).await, Err(Error::Conflict)));
+    let new_tag = r#""new""#;
+    assert!(matches!(change(new_tag, None).await, Err(Error::Uncertain)));
+    assert_eq!(cached(), updated);
+    change(new_tag, None).await.unwrap();
+    assert!(cached().is_empty());
+    assert_eq!(store.calendar_window(&account.id).unwrap(), Some((1, 2)));
+
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("GET /calendars/fixture%2Fcalendar/events/created "));
+    for (index, request) in requests.iter().enumerate().skip(1) {
+        let method = if index <= 4 { "PATCH" } else { "DELETE" };
+        assert!(request.starts_with(&format!("{method} /calendars/fixture%2Fcalendar/events/created?sendUpdates=all")));
+        let tag = if index <= 5 { &snapshot.etag } else { new_tag };
+        assert!(request.to_ascii_lowercase().lines().any(|line| line == format!("if-match: {tag}")));
+    }
+    assert_eq!(request_body(&requests[3]), request_body(&requests[4]));
+    assert_eq!(request_body(&requests[4])["attendees"][0]["email"], "guest@example.test");
+    assert!(requests[4].contains("Bearer fresh"));
 }

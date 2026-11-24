@@ -45,6 +45,10 @@ pub enum Error {
     Rejected,
     #[error("sign in again")]
     ReauthRequired,
+    #[error("the calendar event has changed")]
+    Conflict,
+    #[error("event change unconfirmed; check your calendar before retrying")]
+    Uncertain,
     #[error("Allow calendar access")]
     CalendarConsent,
     #[error("Allow Google Tasks access")]
