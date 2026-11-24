@@ -326,6 +326,7 @@ fn process(
     policy: watch::Receiver<Option<i64>>,
 ) -> (Vec<u8>, Option<tokio::sync::OwnedSemaphorePermit>) {
     let mut permit = None;
+    let mut handled_remote_refusal = false;
     let access = Arc::new(std::sync::OnceLock::<read::ReadPolicy>::new());
     let mut who = None;
     let mut account = None;
@@ -387,6 +388,7 @@ fn process(
             return Err(Code::Unsupported.into());
         }
         if req.cmd == "remote.refused" {
+            handled_remote_refusal = true;
             return Err(Code::InvalidRequest.into());
         }
         let value = read::dispatch(
@@ -425,7 +427,7 @@ fn process(
                 account.as_deref(),
                 target.as_ref(),
                 result.as_ref().map(|_| ()).map_err(Clone::clone),
-                access.get().is_some(),
+                handled_remote_refusal || access.get().is_some(),
             )
         })
     });
