@@ -19,7 +19,7 @@ fn fixture() -> (Worker, Account, UnboundedReceiver<Event>, PathBuf) {
 }
 
 fn draft() -> NewEvent {
-    NewEvent { title: "Fixture".into(), start: "2026-11-09T09:00:00+01:00".into(), end: "2026-11-09T10:00:00+01:00".into(),
+    NewEvent { location: None, title: "Fixture".into(), start: "2026-11-09T09:00:00+01:00".into(), end: "2026-11-09T10:00:00+01:00".into(),
         all_day: false, time_zone: "Europe/Stockholm".into(), description: None, attendees: vec![], meet: true }
 }
 

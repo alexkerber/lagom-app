@@ -1,16 +1,19 @@
 //! The listener belongs to the app, including while its main window is closed.
+pub(crate) mod confirm;
 pub(crate) mod read;
+pub(crate) mod write;
 
 use crate::sync::Bridge;
 use lagom_core::{
     agent::{
-        audit::{AuditRow, Failure},
-        id::ResolvedMessage,
+        audit::{Address, AuditRow, Failure},
+        id::AuditTarget,
         protocol::{Code, Request, Response, VERSION},
         token::Identity,
     },
     store::Store,
 };
+use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{self, File},
@@ -34,7 +37,7 @@ const MAX_RESPONSE: usize = 32 * 1024 * 1024;
 const MAX_PER_TOKEN: usize = 4;
 const ANSWER: Duration = Duration::from_secs(30);
 struct TokenLimit {
-    times: VecDeque<Instant>,
+    times: VecDeque<(Instant, bool)>,
     permits: Arc<Semaphore>,
 }
 type Rates = Arc<Mutex<HashMap<String, TokenLimit>>>;
@@ -157,6 +160,7 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
     let (mut enabled, _) = watch::channel(());
     let (policy, _) = watch::channel(settings.agent_policy_generation().ok());
     let mut bind_error = None;
+    let mut recovered = false;
     loop {
         tokio::select! {
             biased;
@@ -171,7 +175,14 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                 }
                 if let Some(generation)=generation.filter(|_|socket.is_none()) {
                     match Socket::bind(&socket_path,generation) {
-                        Ok(bound) => { socket=Some(bound); bind_error=None; }
+                        Ok(bound) => {
+                            if !recovered {
+                                if settings.recover_agent_writes().is_err() { continue; }
+                                recovered = true;
+                            }
+                            socket=Some(bound);
+                            bind_error=None;
+                        }
                         Err(e) if bind_error!=Some(e.kind()) => {
                             eprintln!("Could not open agent socket: {e}");
                             bind_error=Some(e.kind());
@@ -222,33 +233,42 @@ async fn frame(stream: &mut UnixStream) -> Result<Request, Code> {
     serde_json::from_slice(&buf).map_err(|_| Code::InvalidRequest)
 }
 
-fn audit(
-    store: &Store,
-    req: Option<&Request>,
-    who: Option<&Identity>,
-    account: Option<&str>,
-    target: Option<&ResolvedMessage>,
-    outcome: Result<(), Failure>,
+#[derive(Default)]
+struct Audit {
+    account: Option<String>,
+    target: Option<AuditTarget>,
     dispatched: bool,
-) -> Result<(), Code> {
-    store.record_agent_audit(AuditRow {
-        identity: who,
-        account: account.and_then(|s| s.parse().ok()),
-        command: req.filter(|_| dispatched).map_or("", |r| &r.cmd),
-        target,
-        outcome,
-        source_ip: req.and_then(|r| r.source_ip.as_ref()?.parse().ok()),
-        recipients: &[],
-    })
+    worker_audit: bool,
+    recipients: Vec<Address>,
 }
 
-fn admit(rates: &Rates, token_id: &str) -> Result<tokio::sync::OwnedSemaphorePermit, Code> {
+impl Audit {
+    fn record(
+        &self,
+        store: &Store,
+        req: Option<&Request>,
+        who: Option<&Identity>,
+        outcome: Result<(), Failure>,
+    ) -> Result<(), Code> {
+        store.record_agent_audit(AuditRow {
+            identity: who,
+            account: self.account.as_deref().and_then(|s| s.parse().ok()),
+            command: req.filter(|_| self.dispatched).map_or("", |r| &r.cmd),
+            target: self.target.as_ref(),
+            outcome,
+            source_ip: req.and_then(|r| r.source_ip.as_ref()?.parse().ok()),
+            recipients: &self.recipients,
+        })
+    }
+}
+
+fn admit(rates: &Rates, token_id: &str, write: bool) -> Result<tokio::sync::OwnedSemaphorePermit, Code> {
     let mut rates = rates.lock().map_err(|_| Code::Internal)?;
     let now = Instant::now();
     rates.retain(|_, limit| {
         limit.permits.available_permits() < MAX_PER_TOKEN || limit.times
             .back()
-            .is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60))
+            .is_some_and(|last| now.duration_since(last.0) < Duration::from_secs(60))
     });
     let limit = rates.entry(token_id.to_owned()).or_insert_with(|| TokenLimit {
         times: VecDeque::new(),
@@ -257,14 +277,14 @@ fn admit(rates: &Rates, token_id: &str) -> Result<tokio::sync::OwnedSemaphorePer
     let times = &mut limit.times;
     while times
         .front()
-        .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+        .is_some_and(|at| now.duration_since(at.0) >= Duration::from_secs(60))
     {
         times.pop_front();
     }
-    if times.len() >= 300 {
+    if times.len() >= 300 || write && times.iter().filter(|(_, w)| *w).count() >= 30 {
         return Err(Code::Busy);
     }
-    times.push_back(now);
+    times.push_back((now, write));
     limit.permits.clone().try_acquire_owned().map_err(|_| Code::Busy)
 }
 
@@ -289,13 +309,33 @@ async fn call(
         _ = off.changed() => Err(Code::Unavailable),
         parsed = timeout(Duration::from_secs(5),frame(&mut stream)) => parsed.unwrap_or(Err(Code::InvalidRequest)),
     };
-    let deadline = tokio::time::Instant::now() + ANSWER;
+    let confirming = parsed
+        .as_ref()
+        .is_ok_and(|r| r.cmd == "draft.send" || r.cmd.starts_with("event."));
+    let deadline = tokio::time::Instant::now()
+        + if confirming {
+            Duration::from_secs(130)
+        } else {
+            ANSWER
+        };
+    let writing = parsed.as_ref().is_ok_and(|r| write::handles(&r.cmd));
+    let peer = if confirming {
+        stream
+            .as_fd()
+            .try_clone_to_owned()
+            .ok()
+            .map(std::os::unix::net::UnixStream::from)
+            .map(Arc::new)
+    } else {
+        None
+    };
     let (cancel, cancelled) = watch::channel(());
     let mut job = task::spawn_blocking(move || {
         process(
-            &path, parsed, &bridge, &rates, cancelled, deadline, generation, policy,
+            &path, parsed, &bridge, &rates, cancelled, deadline, generation, peer, policy,
         )
     });
+    let mut extra = [0u8; 1];
     let (bytes, _token_permit) = tokio::select! {
         biased;
         _ = off.changed() => {
@@ -303,6 +343,11 @@ async fn call(
             let _ = job.await;
             return;
         },
+        _ = stream.read(&mut extra), if writing => {
+            drop(cancel);
+            let _=job.await;
+            return;
+        }
         result = timeout_at(deadline,&mut job) => match result {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(_)) => (line(Response::Failure(Code::Internal)), None),
@@ -329,14 +374,14 @@ fn process(
     off: watch::Receiver<()>,
     deadline: tokio::time::Instant,
     generation: i64,
+    peer: Option<Arc<std::os::unix::net::UnixStream>>,
     policy: watch::Receiver<Option<i64>>,
 ) -> (Vec<u8>, Option<tokio::sync::OwnedSemaphorePermit>) {
     let mut permit = None;
     let mut handled_remote_refusal = false;
     let access = Arc::new(std::sync::OnceLock::<read::ReadPolicy>::new());
     let mut who = None;
-    let mut account = None;
-    let mut target = None;
+    let mut audit = Audit::default();
     let cancelled = || off.has_changed().is_err() || tokio::time::Instant::now() >= deadline;
     let mut result = (|| -> read::Result<Vec<u8>> {
         let req = parsed.as_ref().map_err(|e| *e)?;
@@ -372,7 +417,7 @@ fn process(
             Ok(identity) => who.insert(identity),
             Err(e) => {
                 if let Failure::VerifiedRefusal { agent, token, .. } = &e {
-                    match admit(rates, token).map(drop) {
+                    match admit(rates, token, false).map(drop) {
                         Err(Code::Busy) => {
                             return Err(Failure::VerifiedBusy {
                                 agent: agent.clone(),
@@ -386,7 +431,7 @@ fn process(
                 return Err(e);
             }
         };
-        permit = Some(admit(rates, identity.token_id())?);
+        permit = Some(admit(rates, identity.token_id(), write::handles(&req.cmd))?);
         if store.agent_generation()? != Some(generation) {
             return Err(Code::Unauthorized.into());
         }
@@ -397,17 +442,30 @@ fn process(
             handled_remote_refusal = true;
             return Err(Code::InvalidRequest.into());
         }
-        let value = read::dispatch(
-            &store,
-            identity,
-            req,
-            |request| bridge.send(crate::sync::Cmd::AgentAttachment(request)),
-            &mut account,
-            &mut target,
-            &access,
-            off.clone(),
-            policy.clone(),
-        )?;
+        let value = if write::handles(&req.cmd) {
+            write::dispatch(
+                &store,
+                identity,
+                req,
+                bridge,
+                generation,
+                &mut audit,
+                off.clone(),
+                peer.as_ref(),
+            )?
+        } else {
+            read::dispatch(
+                &store,
+                identity,
+                req,
+                |request| bridge.send(crate::sync::Cmd::AgentAttachment(request)),
+                &mut audit.account,
+                &mut audit.target,
+                &access,
+                off.clone(),
+                policy.clone(),
+            )?
+        };
         let mut bytes =
             serde_json::to_vec(&Response::Success(value)).map_err(|_| Code::Internal)?;
         if bytes.len() >= MAX_RESPONSE {
@@ -416,6 +474,7 @@ fn process(
         bytes.push(b'\n');
         Ok(bytes)
     })();
+    if audit.worker_audit { return (result.unwrap_or_else(|e| line(Response::Failure(e.into()))), permit); }
     let audited = Store::agent_writer(path).and_then(|store| {
         store.agent_audit_transaction(|| {
             if let Some(grant) = access.get() {
@@ -423,17 +482,15 @@ fn process(
                     result = Err(e);
                 }
             }
-            if cancelled() {
+            if !audit.dispatched && cancelled() {
                 result = Err(Code::Unavailable.into());
             }
-            audit(
+            audit.dispatched |= handled_remote_refusal || access.get().is_some();
+            audit.record(
                 &store,
                 parsed.as_ref().ok(),
                 who.as_ref(),
-                account.as_deref(),
-                target.as_ref(),
                 result.as_ref().map(|_| ()).map_err(Clone::clone),
-                handled_remote_refusal || access.get().is_some(),
             )
         })
     });
@@ -452,14 +509,14 @@ mod limit_tests {
     #[test]
     fn four_calls_per_token_leave_room_for_another_token() {
         let rates = Rates::default();
-        let mut held: Vec<_> = (0..4).map(|_| admit(&rates, "one").unwrap()).collect();
-        assert!(matches!(admit(&rates, "one"), Err(Code::Busy)));
-        let _other = admit(&rates, "two").unwrap();
+        let mut held: Vec<_> = (0..4).map(|_| admit(&rates, "one", false).unwrap()).collect();
+        assert!(matches!(admit(&rates, "one", false), Err(Code::Busy)));
+        let _other = admit(&rates, "two", false).unwrap();
         held.pop();
-        assert!(admit(&rates, "one").is_ok());
+        assert!(admit(&rates, "one", false).is_ok());
         for _ in 6..300 {
-            drop(admit(&rates, "one").unwrap());
+            drop(admit(&rates, "one", false).unwrap());
         }
-        assert!(matches!(admit(&rates, "one"), Err(Code::Busy)));
+        assert!(matches!(admit(&rates, "one", false), Err(Code::Busy)));
     }
 }

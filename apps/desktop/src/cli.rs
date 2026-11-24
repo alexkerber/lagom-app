@@ -182,7 +182,7 @@ const TOOLS: &[Tool] = &[
         "create_event",
         "event.create",
         &[],
-        &["calendar", "title", "start", "end", "location", "description", "guests"],
+        &["calendar", "title", "start", "end", "location", "description", "guests", "meet"],
         "calendar",
         Send,
     ),
@@ -191,7 +191,7 @@ const TOOLS: &[Tool] = &[
         "update_event",
         "event.update",
         &["id"],
-        &["title", "start", "end", "location", "description", "guests"],
+        &["title", "start", "end", "location", "description", "guests", "meet"],
         "calendar",
         Send,
     ),
@@ -580,6 +580,7 @@ fn prepare(opts: Options) -> Result<(String, Args, bool)> {
         cmd = format!("{name}.{sub}");
         rest = tail;
     }
+    if cmd == "draft.schedule" { return Err(Code::Unsupported); }
     let tool = TOOLS.iter().find(|t| t.cmd == cmd).ok_or(INVALID)?;
     if rest.len() != tool.positional.len() {
         return Err(INVALID);

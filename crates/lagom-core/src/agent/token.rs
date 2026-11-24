@@ -63,6 +63,43 @@ pub struct AgentRow {
     pub expires: Option<i64>,
 }
 
+// The outbox is local. Socket authentication also checks the caller's source address.
+fn token_scope(remote: i64, level: i64, accounts: Option<String>, cidr: Option<String>, expires: Option<i64>,
+    created: i64, source: Option<Option<&str>>) -> Result<(Level, Option<Vec<String>>), TokenFailure> {
+    use TokenFailure::*;
+    let now = chrono::Utc::now().timestamp();
+    let accounts = match remote {
+        0 if source.flatten().is_some() => return Err(Source),
+        0 if expires.is_none() && accounts.is_none() && cidr.is_none() => None,
+        1 => {
+            let end = expires.ok_or(InvalidScope)?;
+            if end <= now {
+                return Err(Expired);
+            }
+            if end <= created || end > created.saturating_add(365 * DAY) {
+                return Err(InvalidScope);
+            }
+            let nets: Vec<IpNet> = serde_json::from_str(&cidr.ok_or(InvalidScope)?).map_err(|_| InvalidScope)?;
+            if nets.is_empty() {
+                return Err(InvalidScope);
+            }
+            if let Some(source) = source {
+                let ip = source.ok_or(Source)?.parse::<IpAddr>().map_err(|_| Source)?.to_canonical();
+                if !nets.iter().any(|n| n.contains(&ip)) {
+                    return Err(Source);
+                }
+            }
+            Some(
+                serde_json::from_str(&accounts.ok_or(InvalidScope)?)
+                    .map_err(|_| InvalidScope)?,
+            )
+        }
+        _ => return Err(InvalidScope),
+    };
+    let level = Level::from_db(level).ok_or(InvalidScope)?;
+    Ok((level, accounts))
+}
+
 impl Store {
     pub fn agents(&self) -> Result<Vec<AgentRow>, Code> {
         let mut rows = self.db.prepare(
@@ -118,6 +155,10 @@ impl Store {
         host: &str,
         remote: bool,
     ) -> Result<String, Code> {
+        self.change_authority(|| self.insert_agent(kind, name, host, remote))
+    }
+
+    fn insert_agent(&self, kind: &str, name: &str, host: &str, remote: bool) -> Result<String, Code> {
         let id = hex(&random::<6>()?);
         self.db.execute(
             "INSERT INTO agents(id,kind,name,host,remote,created) VALUES(?,?,?,?,?,unixepoch())",
@@ -137,8 +178,8 @@ impl Store {
         if host.trim().is_empty() || accounts.is_empty() || ranges.is_empty() {
             return Err(Code::InvalidRequest);
         }
-        let tx = self.db.unchecked_transaction()?;
-        let id = self.create_agent("remote", host, host, true)?;
+        let tx = self.write_transaction()?;
+        let id = self.insert_agent("remote", host, host, true)?;
         tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&id])?;
         for account in accounts {
             if !tx.query_row(
@@ -154,7 +195,7 @@ impl Store {
                 } else {
                     level
                 };
-                self.set_agent_access(
+                self.set_agent_access_inner(
                     &id,
                     &Access {
                         resource,
@@ -174,13 +215,15 @@ impl Store {
             },
         )?;
         tx.commit()?;
+        self.cleanup_revoked_queue();
         Ok((id, token))
     }
 
     pub fn remove_remote_agent(&self, id: &str) -> Result<(), Code> {
-        self.db
-            .execute("DELETE FROM agents WHERE id=? AND remote=1", [id])?;
-        Ok(())
+        self.change_authority(|| {
+            self.db.execute("DELETE FROM agents WHERE id=? AND remote=1", [id])?;
+            Ok(())
+        })
     }
 
     pub fn issue_token(
@@ -188,10 +231,7 @@ impl Store {
         agent: &str,
         scope: TokenScope<'_>,
     ) -> Result<Zeroizing<String>, Code> {
-        let tx = self.db.unchecked_transaction()?;
-        let raw = self.issue_token_inner(agent, scope)?;
-        tx.commit()?;
-        Ok(raw)
+        self.change_authority(|| self.issue_token_inner(agent, scope))
     }
 
     fn issue_token_inner(
@@ -207,8 +247,7 @@ impl Store {
                 })?;
         let (level, accounts, cidr, expires) = match (remote, scope) {
             (0, TokenScope::Local) => {
-                self.db
-                    .execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+                self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
                 (Level::Send, None, None, None)
             }
             (
@@ -244,7 +283,7 @@ impl Store {
     }
 
     pub fn provision_read_agent(&self, account: &str) -> Result<Zeroizing<String>, Code> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
             [account],
@@ -253,7 +292,7 @@ impl Store {
         if !exists {
             return Err(Code::NotFound);
         }
-        let agent = self.create_agent("developer", "Manual test", "local", false)?;
+        let agent = self.insert_agent("developer", "Manual test", "local", false)?;
         tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&agent])?;
         for kind in ["mail", "calendar"] {
             if self.matrix("", kind, account)? < Level::Read {
@@ -270,13 +309,31 @@ impl Store {
             [],
         )?;
         tx.commit()?;
+        self.cleanup_revoked_queue();
         Ok(token)
     }
 
     pub fn revoke_agent_tokens(&self, agent: &str) -> Result<(), Code> {
-        self.db
-            .execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
-        Ok(())
+        self.change_authority(|| {
+            self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn agent_may_send(&self, agent: &str, token: Option<&str>, account: &str) -> crate::Result<bool> {
+        let mut stmt = self.db.prepare("SELECT a.remote,t.id,t.level,t.accounts,t.cidr,t.expires,t.created
+            FROM agents a JOIN agent_tokens t ON a.id=t.agent WHERE a.id=? AND t.id=? AND t.level=3")?;
+        let mut rows = stmt.query(params![agent, token])?;
+        while let Some(row) = rows.next()? {
+            let expires = row.get(5)?;
+            let Ok((level, accounts)) = token_scope(row.get(0)?,row.get(2)?,row.get(3)?,row.get(4)?,expires,row.get(6)?,None) else { continue };
+            let who = Identity { agent: agent.to_owned(), token:row.get(1)?, level, accounts, expires };
+            if self.agent_level(&who, super::policy::Resource::Mail, account)
+                .map_err(|_| crate::Error::Invalid("agent policy unavailable"))? == Level::Send {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn authenticate(
@@ -328,39 +385,8 @@ impl Store {
             agent: agent.clone(),
             token: id.into(),
         };
-        let now = chrono::Utc::now().timestamp();
-        let accounts = match remote {
-            0 if source_ip.is_some() => return Err(refused(Source)),
-            0 if expires.is_none() && accounts.is_none() && cidr.is_none() => None,
-            1 => {
-                let end = expires.ok_or_else(|| refused(InvalidScope))?;
-                if end <= now {
-                    return Err(refused(Expired));
-                }
-                if end <= created || end > created.saturating_add(365 * DAY) {
-                    return Err(refused(InvalidScope));
-                }
-                let nets: Vec<IpNet> = serde_json::from_str(&cidr.ok_or_else(|| refused(InvalidScope))?)
-                    .map_err(|_| refused(InvalidScope))?;
-                if nets.is_empty() {
-                    return Err(refused(InvalidScope));
-                }
-                let ip = source_ip
-                    .ok_or_else(|| refused(Source))?
-                    .parse::<IpAddr>()
-                    .map_err(|_| refused(Source))?
-                    .to_canonical();
-                if !nets.iter().any(|n| n.contains(&ip)) {
-                    return Err(refused(Source));
-                }
-                Some(
-                    serde_json::from_str(&accounts.ok_or_else(|| refused(InvalidScope))?)
-                        .map_err(|_| refused(InvalidScope))?,
-                )
-            }
-            _ => return Err(refused(InvalidScope)),
-        };
-        let level = Level::from_db(level).ok_or_else(|| refused(InvalidScope))?;
+        let (level, accounts) = token_scope(remote, level, accounts, cidr, expires, created, Some(source_ip))
+            .map_err(refused)?;
         Ok(Identity {
             expires,
             agent,

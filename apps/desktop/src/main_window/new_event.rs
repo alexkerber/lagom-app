@@ -127,6 +127,7 @@ impl MainWindow {
             iana_time_zone::get_timezone().map_err(|_| "Could not read the local time zone")?
         };
         let draft = NewEvent {
+            location: None,
             title: text(TITLE).trim().into(), start, end, time_zone, all_day: editor.all_day,
             description: (!text(DESCRIPTION).trim().is_empty()).then(|| text(DESCRIPTION).to_owned()),
             attendees: lagom_core::contacts::split_recipients(text(GUESTS)).iter()

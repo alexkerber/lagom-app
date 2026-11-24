@@ -10,10 +10,10 @@ use crate::{
 use lettre::{
     message::{header, Mailbox, MultiPart, SinglePart},
     transport::smtp::{
-        authentication::{Credentials, Mechanism},
-        client::{Tls, TlsParameters},
+        authentication::{Credentials, Mechanism, DEFAULT_MECHANISMS},
+        client::{AsyncSmtpConnection, Tls, TlsParameters},
     },
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    Executor, Message, Tokio1Executor,
 };
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ fn header_value(value: &str) -> Result<()> {
     }
 }
 pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
-    compose_message(account, outgoing, None)
+    compose_message(account, outgoing, None, false)
 }
 
 pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, token: &str) -> Result<Vec<u8>> {
@@ -68,10 +68,10 @@ pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, tok
     let outgoing = Outgoing { subject: draft.subject.clone(), text: draft.text.clone(),
         attachments: draft.attachments.clone(), in_reply_to, references, message_id: Some(format!("<{token}@draft.lagommail.app>")),
         quoted: draft.quoted.clone(), ..Default::default() };
-    Ok(compose_message(account, &outgoing, Some(draft))?.formatted())
+    Ok(compose_message(account, &outgoing, Some(draft), false)?.formatted())
 }
 
-fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>) -> Result<Message> {
+pub(crate) fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>, plain_only: bool) -> Result<Message> {
     account.validate()?;
     if draft.is_none() && outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
         return Err(Error::Invalid("at least one recipient required"));
@@ -143,7 +143,7 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
         Some(q) => format!("{}{QUOTE_BREAK}{}", outgoing.text, q.text),
         None => outgoing.text.clone(),
     };
-    let html = markdown_html(&outgoing.text, quote.as_deref());
+    let html = if plain_only { None } else { markdown_html(&outgoing.text, quote.as_deref()) };
     let alternative = || {
         let html = SinglePart::html(html.clone().unwrap_or_default());
         let alternative = MultiPart::alternative().singlepart(SinglePart::plain(text.clone()));
@@ -252,37 +252,31 @@ async fn send_within(
 ) -> Result<()> {
     let message = compose(account, outgoing)?;
     let raw = message.formatted();
-    submit_within(account, password, &message, &raw, login, submit).await?;
+    submit_within(account, password, &message, &raw, login, submit, || Ok(())).await?;
     save_sent(account, password, &raw, store, None).await
 }
 
-async fn submit_within(account: &Account, password: &str, message: &Message, raw: &[u8], login: Duration, submit: Duration) -> Result<()> {
+async fn submit_within(account: &Account, password: &str, message: &Message, raw: &[u8], login: Duration, submit: Duration, authorize: impl Fn() -> Result<()>) -> Result<()> {
     let oauth = matches!(account.auth, Auth::OAuth(_));
     let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
     for attempt in 0..2 {
-        let transport = transport(account, &credential)?;
-        // Authentication failures precede DATA; only those can safely refresh and retry.
-        let result = async {
-            match timeout(login, transport.test_connection()).await {
-                Ok(Ok(true)) => {},
-                Ok(Err(e)) if auth_failure(&e) => return Err(Error::Authentication),
-                Ok(Err(e)) if e.is_permanent() => return Err(Error::Rejected),
-                _ => return Err(Error::Network("could not reach your mail provider to send")),
-            }
-            match timeout(submit, transport.send_raw(message.envelope(), raw)).await {
-                Err(_) => Err(Error::MaybeSent),
-                Ok(Err(e)) if auth_failure(&e) => Err(Error::Authentication),
-                Ok(result) => result.map_err(submission_error),
-            }
-        }.await;
-        match result {
-            Err(Error::Authentication) if oauth && attempt == 0 => {
+        let (host, tls) = endpoint(account)?;
+        let mut connection = match timeout(login, login_smtp(account, host, &tls, &credential)).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(e)) if auth_failure(&e) && oauth && attempt == 0 => {
                 credential = crate::oauth::access_token(account, Some(&credential)).await?;
+                continue;
             }
-            result => { result?; break; }
-        }
+            Ok(Err(e)) if auth_failure(&e) => return Err(Error::Authentication),
+            Ok(Err(e)) if e.is_permanent() => return Err(Error::Rejected),
+            _ => return Err(Error::Network("could not reach your mail provider to send")),
+        };
+        authorize()?;
+        timeout(submit, connection.send(message.envelope(), raw)).await
+            .map_err(|_| Error::MaybeSent)?.map_err(submission_error)?;
+        return Ok(());
     }
-    Ok(())
+    Err(Error::Authentication)
 }
 
 /// Resumes at Sent APPEND once SMTP has acknowledged delivery.
@@ -292,8 +286,9 @@ pub async fn send_queued(account: &Account, password: &str, pending: &crate::out
     }
     let result = async {
         if !pending.submitted {
+            store.authorize_queued_send(&pending.id)?;
             let message = compose(account, &pending.mail)?;
-            submit_within(account, password, &message, &pending.raw, LOGIN_DEADLINE, SUBMIT_DEADLINE).await?;
+            submit_within(account, password, &message, &pending.raw, LOGIN_DEADLINE, SUBMIT_DEADLINE, || store.authorize_queued_send(&pending.id)).await?;
             store.submitted(&pending.id).map_err(|_| Error::MaybeSent)?;
         }
         if !pending.copied {
@@ -343,7 +338,14 @@ pub async fn verify(account: &Account, password: &str) -> Result<()> {
     let oauth = matches!(account.auth, Auth::OAuth(_));
     let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
     for attempt in 0..2 {
-        let Ok(result) = timeout(LOGIN_DEADLINE, transport(account, &credential)?.test_connection()).await else {
+        let (host, tls) = endpoint(account)?;
+        let probe = async {
+            let mut connection = login_smtp(account, host, &tls, &credential).await?;
+            let connected = connection.test_connected().await;
+            connection.quit().await?;
+            Ok::<_, lettre::transport::smtp::Error>(connected)
+        };
+        let Ok(result) = timeout(LOGIN_DEADLINE, probe).await else {
             return Err(Error::Network("your mail provider did not answer in time"));
         };
         match result {
@@ -364,7 +366,7 @@ fn auth_failure(error: &lettre::transport::smtp::Error) -> bool {
     error.status().is_some_and(|status| u16::from(status) == 535)
 }
 
-fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+fn endpoint(account: &Account) -> Result<(&str, Tls)> {
     let config = &account.smtp;
     config.validate()?;
     let tls = match config.security {
@@ -384,14 +386,16 @@ fn transport(account: &Account, password: &str) -> Result<AsyncSmtpTransport<Tok
         } else {
             &config.host
         };
-    let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
-        .port(config.port).tls(tls)
-        .credentials(Credentials::new(config.username.clone(), password.to_owned()))
-        .timeout(Some(Duration::from_secs(60)));
-    if matches!(account.auth, Auth::OAuth(_)) {
-        builder = builder.authentication(vec![Mechanism::Xoauth2]);
-    }
-    Ok(builder.build())
+    Ok((host, tls))
+}
+
+async fn login_smtp(account: &Account, host: &str, tls: &Tls, password: &str)
+    -> std::result::Result<AsyncSmtpConnection, lettre::transport::smtp::Error>
+{
+    let mut connection = Tokio1Executor::connect(host, account.smtp.port, Some(Duration::from_secs(60)), &Default::default(), tls).await?;
+    let mechanisms = if matches!(account.auth, Auth::OAuth(_)) { &[Mechanism::Xoauth2][..] } else { DEFAULT_MECHANISMS };
+    connection.auth(mechanisms, &Credentials::new(account.smtp.username.clone(), password.to_owned())).await?;
+    Ok(connection)
 }
 #[cfg(test)]
 mod tests {
@@ -571,8 +575,43 @@ mod tests {
             }
             assert!(authenticated);
         });
-        assert!(transport(&account, "access-token").unwrap().test_connection().await.unwrap());
+        let (host, tls) = endpoint(&account).unwrap();
+        login_smtp(&account, host, &tls, "access-token").await.unwrap().quit().await.unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorization_sits_between_auth_and_mail_on_one_connection() {
+        use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+        let stage = AtomicU8::new(0);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut account = account();
+        account.smtp.host = "127.0.0.1".into();
+        account.smtp.port = listener.local_addr().unwrap().port();
+        account.smtp.security = Security::Plain;
+        let message = compose(&account, &Outgoing { to:vec!["a@example.org".into()], ..Default::default() }).unwrap();
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            socket.get_mut().write_all(b"220 fixture\r\n").await.unwrap();
+            for (command, reply) in [("EHLO ", "250-fixture\r\n250 AUTH PLAIN\r\n"),
+                                     ("AUTH ", "235 ok\r\n"), ("MAIL FROM:", "550 refused\r\n")] {
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                assert!(line.starts_with(command), "expected {command}");
+                if command == "AUTH " { stage.store(1, SeqCst); }
+                if command == "MAIL FROM:" { assert_eq!(stage.load(SeqCst), 2); }
+                socket.get_mut().write_all(reply.as_bytes()).await.unwrap();
+            }
+        };
+        let raw = message.formatted();
+        let deadline = Duration::from_secs(3);
+        let submit = submit_within(&account, "fixture", &message, &raw, deadline, deadline, || {
+            assert_eq!(stage.swap(2, SeqCst), 1);
+            Ok(())
+        });
+        let ((), result) = tokio::join!(server, submit);
+        assert!(matches!(result, Err(Error::Rejected)));
     }
 
     /// A local SMTP server that answers until `stall_at` (a command prefix, or "greeting"), then

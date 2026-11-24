@@ -101,19 +101,33 @@ impl MessageId {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct AuditTarget(String);
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedMessage {
-    target: String,
+    pub target: AuditTarget,
     pub row: i64,
     pub ambiguous: bool,
 }
 
-impl ResolvedMessage {
+impl AuditTarget {
     pub(super) fn audit_target(&self) -> &str {
-        &self.target
+        &self.0
     }
 }
 
 impl Store {
+    pub fn agent_object_target(&self, key: &ObjectId) -> Result<AuditTarget,Code> {
+        let found = match key {
+            ObjectId::Draft(a,d) => self.db.query_row("SELECT account,id FROM drafts WHERE account=? AND id=?",
+                [a,d], |r| Ok(ObjectId::Draft(r.get(0)?,r.get(1)?))).optional()?,
+            ObjectId::Event(a,c,e) => self.db.query_row("SELECT c.account,c.remote_id,e.remote_id FROM calendars c JOIN events e ON e.calendar=c.id
+                WHERE c.account=? AND c.remote_id=? AND e.remote_id=?", [a,c,e], |r| Ok(ObjectId::Event(r.get(0)?,r.get(1)?,r.get(2)?))).optional()?,
+            _ => None,
+        };
+        Ok(AuditTarget(found.ok_or(Code::NotFound)?.encode()))
+    }
+
     pub fn resolve_agent_message(
         &self,
         token: Option<&str>,
@@ -211,7 +225,7 @@ impl Store {
                     AND m.message_id=''", params![account, name, validity, uid],
                     |r| Ok(ResolvedMessage {
                         row: r.get(0)?, ambiguous: false,
-                        target: MessageId::Uid(r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?).encode(),
+                        target: AuditTarget(MessageId::Uid(r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?).encode()),
                     }),
                 ).optional()?
             }
@@ -229,7 +243,7 @@ impl Store {
                     params![account, header, folder],
                     |r| Ok(ResolvedMessage {
                         row: r.get(0)?, ambiguous: r.get(1)?,
-                        target: MessageId::Header(r.get(2)?, r.get(3)?).encode(),
+                        target: AuditTarget(MessageId::Header(r.get(2)?, r.get(3)?).encode()),
                     }),
                 ).optional()?
             }

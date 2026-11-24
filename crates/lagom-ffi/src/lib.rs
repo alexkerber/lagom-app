@@ -370,9 +370,14 @@ fn sync_account(stores: &Stores, a: &Account) -> lagom_core::Result<()> {
         let store = &mut *stores.folder_lock();
         let outbox = (|| -> lagom_core::Result<()> {
             for id in store.due_outbox(&a.id, milliseconds())? {
-                // Undo send may remove the row after due_outbox listed it.
-                let pending = match store.pending(&id) { Err(lagom_core::Error::NotFound) => continue, other => other? };
                 if store.claim_send(&id, milliseconds())? {
+                    let pending = match store.pending(&id) {
+                        Ok(pending) => pending,
+                        Err(e) => {
+                            store.send_failed(&id, &e, milliseconds())?;
+                            return Err(e);
+                        }
+                    };
                     // The Sent copy syncs the Sent folder.
                     if let Err(e) = network(smtp::send_queued(a, &password, &pending, store)) { error = Some(e); }
                 }

@@ -28,6 +28,8 @@ use lagom_core::{
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use zeroize::Zeroizing;
 
+#[cfg(unix)]
+mod agent_write;
 mod tasks;
 use tasks::{TaskCmd, TaskWorker};
 
@@ -80,6 +82,10 @@ pub enum Cmd {
     ForwardAttachments { draft: String, id: i64 },
     OpenMessage(i64),
     #[cfg(unix)]
+    AgentConfirm(crate::agent::confirm::Sheet),
+    #[cfg(unix)]
+    AgentWrite(Box<crate::agent::write::Job>),
+    #[cfg(unix)]
     AgentAttachment(crate::agent::read::Attachment),
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
@@ -121,6 +127,10 @@ pub enum Delivery {
 }
 
 pub enum Event {
+    #[cfg(unix)]
+    AgentConfirm(crate::agent::confirm::Sheet),
+    #[cfg(unix)]
+    AgentQueued(String),
     /// Forward to GPUI cx.open_url; never log this URL.
     OpenUrl(String),
     SignedIn(Result<String, String>),
@@ -452,6 +462,15 @@ impl Worker {
                 self.emit(Event::MessageFile(result));
             }
             #[cfg(unix)]
+            Cmd::AgentConfirm(sheet) => self.emit(Event::AgentConfirm(sheet)),
+            #[cfg(unix)]
+            Cmd::AgentWrite(job) => {
+                let mut created = None;
+                let result = self.agent_write(&job, &mut created).await;
+                if result.is_ok() { self.emit(Event::Changed); }
+                let _ = job.reply.send(result.map(|value| (value, created)));
+            }
+            #[cfg(unix)]
             Cmd::AgentAttachment(mut request) => {
                 if !request.reply.is_closed() {
                     let result = match Store::agent_reader(self.store.path(), || false).and_then(|reader| request.resolve(&reader)) {
@@ -573,7 +592,7 @@ impl Worker {
     }
 
     fn account(&self, id: &str) -> lagom_core::Result<Account> {
-        self.store.accounts()?.into_iter().find(|a| a.id == id).ok_or(Error::NotFound)
+        self.store.account(id)
     }
 
     /// The account's session, logged in if needed. Give it back with `give`.
@@ -588,7 +607,7 @@ impl Worker {
     /// README: a session that saw an error may hold a half-read response; never reuse it.
     fn give<T>(&mut self, account: &str, mut session: ImapSync, result: &lagom_core::Result<T>) {
         if let Some(error) = session.take_refresh_error() {
-            self.emit(Event::Sync(account.into(), SyncState::Failed(format!("Mail moved; refresh failed: {error}"))));
+            self.emit(Event::Sync(account.into(), SyncState::Failed(format!("Mail refresh failed: {error}"))));
         } else if result.is_ok() {
             self.sessions.insert(account.into(), session);
         }
@@ -1073,6 +1092,10 @@ impl Worker {
 
     async fn forward_attachments(&mut self, id: i64) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
         let id = self.resolve(id).await?;
+        self.forward_parts(id, usize::MAX).await
+    }
+
+    async fn forward_parts(&mut self, id: i64, mut remaining: usize) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
         if !self.store.attachment_metadata_loaded(id)? {
             let m = self.store.message_summary(id)?;
             let account = self.account(&m.account)?;
@@ -1082,7 +1105,8 @@ impl Worker {
         }
         let mut parts = Vec::new();
         for part in self.store.attachments(id)? {
-            let data = self.attachment_bytes(id, &part.section, usize::MAX).await?;
+            let data = self.attachment_bytes(id, &part.section, remaining).await?;
+            remaining -= data.len();
             parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
         }
         Ok(parts)

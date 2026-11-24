@@ -71,6 +71,13 @@ async fn net_as<T, E: Transient>(
         .map_err(|_| Error::Network(TIMED_OUT))?
         .map_err(|e| Error::Network(if e.transient() { DROPPED } else { what }))
 }
+async fn mutation<T>(f: impl Future<Output = async_imap::error::Result<T>>) -> Result<T> {
+    match tokio::time::timeout(TIMEOUT, f).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_))) => Err(Error::Network(FAILED)),
+        _ => Err(Error::Uncertain),
+    }
+}
 async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -152,6 +159,10 @@ impl async_imap::Authenticator for Xoauth2 {
 /// reported by COPYUID or confirmed by a unique header and size match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moved { pub folder: i64, pub uid: Option<(u32, u32)> }
+
+pub enum MailFlag { Seen, Flagged }
+
+pub enum Destination { Archive, Trash, Folder(i64) }
 
 pub struct ImapSync {
     account: Account,
@@ -684,12 +695,14 @@ impl ImapSync {
         if part.size as usize > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
         }
-        let estimated = if part.encoding.eq_ignore_ascii_case("base64") {
-            u64::from(part.size) * 3 / 4
-        } else {
-            u64::from(part.size)
+        let wire = part.size as usize;
+        let minimum = match part.encoding.to_ascii_lowercase().as_str() {
+            // Budget MIME lines of 76 digits plus CRLF, including a short final line and two padding bytes.
+            "base64" => (wire.saturating_sub(2 * wire.div_ceil(78)) / 4 * 3).saturating_sub(2),
+            "7bit" | "8bit" | "binary" => wire,
+            _ => 0,
         };
-        if estimated > limit as u64 {
+        if minimum > limit {
             return Err(Error::Invalid("attachment is too large"));
         }
         // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
@@ -716,40 +729,71 @@ impl ImapSync {
         if bytes.len() != part.size as usize {
             return Err(Error::Network("attachment size changed or download incomplete"));
         }
+        if part.encoding.eq_ignore_ascii_case("base64") {
+            let digits = bytes.iter().filter(|b| !b.is_ascii_whitespace() && **b != b'=').count();
+            if digits * 3 / 4 > limit { return Err(Error::Invalid("attachment is too large")); }
+        }
         let data = attachment::decode(bytes, &part.encoding)?;
         if data.len() > limit { return Err(Error::Invalid("attachment is too large")); }
         store.cache_attachment(id, section, &data)?;
         Ok(data)
     }
-    pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
+    pub fn targeted_move_supported(&self) -> bool {
+        self.capabilities.has_str("MOVE") || self.capabilities.has_str("UIDPLUS")
+    }
+
+    pub async fn set_flag_checked(&mut self, store: &Store, id: i64, flag: MailFlag, on: bool,
+        check: impl Fn(&Store) -> Result<()>) -> Result<()> {
         let message = store.message(id)?.summary;
         self.select_unchanged(store, &message, "mailbox changed; resync before operation").await?;
-        let command = if seen {
-            "+FLAGS.SILENT (\\Seen)"
-        } else {
-            "-FLAGS.SILENT (\\Seen)"
-        };
+        check(store)?;
+        let sign = if on { "+" } else { "-" };
+        let name = match flag { MailFlag::Seen => "Seen", MailFlag::Flagged => "Flagged" };
         // async-imap's STORE stream discards tagged NO/BAD replies.
-        net(self.session.run_command_and_check_ok(format!("UID STORE {} {command}", message.uid))).await?;
-        store.set_seen(message.folder, message.uid, seen)
+        mutation(self.session.run_command_and_check_ok(format!("UID STORE {} {sign}FLAGS.SILENT (\\{name})", message.uid))).await?;
+        let cache = match flag {
+            MailFlag::Seen => store.set_seen(message.folder, message.uid, on),
+            MailFlag::Flagged => {
+                store.db.execute("UPDATE messages SET flagged=? WHERE id=?", (on,id)).map(|_| ()).map_err(Error::from)
+            }
+        };
+        if let Err(e) = cache { self.refresh_error = Some(e); }
+        Ok(())
+    }
+
+    pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
+        self.set_flag_checked(store,id,MailFlag::Seen,seen, |_|Ok(())).await
     }
     pub async fn create_folder(&mut self, store: &Store, name: &str) -> Result<i64> {
         validate_folder(name)?;
-        net(self.session.create(&encode_mailbox(name))).await?;
-        self.list_folders(store).await?;
-        store
-            .folders(&self.account.id, 0)?
-            .into_iter()
-            .find(|f| f.name == name)
-            .map(|f| f.id)
-            .ok_or(Error::NotFound)
+        mutation(self.session.create(&encode_mailbox(name))).await?;
+        self.list_folders(store).await.map_err(|_| Error::Uncertain)?
+            .into_iter().find(|f| f.name == name).map(|f| f.id).ok_or(Error::Uncertain)
     }
     pub async fn move_message(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Moved> {
-        let result = self.move_on_server(store, id, target).await;
-        if result.is_err() { store.cancel_move(id)?; }
+        self.move_checked(store,id,Destination::Folder(target), |_|Ok(())).await
+    }
+    pub async fn move_checked(&mut self, store: &mut Store, id: i64, destination: Destination,
+        check: impl Fn(&Store) -> Result<()>) -> Result<Moved> {
+        if store.message_summary(id)?.account != self.account.id {
+            return Err(Error::Invalid("message belongs to another account"));
+        }
+        let target = match destination {
+            Destination::Folder(id) => id,
+            Destination::Trash => self.ensure_role_checked(store,FolderRole::Trash,"Trash",&check).await?,
+            Destination::Archive => {
+                let fallback = if presets::is_gmail(&self.account) { "[Gmail]/All Mail" } else { "Archive" };
+                self.ensure_role_checked(store,FolderRole::Archive,fallback,&check).await?
+            }
+        };
+        check(store)?;
+        let result = self.move_on_server(store, id, target, check).await;
+        if result.is_err() {
+            if let Err(error) = store.cancel_move(id) { self.refresh_error = Some(error); }
+        }
         result.map(|uid| Moved { folder: target, uid })
     }
-    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64) -> Result<Option<(u32, u32)>> {
+    async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64, check: impl Fn(&Store) -> Result<()>) -> Result<Option<(u32, u32)>> {
         let message = store.message(id)?.summary;
         let destination = store.folder(target)?;
         if message.account != self.account.id || destination.account != self.account.id {
@@ -764,19 +808,22 @@ impl ImapSync {
         if before != source.uidvalidity {
             return Err(Error::Invalid("mailbox changed; resync before operation"));
         }
+        check(store)?;
         if source.role == FolderRole::Trash {
             // An interrupted empty may have marked the message; MOVE and COPY preserve flags.
-            net(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
+            mutation(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
         }
         let mailbox = quoted(&encode_mailbox(&destination.name))?;
-        let copied = if self.capabilities.has_str("MOVE") {
-            self.copy_uid(format!("UID MOVE {} {mailbox}", message.uid), message.uid).await?
-        } else {
-            // shortcut: COPY can leave a destination copy if deletion fails; reconcile duplicates when resumable moves are added.
-            let copied = self.copy_uid(format!("UID COPY {} {mailbox}", message.uid), message.uid).await?;
-            self.delete_uids(&message.uid.to_string(), true).await?;
-            copied
-        };
+        let move_command = self.capabilities.has_str("MOVE");
+        if source.role == FolderRole::Trash { check(store).map_err(|_| Error::Uncertain)?; }
+        let verb = if move_command { "MOVE" } else { "COPY" };
+        let copied = self.copy_uid(format!("UID {verb} {} {mailbox}", message.uid), message.uid).await
+            .map_err(|e| if source.role == FolderRole::Trash { Error::Uncertain } else { e })?;
+        if !move_command {
+            let authorized = || check(store).map_err(|_| Error::Uncertain);
+            authorized()?;
+            self.delete_uids(&message.uid.to_string(), true, authorized).await.map_err(|_| Error::Uncertain)?;
+        }
         // A confirmed move must not be rolled back because a subsequent refresh failed.
         if let Err(error) = store.delete_message(id) {
             self.refresh_error = Some(error);
@@ -848,10 +895,10 @@ impl ImapSync {
         };
         // async-imap's uid_mv and uid_copy discard the response codes.
         tokio::time::timeout(TIMEOUT, async {
-            let tag = net(self.session.run_command(command)).await?;
+            let tag = net(self.session.run_command(command)).await.map_err(|_| Error::Uncertain)?;
             let mut copied = None;
             loop {
-                let response = net(self.session.read_response()).await?.ok_or(Error::Network(DROPPED))?;
+                let response = net(self.session.read_response()).await.map_err(|_| Error::Uncertain)?.ok_or(Error::Uncertain)?;
                 let (outcome, done) = match response.parsed() {
                     Response::Data { status: Status::Ok, outcome } => (outcome, false),
                     Response::Done { tag: done, status, outcome } if *done == tag => {
@@ -867,7 +914,7 @@ impl ImapSync {
                 }
                 if done { return Ok(copied); }
             }
-        }).await.map_err(|_| Error::Network(TIMED_OUT))?
+        }).await.map_err(|_| Error::Uncertain)?
     }
     pub(crate) async fn ensure_role(
         &mut self,
@@ -875,41 +922,33 @@ impl ImapSync {
         wanted: FolderRole,
         fallback: &str,
     ) -> Result<i64> {
+        self.ensure_role_checked(store,wanted,fallback, |_|Ok(())).await
+    }
+    async fn ensure_role_checked(&mut self,store:&Store,wanted:FolderRole,fallback:&str,
+        check:impl Fn(&Store)->Result<()>) -> Result<i64> {
         let folders = self.list_folders(store).await?;
         if let Some(f) = folders.iter().find(|f| f.role == wanted) {
             return Ok(f.id);
         }
+        check(store)?;
         self.create_folder(store, fallback).await
     }
     pub async fn archive(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
-        if store.message(id)?.summary.account != self.account.id {
-            return Err(Error::Invalid("message belongs to another account"));
-        }
-        let fallback = if presets::is_gmail(&self.account) {
-            "[Gmail]/All Mail"
-        } else {
-            "Archive"
-        };
-        let target = self
-            .ensure_role(store, FolderRole::Archive, fallback)
-            .await?;
-        self.move_message(store, id, target).await
+        self.move_checked(store,id,Destination::Archive, |_|Ok(())).await
     }
     pub async fn trash(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
-        if store.message(id)?.summary.account != self.account.id {
-            return Err(Error::Invalid("message belongs to another account"));
-        }
-        let target = self.ensure_role(store, FolderRole::Trash, "Trash").await?;
-        self.move_message(store, id, target).await
+        self.move_checked(store,id,Destination::Trash, |_|Ok(())).await
     }
-    async fn delete_uids(&mut self, set: &str, restore_on_refusal: bool) -> Result<()> {
+    async fn delete_uids(&mut self, set: &str, restore_on_refusal: bool, check: impl Fn() -> Result<()>) -> Result<()> {
         // async-imap's STORE/EXPUNGE streams discard tagged NO/BAD replies.
         net(self.session.run_command_and_check_ok(format!("UID STORE {set} +FLAGS.SILENT (\\Deleted)"))).await?;
+        check()?;
         // shortcut: without UIDPLUS, EXPUNGE also removes other deleted mail; use UID EXPUNGE whenever advertised.
         let command = if self.capabilities.has_str("UIDPLUS") { format!("UID EXPUNGE {set}") } else { "EXPUNGE".into() };
         let result = tokio::time::timeout(TIMEOUT, self.session.run_command_and_check_ok(command)).await
             .map_err(|_| Error::Network("IMAP operation timed out"))?;
         if restore_on_refusal && matches!(&result, Err(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_))) {
+            check()?;
             // A refused move must not leave the original waiting for another client's EXPUNGE.
             net(self.session.run_command_and_check_ok(format!("UID STORE {set} -FLAGS.SILENT (\\Deleted)"))).await?;
         }
@@ -931,14 +970,14 @@ impl ImapSync {
         uids.sort_unstable();
         // Exact UIDs keep mail arriving during the operation out of the expunge.
         for chunk in uids.chunks(100) {
-            self.delete_uids(&uid_set(chunk), false).await?;
+            self.delete_uids(&uid_set(chunk), false, || Ok(())).await?;
         }
         self.sync_folder(store, id, DEFAULT_LIMIT).await
     }
     pub async fn append_sent(&mut self, store: &mut Store, raw: &[u8]) -> Result<i64> {
         let target = self.ensure_role(store, FolderRole::Sent, "Sent").await?;
         let folder = store.folder(target)?;
-        net(self
+        mutation(self
             .session
             .append(&encode_mailbox(&folder.name), Some("(\\Seen)"), None, raw))
         .await?;

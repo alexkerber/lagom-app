@@ -28,7 +28,7 @@ pub enum Resource {
     Calendar,
 }
 
-/// A switch in Settings > AI Agents. A missing row is off.
+/// A switch in Settings > AI Agents. Confirmation is on unless explicitly disabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {
     Enabled,
@@ -56,8 +56,12 @@ pub struct Access {
 
 impl Store {
     pub fn agent_setting(&self, setting: Setting) -> Result<bool, Code> {
+        let query = match setting {
+            Setting::Confirm => "SELECT NOT EXISTS(SELECT 1 FROM agent_settings WHERE key=? AND value='0')",
+            _ => "SELECT EXISTS(SELECT 1 FROM agent_settings WHERE key=? AND value='1')",
+        };
         Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_settings WHERE key=? AND value='1')",
+            query,
             [setting.key()],
             |r| r.get(0),
         )?)
@@ -67,10 +71,12 @@ impl Store {
         if matches!(setting, Setting::Enabled) && !on {
             return self.disable_agents();
         }
-        self.db.execute(
+        let tx = self.write_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO agent_settings VALUES(?,?)",
             params![setting.key(), if on { "1" } else { "0" }],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -96,6 +102,10 @@ impl Store {
     /// Calendars have no Triage. Evaluation takes the minimum of both matrices, so a stored agent
     /// row above the global one never widens access.
     pub fn set_agent_access(&self, agent: &str, access: &Access) -> Result<(), Code> {
+        self.change_authority(|| self.set_agent_access_inner(agent, access))
+    }
+
+    pub(super) fn set_agent_access_inner(&self, agent: &str, access: &Access) -> Result<(), Code> {
         let kind = match (access.resource, access.level) {
             (Resource::Calendar, Level::Triage) => return Err(Code::InvalidRequest),
             (Resource::Mail, _) => "mail",
@@ -110,11 +120,10 @@ impl Store {
 
     /// Disconnect all: every token goes and access switches off, in one transaction.
     pub fn revoke_all_agents(&self) -> Result<(), Code> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM agent_tokens", [])?;
-        self.disable_agent_listener()?;
-        tx.commit()?;
-        Ok(())
+        self.change_authority(|| {
+            self.db.execute("DELETE FROM agent_tokens", [])?;
+            self.disable_agent_listener()
+        })
     }
 
     /// Reauthenticate and read both policy matrices in one store snapshot.

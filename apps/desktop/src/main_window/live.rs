@@ -151,6 +151,16 @@ impl Mail {
             handle.update(cx, |this, window, cx| this.on_events(events, window, cx)).ok();
         } else {
             let messages = events.into_iter().filter_map(|event| match event {
+                #[cfg(unix)]
+                Event::AgentConfirm(sheet) => {
+                    let mut waiting = std::mem::take(cx.default_global::<crate::agent::confirm::Waiting>());
+                    let added = waiting.push(sheet, cx.default_global::<crate::agent::confirm::Denials>());
+                    cx.set_global(waiting);
+                    if added {
+                        cx.global_mut::<crate::notifications::State>().service.agent_waiting();
+                    }
+                    None
+                }
                 Event::NewMail(messages) => Some(messages),
                 Event::Op { op, .. } => {
                     cx.global::<Self>().pending.borrow_mut().remove(&op);
@@ -526,6 +536,23 @@ impl MainWindow {
         let mut new_mail = Vec::new();
         for event in events {
             match event {
+                #[cfg(unix)]
+                Event::AgentConfirm(sheet) => {
+                    if self.agent_sheets.push(sheet, cx.default_global::<crate::agent::confirm::Denials>()) {
+                        if !window.is_window_active() && cx.try_global::<crate::notifications::State>().is_some() {
+                            cx.global_mut::<crate::notifications::State>().service.agent_waiting();
+                        }
+                        self.watch_agent_sheets(window,cx);
+                    }
+                }
+                #[cfg(unix)]
+                Event::AgentQueued(id) => {
+                    self.agent_sends.push(id.clone());
+                    cx.spawn(async move |this,cx| {
+                        cx.background_executor().timer(crate::compose::UNDO_WINDOW).await;
+                        this.update(cx,|this,cx| {this.agent_sends.retain(|v|v!=&id);cx.notify();}).ok();
+                    }).detach();
+                }
                 Event::OpenUrl(url) => cx.open_url(&url),
                 Event::ForwardAttachments { draft, result } => {
                     for compose in self.compose.iter().chain(&self.drafts) {
@@ -820,6 +847,11 @@ impl MainWindow {
     pub(super) fn open_notification(&mut self, target: crate::notifications::Target, window: &mut Window, cx: &mut Context<Self>) {
         cx.activate(true);
         window.activate_window();
+        #[cfg(unix)]
+        if target.account == crate::settings::agents::AGENTS && target.message.is_none() {
+            if self.agent_sheets.sheets.is_empty(){self.open_agents(window,cx);} else {self.agent_deny.focus(window);}
+            return;
+        }
         let Some(live) = &mut self.live else { return };
         if !live.ops.is_empty() {
             live.notification_target = Some(target);
@@ -4363,6 +4395,116 @@ mod tests {
         let summary = MessageSummary { account: a.id.clone(), folder, uid, date: uid as i64, ..Default::default() };
         let id = live.store.save_message(&Message { summary, ..Default::default() }).unwrap();
         live.store.message(id).unwrap().summary
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn confirmation_scrolls_to_the_end_and_marks_withdrawals(cx: &mut TestAppContext) {
+        use crate::agent::{confirm::Sheet,write::Snapshot};
+        use lagom_core::agent::{protocol::{Code,Request},token::AgentRow};
+        let (view,cx,_) = window(cx);
+        let show = |id: &str, text: &str, cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |v,w,cx| {
+                let agent = AgentRow { id:id.into(),name:id.into(),kind:"fixture".into(),host:"here".into(),remote:false,active:true, expires: None };
+                let req: Request = serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
+                let (done,closed) = tokio::sync::oneshot::channel();
+                let mail = lagom_core::smtp::Outgoing {
+                    to: if id == "three" { (0..80).map(|n| format!("person{n}@example.org")).collect() } else { vec![] },
+                    text:text.into(), ..Default::default()
+                };
+                let (sheet, answer) = Sheet::new(agent,v.live.as_ref().unwrap().account().unwrap(),&req,
+                    &Snapshot::Mail(String::new(),mail),closed,Default::default()).unwrap();
+                v.on_events(vec![Event::AgentConfirm(sheet)],w,cx);
+                (done,answer)
+            })
+        };
+        let first = show("one","short",cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Expand").is_none());
+        let _second = show("two",&"Long message line\n".repeat(500),cx);
+        drop(first);
+        cx.run_until_parked();
+        assert_eq!(show("one","again",cx).1.try_recv().unwrap(), Err(Code::Busy));
+        view.update(cx,|v,_| {
+            assert!(v.agent_sheets.withdrawn);
+            let (serial, at) = v.agent_sheets.front_since.as_mut().unwrap();
+            let serial = *serial;
+            *at -= std::time::Duration::from_millis(800);
+            assert!(!v.agent_sheets.armed(serial,false,false,true));
+        });
+        assert!(cx.debug_bounds("Expand").is_some());
+        assert!(cx.debug_bounds("more-confirmation-body").is_some());
+        view.update(cx,|v,cx| {
+            let scroll = &v.agent_sheets.scroll[0];
+            scroll.set_offset(gpui::point(px(0.),-scroll.max_offset().height));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("more-confirmation-body").is_none());
+        cx.simulate_keystrokes("escape");
+        let _later = show("three","later",cx);
+        view.read_with(cx,|v,_| assert!(!v.agent_sheets.withdrawn));
+        cx.run_until_parked();
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert!(cx.debug_bounds("more-agent-preview").is_some());
+        view.update(cx,|v,cx| {
+            let scroll = &v.agent_sheets.scroll[2];
+            scroll.set_offset(gpui::point(px(0.),-scroll.max_offset().height));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("more-agent-preview").is_none());
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn agent_sheet_focus_keys_and_background_notice(cx: &mut TestAppContext) {
+        use crate::agent::{confirm::Sheet,write::Snapshot};
+        use lagom_core::agent::{protocol::{Code,Request},token::AgentRow};
+        use std::{os::unix::net::UnixStream,sync::Arc};
+        let (view,cx,_)=window(cx);
+        let (client,server)=UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let server=Arc::new(server);
+        let req:Request=serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
+        let store = view.read_with(cx, |v,_| v.live.as_ref().unwrap().store.clone());
+        let id = store.create_agent("fixture","Writer","here",false).unwrap();
+        let token = store.issue_token(&id, lagom_core::agent::token::TokenScope::Local).unwrap();
+        cx.deactivate_window();
+        for action in ["deny", "busy", "approve", "revoke"] {
+            let agent = AgentRow { id:if matches!(action,"deny"|"busy") { "other".into() } else { id.clone() },
+                name:"Writer".into(), kind:"fixture".into(), remote:false, host:"here".into(),active:true, expires: None };
+            let (_lifetime,done)=tokio::sync::oneshot::channel();
+            let mut answer=view.update_in(cx,|v,w,cx|{
+                let account=v.live.as_ref().unwrap().account().unwrap();
+                let (sheet,answer)=Sheet::new(agent,account,&req,&Snapshot::Mail("rev".into(),Default::default()),done,Arc::downgrade(&server)).unwrap();
+                v.on_events(vec![Event::AgentConfirm(sheet)],w,cx);
+                if action != "busy" { assert!(v.agent_deny.is_focused(w)); }
+                answer
+            });
+            cx.run_until_parked();
+            if action == "busy" { assert_eq!(answer.try_recv().unwrap(), Err(Code::Busy)); continue; }
+            if action == "deny" {
+                cx.simulate_keystrokes("enter space secondary-enter");
+                assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+                cx.simulate_keystrokes("escape");
+            } else {
+                view.update_in(cx, |_, w, _| w.activate_window());
+                cx.run_until_parked();
+                let label = if action == "approve" { "Send" } else { "Deny and revoke" };
+                let at = cx.debug_bounds(label).unwrap().center();
+                {
+                    cx.simulate_click(at, Default::default());
+                    assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+                    view.update(cx,|v,_| v.agent_sheets.front_since.as_mut().unwrap().1 -= std::time::Duration::from_secs(1));
+                }
+                cx.simulate_click(at, Default::default());
+            }
+            assert_eq!(answer.try_recv().unwrap(), if action == "approve" { Ok(()) } else { Err(Code::Denied) });
+        }
+        assert!(store.authenticate(Some(&token),None).is_err());
+        view.update(cx,|_,cx|assert!(cx.global::<crate::notifications::State>().service.posted_count()>0));
+        drop(client);
     }
 
     #[gpui::test]

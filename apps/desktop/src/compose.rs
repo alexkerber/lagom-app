@@ -519,7 +519,7 @@ impl Compose {
         if let Some((store, account)) = &self.store {
             let ready = chrono::Local::now().timestamp_millis() + UNDO_WINDOW.as_millis() as i64;
             if store.enqueue(account, &mail, ready).is_err() {
-                self.problem = Some("Could not save the message for sending. Check the recipients.");
+                self.problem = Some("Could not save the message for sending.");
                 cx.notify();
                 return;
             }

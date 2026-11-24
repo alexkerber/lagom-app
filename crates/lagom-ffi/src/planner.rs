@@ -69,6 +69,7 @@ fn new_event(form: EventForm) -> lagom_core::Result<NewEvent> {
         .map(|guest| lagom_core::contacts::recipient_address(guest).ok_or(Invalid("Enter valid guest email addresses")))
         .collect::<lagom_core::Result<Vec<_>>>()?;
     let draft = NewEvent {
+        location: None,
         title: form.title.trim().into(), start, end, all_day: form.all_day,
         time_zone: if form.all_day { String::new() } else { form.time_zone },
         description: (!form.description.trim().is_empty()).then_some(form.description), attendees, meet: form.meet,

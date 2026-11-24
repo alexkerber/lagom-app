@@ -147,6 +147,36 @@ async fn synchronous_failure_leaves_no_queued_delivery() {
 }
 
 #[tokio::test]
+async fn compose_sends_a_triage_agents_draft() {
+    use crate::agent::{policy::{Access, Level, Resource, Setting}, token::TokenScope};
+    let (smtp, submissions, smtp_server) = smtp_fixture(None).await;
+    let (imap, _, imap_server) = imap_fixture(false, false).await;
+    let config = |port| crate::account::ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: "writer".into() };
+    let account = Account::new("writer@example.com".into(), config(imap), config(smtp)).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path().join("mail.db")).unwrap();
+    store.save_account(&account).unwrap();
+    let agent = store.create_agent("test","Writer","here",false).unwrap();
+    let token = store.issue_token(&agent,TokenScope::Local).unwrap();
+    store.set_agent_setting(Setting::Enabled,true).unwrap();
+    for owner in ["",&agent] {
+        store.set_agent_access(owner,&Access { resource:Resource::Mail, account:account.id.clone(), level:Level::Triage }).unwrap();
+    }
+    let id = message_id(&account.email);
+    let draft = crate::outbox::Draft { id:id.clone(),account:account.id.clone(),to:"reader@example.com".into(),
+        text:"Reviewed in Compose".into(), ..Default::default() };
+    store.save_draft(&draft).unwrap();
+    store.set_draft_agent(&id,&store.authenticate(Some(&token),None).unwrap()).unwrap();
+    let mail = Outgoing { message_id:Some(id.clone()),to:vec![draft.to],text:draft.text,..Default::default() };
+    store.enqueue(&account,&mail,0).unwrap();
+    assert!(store.claim_send(&id,0).unwrap());
+    send_queued(&account,"fixture",&store.pending(&id).unwrap(),&mut store).await.unwrap();
+    assert!(submissions.lock().unwrap()[0].contains("Reviewed in Compose"));
+    smtp_server.abort();
+    imap_server.abort();
+}
+
+#[tokio::test]
 async fn acknowledged_append_survives_cache_refresh_failure() {
     let (smtp_port, submissions, smtp_server) = smtp_fixture(None).await;
     let (imap_port, copies, imap_server) = imap_fixture(false, true).await;

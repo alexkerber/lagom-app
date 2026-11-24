@@ -98,7 +98,7 @@ async fn roundtrip(into_inbox: bool, resolving: bool, fail_source: bool) {
                 Event::NewMail(mail) => messages.extend(mail),
                 Event::Op { error, .. } => assert!(error.is_none(), "confirmed moves survive refresh failures"),
                 Event::Sync(_, SyncState::Failed(error)) => {
-                    assert!(error.starts_with("Mail moved; refresh failed:"));
+                    assert!(error.starts_with("Mail refresh failed:"));
                     refresh_failed = true;
                 }
                 _ => {},

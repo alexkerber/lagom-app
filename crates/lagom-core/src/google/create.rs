@@ -18,7 +18,7 @@ impl NewEvent {
         };
         event(RemoteEvent {
             id, status: String::new(), summary: Some(self.title.trim().into()), start: Some(time(&self.start)), end: Some(time(&self.end)),
-            location: None, hangout_link: None, html_link: None, conference_data: None,
+            location: self.location.clone(), hangout_link: None, html_link: None, conference_data: None,
         }).map_err(|_| Error::Invalid("enter a valid start and later end"))
     }
 
@@ -40,6 +40,7 @@ impl NewEvent {
         let time = |value: &str| if self.all_day { json!({ "date": value }) }
             else { json!({ "dateTime": value, "timeZone": self.time_zone }) };
         let mut body = json!({ "summary": self.title.trim(), "start": time(&self.start), "end": time(&self.end) });
+        if let Some(location) = &self.location { body["location"] = json!(location); }
         if let Some(description) = &self.description { body["description"] = json!(description); }
         if !self.attendees.is_empty() {
             body["attendees"] = self.attendees.iter().map(|email| json!({ "email": email })).collect();
@@ -54,8 +55,16 @@ impl NewEvent {
 }
 
 pub async fn create_event(account: &Account, calendar: &str, draft: &NewEvent) -> Result<CreatedEvent> {
-    create_with("https://www.googleapis.com/calendar/v3/", calendar, draft,
-        |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
+    create_event_checked(account, calendar, draft, || Ok(())).await
+}
+
+pub async fn create_event_checked(account: &Account, calendar: &str, draft: &NewEvent, check: impl Fn() -> Result<()>) -> Result<CreatedEvent> {
+    let check = &check;
+    create_with("https://www.googleapis.com/calendar/v3/", calendar, draft, |rejected| async move {
+        let access = oauth::access_token(account, rejected.as_deref()).await?;
+        check()?;
+        Ok(access)
+    }).await
 }
 
 pub async fn create_with<F, Fut>(base: &str, calendar: &str, draft: &NewEvent, token: F) -> Result<CreatedEvent>

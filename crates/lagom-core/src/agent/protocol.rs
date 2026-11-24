@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 pub const VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Request {
     pub v: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

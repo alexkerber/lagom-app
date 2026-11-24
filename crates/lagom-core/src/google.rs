@@ -1,8 +1,8 @@
 mod change;
-pub use change::{delete_event, fetch_event, update_event, EventSnapshot};
+pub use change::{change_event_checked, change_with, fetch_event_with, delete_event, fetch_event, update_event, EventSnapshot};
 use change::{event_url, write_event};
 mod create;
-pub use create::{create_event, create_with, fetch_created, fetch_created_with, CreatedEvent};
+pub use create::{create_event_checked, create_event, create_with, fetch_created, fetch_created_with, CreatedEvent};
 
 use crate::{account::Account, calendar::{Calendar, Event}, oauth, store::Store, Error, Result};
 use serde::Deserialize;

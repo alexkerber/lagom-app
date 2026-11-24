@@ -1,4 +1,4 @@
-use super::{id::ResolvedMessage, protocol::Code, token::Identity};
+use super::{id::AuditTarget, protocol::Code, token::Identity};
 use crate::store::Store;
 use rusqlite::{params, OptionalExtension};
 use std::net::IpAddr;
@@ -68,11 +68,13 @@ impl TokenFailure {
     }
 }
 
+pub use lettre::Address;
+
 pub struct AuditRow<'a> {
     pub identity: Option<&'a Identity>,
     pub account: Option<uuid::Uuid>,
     pub command: &'a str,
-    pub target: Option<&'a ResolvedMessage>,
+    pub target: Option<&'a AuditTarget>,
     pub outcome: Result<(), Failure>,
     pub source_ip: Option<IpAddr>,
     pub recipients: &'a [lettre::Address],
@@ -86,6 +88,23 @@ pub struct AuditEntry {
     pub account: Option<String>,
     pub command: String,
     pub result: String,
+}
+
+fn outcome_label(command: &str, outcome: &Result<(), Failure>) -> Result<String, Code> {
+    Ok(match outcome {
+        Ok(()) => "ok".into(),
+        Err(Failure::Error(Code::InvalidRequest)) if command == "remote.refused" => "refused".into(),
+        Err(Failure::Error(code)) => serde_json::to_value(code)
+            .map_err(|_| Code::Internal)?
+            .as_str()
+            .ok_or(Code::Internal)?
+            .into(),
+        Err(Failure::VerifiedBusy { .. }) => "busy".into(),
+        Err(Failure::OutsideScope) => "not_found:outside_scope".into(),
+        Err(Failure::Unauthorized(reason) | Failure::VerifiedRefusal { reason, .. }) => {
+            format!("unauthorized:{}", reason.label())
+        }
+    })
 }
 
 impl Store {
@@ -127,19 +146,42 @@ impl Store {
         Ok(())
     }
 
+    pub fn recover_agent_writes(&self) -> Result<(), Code> {
+        self.db.execute("UPDATE agent_audit SET result='uncertain' WHERE result='pending' AND dispatched_write=1", [])?;
+        Ok(())
+    }
+
+    pub fn begin_agent_write(&self, row: AuditRow<'_>) -> Result<i64, Code> {
+        self.agent_audit_transaction(|| self.insert_agent_audit(row, chrono::Utc::now().timestamp(), true)?.ok_or(Code::Internal))
+    }
+
+    pub fn finish_agent_write(&self, id: i64, outcome: &Result<(), Failure>, target: Option<&AuditTarget>) -> Result<(), Code> {
+        let hidden = matches!(outcome, Err(Failure::OutsideScope | Failure::Unauthorized(_) | Failure::VerifiedRefusal { .. }
+            | Failure::Error(Code::Unauthorized | Code::NotFound)));
+        let changed = self.db.execute("UPDATE agent_audit SET result=?2,
+            target=CASE WHEN ?3 THEN NULL ELSE coalesce(?4,target) END WHERE id=?1 AND dispatched_write=1",
+            params![id, outcome_label("", outcome)?, hidden, target.map(AuditTarget::audit_target)])?;
+        if changed != 1 { return Err(Code::Internal); }
+        Ok(())
+    }
+
     pub fn record_agent_audit(&self, row: AuditRow<'_>) -> Result<(), Code> {
         self.record_agent_audit_at(row, chrono::Utc::now().timestamp())
     }
 
     pub(super) fn record_agent_audit_at(&self, row: AuditRow<'_>, now: i64) -> Result<(), Code> {
+        self.insert_agent_audit(row, now, false).map(|_| ())
+    }
+
+    fn insert_agent_audit(&self, row: AuditRow<'_>, now: i64, pending: bool) -> Result<Option<i64>, Code> {
         if self.db.is_autocommit() {
-            return self.agent_audit_transaction(|| self.record_agent_audit_at(row, now));
+            return self.agent_audit_transaction(|| self.insert_agent_audit(row, now, pending));
         }
         let tx = &self.db;
         let command = match row.command {
             "accounts" | "folders" | "emails" | "search" | "thread" | "attachment" | "contacts"
             | "events" | "availability" | "draft.list" | "draft.show" | "draft.create"
-            | "draft.edit" | "draft.delete" | "draft.send" | "action.archive" | "action.move"
+            | "draft.schedule" | "draft.edit" | "draft.delete" | "draft.send" | "action.archive" | "action.move"
             | "action.read" | "action.unread" | "action.star" | "action.unstar"
             | "action.snooze" | "action.unsnooze" | "action.trash" | "event.create"
             | "event.update" | "event.delete" | "remote.refused" => row.command,
@@ -155,20 +197,7 @@ impl Store {
                 row.identity.map(Identity::token_id),
             ),
         };
-        let result = match &row.outcome {
-            Ok(()) => "ok".into(),
-            Err(Failure::Error(Code::InvalidRequest)) if command == "remote.refused" => "refused".into(),
-            Err(Failure::Error(code)) => serde_json::to_value(code)
-                .map_err(|_| Code::Internal)?
-                .as_str()
-                .ok_or(Code::Internal)?
-                .into(),
-            Err(Failure::VerifiedBusy { .. }) => "busy".into(),
-            Err(Failure::OutsideScope) => "not_found:outside_scope".into(),
-            Err(Failure::Unauthorized(reason) | Failure::VerifiedRefusal { reason, .. }) => {
-                format!("unauthorized:{}", reason.label())
-            }
-        };
+        let result = outcome_label(command, &row.outcome)?;
         let minute = now - now.rem_euclid(60);
         let bucket = agent.is_some() && row.outcome.is_err();
         let mut aggregate = false;
@@ -195,6 +224,7 @@ impl Store {
                 params![now, identity.token_id(), identity.agent_id()],
             )?;
         }
+        let mut id = None;
         if !aggregate {
             let detail = if matches!(
                 command,
@@ -220,12 +250,13 @@ impl Store {
                     | Failure::Unauthorized(_)
                     | Failure::VerifiedRefusal { .. },
                 ) => None,
-                _ if row.identity.is_some() => row.target.map(ResolvedMessage::audit_target),
+                _ if row.identity.is_some() => row.target.map(AuditTarget::audit_target),
                 _ => None,
             };
-            tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail,refusals) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail,refusals,dispatched_write) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 params![if bucket {minute} else {now},agent,token,row.account.map(|id| id.to_string()),command,
-                    target,result,row.source_ip.map(|ip|ip.to_string()),detail,bucket])?;
+                    target,if pending { "pending" } else { &result },row.source_ip.map(|ip|ip.to_string()),detail,bucket,pending])?;
+            id = Some(tx.last_insert_rowid());
         }
         let last: Option<i64> = tx
             .query_row(
@@ -241,7 +272,7 @@ impl Store {
                 [now],
             )?;
         }
-        Ok(())
+        Ok(id)
     }
 
     pub fn agent_audit_transaction<T>(

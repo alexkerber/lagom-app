@@ -202,6 +202,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
+  - [x] read-only slice: `lagom-cli mcp` over stdio with list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos (2026-11-17). Protocol tests and a stdio smoke; not tried in a real MCP client.
   - [x] Closed the agent read security review on `feat/agents-socket`. Settings provisions authenticated MCP access.
     Pending reads recheck permissions. Search uses one snapshot. Contacts, attachments and audit refusals have limits.
     Long identifiers resolve within their account. Settings shows the latest 50 activity rows per agent.
@@ -218,13 +219,50 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     A fake socket verified framing, identity, output, errors and MCP calls.
     The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
     The live service and Linux remain untested.
+  - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
-- [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+    The write policy below resolves mail and calendar actions.
+  - [ ] Agent task changes are deferred.
+- [x] Local and SSH agents can triage mail, edit drafts and change calendars on `feat/agents-write`.
+  Both paths enforce token limits, audit refusals and check approved sends against the original policy.
+  Core, desktop and FFI tests passed on macOS. The desktop app built.
+  Live SSH, provider accounts and manual confirmation clicks remain unverified. See `docs/ai-agents.md`.
   - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
     Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
     Settings and the client explain when the socket path is too long.
     Core and desktop tests passed on macOS. The desktop app built. Live Gmail and visual Settings checks remain unverified.
+  - [x] Desktop agents can triage mail, manage their own drafts and change calendar events on `feat/agents-write`.
+    The worker checks access again before writing. Every calendar change requires approval.
+    Socket tests covered revocation, expiry, draft conflicts, disconnects, the two-minute timeout and Undo.
+    Scripted providers verified safe moves, guest previews, ETag conflicts, lost replies and cancellation of stale calendar syncs.
+    Core, desktop and FFI tests passed. The macOS desktop build passed.
+    Live providers, native notification delivery and Linux remain unverified.
+  - [x] Closed the agent write review on `feat/agents-write`.
+    Approval shows individual fields and requires an armed click. Mail uses the reviewed plain text.
+    Writes reserve an audit row. Revoked sends return to the agent’s drafts.
+    Socket and scripted provider tests covered lost replies, partial moves, limits and audit contention.
+    GPUI tests covered keyboard input, click arming, denial and revocation.
+    Core, desktop and FFI tests passed. The macOS desktop build passed.
+    Live providers, native window activation and Linux remain unverified.
+  - [x] Completed the second agent write review on `feat/agents-write`.
+    Revocation restores queued drafts. Agent sends require their original token. Compose sends use the person's authority.
+    Confirmation shows full bodies and matching recipients. Withdrawals delay replacement requests and both destructive buttons require an armed click.
+    Draft reads hide other owners' revisions. Forwarding counts decoded bytes. IMAP reports uncertain writes and checks recovery authorization.
+    Socket, provider fixture and GPUI tests passed. Core, desktop and FFI tests passed. The macOS desktop app built.
+    Live providers, native window activation and Linux remain unverified.
+  - [x] Completed the third agent write review on `feat/agents-write`.
+    Revocation commits before cleanup and preserves newer Compose drafts. Queued sends require the original token and policy generation.
+    Confirmation marks overflowing rows, distinguishes literal escapes and times withdrawals from disconnect.
+    Draft lists keep creation order. Agent reads preserve text shaping. Base64 fetches check wire and decoded sizes.
+    Core, desktop and FFI tests passed on macOS. The desktop build passed.
+    Live providers, native window activation and Linux remain unverified.
+  - [x] Completed the final agent write review on `feat/agents-write`.
+    Approved sends retain their policy generation. SMTP checks access after login on the connection that sends the message.
+    Authority changes take the write lock first. Cleanup restores stale sends individually, including failed sends and released claims.
+    Undo preserves newer drafts. Compose sends replace queued agent sends. Pre-v22 drafts sort by ID.
+    Regression tests covered all eight fixes. Core, desktop and FFI tests passed on macOS. The desktop build passed.
+    Live providers and Linux remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
     Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
     Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.

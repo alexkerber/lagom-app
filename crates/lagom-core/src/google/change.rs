@@ -95,7 +95,7 @@ pub async fn fetch_event(account: &Account, calendar: &str, id: &str) -> Result<
         |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
 }
 
-pub(super) async fn fetch_event_with<F, Fut>(base: &str, calendar: &str, id: &str, mut token: F) -> Result<EventSnapshot>
+pub async fn fetch_event_with<F, Fut>(base: &str, calendar: &str, id: &str, mut token: F) -> Result<EventSnapshot>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
     let url = event_url(base, calendar, id)?;
     let client = oauth::http(Duration::from_secs(30))?;
@@ -130,16 +130,24 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
 
 /// Empty attendees, absent description and meet=false leave those fields alone.
 pub async fn update_event(store: &Store, account: &Account, calendar: &str, id: &str, etag: &str, draft: &NewEvent) -> Result<()> {
-    change_with(store, &account.id, BASE, calendar, id, etag, Some(draft),
-        |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
+    change_event_checked(store, account, calendar, id, etag, Some(draft), || Ok(())).await
 }
 
 pub async fn delete_event(store: &Store, account: &Account, calendar: &str, id: &str, etag: &str) -> Result<()> {
-    change_with(store, &account.id, BASE, calendar, id, etag, None,
-        |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
+    change_event_checked(store, account, calendar, id, etag, None, || Ok(())).await
 }
 
-pub(super) async fn change_with<F, Fut>(store: &Store, account: &str, base: &str, calendar: &str, id: &str,
+pub async fn change_event_checked(store: &Store, account: &Account, calendar: &str, id: &str, etag: &str,
+    draft: Option<&NewEvent>, check: impl Fn() -> Result<()>) -> Result<()> {
+    let check = &check;
+    change_with(store, &account.id, BASE, calendar, id, etag, draft, |rejected| async move {
+        let access = oauth::access_token(account, rejected.as_deref()).await?;
+        check()?;
+        Ok(access)
+    }).await
+}
+
+pub async fn change_with<F, Fut>(store: &Store, account: &str, base: &str, calendar: &str, id: &str,
     etag: &str, draft: Option<&NewEvent>, mut token: F) -> Result<()>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
     if !valid_etag(etag) { return Err(Error::Invalid("read the event again before changing it")); }

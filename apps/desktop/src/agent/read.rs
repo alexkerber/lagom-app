@@ -3,7 +3,7 @@ use lagom_core::{
     agent::{
         audit::Failure,
         filter::Filter,
-        id::{MessageId, ObjectId, ResolvedMessage},
+        id::{AuditTarget, MessageId, ObjectId, ResolvedMessage},
         policy::{Level, Resource},
         protocol::{Code, Request},
         token::Identity,
@@ -19,6 +19,7 @@ pub(super) type Result<T> = std::result::Result<T, Failure>;
 pub(crate) fn error(e: Error) -> Code {
     match e {
         Error::Store(e) => e.into(),
+        Error::Uncertain => Code::Uncertain,
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
         Error::Invalid(
@@ -87,12 +88,27 @@ impl Attachment {
     }
 }
 
-fn clean(s: &str) -> String {
+pub(super) fn clean(s: &str) -> String {
+    escape_text(s, false)
+}
+
+pub(super) fn sheet_text(s: &str) -> String {
+    escape_text(s, true)
+}
+
+fn escape_text(s: &str, sheet: bool) -> String {
+    use icu_properties::{CodePointMapData, CodePointSetData, props::{BidiControl, DefaultIgnorableCodePoint, GeneralCategory}};
+    let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
+    let category = CodePointMapData::<GeneralCategory>::new();
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() && c != '\n' && c != '\t' {
+        if c == '\\' {
+            out.push_str(r"\\");
+        } else if c.is_control() && c != '\n' {
             out.extend(c.escape_default());
-        } else if matches!(c,'\u{200e}'|'\u{200f}'|'\u{061c}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+        } else if CodePointSetData::new::<BidiControl>().contains(c)
+            || matches!(c, '\u{2028}' | '\u{2029}' | '\u{e0000}'..='\u{e007f}')
+            || sheet && (ignorable.contains(c) || category.get(c) == GeneralCategory::Format)
         {
             out.extend(c.escape_unicode());
         } else {
@@ -148,14 +164,15 @@ pub(super) fn dispatch(
     req: &Request,
     fetch: impl FnOnce(Attachment) -> bool,
     touched: &mut Option<String>,
-    target: &mut Option<ResolvedMessage>,
+    target: &mut Option<AuditTarget>,
     access: &std::sync::OnceLock<ReadPolicy>,
     mut off: tokio::sync::watch::Receiver<()>,
     mut policy: tokio::sync::watch::Receiver<Option<i64>>,
 ) -> Result<Value> {
     let cmd = req.cmd.as_str();
     let keys: &[&str] = match cmd {
-        "accounts" | "folders" | "contacts" => &[],
+        "draft.show" => &["id"],
+        "draft.list" | "accounts" | "folders" | "contacts" => &[],
         "emails" => &["filter", "page", "limit"],
         "search" => &["query", "in", "page", "limit"],
         "thread" => &["id"],
@@ -188,10 +205,10 @@ pub(super) fn dispatch(
         "events" | "availability" => &[Resource::Calendar],
         _ => &[Resource::Mail],
     };
-    let key = if matches!(cmd, "thread" | "attachment") {
+    let key = if matches!(cmd, "thread" | "attachment" | "draft.show") {
         let key = ObjectId::decode(string("id")?.ok_or(Code::InvalidRequest)?)?;
         let account = match (&key, cmd) {
-            (ObjectId::Thread(a, _) | ObjectId::ThreadHash(a, _), "thread") => a,
+            (ObjectId::Draft(a, _), "draft.show") | (ObjectId::Thread(a, _) | ObjectId::ThreadHash(a, _), "thread") => a,
             (ObjectId::Attachment(m, _) | ObjectId::SectionHash(m, _), "attachment") => m.account(),
             _ => return Err(Code::NotFound.into()),
         };
@@ -259,6 +276,33 @@ pub(super) fn dispatch(
                     "mail":store.agent_level(who,Resource::Mail,&id)?,
                     "calendar":store.agent_level(who,Resource::Calendar,&id)?}))?;
             }
+        }
+        "draft.show" | "draft.list" => {
+            for (a, _) in accounts {
+                let ids = if let Some((_, ObjectId::Draft(_, id))) = &key {
+                    vec![id.clone()]
+                } else {
+                    store.agent_draft_ids(&a)?
+                };
+                for id in ids {
+                    let (revision, agent) = store.agent_draft_meta(&a, &id)?;
+                    let d = store.draft(&id).map_err(error)?;
+                    let mut value = json!({"id":ObjectId::Draft(a.clone(),id).encode(),"account":a,"agent":agent,"subject":clean(&d.subject),"to":clean(&d.to)});
+                    if agent.as_deref() == Some(who.agent_id()) { value["revision"] = json!(revision); }
+                    if cmd == "draft.show" {
+                        value["cc"] = json!(clean(&d.cc));
+                        value["bcc"] = json!(clean(&d.bcc));
+                        let end = d.text.char_indices().nth(100_000).map(|(i, _)| i);
+                        value["body"] = json!(clean(&d.text[..end.unwrap_or(d.text.len())]));
+                        value["truncated"] = json!(end.is_some());
+                        *target = Some(store.agent_object_target(&ObjectId::Draft(a.clone(), d.id))?);
+                        *touched = Some(a.clone());
+                        return Ok(value);
+                    }
+                    push(value)?;
+                }
+            }
+            return Ok(json!({"drafts":rows}));
         }
         "folders" => {
             for (id, _) in accounts {
@@ -360,7 +404,7 @@ pub(super) fn dispatch(
                 })
                 .ok_or(Code::NotFound)?;
             request.section = part.section.clone();
-            *target = Some(resolved);
+            *target = Some(resolved.target);
             *touched = Some(account.clone());
             if !fetch(request) {
                 return Err(Code::Unavailable.into());
