@@ -248,6 +248,12 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     Draft reads hide other owners' revisions. Forwarding counts decoded bytes. IMAP reports uncertain writes and checks recovery authorization.
     Socket, provider fixture and GPUI tests passed. Core, desktop and FFI tests passed. The macOS desktop app built.
     Live providers, native window activation and Linux remain unverified.
+  - [x] Completed the third agent write review on `feat/agents-write`.
+    Revocation commits before cleanup and preserves newer Compose drafts. Queued sends require the original token and policy generation.
+    Confirmation marks overflowing rows, distinguishes literal escapes and times withdrawals from disconnect.
+    Draft lists keep creation order. Agent reads preserve text shaping. Base64 fetches check wire and decoded sizes.
+    Core, desktop and FFI tests passed on macOS. The desktop build passed.
+    Live providers, native window activation and Linux remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
     Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
     Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.

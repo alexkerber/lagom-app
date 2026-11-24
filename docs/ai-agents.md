@@ -182,7 +182,7 @@ effective(resource) = min( global level,   # the account's row, else the group d
   created. Every other draft is read-only. `draft edit` names the revision it read; a draft that
   changed since gives `conflict`. The Drafts list marks a draft an agent created. An agent draft
   syncs to the account's Drafts folder on the server like any draft. List and show expose the revision only to its owner.
-  Other drafts omit both the revision and update time.
+  Other drafts omit both the revision and update time. Within each account, drafts sort by creation time descending, then ID ascending.
 - Agent drafts carry no files from disk. A forward keeps the attachments of its original, and
   needs Read on the original's account.
 - `action archive`, `move` and `trash` need a server with `MOVE` or `UIDPLUS`. Without both, a
@@ -212,6 +212,8 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
 - Sizes: request at most 1 MiB, response at most 32 MiB, attachment at most 20 MiB. A message
   body, including `draft.show`, is cut at 100 000 characters and marked `truncated`.
   Agent writes reject bodies over 100 000 characters, descriptions over 8 192 and locations over 1 024 with `invalid_request`.
+  Base64 downloads have a wire budget based on 76 encoded characters per line, CRLF and up to two padding characters.
+  Dense wrapping can exceed this budget even when the decoded part fits. The app also checks the actual decoded size.
   Forwarded attachments share one 20 MiB budget measured after decoding. A send accepts up to 100 recipients across To, Cc and Bcc.
   An event accepts up to 100 guests. Mail and event writes deduplicate by the whole case-insensitive address with its punycode domain, keeping the first occurrence.
   Recipients and guests with quoted or non-ASCII local parts give `invalid_request`.
@@ -221,7 +223,8 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
 - Concurrency: 8 connections at once. Per token: 300 requests and 30 write commands a minute.
   One waiting confirmation per agent, three in total. Beyond that: `busy`.
 - Every message object carries `account` and `id`, also inside thread and search results.
-- Text from mail is data. The app escapes control characters and direction marks.
+- Text from mail is data. Reads escape backslashes, control characters except newlines, bidi controls, tags and Unicode line and paragraph separators.
+  They preserve joiners, variation selectors and soft hyphens.
 
 Errors are fixed strings. They never carry a stack trace, a path, SQL, a server reply or data
 from an account.
@@ -313,21 +316,23 @@ The Confirmation toggle in Settings controls mail sends for all agents.
 3. Fixed rows show the agent, the account and each recipient or guest. A mail labels the account
    From. Addresses appear first, one per row. Display names show up to 64 characters followed by the exact number omitted.
    Internationalized domains use punycode with a warning mark.
-   The sheet escapes controls, Unicode format and default-ignorable characters, and Unicode line separators.
+   The sheet escapes controls, Unicode line separators and all Unicode format and default-ignorable characters.
+   A literal backslash appears doubled.
    Long subjects and titles wrap. Calendars appear by display name.
    Timed events show local start and end with the weekday and UTC offset. All-day events show calendar dates.
    An event change compares with Google's current event. Each guest appears once. A guest the
    change adds is marked Added, and one it removes is marked Removed. The comparison uses the
    whole address: punycode domain, any case, no display name. An unchanged field shows once. A
    changed field shows one row with the current value struck through, an arrow and the new value.
-   The current description appears only when the change replaces it. Body and description appear
+   The sheet compares raw descriptions and shows the current description when they differ. Body and description appear
    last in scrollable boxes with the complete reviewed text. Expand appears only on overflow.
-   Each box shows “More below” while text remains below the viewport. Replies and forwards send only the reviewed plain text and listed attachments.
+   Each text box and the outer preview show “More below” while content remains below their viewport. Replies and forwards send only the reviewed plain text and listed attachments.
 4. **Deny** has focus and Escape declines. **Deny and revoke** also revokes the agent's tokens.
    After either denial or a disconnect while waiting, the same agent receives `busy` for 30 seconds.
    Approval and revocation require a mouse click in the active window. Each front sheet and window activation
    starts a 700 ms delay. A replacement for a withdrawn request says “The previous request was withdrawn”
-   and waits 1.5 seconds. Activation clicks and keyboard shortcuts cannot approve or revoke.
+   and waits 1.5 seconds. The cooldown starts at withdrawal even with the window closed. Only the replacement shows the notice.
+   Activation clicks and keyboard shortcuts cannot approve or revoke.
 5. While the sheet awaits approval, a decline, a 120 s timeout or a client disconnect ends the request.
    The audit records `denied` and the app sends nothing.
 6. On Approve the app authorizes again (token, expiry, levels, master switch) and compares the
@@ -336,10 +341,13 @@ The Confirmation toggle in Settings controls mail sends for all agents.
    goes out the way Compose sends, with its Undo window. After Approve the send continues even
    when the client is gone; `draft show` then gives `not_found`.
 
-Before SMTP submission, the outbox checks the master switch, the exact originating token and its effective Send
-access for the sending account. Only agent-initiated sends carry the agent and token IDs. A person can send an agent draft from Compose.
-Revocation, Disconnect and switching access off return unclaimed sends to their owners, including during Undo.
-Draft restoration and the `revoked` audit entry commit with the access change. Reconnecting cannot release an old send. A message already submitted to SMTP stays submitted.
+Before SMTP submission, the outbox requires the policy generation recorded at enqueue, the same token and effective Send access.
+Disabling access or changing a grant invalidates queued approvals even if access is later restored.
+Only agent-initiated sends carry the agent and token IDs. A person can send an agent draft from Compose.
+Revocation, Disconnect, token replacement and disabling access commit the authority change before restoring drafts.
+Cleanup restores unclaimed sends during Undo, on failure and while waiting for retry or reauthentication.
+If Compose already saved a draft with that ID, cleanup keeps it. Removing the queued send and auditing `revoked` are atomic.
+Reconnecting cannot release an old send. A message already submitted to SMTP stays submitted.
 
 The agent cannot approve: the protocol has no such command. Confirmations queue one at a time. A
 remote agent needs a person at the app for calendar changes and for mail sends with confirmations enabled.
