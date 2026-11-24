@@ -184,3 +184,13 @@ fn developer_agent_enables_only_the_selected_account() {
     run(&path, &["agent", "--off"]);
     assert!(!store.agent_enabled().unwrap());
 }
+
+#[test]
+fn developer_cli_rejects_mcp_before_opening_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("unused.db");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&db).arg("mcp").output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!db.exists());
+}
