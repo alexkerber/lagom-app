@@ -210,6 +210,8 @@ mod new_event;
 mod home;
 mod drafts;
 pub(crate) use tasks::TaskChange;
+mod agents;
+pub(crate) use agents::AgentChange;
 mod popout;
 pub use live::Live;
 pub(crate) use live::notify_without_window;
@@ -356,6 +358,8 @@ pub struct MainWindow {
     default_mail: Option<bool>,
     /// "Change password" on an email-and-password account's page.
     new_password: Option<crate::settings::NewPassword>,
+    /// Settings > AI Agents, and the sidebar row it can add.
+    agents: crate::settings::agents::Agents,
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
     message_menu: Option<usize>,
@@ -501,6 +505,7 @@ impl MainWindow {
             remove_note: String::new(),
             default_mail: None,
             new_password: None,
+            agents: crate::settings::agents::Agents::new(),
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
             message_menu: None,
@@ -562,6 +567,7 @@ impl MainWindow {
         this.inbox.regroup();
         if this.live.is_some() {
             this.reload(cx);
+            this.reload_agents(cx);
             this.restore_drafts(window, cx);
             // No account yet: Welcome first, as on iOS and Android.
             if screen.starts_with("add-account") || this.live.as_ref().is_some_and(|l| l.accounts.is_empty()) {
@@ -602,6 +608,14 @@ impl MainWindow {
             }
             "settings" => this.set_page(Page::Settings(None), cx),
             "settings-account" if demo => this.open_account_settings("personal".into(), window, cx),
+            "settings-agents" => this.open_agents(window, cx),
+            // One agent's own matrix, scrolled to the activity log.
+            "settings-agents-agent" if demo => {
+                this.open_agents(window, cx);
+                let first = this.agents.agents.first().map(|a| a.id.clone());
+                this.agent_change(AgentChange::Select(first), cx);
+                this.settings_scroll.scroll_to_bottom();
+            }
             "shortcuts" => this.show_shortcuts(window, cx),
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
@@ -1780,7 +1794,24 @@ impl MainWindow {
                 .child(account(i, name, address, active).on_click(cx.listener(move |this, _, _, cx| this.switch_account(i, cx))))
                 .children(self.reauth_control(i, "account-reauth", cx)));
         }
-        let in_settings = matches!(self.page, Page::Settings(_));
+        // With its own sidebar row, AI Agents lights that row instead of Settings.
+        let in_agents = self.agents.sidebar && matches!(&self.page, Page::Settings(Some(id)) if id == crate::settings::agents::AGENTS);
+        let in_settings = matches!(self.page, Page::Settings(_)) && !in_agents;
+        let footer = |id: &'static str, path: &'static str, label: &'static str, active: bool| {
+            pressable(div().id(id).group(id), t, active)
+                .flex()
+                .flex_shrink_0()
+                .debug_selector(move || id.into())
+                .items_center()
+                .h(px(SIDEBAR_ROW))
+                .px(px(10.))
+                .rounded(px(radius::CONTROL))
+                .text_color(t.ink)
+                .when(active, |d| d.bg(t.sel))
+                .gap(px(8.)).child(icon(path, if active { active_icon } else { t.ink2 }, 16.)
+                    .when(!active, |icon| icon.group_hover(id, { let ink = t.ink; move |s| s.text_color(ink) })))
+                .child(div().flex_1().child(label))
+        };
 
         div()
             .debug_selector(|| "sidebar".into())
@@ -1834,22 +1865,13 @@ impl MainWindow {
                     .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Trash, cx); })))
                 .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(FOLDERS_MAX)))
                 .child(account_rows.mt(px(18.))))))
-            .child(
-                pressable(div().id("settings").group("settings"), t, in_settings)
-                    .flex()
-                    .flex_shrink_0()
-                    .debug_selector(|| "settings".into())
-                    .items_center()
-                    .h(px(SIDEBAR_ROW))
-                    .px(px(10.))
-                    .rounded(px(radius::CONTROL))
-                    .text_color(t.ink)
-                    .when(in_settings, |d| d.bg(t.sel))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
-                    .gap(px(8.)).child(icon("icons/settings.svg", if in_settings { active_icon } else { t.ink2 }, 16.)
-                        .when(!in_settings, |icon| icon.group_hover("settings", { let ink = t.ink; move |s| s.text_color(ink) })))
-                    .child("Settings"),
-            )
+            .child(div().flex().flex_col().flex_shrink_0().gap(px(2.))
+                .when(self.agents.sidebar, |d| d.child(footer("ai-agents", "icons/connect.svg", "AI Agents", in_agents)
+                    // A quiet number of connected agents, as on the mailbox rows.
+                    .when(self.agents.active() > 0, |d| d.child(mono(self.agents.active().to_string(), t.ink2)))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_agents(window, cx)))))
+                .child(footer("settings", "icons/settings.svg", "Settings", in_settings)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))))
     }
 
     fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2704,6 +2726,7 @@ impl Render for MainWindow {
                     signatures: &self.signatures,
                     password: self.new_password.as_ref(),
                     scroll: &self.settings_scroll,
+                    agents: &self.agents,
                 }, cx)
             }
             // Undo from the empty screen brings the list back. An empty folder keeps its header.

@@ -24,6 +24,31 @@ pub enum Agent {
 }
 
 impl Agent {
+    pub const ALL: [Self; 6] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Cursor,
+        Self::Hermes,
+        Self::OpenClaw,
+        Self::ClaudeDesktop,
+    ];
+
+    /// The store's `kind` for this agent.
+    pub fn kind(self) -> String {
+        format!("{self:?}")
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Cursor => "Cursor",
+            Self::Hermes => "Hermes",
+            Self::OpenClaw => "OpenClaw",
+            Self::ClaudeDesktop => "Claude Desktop",
+        }
+    }
+
     fn dir(self) -> &'static str {
         match self {
             Self::ClaudeCode => ".claude",
@@ -59,8 +84,7 @@ fn on_path(home: &Path, path: &OsStr, command: &str) -> bool {
 }
 
 pub fn detect(home: &Path, path: &OsStr) -> Vec<Agent> {
-    use Agent::*;
-    [ClaudeCode, Codex, Cursor, Hermes, OpenClaw, ClaudeDesktop]
+    Agent::ALL
         .into_iter()
         .filter(|a| {
             home.join(a.dir()).is_dir() || a.commands().iter().any(|cmd| on_path(home, path, cmd))

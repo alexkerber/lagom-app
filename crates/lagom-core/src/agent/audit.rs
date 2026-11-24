@@ -67,7 +67,34 @@ pub struct AuditRow<'a> {
     pub recipients: &'a [lettre::Address],
 }
 
+/// One audit row as Settings shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditEntry {
+    pub at: i64,
+    pub agent: Option<String>,
+    pub account: Option<String>,
+    pub command: String,
+    pub result: String,
+}
+
 impl Store {
+    /// Newest first.
+    pub fn agent_audit(&self, limit: u32) -> Result<Vec<AuditEntry>, Code> {
+        let mut rows = self.db.prepare(
+            "SELECT at,agent,account,command,result FROM agent_audit ORDER BY at DESC,id DESC LIMIT ?",
+        )?;
+        let rows = rows.query_map([limit], |r| {
+            Ok(AuditEntry {
+                at: r.get(0)?,
+                agent: r.get(1)?,
+                account: r.get(2)?,
+                command: r.get(3)?,
+                result: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn prune_agent_audit(&self, now: i64) -> rusqlite::Result<()> {
         let keep_since = now.saturating_sub(90 * 86400);
         let excess: Option<i64> = self

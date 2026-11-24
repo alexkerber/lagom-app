@@ -50,7 +50,62 @@ impl Identity {
     }
 }
 
+/// An agent as Settings lists it. `active`: it holds a token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRow {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub host: String,
+    pub remote: bool,
+    pub active: bool,
+}
+
 impl Store {
+    pub fn agents(&self) -> Result<Vec<AgentRow>, Code> {
+        let mut rows = self.db.prepare(
+            "SELECT id,kind,name,host,remote,EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent=a.id)
+             FROM agents a ORDER BY created,id",
+        )?;
+        let rows = rows.query_map([], |r| {
+            Ok(AgentRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                name: r.get(2)?,
+                host: r.get(3)?,
+                remote: r.get(4)?,
+                active: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// What Connect wrote outside the store, so Disconnect can remove it. It holds no secret.
+    pub fn agent_connection(&self, agent: &str) -> Result<Option<String>, Code> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT value FROM agent_settings WHERE key='connection:' || ?",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_agent_connection(&self, agent: &str, receipt: Option<&str>) -> Result<(), Code> {
+        match receipt {
+            Some(receipt) => self.db.execute(
+                "INSERT OR REPLACE INTO agent_settings VALUES('connection:' || ?,?)",
+                params![agent, receipt],
+            )?,
+            None => self.db.execute(
+                "DELETE FROM agent_settings WHERE key='connection:' || ?",
+                [agent],
+            )?,
+        };
+        Ok(())
+    }
+
     pub fn create_agent(
         &self,
         kind: &str,

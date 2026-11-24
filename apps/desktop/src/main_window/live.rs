@@ -363,7 +363,7 @@ impl MainWindow {
         if self.inbox.account_filter.as_ref().is_some_and(|id| !live.accounts.iter().any(|a| &a.id == id)) {
             self.inbox.account_filter = None;
         }
-        if matches!(&self.page, Page::Settings(Some(id)) if !live.accounts.iter().any(|a| &a.id == id)) {
+        if matches!(&self.page, Page::Settings(Some(id)) if id != crate::settings::agents::AGENTS && !live.accounts.iter().any(|a| &a.id == id)) {
             self.page = Page::Settings(None);
             self.confirm_remove_account = false;
             self.new_password = None;
@@ -3091,6 +3091,68 @@ mod tests {
         draw(cx);
         view.read_with(cx, |v, _| assert!(matches!(v.page, Page::Settings(None)) && !v.confirm_remove_account && !v.names.contains_key(&id)));
         assert!(cx.update(|window, cx| view.read(cx).focus.is_focused(window)));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn agents_page_starts_off_connects_on_click_only_narrows_and_disconnects_all(cx: &mut TestAppContext) {
+        use lagom_core::agent::policy::{Access, Level, Resource, Setting};
+        fn files(dir: &std::path::Path, found: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+            for child in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+                if child.file_type().unwrap().is_dir() { files(&child.path(), found) } else { found.push((child.path(), std::fs::read(child.path()).unwrap())) }
+            }
+        }
+        let snapshot = |dir: &std::path::Path| { let mut found = Vec::new(); files(dir, &mut found); found.sort(); found };
+        let (view, cx, _rx) = window(cx);
+        let home = tempfile::tempdir().unwrap();
+        for dir in [".claude", ".codex", "bin"] { std::fs::create_dir(home.path().join(dir)).unwrap(); }
+        let (store, account) = view.update_in(cx, |v, window, cx| {
+            v.agents.home = home.path().into();
+            v.agents.path = home.path().join("bin").into();
+            v.open_agents(window, cx);
+            let live = v.live.as_ref().unwrap();
+            (live.store.clone(), live.accounts[0].id.clone())
+        });
+        let draw = |cx: &mut VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let click = |cx: &mut VisualTestContext, selector: String| {
+            draw(cx);
+            let at = cx.debug_bounds(selector.clone().leak()).unwrap_or_else(|| panic!("{selector}")).center();
+            cx.simulate_click(at, Default::default());
+        };
+        // The master switch starts off, and opening the page and detection write nothing.
+        let before = snapshot(home.path());
+        view.read_with(cx, |v, _| assert!(!v.agents.enabled && v.agents.detected.len() == 2));
+        assert!(!store.agent_setting(Setting::Enabled).unwrap());
+        click(cx, "Enable agent access".into());
+        assert!(store.agent_setting(Setting::Enabled).unwrap());
+        // The first Connect only lists the files; the second writes them.
+        click(cx, "connect-ClaudeCode".into());
+        assert!(view.read_with(cx, |v, _| v.agents.pending.as_ref().is_some_and(|(_, f)| f.iter().any(|f| f.ends_with("SKILL.md")))));
+        assert_eq!(snapshot(home.path()), before);
+        assert!(store.agents().unwrap().is_empty());
+        click(cx, "confirm-connect-ClaudeCode".into());
+        let agent = store.agents().unwrap().into_iter().next().unwrap();
+        assert!(agent.active && agent.kind == "ClaudeCode");
+        assert!(snapshot(home.path()).iter().any(|(p, _)| p.ends_with(format!("{}.token", agent.id))));
+        // A global level persists; an agent's own level never shows above it.
+        let mail = |account: &str, level| Access { resource: Resource::Mail, account: account.into(), level };
+        view.update(cx, |v, cx| v.agent_change(AgentChange::Level(String::new(), mail(&account, Level::Triage)), cx));
+        assert!(store.agent_access("").unwrap().contains(&mail(&account, Level::Triage)));
+        store.set_agent_access(&agent.id, &mail(&account, Level::Send)).unwrap();
+        view.update(cx, |v, cx| v.agent_change(AgentChange::Select(Some(agent.id.clone())), cx));
+        view.read_with(cx, |v, _| assert_eq!(v.agents.shown(Resource::Mail, &account), Level::Triage));
+        view.update(cx, |v, cx| v.agent_change(AgentChange::Level(String::new(), mail(&account, Level::Read)), cx));
+        view.read_with(cx, |v, _| assert_eq!(v.agents.shown(Resource::Mail, &account), Level::Read));
+        // Disconnect all revokes every agent, switches access off and removes what Connect wrote.
+        view.update(cx, |v, cx| v.agent_change(AgentChange::Select(None), cx));
+        click(cx, "connect-Codex".into());
+        click(cx, "confirm-connect-Codex".into());
+        assert_eq!(store.agents().unwrap().iter().filter(|a| a.active).count(), 2);
+        click(cx, "Disconnect all".into());
+        assert!(store.agents().unwrap().iter().all(|a| !a.active));
+        assert!(!store.agent_setting(Setting::Enabled).unwrap());
+        assert_eq!(snapshot(home.path()), before);
+        view.read_with(cx, |v, _| assert_eq!(v.agents.active(), 0));
     }
 
     #[gpui::test]
