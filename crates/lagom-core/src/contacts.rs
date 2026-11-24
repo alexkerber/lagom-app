@@ -120,16 +120,23 @@ impl Store {
         let mut seen = HashSet::new();
         let mut stmt = self.db.prepare("SELECT m.from_name,m.from_address,m.to_addresses,m.cc FROM messages m
             JOIN folders f ON f.id=coalesce(m.move_target,m.folder) AND f.account=m.account
-            WHERE m.account=? AND f.role NOT IN ('junk','trash')")?;
-        let mut rows = stmt.query([account])?;
-        while let Some(row) = rows.next()? {
-            let field = |i| row.get_ref(i)?.as_str().map_err(rusqlite::Error::from);
-            let from = format_recipient(field(0)?,field(1)?);
-            for value in std::iter::once(from.as_str()).chain(recipient_parts(field(2)?)).chain(recipient_parts(field(3)?)) {
-                let Some((name,address)) = correspondent(value) else { continue; };
-                if !address.eq_ignore_ascii_case(&own) && !seen.contains(&address) {
-                    visit(&name,&address)?;
-                    seen.insert(address);
+            WHERE m.account=?1 AND f.role NOT IN ('junk','trash') AND
+            (f.role IN ('sent','drafts') AND m.from_address=?2 COLLATE NOCASE)=?3")?;
+        // Names from mail the user wrote take precedence over incoming headers.
+        for written in [true, false] {
+            let mut rows = stmt.query(rusqlite::params![account, own, written])?;
+            while let Some(row) = rows.next()? {
+                let field = |i| row.get_ref(i)?.as_str().map_err(rusqlite::Error::from);
+                let from = format_recipient(field(0)?, field(1)?);
+                let values = std::iter::once(from.as_str())
+                    .chain(recipient_parts(field(2)?))
+                    .chain(recipient_parts(field(3)?));
+                for value in values {
+                    let Some((name, address)) = correspondent(value) else { continue; };
+                    if !address.eq_ignore_ascii_case(&own) && !seen.contains(&address) {
+                        visit(&name, &address)?;
+                        seen.insert(address);
+                    }
                 }
             }
         }

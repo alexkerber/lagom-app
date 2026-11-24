@@ -180,9 +180,9 @@ impl Store {
         )
     }
     pub(super) fn matrix(&self, agent: &str, kind: &str, account: &str) -> Result<Level, Code> {
-            let n = self.db.query_row("SELECT coalesce((SELECT level FROM agent_access
+        let n = self.db.query_row("SELECT coalesce((SELECT level FROM agent_access
                 WHERE agent=?1 AND kind=?2 AND account IN ('',?3) ORDER BY account<>'' DESC LIMIT 1),0)",
                 params![agent,kind,account], |r| r.get(0))?;
-            Ok(Level::from_db(n).unwrap_or(Level::None))
+        Ok(Level::from_db(n).unwrap_or(Level::None))
     }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    store::{Store,summary_row, MessageSummary, VISIBLE_SUMMARY_COLUMNS},
+    store::{summary_row, MessageSummary, Store, VISIBLE_SUMMARY_COLUMNS},
     Error, Result,
 };
 use chrono::NaiveDate;
@@ -243,7 +243,7 @@ impl Predicate {
     }
 }
 
-/// The dispatcher opens a dedicated query-only connection for agent searches.
+/// Standalone query-only reader for searches outside an existing request snapshot.
 pub struct FilterReader {
     store: Store,
 }
@@ -255,7 +255,9 @@ impl FilterReader {
         // A lock wait cannot be interrupted by the progress handler.
         db.busy_timeout(Duration::ZERO)?;
         register_casefold(&db)?;
-        Ok(Self { store: Store { db } })
+        Ok(Self {
+            store: Store { db },
+        })
     }
 
     /// The largest permitted offset is 10,000 rows.
@@ -270,20 +272,24 @@ impl FilterReader {
         limit: Option<u32>,
     ) -> Result<(Vec<MessageSummary>, Option<u32>)> {
         let deadline = Instant::now() + Duration::from_secs(2);
-        self.store.db.progress_handler(100, Some(move || Instant::now() >= deadline))?;
-        let result = self.store.filtered_messages(accounts, filter, scope, now, page, limit);
+        self.store
+            .db
+            .progress_handler(100, Some(move || Instant::now() >= deadline))?;
+        let result = self
+            .store
+            .filtered_messages(accounts, filter, scope, now, page, limit);
         self.store.db.progress_handler(0, None::<fn() -> bool>)?;
         result
     }
 }
 
 pub(super) fn register_casefold(db: &Connection) -> rusqlite::Result<()> {
-        db.create_scalar_function(
-            "casefold",
-            1,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            |ctx| Ok(UniCase::new(ctx.get_raw(0).as_str()?).to_folded_case()),
-        )
+    db.create_scalar_function(
+        "casefold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(UniCase::new(ctx.get_raw(0).as_str()?).to_folded_case()),
+    )
 }
 
 impl Store {
@@ -354,7 +360,7 @@ impl Store {
         sql.push_str(" ORDER BY m.date DESC,m.id DESC LIMIT ? OFFSET ?");
         args.push((limit + 1).into());
         args.push(offset.into());
-        let mut rows = self.filter_rows(&sql,args)?;
+        let mut rows = self.filter_rows(&sql, args)?;
         let next = if rows.len() > limit as usize {
             rows.pop();
             (offset + i64::from(limit) <= MAX_OFFSET).then_some(page + 1)
@@ -364,11 +370,7 @@ impl Store {
         Ok((rows, next))
     }
 
-    fn filter_rows(
-        &self,
-        sql: &str,
-        args: Vec<Value>,
-    ) -> Result<Vec<MessageSummary>> {
+    fn filter_rows(&self, sql: &str, args: Vec<Value>) -> Result<Vec<MessageSummary>> {
         let result = self.db.prepare(sql).and_then(|mut stmt| {
             stmt.query_map(params_from_iter(args), summary_row)?
                 .collect()

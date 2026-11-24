@@ -41,14 +41,17 @@ fn parts<T: for<'a> Deserialize<'a>>(data: &str) -> Result<T, Code> {
         .map_err(|_| Code::NotFound)
 }
 
+// Leave space for the nested message ID and a section digest in an attachment ID.
+const NESTED_ID_LIMIT: usize = 1400;
+
 impl MessageId {
     pub fn encode(&self) -> String {
         match self {
             Self::Header(a, h) => {
-                bounded(encode("m1", (a, h)), 1400, || encode("mh", (a, digest(h))))
+                bounded(encode("m1", (a, h)), NESTED_ID_LIMIT, || encode("mh", (a, digest(h))))
             }
             Self::HeaderHash(a, h) => encode("mh", (a, h)),
-            Self::Uid(a, f, v, u) => bounded(encode("u1", (a, f, v, u)), 1400, || {
+            Self::Uid(a, f, v, u) => bounded(encode("u1", (a, f, v, u)), NESTED_ID_LIMIT, || {
                 encode("uh", (a, digest(f), v, u))
             }),
             Self::FolderHash(a, h, v, u) => encode("uh", (a, h, v, u)),

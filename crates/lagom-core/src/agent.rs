@@ -35,6 +35,14 @@ impl Store {
         Ok(Self { db })
     }
 
+    pub fn agent_policy_generation(&self) -> Result<i64, Code> {
+        Ok(self.db.query_row(
+            "SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn agent_enabled(&self) -> Result<bool, Code> {
         Ok(self.agent_generation()?.is_some())
     }

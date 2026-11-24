@@ -35,6 +35,7 @@ pub enum TokenScope<'a> {
 }
 
 pub struct Identity {
+    pub expires: Option<i64>,
     pub(super) agent: String,
     pub(super) token: String,
     pub(super) level: Level,
@@ -300,6 +301,7 @@ impl Store {
         };
         let level = Level::from_db(level).ok_or_else(|| refused(InvalidScope))?;
         Ok(Identity {
+            expires,
             agent,
             token: id.into(),
             level,

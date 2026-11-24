@@ -146,7 +146,7 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
     let check_refusal = |source, reason: &str| {
         let failure = s.authenticate(Some(&token), source).err().unwrap();
         assert_eq!(Code::from(failure.clone()), Code::Unauthorized);
-        s.record_agent_audit(AuditRow {
+        s.record_agent_audit_at(AuditRow {
             identity: None,
             account: None,
             command: "emails",
@@ -154,7 +154,7 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
             outcome: Err(failure),
             source_ip: None,
             recipients: &[],
-        })
+        },1_800_000_000)
         .unwrap();
         let actual =
             s.db.query_row(
@@ -182,7 +182,13 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
     s.db.execute("UPDATE agent_tokens SET expires=unixepoch()", [])
         .unwrap();
     assert_eq!(auth(Some(&token), ip), Err(Code::Unauthorized));
-    check_refusal(ip, "expired");
+    check_refusal(ip, "source");
+    assert_eq!(
+        s.db.query_row("SELECT sum(refusals) FROM agent_audit", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
     s.db.execute("UPDATE agent_tokens SET expires=created+86400", [])
         .unwrap();
     assert_eq!(auth(Some(&token), ip), Ok(()));
@@ -218,15 +224,27 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
             .map_err(Code::from)
     };
     let snapshot = crate::store::Store::agent_reader(s.path(), || false).unwrap();
-    let who = snapshot.authenticate(Some(&token),Some("::1")).unwrap();
-    let allowed = snapshot.agent_accounts(&who,&[Mail],None).unwrap();
-    assert_eq!(allowed[0].0,a.id);
+    let who = snapshot.authenticate(Some(&token), Some("::1")).unwrap();
+    let allowed = snapshot.agent_accounts(&who, &[Mail], None).unwrap();
+    assert_eq!(allowed[0].0, a.id);
     let key = MessageId::Header(a.id.clone(), "m@example.org".into());
     let mut m = mail(&a, inbox, 1);
     m.summary.message_id = "m@example.org".into();
     let first = s.save_message(&m).unwrap();
-    let (rows,_) = snapshot.filtered_messages(&[allowed[0].0.clone()], &super::filter::Filter::parse("").unwrap(), None, 0, 1, None).unwrap();
-    assert!(rows.is_empty(), "a later insert cannot enter the authorized snapshot");
+    let (rows, _) = snapshot
+        .filtered_messages(
+            &[allowed[0].0.clone()],
+            &super::filter::Filter::parse("").unwrap(),
+            None,
+            0,
+            1,
+            None,
+        )
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "a later insert cannot enter the authorized snapshot"
+    );
     drop(snapshot);
     m.summary.folder = s
         .save_folder(&a.id, "Archive", None, FolderRole::Archive)
@@ -291,14 +309,20 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
         let mut msg = mail(&a, inbox, 111);
         msg.summary.message_id = header;
         let row = s.save_message(&msg).unwrap();
-        let (key, _, resolved) = s.agent_message_row(&a.id,row).unwrap();
+        let (key, _, resolved) = s.agent_message_row(&a.id, row).unwrap();
         assert_eq!(resolved.row, row);
-        assert_eq!(lookup(&key,None,Level::Read).unwrap(), resolved);
-        let part = ObjectId::Attachment(key,"1.".repeat(1800));
-        assert_eq!(ObjectId::decode(&part.encode()).unwrap().encode(),part.encode());
+        assert_eq!(lookup(&key, None, Level::Read).unwrap(), resolved);
+        let part = ObjectId::Attachment(key, "1.".repeat(1800));
+        assert_eq!(
+            ObjectId::decode(&part.encode()).unwrap().encode(),
+            part.encode()
+        );
     }
     let long = MessageId::Header(a.id.clone(), "x".repeat(2048)).encode();
-    assert!(matches!(MessageId::decode(&long), Ok(MessageId::HeaderHash(..))));
+    assert!(matches!(
+        MessageId::decode(&long),
+        Ok(MessageId::HeaderHash(..))
+    ));
     assert_eq!(
         ObjectId::decode(&ObjectId::Draft(a.id.clone(), "x".repeat(2048)).encode()),
         Err(Code::NotFound)
@@ -378,10 +402,10 @@ fn audit_limits_anonymous_refusals() {
 fn audit_caps_reads_per_agent_at_append_and_expires_writes_by_age() {
     let (_dir, s, _, _) = setup();
     let now = chrono::Utc::now().timestamp();
-    s.db.execute("INSERT INTO agent_audit(at,agent,command,result) VALUES
-        (?1,'quiet','emails','ok'),(?1,'quiet','draft.send','ok'),(?1,NULL,'unknown','unauthorized:missing'),
-        (?1,'busy','draft.send','ok'),(?1,'busy','draft.edit','ok'),
-        (?1,'busy','action.move','ok'),(?1,'busy','event.update','ok'),(0,'busy','draft.send','ok')",[now]).unwrap();
+    s.db.execute("INSERT INTO agent_audit(at,agent,command,result,dispatched_write) VALUES
+        (?1,'quiet','emails','ok',0),(?1,'quiet','draft.send','ok',1),(?1,NULL,'unknown','unauthorized:missing',0),
+        (?1,'busy','draft.send','ok',1),(?1,'busy','draft.edit','ok',1),
+        (?1,'busy','action.move','ok',1),(?1,'busy','event.update','ok',1),(0,'busy','draft.send','ok',1)",[now]).unwrap();
     s.db.execute(
         "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<60000)
         INSERT INTO agent_audit(at,agent,command,result) SELECT ?,'busy','emails','ok' FROM n",
@@ -398,7 +422,12 @@ fn audit_caps_reads_per_agent_at_append_and_expires_writes_by_age() {
     };
     assert_eq!(count("agent='busy' AND command='emails'"), 50_000);
     assert_eq!(count("agent='busy' AND command<>'emails'"), 5);
-    assert_eq!(count("agent='quiet'"), 2);
+    s.db.execute("INSERT INTO agent_audit(at,agent,command,result) VALUES(?,'quiet','draft.send','invalid_request')",[now]).unwrap();
+    assert_eq!(
+        count("agent='quiet' AND command='draft.send' AND read_seq IS NOT NULL"),
+        1
+    );
+    assert_eq!(count("agent='quiet'"), 3);
     assert_eq!(count("agent IS NULL"), 1);
     s.prune_agent_audit(now).unwrap();
     assert_eq!(count("agent='busy' AND command<>'emails'"), 4);
@@ -407,21 +436,43 @@ fn audit_caps_reads_per_agent_at_append_and_expires_writes_by_age() {
 #[test]
 fn replies_accept_only_one_payload_and_fixed_error_text() {
     for (code, name, message) in [
-        (Code::Unauthorized, "unauthorized", "Token missing, invalid, expired or revoked."),
-        (Code::Forbidden, "forbidden", "This agent's access level does not allow this command."),
+        (
+            Code::Unauthorized,
+            "unauthorized",
+            "Token missing, invalid, expired or revoked.",
+        ),
+        (
+            Code::Forbidden,
+            "forbidden",
+            "This agent's access level does not allow this command.",
+        ),
         (Code::NotFound, "not_found", "Not found."),
         (Code::InvalidRequest, "invalid_request", "Invalid request."),
         (Code::Denied, "denied", "Not approved."),
-        (Code::Conflict, "conflict", "Changed or ambiguous. Read it again."),
-        (Code::Uncertain, "uncertain", "The outcome is unknown. Check before you retry."),
+        (
+            Code::Conflict,
+            "conflict",
+            "Changed or ambiguous. Read it again.",
+        ),
+        (
+            Code::Uncertain,
+            "uncertain",
+            "The outcome is unknown. Check before you retry.",
+        ),
         (Code::Busy, "busy", "Too many requests. Try again."),
-        (Code::Unavailable, "unavailable", "Temporarily unavailable. Try again."),
+        (
+            Code::Unavailable,
+            "unavailable",
+            "Temporarily unavailable. Try again.",
+        ),
         (Code::Unsupported, "unsupported", "Not supported."),
         (Code::TooLarge, "too_large", "Too large."),
         (Code::Internal, "internal", "Internal error."),
     ] {
-        assert_eq!(serde_json::to_value(Response::Failure(code)).unwrap(),
-            serde_json::json!({"v":1,"ok":false,"error":{"code":name,"message":message}}));
+        assert_eq!(
+            serde_json::to_value(Response::Failure(code)).unwrap(),
+            serde_json::json!({"v":1,"ok":false,"error":{"code":name,"message":message}})
+        );
     }
     for reply in [
         Response::Success(serde_json::Value::Null),
@@ -480,8 +531,13 @@ fn settings_apis_store_switches_matrices_receipts_and_revoke_all() {
     s.set_agent_connection(&agent, Some("{}")).unwrap();
     assert_eq!(s.agent_connection(&agent).unwrap().as_deref(), Some("{}"));
     assert_eq!(s.agent_connection(&other).unwrap(), None);
-    s.db.execute("UPDATE agent_tokens SET expires=1 WHERE agent=?", [&other]).unwrap();
-    assert_eq!(s.agents().unwrap().iter().filter(|r| r.active).count(), 1, "an expired token is not active");
+    s.db.execute("UPDATE agent_tokens SET expires=1 WHERE agent=?", [&other])
+        .unwrap();
+    assert_eq!(
+        s.agents().unwrap().iter().filter(|r| r.active).count(),
+        1,
+        "an expired token is not active"
+    );
     s.revoke_all_agents().unwrap();
     assert!(s.agents().unwrap().iter().all(|r| !r.active));
     assert!(!s.agent_setting(Setting::Enabled).unwrap());
@@ -494,18 +550,30 @@ fn settings_apis_store_switches_matrices_receipts_and_revoke_all() {
         )
         .unwrap();
     }
+    s.db.execute(
+        "INSERT INTO agent_audit(at,agent,command,result) VALUES(0,?,'quiet','ok')",
+        [&other],
+    )
+    .unwrap();
+    assert_eq!(s.agent_audit(1).unwrap().len(), 2);
     let log = s.agent_audit(10).unwrap();
     assert_eq!(
         log.iter().map(|e| e.command.as_str()).collect::<Vec<_>>(),
-        ["search", "emails"]
+        ["search", "emails", "quiet"]
     );
 }
 
 #[test]
 fn provisioning_cannot_raise_either_global_level() {
     let (_dir, store, account, _) = setup();
-    store.db.execute("INSERT INTO agent_access VALUES('','mail','',1)", []).unwrap();
-    assert_eq!(store.provision_read_agent(&account.id), Err(Code::Forbidden));
+    store
+        .db
+        .execute("INSERT INTO agent_access VALUES('','mail','',1)", [])
+        .unwrap();
+    assert_eq!(
+        store.provision_read_agent(&account.id),
+        Err(Code::Forbidden)
+    );
     assert!(store.agents().unwrap().is_empty());
     assert_eq!(store.agent_access("").unwrap().len(), 1);
     assert!(!store.agent_enabled().unwrap());
