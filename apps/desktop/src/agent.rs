@@ -5,7 +5,7 @@ use crate::sync::Bridge;
 use lagom_core::{
     agent::{
         audit::{AuditRow, Failure},
-        id::ObjectId,
+        id::ResolvedMessage,
         protocol::{Code, Request, Response, VERSION},
         token::Identity,
     },
@@ -190,7 +190,7 @@ fn audit(
     req: Option<&Request>,
     who: Option<&Identity>,
     account: Option<&str>,
-    target: Option<&ObjectId>,
+    target: Option<&ResolvedMessage>,
     outcome: Result<(), Failure>,
 ) -> Result<(), Code> {
     store.record_agent_audit(AuditRow {
@@ -298,7 +298,7 @@ fn process(
             stop.has_changed().is_err() || tokio::time::Instant::now() >= deadline
         })?;
         let identity =
-            who.insert(store.authenticate(req.token.as_deref(), req.source_ip.as_deref())?);
+            who.insert(store.authenticate(req.token.as_deref().map(String::as_str), req.source_ip.as_deref())?);
         if store.agent_generation()? != Some(generation) {
             return Err(Code::Unauthorized.into());
         }

@@ -2,8 +2,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use lagom_core::{
     agent::{
         audit::Failure,
-        filter::Filter,
-        id::{MessageId, ObjectId},
+        filter::{Filter, FilterReader},
+        id::{MessageId, ObjectId, ResolvedMessage},
         policy::{Level, Resource},
         protocol::{Code, Request},
         token::Identity,
@@ -22,7 +22,7 @@ pub(crate) fn error(e: Error) -> Code {
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
         Error::Invalid("attachment exceeds 64 MiB" | "attachment is too large") => Code::TooLarge,
-        Error::Network(_) | Error::Authentication | Error::ReauthRequired | Error::Secret => {
+        Error::Invalid("unavailable") | Error::Network(_) | Error::Authentication | Error::ReauthRequired | Error::Secret => {
             Code::Unavailable
         }
         _ => Code::Internal,
@@ -42,19 +42,17 @@ pub(crate) struct Attachment {
 }
 
 impl Attachment {
-    pub(crate) fn resolve(&self, store: &Store) -> std::result::Result<i64, Code> {
+    pub(crate) fn resolve(&self, store: &Store) -> std::result::Result<ResolvedMessage, Code> {
         if store.agent_generation()? != Some(self.generation) {
             return Err(Code::Unavailable);
         }
-        Ok(store
-            .resolve_agent_message(
+        store.resolve_agent_message(
                 Some(&self.token),
                 self.ip.as_deref(),
                 &self.message.encode(),
                 self.folder.as_deref(),
                 Level::Read,
-            )?
-            .row)
+            )
     }
 }
 
@@ -77,7 +75,7 @@ fn message(store: &Store, req: &Request, mut m: MessageSummary, body: bool) -> R
     let (key, mut folder) = store.agent_message_key(&m.account, m.id)?;
     let id = key.encode();
     let resolved = store.resolve_agent_message(
-        req.token.as_deref(),
+        req.token.as_deref().map(String::as_str),
         req.source_ip.as_deref(),
         &id,
         None,
@@ -118,7 +116,7 @@ pub(super) fn dispatch(
     req: &Request,
     fetch: impl FnOnce(Attachment) -> bool,
     touched: &mut Option<String>,
-    target: &mut Option<ObjectId>,
+    target: &mut Option<ResolvedMessage>,
     mut off: tokio::sync::watch::Receiver<()>,
 ) -> Result<Value> {
     let cmd = req.cmd.as_str();
@@ -156,7 +154,7 @@ pub(super) fn dispatch(
         "events" | "availability" => &[Resource::Calendar],
         _ => &[Resource::Mail],
     };
-    if matches!(cmd, "thread" | "attachment") {
+    let key = if matches!(cmd, "thread" | "attachment") {
         let key = ObjectId::decode(string("id")?.ok_or(Code::InvalidRequest)?)?;
         let account = match (&key, cmd) {
             (ObjectId::Thread(a, _), "thread") => a,
@@ -167,8 +165,8 @@ pub(super) fn dispatch(
         if store.agent_level(who, Resource::Mail, account)? < Level::Read {
             return Err(Failure::OutsideScope);
         }
-        *target = Some(key);
-    }
+        Some(key)
+    } else { None };
     let account_id = touched.as_deref().or(selector.filter(|s| !s.contains('@')));
     let mut accounts = store.agent_accounts(who, resources, account_id)?;
     if let Some(sel) = selector {
@@ -237,7 +235,7 @@ pub(super) fn dispatch(
                     .transpose()
             };
             let ids = accounts.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-            let (messages, next) = store
+            let (messages, next) = FilterReader::open(store.path()).map_err(error)?
                 .filtered_messages(
                     &ids,
                     &filter,
@@ -253,7 +251,7 @@ pub(super) fn dispatch(
             return Ok(json!({"messages":rows,"next_page":next}));
         }
         "thread" => {
-            let Some(ObjectId::Thread(account, thread)) = target else {
+            let Some(ObjectId::Thread(account, thread)) = &key else {
                 return Err(Code::NotFound.into());
             };
             let mut headers = std::collections::HashSet::new();
@@ -269,12 +267,12 @@ pub(super) fn dispatch(
             return Ok(json!({"messages":rows}));
         }
         "attachment" => {
-            let Some(ObjectId::Attachment(message, section)) = target else {
+            let Some(ObjectId::Attachment(message, section)) = &key else {
                 return Err(Code::NotFound.into());
             };
             let (reply, rx) = oneshot::channel();
             let request = Attachment {
-                token: Zeroizing::new(req.token.clone().ok_or(Code::Unauthorized)?),
+                token: req.token.clone().ok_or(Code::Unauthorized)?,
                 ip: req.source_ip.clone(),
                 message: message.clone(),
                 folder: string("folder")?.map(str::to_owned),
@@ -282,13 +280,14 @@ pub(super) fn dispatch(
                 section: section.clone(),
                 reply,
             };
-            let row = request.resolve(store)?;
+            let resolved = request.resolve(store)?;
             let part = store
-                .attachments(row)
+                .attachments(resolved.row)
                 .map_err(error)?
                 .into_iter()
                 .find(|p| p.section == *section)
                 .ok_or(Code::NotFound)?;
+            *target = Some(resolved);
             if !fetch(request) {
                 return Err(Code::Unavailable.into());
             }

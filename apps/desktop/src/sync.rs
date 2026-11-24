@@ -458,7 +458,7 @@ impl Worker {
                         Ok(row) => tokio::select! {
                             biased;
                             _ = request.reply.closed() => return,
-                            result = self.attachment_bytes(row, &request.section, crate::agent::read::ATTACHMENT_LIMIT) => result.map_err(crate::agent::read::error),
+                            result = self.attachment_bytes(row.row, &request.section, crate::agent::read::ATTACHMENT_LIMIT) => result.map_err(crate::agent::read::error),
                         },
                         Err(e) => Err(e),
                     };
