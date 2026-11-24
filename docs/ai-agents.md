@@ -93,7 +93,7 @@ Every request carries a token. No token means refused. A token belongs to one ag
   the token.
 - Remote agent: Settings creates the token with accounts, a level, an expiry (required, 30 days
   by default, 365 at most) and a required list of source IP addresses or CIDR ranges. The app writes its token file
-  too, for the forced command below, and shows the value once for other setups.
+  too, for the forced command below, and offers Show token during setup.
 - Token sources in the client: `--token <value>`, `--agent <agent id>` (reads the token file) or
   `LAGOM_TOKEN`. The first one given is the only one used. A missing token file is an error; the
   client does not fall through to another source. `--token` shows in `ps` to other users.
@@ -113,7 +113,7 @@ The request clears its owned token buffer on drop. Limits:
   `from="<ranges>"` and `expiry-time="<date>"` too:
 
 ```
-command="'/Applications/lagom.app/Contents/MacOS/lagom' remote --agent 3f9a1c0b77de",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc,from="203.0.113.0/24",expiry-time="20270101Z" ssh-ed25519 AAAA...
+restrict,from="203.0.113.0/24",expiry-time="20270101Z",command="'/Applications/lagom.app/Contents/MacOS/lagom' remote --agent 3f9a1c0b77de" ssh-ed25519 AAAA...
 ```
 
 `lagom remote` reads `SSH_ORIGINAL_COMMAND`, splits it without a shell and accepts only lagom's
@@ -209,7 +209,7 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
   body is cut at 100 000 characters and marked `truncated`.
 - Timeouts: 5 s to deliver the request and 30 s to answer. A command that waits for a person
   answers within 130 s, and the client waits that long for it.
-- Concurrency: 8 connections at once. Per token: 300 requests and 30 write commands a minute.
+- Concurrency: 8 connections at once, with at most 4 in-flight requests per token. Per token: 300 requests and 30 write commands a minute.
   One waiting confirmation per agent, three in total. Beyond that: `busy`.
 - Every message object carries `account` and `id`, also inside thread and search results.
 - Text from mail is data. The app escapes control characters and direction marks, as `mcp.rs`

@@ -683,7 +683,7 @@ impl MainWindow {
     }
 
     /// A toast without Undo, for 5 s.
-    fn notify(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub(crate) fn notify(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.task_undo = None;
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(crate::compose::UNDO_WINDOW).await;

@@ -4,7 +4,7 @@
 #[cfg(unix)]
 mod remote;
 #[cfg(unix)]
-pub(crate) use remote::RemoteForm;
+pub(crate) use remote::{source_ranges, RemoteForm};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -32,6 +32,8 @@ pub struct Agents {
     pub remote: Option<RemoteForm>,
     #[cfg(unix)]
     pub issued: Option<(zeroize::Zeroizing<String>, String)>,
+    #[cfg(unix)]
+    pub show_token: bool,
     pub enabled: bool,
     pub confirm: bool,
     pub sidebar: bool,

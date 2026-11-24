@@ -96,16 +96,12 @@ mod files {
     pub(super) fn create_remote(store: &Store, fields: [&str; 4], accounts: &[String], level: lagom_core::agent::policy::Level)
         -> anyhow::Result<(zeroize::Zeroizing<String>, String)> {
         use anyhow::{ensure, Context as _};
-        use ipnet::IpNet;
         use std::io::Write;
         use std::process::{Command, Stdio};
         let [host, sources, date, key] = fields.map(str::trim);
         ensure!(!host.is_empty(), "Enter a host name");
         ensure!(!accounts.is_empty(), "Select at least one account");
-        let ranges = sources.split(',').map(|s| {
-            let s = s.trim();
-            s.parse::<IpNet>().or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from)).map(|net| net.trunc())
-        }).collect::<Result<Vec<_>, _>>().context("Enter IP addresses or CIDR ranges separated by commas")?;
+        let ranges = crate::settings::agents::source_ranges(sources)?;
         let expires = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").context("Use YYYY-MM-DD for expiry")?.and_hms_opt(0, 0, 0).unwrap().and_utc();
         let now = chrono::Utc::now();
         ensure!(expires > now && expires <= now + chrono::Days::new(365), "Choose an expiry in the next 365 days");
@@ -123,9 +119,11 @@ mod files {
             ensure!(!path.chars().any(char::is_control), "Unsupported SSH command path");
             Ok(format!("'{}'", path.replace('\'', r"'\''")))
         };
-        let mut command = quote(&std::env::current_exe()?)?;
+        let executable = std::env::current_exe()?;
+        let mut command = quote(&executable)?;
         let data = store.path().parent().context("Missing store directory")?;
         if dirs::data_dir().map(|p| p.join("lagom")).as_deref() != Some(data) {
+            check_executable(&executable)?;
             command = format!("/usr/bin/env LAGOM_DATA_DIR={} {command}", quote(&data.canonicalize()?)?);
         }
         let (id, token) = core(store.create_remote_agent(host, accounts, level, &ranges, expires.timestamp()))?;
@@ -136,8 +134,14 @@ mod files {
         let from = ranges.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
         // sshd unquotes the option before the login shell reads the forced command.
         let command = command.replace('"', r#"\""#);
-        let line = format!(r#"command="{command} remote --agent {id}",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc,from="{from}",expiry-time="{}" {key}"#, expires.format("%Y%m%dZ"));
+        let line = format!(r#"restrict,from="{from}",expiry-time="{}",command="{command} remote --agent {id}" {key}"#, expires.format("%Y%m%dZ"));
         Ok((token, line))
+    }
+
+    pub(super) fn check_executable(path: &std::path::Path) -> anyhow::Result<()> {
+        anyhow::ensure!(path.is_absolute() && path.as_os_str().as_encoded_bytes().iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._- ".contains(b)), "Unsupported SSH command path");
+        Ok(())
     }
 
     pub fn remove(store: &Store, id: &str, remote: bool) -> anyhow::Result<()> {
@@ -219,6 +223,7 @@ impl MainWindow {
         match files::create_remote(&live.store, fields, &form.accounts, form.level) {
             Ok(issued) => {
                 self.agents.remote = None;
+                self.agents.show_token = false;
                 self.agents.issued = Some(issued);
                 self.reload_agents(cx);
             }
@@ -295,6 +300,15 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn forced_command_requires_a_safe_absolute_executable() {
+        use std::path::Path;
+        for path in ["/Applications/mail=app/lagom", "/tmp/mail;app", "/tmp/mail\napp", "lagom"] {
+            assert_eq!(files::check_executable(Path::new(path)).unwrap_err().to_string(), "Unsupported SSH command path");
+        }
+        assert!(files::check_executable(Path::new("/Applications/Lagom Mail.app/Contents/MacOS/lagom")).is_ok());
+    }
+
+    #[test]
     fn ssh_line_matches_the_issued_scope_and_retires_with_its_agent() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let dir = tempfile::Builder::new().prefix("agent's mail ").tempdir_in(temp.path())?;
@@ -307,7 +321,7 @@ mod tests {
         let key = dir.path().join("key");
         assert!(std::process::Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).status()?.success());
         let public = std::fs::read_to_string(key.with_extension("pub"))?;
-        let fields = ["build host", "203.0.113.5/24,2001:db8::1", &expiry, &public];
+        let fields = ["build host", "203.0.113.0/24,2001:db8::1", &expiry, &public];
         let create = || files::create_remote(&store, fields, std::slice::from_ref(&account.id), Level::Triage);
         let (token, line) = create()?;
         let source = Some("203.0.113.1");
@@ -320,13 +334,13 @@ mod tests {
         let file = dir.path().join("agents").join(format!("{}.token", row.id));
         assert_eq!(std::fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::read_to_string(&file)?, *token);
-        let (command, options) = line.strip_prefix("command=\"").unwrap().split_once("\",").unwrap();
+        let (options, rest) = line.split_once(",command=\"").unwrap();
+        let (command, key) = rest.split_once("\" ").unwrap();
         let (bin, id) = command.split_once(" remote --agent ").unwrap();
         assert_eq!(bin, format!("/usr/bin/env LAGOM_DATA_DIR='{}' '{}'", dir.path().canonicalize()?.display().to_string().replace('\'', r"'\''"), std::env::current_exe()?.display()));
         assert_eq!(row.id, id);
-        let (options, key) = options.split_once(' ').unwrap();
         assert_eq!(key, public.split_whitespace().take(2).collect::<Vec<_>>().join(" "));
-        assert_eq!(options, format!("no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc,from=\"203.0.113.0/24,2001:db8::1/128\",expiry-time=\"{}\"", date.format("%Y%m%dZ")));
+        assert_eq!(options, format!("restrict,from=\"203.0.113.0/24,2001:db8::1/128\",expiry-time=\"{}\"", date.format("%Y%m%dZ")));
         assert_eq!(row.expires, Some(date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()));
         let mut a = Agents::new();
         core(a.load(&store))?;

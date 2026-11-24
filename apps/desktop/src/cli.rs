@@ -483,8 +483,8 @@ fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn run(opts: Options, source_ip: Option<String>) -> Result<i32> {
-    let Some((name, mut rest)) = opts.words.split_first() else {
+fn run(mut opts: Options) -> Result<i32> {
+    let Some((name, rest)) = opts.words.split_first() else {
         return Err(INVALID);
     };
     match name.as_str() {
@@ -507,19 +507,17 @@ fn run(opts: Options, source_ip: Option<String>) -> Result<i32> {
         _ => {}
     }
     let dir = lagom_core::store::Store::data_dir().map_err(|_| INVALID)?;
-    let client = Client { dir, identity: opts.identity, source_ip };
-    if client.source_ip.is_some() && name == "mcp" {
-        drop(zeroize::Zeroizing::new(client.token()?));
-    }
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| Code::Internal)?;
+    let client = Client { dir, identity: opts.identity.take(), source_ip: None };
+    run_client(client, Ok(opts))
+}
+
+fn prepare(opts: Options) -> Result<(String, Args, bool)> {
+    let (name, mut rest) = opts.words.split_first().ok_or(INVALID)?;
     if name == "mcp" {
         if !rest.is_empty() || !opts.args.is_empty() {
             return Err(INVALID);
         }
-        return mcp::serve(client, &rt).map(|_| 0);
+        return Ok((name.clone(), opts.args, opts.json));
     }
     let mut cmd = name.clone();
     if matches!(name.as_str(), "draft" | "event") {
@@ -547,9 +545,26 @@ fn run(opts: Options, source_ip: Option<String>) -> Result<i32> {
         }
     }
     let (cmd, args) = tool.command(args)?;
+    Ok((cmd, args, opts.json))
+}
+
+fn run_client(client: Client, options: Result<Options>) -> Result<i32> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all().build().map_err(|_| Code::Internal)?;
+    let (cmd, args, json) = options.and_then(prepare).inspect_err(|_| {
+        if client.source_ip.is_some() && client.identity.is_some() {
+            let _ = rt.block_on(client.request("remote.refused", Args::new()));
+        }
+    })?;
+    if cmd == "mcp" {
+        if client.source_ip.is_some() {
+            drop(zeroize::Zeroizing::new(client.token()?));
+        }
+        return mcp::serve(client, &rt).map(|_| 0);
+    }
     let (frame, response) = rt.block_on(client.request(&cmd, args))?;
     let mut out = io::stdout().lock();
-    if opts.json {
+    if json {
         out.write_all(&frame).map_err(|_| Code::Internal)?;
         return Ok(match response {
             Response::Success(_) => 0,
@@ -603,7 +618,7 @@ pub fn dispatch() -> Option<i32> {
     let result = if command == "remote" {
         remote::run(&words)
     } else {
-        Options::parse(words).and_then(|opts| run(opts, None))
+        Options::parse(words).and_then(run)
     };
     Some(match result {
         Ok(status) => status,

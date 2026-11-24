@@ -276,7 +276,7 @@ fn remote_uses_sshd_source_and_the_forced_identity() {
     };
     let inside = "203.0.113.5";
     for original in ["sh", "lagom remote", "lagom help", "lagom draft unknown", "lagom skill install", "lagom emails;id",
-        "lagom emails | cat", "lagom search $(id)", "lagom emails\nwhoami", "lagom emails --token NO",
+        "lagom search 'two words'", "lagom search two words", "lagom emails | cat", "lagom search $(id)", "lagom emails\nwhoami", "lagom emails --token NO",
         "lagom emails --token=NO", "lagom mcp --agent other", "lagom emails --agent=other",
         "lagom emails --dir /tmp", "lagom draft create --body --file=/tmp", "lagom emails --source-ip=203.0.113.5"] {
         assert_eq!(run(&forced, original, inside, "").output().unwrap().status.code(), Some(2), "{original}");
@@ -285,17 +285,26 @@ fn remote_uses_sshd_source_and_the_forced_identity() {
     let listener = UnixListener::bind(dir.path().join("agent.sock")).unwrap();
     let server = thread::spawn(move || {
         let store = Store::open(path).unwrap();
-        for _ in 0..4 {
+        for i in 0..5 {
             let (mut socket, _) = listener.accept().unwrap();
             let mut line = String::new();
             BufReader::new(&socket).read_line(&mut line).unwrap();
             let request: Request = serde_json::from_str(&line).unwrap();
+            if i == 0 {
+                assert_eq!(request.cmd, "remote.refused");
+                assert!(request.args.is_empty());
+                assert_eq!(request.source_ip.as_deref(), Some("203.0.113.5"));
+                assert!(store.authenticate(request.token.as_deref().map(String::as_str), request.source_ip.as_deref()).is_ok());
+            }
             let response = if store.authenticate(request.token.as_deref().map(|t| t.as_str()), request.source_ip.as_deref()).is_ok() {
                 Response::Success(json!({"accounts":[]}))
             } else { Response::Failure(Code::Unauthorized) };
             writeln!(socket, "{}", serde_json::to_string(&response).unwrap()).unwrap();
         }
     });
+    let out = run(&forced, "lagom search private words", inside, "wrong").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(String::from_utf8(out.stderr).unwrap().trim_end(), Code::InvalidRequest.message());
     for (args, ip, environment, ok) in [
         (&forced[..], inside, "wrong", true), (&forced[..], "198.51.100.2", "wrong", false),
         (&["remote"][..], inside, token.as_str(), true),
@@ -322,4 +331,13 @@ fn remote_uses_sshd_source_and_the_forced_identity() {
         assert_eq!(out.status.code(), Some(1));
         assert_eq!(out.stderr, b"Token missing, invalid, expired or revoked.\n");
     }
+}
+
+#[test]
+fn ssh_guide_limits_the_forced_command_environment() {
+    let guide = include_str!("../../../docs/agents-ssh.md");
+    let (_, block) = guide.split_once("```sshd_config\n").unwrap();
+    let (config, _) = block.split_once("```").unwrap();
+    assert_eq!(config.lines().collect::<Vec<_>>(), ["AcceptEnv LANG LC_*", "PermitUserEnvironment no"]);
+    assert!(guide.contains("`ssh mac lagom mcp`"));
 }

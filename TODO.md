@@ -226,10 +226,13 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     Tests verified cancellation, EOF, credential checks and interrupted setup.
     The macOS release measured 19.60 MB against the 30 MB budget.
     Live providers, external agent sessions and Linux remain untested.
-  - [x] Step f on `feat/agents-remote` adds scoped SSH agents, one-time token display, expiry and revocation in Settings.
-    CLI and MCP tests verified source ranges, refused inputs, token files and retired agent IDs.
-    Tests checked the generated SSH line. Core and desktop tests passed. The macOS desktop build passed.
-    Live SSH login, visual Settings checks and Linux remain untested.
+  - [x] Hardened remote SSH agents on `feat/agents-remote`.
+    Remote tokens require source ranges. Settings previews canonical ranges and rejects broad networks.
+    Refused commands leave a rate-limited audit entry. Each token can hold four requests.
+    SSH keys use restrict, source and expiry limits, and a checked executable path.
+    Settings hides the token until requested. macOS marks copied tokens as concealed.
+    Core and desktop tests passed. The macOS desktop build passed.
+    Live SSH login, manual Settings checks and Linux remain unverified.
 
 ## Calendar
 

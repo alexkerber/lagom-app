@@ -220,7 +220,7 @@ impl Store {
                 },
             ) => {
                 let end = expires.unwrap_or(now + 30 * DAY);
-                if end <= now || end > now + 365 * DAY || accounts.iter().any(String::is_empty) {
+                if ranges.is_empty() || end <= now || end > now + 365 * DAY || accounts.iter().any(String::is_empty) {
                     return Err(Code::InvalidRequest);
                 }
                 (
@@ -339,17 +339,18 @@ impl Store {
                 if end <= created || end > created.saturating_add(365 * DAY) {
                     return Err(refused(InvalidScope));
                 }
+                let nets: Vec<IpNet> = serde_json::from_str(&cidr.ok_or_else(|| refused(InvalidScope))?)
+                    .map_err(|_| refused(InvalidScope))?;
+                if nets.is_empty() {
+                    return Err(refused(InvalidScope));
+                }
                 let ip = source_ip
                     .ok_or_else(|| refused(Source))?
                     .parse::<IpAddr>()
                     .map_err(|_| refused(Source))?
                     .to_canonical();
-                if let Some(cidr) = cidr {
-                    let nets: Vec<IpNet> =
-                        serde_json::from_str(&cidr).map_err(|_| refused(InvalidScope))?;
-                    if !nets.is_empty() && !nets.iter().any(|n| n.contains(&ip)) {
-                        return Err(refused(Source));
-                    }
+                if !nets.iter().any(|n| n.contains(&ip)) {
+                    return Err(refused(Source));
                 }
                 Some(
                     serde_json::from_str(&accounts.ok_or_else(|| refused(InvalidScope))?)

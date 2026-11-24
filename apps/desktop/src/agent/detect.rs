@@ -395,15 +395,16 @@ fn atomic_write(
             "file changed: {}",
             path.display()
         );
-        let permissions = match mode {
-            Some(mode) => fs::Permissions::from_mode(mode),
-            None => fs::metadata(path)?.permissions(),
-        };
-        tmp.as_file().set_permissions(permissions)?;
-        tmp.as_file().sync_all()?;
+    }
+    if let Some(mode) = mode {
+        tmp.as_file().set_permissions(fs::Permissions::from_mode(mode))?;
+    } else if previous.is_some() {
+        tmp.as_file().set_permissions(fs::metadata(path)?.permissions())?;
+    }
+    tmp.as_file().sync_all()?;
+    if previous.is_some() {
         tmp.persist(path)?;
     } else {
-        tmp.as_file().sync_all()?;
         tmp.persist_noclobber(path)?;
     }
     if let Ok(dir) = fs::File::open(path.parent().unwrap()) {
@@ -1123,6 +1124,16 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(path, format!("{}\n", text.trim_end()))?;
         Ok(())
+    }
+
+    #[test]
+    fn atomic_write_applies_the_mode_on_create_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        for (previous, mode) in [(None, 0o640), (Some("first"), 0o600)] {
+            atomic_write(&path, "first", previous, Some(mode)).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+        }
     }
 
     #[test]

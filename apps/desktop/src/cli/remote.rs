@@ -19,6 +19,15 @@ pub(super) fn run(forced: &[String]) -> Result<i32> {
     port.parse::<u16>().map_err(|_| INVALID)?;
     host_port.parse::<u16>().map_err(|_| INVALID)?;
 
+    let client = Client {
+        dir: lagom_core::store::Store::data_dir().map_err(|_| INVALID)?,
+        identity,
+        source_ip: Some(ip.to_string()),
+    };
+    run_client(client, options())
+}
+
+fn options() -> Result<Options> {
     let original = env::var("SSH_ORIGINAL_COMMAND").map_err(|_| INVALID)?;
     if !original
         .chars()
@@ -45,7 +54,5 @@ pub(super) fn run(forced: &[String]) -> Result<i32> {
             return Err(INVALID);
         }
     }
-    let mut opts = Options::parse(words)?;
-    opts.identity = identity;
-    super::run(opts, Some(ip.to_string()))
+    Options::parse(words)
 }

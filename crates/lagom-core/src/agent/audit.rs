@@ -123,7 +123,7 @@ impl Store {
             | "draft.edit" | "draft.delete" | "draft.send" | "action.archive" | "action.move"
             | "action.read" | "action.unread" | "action.star" | "action.unstar"
             | "action.snooze" | "action.unsnooze" | "action.trash" | "event.create"
-            | "event.update" | "event.delete" => row.command,
+            | "event.update" | "event.delete" | "remote.refused" => row.command,
             _ => "unknown",
         };
         let (agent, token) = match &row.outcome {
@@ -138,6 +138,7 @@ impl Store {
         };
         let result = match &row.outcome {
             Ok(()) => "ok".into(),
+            Err(Failure::Error(Code::InvalidRequest)) if command == "remote.refused" => "refused".into(),
             Err(Failure::Error(code)) => serde_json::to_value(code)
                 .map_err(|_| Code::Internal)?
                 .as_str()

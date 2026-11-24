@@ -226,19 +226,16 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
             lagom_core::agent::token::TokenScope::Remote {
                 accounts: std::slice::from_ref(&a.id),
                 level: lagom_core::agent::policy::Level::Read,
-                ranges: &[],
+                ranges: &["127.0.0.1/32".parse().unwrap()],
                 expires: None,
             },
         )
         .unwrap();
-    wait(|| sock.exists());
+    // bind creates the path before the server applies its final mode.
+    wait(|| std::fs::metadata(&sock).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600));
     assert_eq!(
         std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
         0o700
-    );
-    assert_eq!(
-        std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777,
-        0o600
     );
     let count = || {
         db.query_row("SELECT count(*) FROM agent_audit", [], |r| {
@@ -259,6 +256,12 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
         assert_eq!(count(), n + 1);
         bytes
     };
+    let refusal: Value = serde_json::from_slice(&call("remote.refused", json!({}))).unwrap();
+    assert_eq!(refusal["error"]["code"], "invalid_request");
+    let counted: i64 = db.query_row(
+        "SELECT count(*) FROM agent_audit WHERE agent=? AND command='remote.refused' AND result='refused' AND read_seq IS NOT NULL",
+        [&agent], |r| r.get(0)).unwrap();
+    assert_eq!(counted, 1);
     let ok = |cmd, args| {
         let bytes = call(cmd, args);
         let value: Value = serde_json::from_slice(&bytes).unwrap();

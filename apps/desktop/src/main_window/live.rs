@@ -3100,6 +3100,26 @@ mod tests {
 
     #[cfg(unix)]
     #[gpui::test]
+    fn remote_token_requires_explicit_disclosure(cx: &mut TestAppContext) {
+        let (view, cx, _rx) = window(cx);
+        view.update_in(cx, |v, window, cx| {
+            v.open_agents(window, cx);
+            v.agents.detected.clear();
+            v.agents.issued = Some((String::from("fixture").into(), "SSH line".into()));
+            cx.notify();
+        });
+        let draw = |cx: &mut VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        for (label, shown) in [("Show token", false), ("Hide token", true)] {
+            draw(cx);
+            assert_eq!(cx.debug_bounds("Copy token").is_some(), shown);
+            let button = cx.debug_bounds(label).unwrap().center();
+            cx.simulate_click(button, Default::default());
+        }
+        assert!(!view.read_with(cx, |v, _| v.agents.show_token));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
     fn agents_page_starts_off_connects_on_click_only_narrows_and_disconnects_all(cx: &mut TestAppContext) {
         use lagom_core::agent::policy::{Access, Level, Resource, Setting};
         fn files(dir: &std::path::Path, found: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
