@@ -32,13 +32,17 @@ impl Store {
         Self::open(Self::default_path()?)
     }
     /// `LAGOM_DATA_DIR` isolates test runs from the owner's real store.
-    pub fn default_path() -> Result<std::path::PathBuf> {
-        let dir = match std::env::var_os("LAGOM_DATA_DIR") {
-            Some(dir) => std::path::PathBuf::from(dir),
+    pub fn data_dir() -> Result<std::path::PathBuf> {
+        Ok(match std::env::var_os("LAGOM_DATA_DIR") {
+            Some(dir) if Path::new(&dir).is_absolute() => dir.into(),
+            Some(_) => return Err(Error::Invalid("LAGOM_DATA_DIR must be absolute")),
             None => dirs::data_dir()
                 .ok_or(Error::Invalid("platform data directory unavailable"))?
                 .join("lagom"),
-        };
+        })
+    }
+    pub fn default_path() -> Result<std::path::PathBuf> {
+        let dir = Self::data_dir()?;
         std::fs::create_dir_all(&dir)?;
         owner_only(&dir, 0o700)?;
         Ok(dir.join("lagom.sqlite3"))
@@ -66,7 +70,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 21 {
+        if version > 22 {
             return Err(Error::Invalid("store was created by a newer lagom version"));
         }
         if version == 0 {
@@ -149,14 +153,21 @@ impl Store {
         if version < 21 {
             store.db.execute_batch(include_str!("schema_v21.sql"))?;
         }
+        if version < 22 {
+            store.db.execute_batch(include_str!("schema_v22.sql"))?;
+        }
+        store.db.busy_timeout(std::time::Duration::ZERO)?;
+        match store.prune_agent_audit(chrono::Utc::now().timestamp()) {
+            Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
+            result => result?,
+        }
         if store.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_credentials)", [], |r| r.get(0))? {
-            store.db.busy_timeout(std::time::Duration::ZERO)?;
             match store.clean_pending(None) {
                 Err(Error::Store(e)) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
                 result => result?,
             }
-            store.db.busy_timeout(busy_timeout)?;
         }
+        store.db.busy_timeout(busy_timeout)?;
         Ok(store)
     }
     pub fn signature(&self, account: &str) -> Result<String> {
@@ -169,7 +180,17 @@ impl Store {
     }
 
     pub fn cached_attachment(&self, message: i64, section: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.db.query_row("SELECT data FROM attachment_cache WHERE message=?1 AND section=?2", params![message, section], |r| r.get(0)).optional()?)
+        self.cached_attachment_limited(message, section, usize::MAX)
+    }
+
+    pub fn cached_attachment_limited(&self, message: i64, section: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        match self.db.query_row("SELECT CASE WHEN length(data)<=?3 THEN data END FROM attachment_cache WHERE message=?1 AND section=?2",
+            params![message, section, limit], |r| r.get::<_, Option<Vec<u8>>>(0)).optional()? {
+            None => Ok(None),
+            Some(Some(data)) => Ok(Some(data)),
+            Some(None) => Err(Error::Invalid("attachment is too large")),
+        }
     }
 
     pub fn cached_forward_attachments(&self, message: i64) -> Result<Option<Vec<crate::smtp::OutgoingAttachment>>> {
@@ -441,9 +462,15 @@ mod tests {
         let path = temp.path().join("busy.sqlite3");
         let writer = Store::open(&path).unwrap();
         writer.db.execute("INSERT INTO pending_credentials VALUES ('account','key')", []).unwrap();
-        let _tx = writer.credential_transaction().unwrap();
+        writer.db.execute("INSERT INTO agent_audit(at,command,result) VALUES(0,'emails','ok')", []).unwrap();
+        let tx = writer.credential_transaction().unwrap();
         let reader = Store::open(&path).unwrap();
         assert_eq!(reader.db.query_row("SELECT credential_key FROM pending_credentials", [], |r| r.get::<_, String>(0)).unwrap(), "key");
+        let rows = |store: &Store| store.db.query_row("SELECT count(*) FROM agent_audit", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(rows(&reader), 1);
+        drop(tx);
+        reader.prune_agent_audit(chrono::Utc::now().timestamp()).unwrap();
+        assert_eq!(rows(&reader), 0);
     }
 
     #[test]
@@ -511,7 +538,7 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
     }
     #[test]
     fn account_roundtrip_and_reopen() {
@@ -989,7 +1016,7 @@ impl Store {
 }
 
 #[cfg(test)]
-mod mail_tests {
+pub(crate) mod mail_tests {
     use super::*;
     #[test]
     fn a_synced_save_waits_for_a_write_on_another_connection() {
@@ -1065,7 +1092,7 @@ mod mail_tests {
         }
     }
 
-    fn setup() -> (tempfile::TempDir, Store, Account, i64) {
+    pub(crate) fn setup() -> (tempfile::TempDir, Store, Account, i64) {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("mail.db")).unwrap();
         let (i, s) = crate::presets::servers("a@gmail.com").unwrap();
@@ -1146,7 +1173,7 @@ mod mail_tests {
         assert_eq!(store.unread_inbox_count(100, &expected).unwrap(), 0);
     }
 
-    fn mail(a: &Account, f: i64, uid: u32) -> Message {
+    pub(crate) fn mail(a: &Account, f: i64, uid: u32) -> Message {
         Message {
             summary: MessageSummary {
                 account: a.id.clone(),
@@ -1185,7 +1212,7 @@ mod mail_tests {
         let folders = [old.folder(inbox).unwrap(), old.folder(custom).unwrap()];
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
         for message in &messages {
             assert_eq!(store.message(message.summary.id).unwrap(), *message);
             assert!(!store.inline_loaded(message.summary.id).unwrap());
@@ -1229,7 +1256,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -1306,12 +1333,14 @@ mod mail_tests {
         legacy.as_object_mut().unwrap().remove("forward_source");
         old.db.execute("INSERT INTO drafts(id,account,content,revision) VALUES (?1,?2,?3,'revision')", params![draft.id, account.id, legacy.to_string()]).unwrap();
         let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "Queued".into(), ..Default::default() };
-        let queued = old.enqueue(&account, &outgoing, 123).unwrap();
-        let raw = old.pending(&queued).unwrap().raw;
+        let queued = "queued@example.com";
+        let raw = crate::smtp::compose(&account, &outgoing).unwrap().formatted();
+        old.db.execute("INSERT INTO outbox(id,account,content,raw,ready_at) VALUES(?,?,?,?,123)",
+            params![queued, account.id, serde_json::to_string(&outgoing).unwrap(), raw]).unwrap();
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -1319,7 +1348,7 @@ mod mail_tests {
         assert_eq!(store.drafts().unwrap(), [draft.clone()]);
         assert_eq!(store.owned_drafts().unwrap(), [draft.clone()]);
         assert_eq!(store.due_drafts(&account.id, 0).unwrap(), [draft.id.clone()]);
-        assert_eq!(store.pending(&queued).unwrap().raw, raw);
+        assert_eq!(store.pending(queued).unwrap().raw, raw);
         assert_eq!(store.tasks(task.list, false).unwrap(), [task]);
         assert_eq!(store.signature(&account.id).unwrap(), if version == 11 { "Existing signature" } else { "" });
         store.set_signature(&account.id, "**Team**\nContact").unwrap();
@@ -1468,7 +1497,7 @@ mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1540,7 +1569,7 @@ mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1618,7 +1647,7 @@ mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            21
+            22
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1647,7 +1676,7 @@ mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 21);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 22);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));
@@ -1709,6 +1738,163 @@ mod mail_tests {
         assert!(s.folder(f).is_err());
         assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
     }
+    #[test]
+    fn agent_filter_scopes_every_alternative_before_paging() {
+        use crate::agent::filter::{Filter, FilterReader};
+        let (temp, store, account, inbox) = setup();
+        let mut other = account.clone();
+        other.id = "other".into();
+        store.save_account(&other).unwrap();
+        let sent = store.save_folder(&other.id, "Sent Items", None, FolderRole::Sent).unwrap();
+        let hidden = store.save_message(&mail(&other, sent, 999)).unwrap();
+        store.snooze(hidden, Some(100)).unwrap();
+        let mut expected = Vec::new();
+        for uid in 1..=102 {
+            let mut m = mail(&account, inbox, uid);
+            m.summary.cc = "Team".into();
+            m.summary.to = "List".into();
+            m.summary.has_attachments = true;
+            m.summary.flagged = true;
+            expected.push(store.save_message(&m).unwrap());
+        }
+        let mut reader = FilterReader::open(&temp.path().join("mail.db")).unwrap();
+        expected.reverse();
+        let ids = |rows: &[MessageSummary]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        let allowed = [account.id.clone()];
+        let mut search = |query, scope, page, limit| {
+            reader.filtered_messages(&allowed, &Filter::parse(query).unwrap(), scope, 86400, page, limit).unwrap()
+        };
+        let filter = r#"from:alice to:list cc:team subject:hello is:starred is:unread has:attachment in:inbox after:1970/01/01 before:1970-01-02 newer_than:1d older_than:1w OR -is:read "rust sqlite" sea"#;
+        let (rows, next) = search(filter, None, 1, None);
+        assert_eq!(ids(&rows), expected[..20]);
+        assert_eq!(next, Some(2));
+        let query = r#""rust sqlite" OR in:sent"#;
+        let (rows, next) = search(query, None, 1, Some(200));
+        assert_eq!(ids(&rows), expected[..100]);
+        assert_eq!(next, Some(2));
+        let (rows, next) = search(query, None, 2, Some(200));
+        assert_eq!(ids(&rows), expected[100..]);
+        assert_eq!(next, None);
+        for q in [r#""rust search""#, "-in:all", "subject:%", "is:read", "older_than:1w"] {
+            assert!(search(q, None, 1, None).0.is_empty());
+        }
+        assert!(search(query, Some("Sent Items"), 1, None).0.is_empty());
+        let empty = Filter::parse("").unwrap();
+        assert!(reader.filtered_messages(&[], &empty, None, 0, 1, None).unwrap().0.is_empty());
+        assert!(reader.filtered_messages(&allowed, &empty, None, 0, 0, None).is_err());
+        let both = [account.id, other.id.clone()];
+        let (rows, _) = reader.filtered_messages(&both, &empty, Some("sent"), 100, 1, None).unwrap();
+        assert_eq!(ids(&rows), [hidden]);
+        let (rows, _) = reader.filtered_messages(&both, &Filter::parse("in:later").unwrap(), None, 99, 1, None).unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [hidden]);
+    }
+
+    #[test]
+    fn agent_mail_pages_count_messages_per_account_before_applying_the_limit() {
+        use crate::agent::filter::Filter;
+        let (_temp, store, a, inbox) = setup();
+        let archive = store.save_folder(&a.id, "[Gmail]/All Mail", None, FolderRole::Archive).unwrap();
+        let mut other = a.clone();
+        other.id = "other".into();
+        store.save_account(&other).unwrap();
+        let second_inbox = store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let mut copy = mail(&a, inbox, 1);
+        copy.summary.message_id = "<shared>".into();
+        let primary = store.save_message(&copy).unwrap();
+        copy.summary.folder = archive;
+        store.save_message(&copy).unwrap();
+        copy.summary.account = other.id.clone();
+        copy.summary.folder = second_inbox;
+        let separate = store.save_message(&copy).unwrap();
+
+        let reader = Store::agent_reader(store.path(), || false).unwrap();
+        let accounts = [a.id.clone(), other.id];
+        for query in ["", "subject:hello"] {
+            let filter = Filter::parse(query).unwrap();
+            for (page, id, next) in [(1, separate, Some(2)), (2, primary, None)] {
+                let (rows, next_page) = reader.filtered_messages(&accounts, &filter, None, 0, page, Some(1)).unwrap();
+                assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), [id]);
+                assert_eq!(next_page, next);
+            }
+        }
+        assert_eq!(store.agent_message_folders(&a.id, "<shared>").unwrap(), ["INBOX", "[Gmail]/All Mail"]);
+    }
+
+    #[test]
+    fn agent_filter_matches_literal_terms_in_allowed_folders() {
+        use crate::agent::filter::{Filter, FilterReader};
+        let (temp, store, a, inbox) = setup();
+        let mut b = a.clone();
+        b.id = "other".into();
+        store.save_account(&b).unwrap();
+        let terms = (0..64).map(|n| format!("term{n:02}")).collect::<Vec<_>>().join(" ");
+        let mut m = mail(&a, inbox, 1);
+        m.body_text = format!("NEAR AND col http://x 12:30 {terms}");
+        m.summary.subject = "Återbetalning MÖTE Straße".into();
+        m.summary.from_name = "MÖTE_%".into();
+        m.summary.to = "MÖTE_%".into();
+        m.summary.cc = "MÖTE_%".into();
+        let hit = store.save_message(&m).unwrap();
+        let insert = |account, name, role, uid| {
+            let folder = store.save_folder(account, name, None, role).unwrap();
+            let mut m = mail(&a, folder, uid);
+            m.summary.account = account.into();
+            store.save_message(&m).unwrap()
+        };
+        let custom = insert(&a.id, "Project", FolderRole::Other, 2);
+        let other = insert(&b.id, "Project", FolderRole::Other, 3);
+        let trash = insert(&a.id, "[Gmail]/Trash", FolderRole::Trash, 4);
+        let junk = insert(&a.id, "Junk Email", FolderRole::Junk, 5);
+        let draft = insert(&a.id, "Entwürfe", FolderRole::Drafts, 6);
+        let archive = insert(&a.id, "Alle Nachrichten", FolderRole::Archive, 7);
+        let later = store.save_message(&mail(&a, inbox, 8)).unwrap();
+        store.snooze(later, Some(11)).unwrap();
+        let later_custom = insert(&a.id, "Project", FolderRole::Other, 9);
+        store.snooze(later_custom, Some(11)).unwrap();
+        let other_trash = insert(&b.id, "Deleted Items", FolderRole::Trash, 10);
+
+        let allowed = [a.id.clone()];
+        let both = [a.id, b.id];
+        let mut reader = FilterReader::open(&temp.path().join("mail.db")).unwrap();
+        let mut ids = |accounts: &[String], query: &str, scope| {
+            let (rows, next) = reader.filtered_messages(accounts, &Filter::parse(query).unwrap(), scope, 10, 1, None).unwrap();
+            assert_eq!(next, None);
+            rows.into_iter().map(|r| r.id).collect::<Vec<_>>()
+        };
+        for query in [terms.as_str(), "NEAR", "AND", "col:", "http://x", "12:30",
+                      r#""NEAR AND" "col:""#, "FROM:möte_% TO:möte_% CC:möte_%",
+                      "SUBJECT:återbetalning subject:möte subject:STRASSE", "ter", "from:%", "from:_",
+                      "to:%", "to:_", "cc:%", "cc:_"] {
+            assert_eq!(ids(&allowed, query, None), [hit], "{query}");
+        }
+        for query in ["*", "^", r#""*""#, r#""^""#, "te", "te:"] {
+            assert!(ids(&allowed, query, None).is_empty(), "{query}");
+        }
+        assert_eq!(ids(&allowed, "", None), [later_custom, later, archive, draft, custom, hit]);
+        assert_eq!(ids(&allowed, "-rust", None), [hit]);
+        assert_eq!(ids(&allowed, "-col:", None), [later_custom, later, archive, draft, custom]);
+        assert_eq!(ids(&both, "in:Project", None), [other, custom]);
+        assert_eq!(ids(&both, "", Some("Project")), [other, custom]);
+        assert_eq!(ids(&allowed, "in:inbox", None), [hit]);
+        assert_eq!(ids(&allowed, "in:later", None), [later_custom, later]);
+        assert_eq!(ids(&both, "in:trash", None), [other_trash, trash]);
+        assert_eq!(ids(&allowed, "in:trash OR subject:möte", None), [trash, hit]);
+        assert_eq!(ids(&allowed, "-in:trash", Some("all")), [later_custom, later, archive, draft, junk, custom, hit]);
+        assert_eq!(ids(&allowed, "in:junk", None), [junk]);
+        assert_eq!(ids(&allowed, "in:spam", None), [junk]);
+        assert_eq!(ids(&allowed, "in:drafts", None), [draft]);
+        assert_eq!(ids(&allowed, "in:archive", None), [archive]);
+
+        let empty = Filter::parse("").unwrap();
+        for scope in ["", " \t", "a\0b", &format!("{}x", " ".repeat(4096))] {
+            assert!(matches!(reader.filtered_messages(&allowed, &empty, Some(scope), 10, 1, None), Err(Error::Invalid("invalid_request"))));
+        }
+        for (page, limit) in [(1, 0), (u32::MAX, 100), (102, 100)] {
+            assert!(matches!(reader.filtered_messages(&allowed, &empty, None, 10, page, Some(limit)), Err(Error::Invalid("invalid_request"))));
+        }
+        assert!(reader.filtered_messages(&allowed, &empty, None, 10, 101, Some(100)).unwrap().0.is_empty());
+    }
+
     #[test]
     fn rejects_cross_account_message() {
         let (_t, s, mut a, f) = setup();

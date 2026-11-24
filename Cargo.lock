@@ -3468,14 +3468,17 @@ name = "lagom"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "block2",
  "chrono",
+ "dirs 6.0.0",
  "embed-resource",
  "gpui",
  "iana-time-zone",
  "image",
  "keyring",
  "lagom-core",
+ "libc",
  "notify-rust",
  "objc2",
  "objc2-app-kit",
@@ -3486,7 +3489,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "tempfile",
  "tokio",
+ "toml_edit 0.22.27",
  "unicode-segmentation",
  "windows 0.61.3",
  "wry",
@@ -3499,11 +3504,9 @@ name = "lagom-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "lagom-core",
  "rpassword",
- "serde_json",
  "tempfile",
  "tokio",
  "zeroize",
@@ -3520,9 +3523,11 @@ dependencies = [
  "dirs 6.0.0",
  "dom_query",
  "futures-util",
+ "getrandom 0.4.3",
  "hickory-proto",
  "hickory-resolver",
  "html5ever",
+ "ipnet",
  "keyring",
  "lettre",
  "libc",
@@ -3538,10 +3543,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "unicase",
  "unicode-normalization",
  "url",
  "uuid",
@@ -8659,6 +8666,7 @@ version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

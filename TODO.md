@@ -202,9 +202,37 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
-  - [x] read-only slice: `lagom-cli mcp` over stdio with list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos (2026-11-17). Protocol tests and a stdio smoke; not tried in a real MCP client.
+  - [x] Closed the agent read security review on `feat/agents-socket`. Settings provisions authenticated MCP access.
+    Pending reads recheck permissions. Search uses one snapshot. Contacts, attachments and audit refusals have limits.
+    Long identifiers resolve within their account. Settings shows the latest 50 activity rows per agent.
+    Core, desktop and developer CLI tests passed. The macOS desktop build passed.
+    Live providers, external MCP clients and Linux remain unverified.
+  - [x] Agent security review on `feat/agents-core`. Audit targets require a store lookup. Read limits protect each agent’s history.
+    Verified token refusals retain their IDs. Source checks distinguish local and remote tokens. Undo restores draft ownership.
+    Core and FFI tests passed. The desktop app built. Live agent connections were not tested.
+  - [x] Desktop agents read permitted mail and calendars through a private socket on `feat/agents-socket`.
+    The developer CLI grants test access to one account. Disabling access closes open requests.
+    macOS socket tests verified account isolation, read purity, limits, audit records and revocation.
+    Linux, live providers and access from another OS user remain unverified.
+  - [x] The desktop CLI and MCP forward agent commands on `feat/agents-client`. The CLI also installs the bundled skill.
+    A fake socket verified framing, identity, output, errors and MCP calls.
+    The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
+    The live service and Linux remain untested.
+  - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
-- [ ] AI Agents: local and remote agents read and act on mail and calendar through the running app. Settings > AI Agents (off by default, per-account and per-agent levels None/Read/Triage/Send, confirmation before send and calendar changes, sidebar toggle), a socket-only CLI with `--json`, `skill install` and `mcp`, scoped tokens for remote agents (accounts, level, CIDR, expiry), an audit log with Revoke. Spec: `docs/ai-agents.md`. Branch `wip/ai-agents`.
+- [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+  - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
+    Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
+    Settings and the client explain when the socket path is too long.
+    Core and desktop tests passed on macOS. The desktop app built. Live Gmail and visual Settings checks remain unverified.
+  - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
+    Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
+    Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
+    Connect records cleanup instructions before writing files. Tokens live beside the open store.
+    A temporary socket verified CLI and MCP reads, account isolation and access off.
+    Tests verified cancellation, EOF, credential checks and interrupted setup.
+    The macOS release measured 19.60 MB against the 30 MB budget.
+    Live providers, external agent sessions and Linux remain untested.
 
 ## Calendar
 
@@ -248,7 +276,10 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 ## Mail core
 
 - [x] Accounts, OS keychain app passwords and configurable provider presets.
-- [x] Migrated SQLite/WAL store, FTS5 search, paged metadata and local Later/snooze queries.
+- [x] Migrated the SQLite/WAL store and added FTS5 search, paging and local snooze queries.
+  On `feat/agents-filter`, agent searches use a read-only connection, a two-second deadline and a 10,000-row offset cap.
+  Filters match Unicode text and provider folder roles. Default searches exclude Trash and Junk.
+  Core tests cover parsing, account isolation, folder visibility, paging and timeout recovery. The agent socket was not tested.
 - [x] IMAP folder discovery, bounded initial and incremental sync, flags, expunges, IDLE and mail operations.
 - [x] IMAP BODYSTRUCTURE nesting: skip text branches beyond depth 32 as attachments; reject structured responses above 40 nested lists and independently cap parser recursion at 40 (including unsolicited and fragmented FETCH, message bodies and extensions). Local imap-proto patch prevents quoted unknown attributes from bypassing the wire scanner; remove the patch when upstream bounds recursion.
 - [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.

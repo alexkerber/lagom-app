@@ -672,6 +672,10 @@ impl ImapSync {
     }
 
     pub async fn fetch_attachment(&mut self, store: &mut Store, id: i64, section: &str) -> Result<Vec<u8>> {
+        self.fetch_attachment_limited(store, id, section, MAX_LITERAL).await
+    }
+
+    pub async fn fetch_attachment_limited(&mut self, store: &mut Store, id: i64, section: &str, limit: usize) -> Result<Vec<u8>> {
         let message = store.message(id)?.summary;
         let part = store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
         let path = section.split('.').map(|s| s.parse::<u32>().ok().filter(|n| *n > 0))
@@ -679,6 +683,14 @@ impl ImapSync {
         // shortcut: buffer encoded parts up to 64 MiB; stream to disk when larger attachments are needed.
         if part.size as usize > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
+        }
+        let estimated = if part.encoding.eq_ignore_ascii_case("base64") {
+            u64::from(part.size) * 3 / 4
+        } else {
+            u64::from(part.size)
+        };
+        if estimated > limit as u64 {
+            return Err(Error::Invalid("attachment is too large"));
         }
         // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
         self.session.get_mut().remaining = Some(part.size as usize + 65536);
@@ -705,6 +717,7 @@ impl ImapSync {
             return Err(Error::Network("attachment size changed or download incomplete"));
         }
         let data = attachment::decode(bytes, &part.encoding)?;
+        if data.len() > limit { return Err(Error::Invalid("attachment is too large")); }
         store.cache_attachment(id, section, &data)?;
         Ok(data)
     }

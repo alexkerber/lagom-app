@@ -106,6 +106,8 @@ async fn attachment_roundtrip(cached: Option<bool>) {
     assert_eq!(parts.len(), 2);
     assert_eq!((&*parts[0].section, &*parts[0].filename, &*parts[0].mime_type, parts[0].size, &*parts[0].encoding),
         ("2.1", "data.bin", "application/octet-stream", 10, "base64"));
+    assert!(matches!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 6).await,
+        Err(lagom_core::Error::Invalid("attachment is too large"))));
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1] UID FETCH 2").await.is_err());
     assert_eq!(imap.fetch_attachment(&mut store, message.id, "2.1").await.unwrap(), b"\0\xffhi");
     assert_eq!(imap.fetch_attachment(&mut store, message.id, "2.2").await.unwrap(), b"\0\xffhi!");

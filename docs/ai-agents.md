@@ -23,6 +23,9 @@ processes of the same user, and neither does anything else in this design. Per-a
 between local agents are guardrails against mistakes and prompt injection. They are not a
 boundary against a hostile local process.
 
+Full-text search uses a shared index. Response timing can reveal that a term is frequent in another account.
+A process running as the same user can occupy all eight socket connections and prevent other agents from connecting.
+
 Keychain. Linux Secret Service and Windows Credential Manager give any process of the same user
 the stored secrets. macOS asks before another program reads an item. Not verified for lagom's
 release builds.
@@ -102,7 +105,9 @@ Every request carries a token. No token means refused. A token belongs to one ag
 
 Source address. Under a forced command, `sshd` sets `SSH_CONNECTION`. `lagom remote` sends its
 first field as `source_ip`. The app refuses a remote token without `source_ip`, and one outside
-the token's ranges. Limits:
+the token's ranges. Local tokens are refused when a source address is present.
+CIDR checks treat an IPv4-mapped IPv6 source as IPv4, including when the range is `::/0`.
+The request clears its owned token buffer on drop. Limits:
 
 - The client states the address; the app cannot check it. It holds only when the token is
   reachable through the forced command alone. A local process can state any address.
@@ -153,7 +158,7 @@ effective(resource) = min( global level,   # the account's row, else the group d
 | `accounts`                                                                  | —        | lists accounts with Read or more on mail or calendar |         |
 | `folders`                                                                   | mail     | Read                                                 |         |
 | `emails [--filter] [--page] [--limit]`                                      | mail     | Read                                                 |         |
-| `search <topic or filter> [--in <scope>]`                                   | mail     | Read                                                 |         |
+| `search <topic or filter> [--in <scope>] [--page] [--limit]`                | mail     | Read                                                 |         |
 | `thread <id>`                                                               | mail     | Read                                                 |         |
 | `attachment <id>`                                                           | mail     | Read                                                 |         |
 | `contacts`                                                                  | mail     | Read                                                 |         |
@@ -172,7 +177,7 @@ effective(resource) = min( global level,   # the account's row, else the group d
   `has:attachment`, `in:<folder>`, `before:` and `after:` (`YYYY-MM-DD`), and bare words for full
   text. The core parses it into bound SQL parameters. An unknown operator is `invalid_request`.
 - `--in` takes `inbox`, `sent`, `archive`, `later`, `all` or a folder name. `--limit` is 20 by
-  default and 100 at most. `--page` starts at 1.
+  default and 100 at most. `--page` starts at 1. Only `emails` and `search` accept these paging flags.
 - Drafts. `draft edit`, `draft delete` and `draft send` work only on a draft that the same agent
   created. Every other draft is read-only. `draft edit` names the revision it read; a draft that
   changed since gives `conflict`. The Drafts list marks a draft an agent created. An agent draft
@@ -210,8 +215,7 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
 - Concurrency: 8 connections at once. Per token: 300 requests and 30 write commands a minute.
   One waiting confirmation per agent, three in total. Beyond that: `busy`.
 - Every message object carries `account` and `id`, also inside thread and search results.
-- Text from mail is data. The app escapes control characters and direction marks, as `mcp.rs`
-  does today.
+- Text from mail is data. The app escapes control characters and direction marks.
 
 Errors are fixed strings. They never carry a stack trace, a path, SQL, a server reply or data
 from an account.
@@ -231,8 +235,9 @@ from an account.
 | `too_large`       | Too large.                                             | A size limit above.                                                              |
 | `internal`        | Internal error.                                        | Anything else. The detail goes to the app's log only.                            |
 
-The client adds one of its own: `app_unreachable` ("lagom is not running, or agent access is
-off."). An ID or account outside the caller's scope gives the same bytes as one that does not
+The client reports `app_unreachable` ("lagom is not running, or agent access is
+off.") or `socket_path_too_long` ("Agent access could not start. The socket path is too long.").
+An ID or account outside the caller's scope gives the same bytes as one that does not
 exist, and the app decides it before any lookup. `forbidden` appears only for objects the caller
 can already read. The audit log keeps the real reason.
 
@@ -253,6 +258,8 @@ IDs are opaque strings. Clients must not parse them.
 | Event `e1.…`                   | account ID, calendar remote ID, event remote ID | sync                                                                         |
 | Attachment `a1.…`              | message ID and MIME section                     | as its message                                                               |
 
+- Long message headers, folder names, thread keys and attachment sections use compact SHA-256 forms.
+  Lookup matches the digest inside the authorized account or message.
 - Each is the prefix plus base64url of the parts. The migration adds an index on
   `messages(account, message_id)` for the lookup.
 - Resolving: decode, then require Read on the account inside the ID, else `not_found`. Then query
@@ -261,7 +268,8 @@ IDs are opaque strings. Clients must not parse them.
 - Copies. One mail can sit in several folders of one account, for example Gmail's Inbox and All
   Mail. Rows with one Message-ID and the same date, size, sender and subject are copies. A
   command takes the first copy in this order: Inbox, other folders, Sent, Archive, Junk, Trash.
-  `--folder` picks another.
+  `emails` and `search` page over distinct IDs per account. Each row names the preferred matching
+  folder and lists all its folders in `folders`. `--folder` picks another.
 - Collisions. The sender chooses the Message-ID, so a stranger can reuse one. When the rows for
   an ID are not all copies, or two of them share a folder, every write gives `conflict` and a
   read marks the object `"ambiguous":true`. What stays: a forgery with equal date, size, sender
@@ -320,17 +328,23 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
 | Column           | Content                                                                                                                           |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `at`             | Unix seconds                                                                                                                      |
-| `agent`, `token` | Agent ID and public token ID; empty when the token is unknown                                                                     |
+| `agent`, `token` | Verified agent ID and public token ID, including expiry and source refusals. Empty until the digest matches.                      |
 | `account`        | The account the command touched                                                                                                   |
 | `command`        | For example `emails`, `draft.send`                                                                                                |
-| `target`         | The object ID, when there is one. For a send it is the draft ID, which is also the outbox ID and the Message-ID of the sent mail. |
+| `target`         | Canonical ID from an in-scope store lookup. NULL for unresolved or out-of-scope targets.                                          |
 | `result`         | `ok` or the error code, with the real reason for `unauthorized` and `not_found`                                                   |
 | `source_ip`      | As stated by the client                                                                                                           |
 | `detail`         | Recipients of a send or an event. Nothing else.                                                                                   |
 
+- A send uses the draft ID, shared with the outbox row and the sent Message-ID.
 - Never logged: subjects, bodies, filter and search text, attachment bytes, tokens.
-- Kept for 90 days or 50 000 rows, whichever ends first. Pruned at start and once a day.
-- Refusals without a valid token are limited to 60 rows a minute, then counted in one row.
+- The decoder rejects IDs longer than 2 KiB before decoding.
+- All rows expire after 90 days. The app prunes at startup and once a day during use.
+- Each append keeps the latest 50 000 non-write rows per agent. Anonymous refusals have their own bucket.
+  Draft changes, sends, mail actions and event changes expire only by age.
+- Refusals without a verified digest are limited to 60 rows a minute, then counted in one row.
+- Verified refusals and busy replies share one counter per agent per minute. The first refusal records its reason.
+- Socket admission failures are counted off the listener thread. Settings shows the newest 50 rows for each agent.
 - Rows have no foreign keys: they outlive the agent, the token and the account.
 - Settings shows the log by agent, newest first, with Revoke on each agent.
 
@@ -354,6 +368,9 @@ CREATE TABLE agent_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT N
 CREATE INDEX agent_audit_at ON agent_audit(at);
 CREATE INDEX messages_account_message_id ON messages(account, message_id);
 ```
+
+Migration `schema_v22.sql` also indexes counted read rows by agent and sequence.
+Enqueue copies the draft owner into `outbox.draft_agent`. Undo restores ownership in the draft transaction.
 
 `Store::delete_account` also deletes the account's `agent_access` rows.
 
@@ -380,9 +397,7 @@ CREATE INDEX messages_account_message_id ON messages(account, message_id);
   file write by the client and creates no token.
 - `lagom-cli` stays a developer test client with the user's full rights: it opens the store,
   reads the keychain and talks to the mail servers itself. It skips every rule here. It is not
-  packaged, not on `PATH` and never named in a skill or an MCP entry. Its `mcp` command and
-  `mcp.rs` are removed in step e, when the replacement can be switched on. `today` and
-  `list_todos` go with it until tasks are exposed.
+  packaged, not on `PATH` and never named in a skill or an MCP entry. Use the desktop binary for MCP. Tasks remain available through the developer CLI.
 
 ## 13. Agent detection and Connect
 
