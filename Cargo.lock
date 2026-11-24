@@ -3504,11 +3504,9 @@ name = "lagom-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "lagom-core",
  "rpassword",
- "serde_json",
  "tempfile",
  "tokio",
  "zeroize",
