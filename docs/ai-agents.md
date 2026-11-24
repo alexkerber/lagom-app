@@ -26,6 +26,9 @@ boundary against a hostile local process.
 Full-text search uses a shared index. Response timing can reveal that a term is frequent in another account.
 A process running as the same user can occupy all eight socket connections and prevent other agents from connecting.
 
+An agent send checks authority after SMTP login on the connection that sends the message.
+A revocation after that check can race the SMTP transaction for up to 60 seconds (section 9).
+
 Keychain. Linux Secret Service and Windows Credential Manager give any process of the same user
 the stored secrets. macOS asks before another program reads an item. Not verified for lagom's
 release builds.
@@ -341,7 +344,8 @@ The Confirmation toggle in Settings controls mail sends for all agents.
    goes out the way Compose sends, with its Undo window. After Approve the send continues even
    when the client is gone; `draft show` then gives `not_found`.
 
-Before SMTP submission, the outbox requires the policy generation recorded at enqueue, the same token and effective Send access.
+On the authenticated connection, immediately before MAIL FROM, the outbox checks the recorded policy generation, token and effective Send access.
+Revocation after this check cannot recall the transaction. SUBMIT_DEADLINE bounds the wait for acceptance to 60 seconds.
 Disabling access or changing a grant invalidates queued approvals even if access is later restored.
 Only agent-initiated sends carry the agent and token IDs. A person can send an agent draft from Compose.
 Revocation, Disconnect, token replacement and disabling access commit the authority change before restoring drafts.
