@@ -1710,6 +1710,55 @@ mod mail_tests {
         assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
     }
     #[test]
+    fn agent_filter_scopes_every_alternative_before_paging() {
+        use crate::agent::filter::Filter;
+        let (_temp, store, account, inbox) = setup();
+        let mut other = account.clone();
+        other.id = "other".into();
+        store.save_account(&other).unwrap();
+        let sent = store.save_folder(&other.id, "Sent Items", None, FolderRole::Sent).unwrap();
+        let hidden = store.save_message(&mail(&other, sent, 999)).unwrap();
+        store.snooze(hidden, Some(100)).unwrap();
+        for uid in 1..=102 {
+            let mut m = mail(&account, inbox, uid);
+            m.summary.cc = "Team".into();
+            m.summary.to = "List".into();
+            m.summary.has_attachments = true;
+            m.summary.flagged = true;
+            store.save_message(&m).unwrap();
+        }
+        store.db.pragma_update(None, "query_only", true).unwrap();
+        let allowed = [account.id.clone()];
+        let search = |query, scope, page, limit| {
+            store.filtered_messages(&allowed, &Filter::parse(query).unwrap(), scope, 86400, page, limit).unwrap()
+        };
+        let filter = r#"from:alice to:list cc:team subject:hello is:starred is:unread has:attachment in:inbox after:1970/01/01 before:1970-01-02 newer_than:1d older_than:1w OR -is:read "rust sqlite" sea"#;
+        let (rows, next) = search(filter, None, 1, None);
+        assert_eq!((rows.len(), next), (20, Some(2)));
+        assert_eq!(rows[0].uid, 102);
+        let query = r#""rust sqlite" OR in:sent"#;
+        let (rows, next) = search(query, None, 1, Some(200));
+        assert_eq!((rows.len(), next), (100, Some(2)));
+        assert!(rows.iter().all(|row| row.account == account.id));
+        let (rows, next) = search(query, None, 2, Some(200));
+        assert_eq!(rows.iter().map(|row| row.uid).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(next, None);
+        for q in [r#""rust search""#, "-in:all", "subject:%", "is:read", "older_than:1w"] {
+            assert!(search(q, None, 1, None).0.is_empty());
+        }
+        assert!(search(query, Some("Sent Items"), 1, None).0.is_empty());
+        let empty = Filter::parse("").unwrap();
+        assert!(store.filtered_messages(&[], &empty, None, 0, 1, None).unwrap().0.is_empty());
+        assert!(store.filtered_messages(&allowed, &empty, None, 0, 0, None).is_err());
+        let both = [account.id, other.id.clone()];
+        let (rows, _) = store.filtered_messages(&both, &empty, Some("sent"), 100, 1, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account, other.id);
+        let (rows, _) = store.filtered_messages(&both, &Filter::parse("in:later").unwrap(), None, 99, 1, None).unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [hidden]);
+    }
+
+    #[test]
     fn rejects_cross_account_message() {
         let (_t, s, mut a, f) = setup();
         a.id = "other".into();
