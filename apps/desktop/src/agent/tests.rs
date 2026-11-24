@@ -433,6 +433,11 @@ fn socket_ownership_framing_deadlines_and_limits() {
     let sock = dir.join("agent.sock");
     let store = Store::open(&path).unwrap();
     store.save_account(&account).unwrap();
+    for resource in [lagom_core::agent::policy::Resource::Mail, lagom_core::agent::policy::Resource::Calendar] {
+        store.set_agent_access("", &lagom_core::agent::policy::Access {
+            resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
+        }).unwrap();
+    }
     let token = store.provision_read_agent(&account.id).unwrap();
     drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
     let (bridge, _) = Bridge::detached();

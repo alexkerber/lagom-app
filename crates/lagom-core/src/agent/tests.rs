@@ -483,3 +483,13 @@ fn settings_apis_store_switches_matrices_receipts_and_revoke_all() {
         ["search", "emails"]
     );
 }
+
+#[test]
+fn provisioning_cannot_raise_either_global_level() {
+    let (_dir, store, account, _) = setup();
+    store.db.execute("INSERT INTO agent_access VALUES('','mail','',1)", []).unwrap();
+    assert_eq!(store.provision_read_agent(&account.id), Err(Code::Forbidden));
+    assert!(store.agents().unwrap().is_empty());
+    assert_eq!(store.agent_access("").unwrap().len(), 1);
+    assert!(!store.agent_enabled().unwrap());
+}

@@ -158,16 +158,10 @@ impl Store {
             Resource::Mail => "mail",
             Resource::Calendar => "calendar",
         };
-        let matrix = |agent: &str| -> Result<Level, Code> {
-            let n = self.db.query_row("SELECT coalesce((SELECT level FROM agent_access
-                WHERE agent=?1 AND kind=?2 AND account IN ('',?3) ORDER BY account<>'' DESC LIMIT 1),0)",
-                params![agent,kind,account], |r| r.get(0))?;
-            Ok(Level::from_db(n).unwrap_or(Level::None))
-        };
         let level = identity
             .level
-            .min(matrix("")?)
-            .min(matrix(&identity.agent)?);
+            .min(self.matrix("", kind, account)?)
+            .min(self.matrix(&identity.agent, kind, account)?);
         if level == Level::None
             || !self.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
@@ -184,5 +178,11 @@ impl Store {
                 level
             },
         )
+    }
+    pub(super) fn matrix(&self, agent: &str, kind: &str, account: &str) -> Result<Level, Code> {
+            let n = self.db.query_row("SELECT coalesce((SELECT level FROM agent_access
+                WHERE agent=?1 AND kind=?2 AND account IN ('',?3) ORDER BY account<>'' DESC LIMIT 1),0)",
+                params![agent,kind,account], |r| r.get(0))?;
+            Ok(Level::from_db(n).unwrap_or(Level::None))
     }
 }

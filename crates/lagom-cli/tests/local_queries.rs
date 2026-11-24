@@ -174,6 +174,11 @@ fn developer_agent_enables_only_the_selected_account() {
         let (imap, smtp) = presets::servers(email).unwrap();
         store.save_account(&Account::new(email.into(), imap, smtp).unwrap()).unwrap();
     }
+    for resource in [lagom_core::agent::policy::Resource::Mail, lagom_core::agent::policy::Resource::Calendar] {
+        store.set_agent_access("", &lagom_core::agent::policy::Access {
+            resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
+        }).unwrap();
+    }
     let raw = run(&path, &["agent", "--account", "a@gmail.com"]);
     for a in store.accounts().unwrap() {
         for resource in [Resource::Mail, Resource::Calendar] {
