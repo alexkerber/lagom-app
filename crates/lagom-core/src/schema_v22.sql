@@ -19,19 +19,38 @@ CREATE TABLE agent_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT INTO agent_settings VALUES('enabled','0'),('confirm','1');
 CREATE TABLE agent_drafts (draft TEXT PRIMARY KEY REFERENCES drafts(id) ON DELETE CASCADE, agent TEXT NOT NULL);
 CREATE TABLE agent_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, agent TEXT, token TEXT,
- account TEXT, command TEXT NOT NULL, target TEXT, result TEXT NOT NULL, source_ip TEXT, detail TEXT, read_seq INTEGER);
+ account TEXT, command TEXT NOT NULL, target TEXT, result TEXT NOT NULL, source_ip TEXT, detail TEXT, read_seq INTEGER,
+ dispatched_write INTEGER NOT NULL DEFAULT 0, refusals INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX agent_audit_at ON agent_audit(at);
 CREATE INDEX agent_audit_reads ON agent_audit(agent,read_seq) WHERE read_seq IS NOT NULL;
--- Reads are numbered per agent and capped at 50 000; write rows have no sequence and expire only by age.
+-- Reads and refusals are numbered per agent and capped at 50 000; dispatched writes expire only by age.
+CREATE UNIQUE INDEX anonymous_refusal_minute ON agent_audit(at) WHERE agent IS NULL AND command='refusals';
+CREATE INDEX agent_refusal_bucket ON agent_audit(agent,at) WHERE refusals>0;
 CREATE TRIGGER agent_audit_cap AFTER INSERT ON agent_audit
- WHEN NEW.command NOT IN ('draft.create','draft.edit','draft.delete','draft.send')
- AND NEW.command NOT GLOB 'action.*' AND NEW.command NOT GLOB 'event.*'
+ WHEN NEW.dispatched_write=0 OR NEW.result<>'ok'
 BEGIN
  UPDATE agent_audit SET read_seq=1+coalesce(
   (SELECT max(read_seq) FROM agent_audit WHERE agent IS NEW.agent AND read_seq IS NOT NULL),0)
  WHERE id=NEW.id;
  DELETE FROM agent_audit WHERE agent IS NEW.agent AND read_seq <=
   (SELECT read_seq-50000 FROM agent_audit WHERE id=NEW.id);
+END;
+-- Any change to tokens or access cancels requests that were authorized under the old policy.
+INSERT INTO agent_settings VALUES('policy_generation','0');
+CREATE TRIGGER agent_policy_revoke AFTER DELETE ON agent_tokens BEGIN
+ UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
+END;
+CREATE TRIGGER agent_policy_scope AFTER UPDATE OF level,accounts,cidr,expires ON agent_tokens BEGIN
+ UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
+END;
+CREATE TRIGGER agent_policy_access AFTER INSERT ON agent_access BEGIN
+ UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
+END;
+CREATE TRIGGER agent_policy_level AFTER UPDATE ON agent_access BEGIN
+ UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
+END;
+CREATE TRIGGER agent_policy_remove AFTER DELETE ON agent_access BEGIN
+ UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
 END;
 ALTER TABLE outbox ADD COLUMN draft_agent TEXT;
 CREATE INDEX messages_account_message_id ON messages(account,message_id);
