@@ -341,3 +341,4 @@ fn process(
         .and(result)
         .unwrap_or_else(|e| line(Response::Failure(e.into())))
 }
+pub mod detect;

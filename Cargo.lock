@@ -3491,6 +3491,7 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "tokio",
+ "toml_edit 0.22.27",
  "unicode-segmentation",
  "windows 0.61.3",
  "wry",
