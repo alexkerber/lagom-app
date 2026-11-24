@@ -90,9 +90,10 @@ pub struct AuditEntry {
     pub result: String,
 }
 
-fn outcome_label(outcome: &Result<(), Failure>) -> Result<String, Code> {
+fn outcome_label(command: &str, outcome: &Result<(), Failure>) -> Result<String, Code> {
     Ok(match outcome {
         Ok(()) => "ok".into(),
+        Err(Failure::Error(Code::InvalidRequest)) if command == "remote.refused" => "refused".into(),
         Err(Failure::Error(code)) => serde_json::to_value(code)
             .map_err(|_| Code::Internal)?
             .as_str()
@@ -159,7 +160,7 @@ impl Store {
             | Failure::Error(Code::Unauthorized | Code::NotFound)));
         let changed = self.db.execute("UPDATE agent_audit SET result=?2,
             target=CASE WHEN ?3 THEN NULL ELSE coalesce(?4,target) END WHERE id=?1 AND dispatched_write=1",
-            params![id, outcome_label(outcome)?, hidden, target.map(AuditTarget::audit_target)])?;
+            params![id, outcome_label("", outcome)?, hidden, target.map(AuditTarget::audit_target)])?;
         if changed != 1 { return Err(Code::Internal); }
         Ok(())
     }
@@ -183,7 +184,7 @@ impl Store {
             | "draft.schedule" | "draft.edit" | "draft.delete" | "draft.send" | "action.archive" | "action.move"
             | "action.read" | "action.unread" | "action.star" | "action.unstar"
             | "action.snooze" | "action.unsnooze" | "action.trash" | "event.create"
-            | "event.update" | "event.delete" => row.command,
+            | "event.update" | "event.delete" | "remote.refused" => row.command,
             _ => "unknown",
         };
         let (agent, token) = match &row.outcome {
@@ -196,7 +197,7 @@ impl Store {
                 row.identity.map(Identity::token_id),
             ),
         };
-        let result = outcome_label(&row.outcome)?;
+        let result = outcome_label(command, &row.outcome)?;
         let minute = now - now.rem_euclid(60);
         let bucket = agent.is_some() && row.outcome.is_err();
         let mut aggregate = false;

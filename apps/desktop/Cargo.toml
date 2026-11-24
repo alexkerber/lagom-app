@@ -43,6 +43,7 @@ wry = { version = "0.57", default-features = false }
 icu_properties = "2"
 idna = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder"] }
+ipnet = "2"
 base64 = "0.22"
 libc = "0.2"
 dirs = "6"
@@ -68,8 +69,8 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Libr
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSDockTile", "NSImage", "NSView", "NSWindow", "NSGraphics", "NSHapticFeedback", "NSGlassEffectView", "NSVisualEffectView", "objc2-quartz-core"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSBundle", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSDockTile", "NSPasteboard", "NSPasteboardItem", "NSImage", "NSView", "NSWindow", "NSGraphics", "NSHapticFeedback", "NSGlassEffectView", "NSVisualEffectView", "objc2-quartz-core"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSRange", "NSBundle", "NSString"] }
 
 block2 = "0.6.2"
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger"] }

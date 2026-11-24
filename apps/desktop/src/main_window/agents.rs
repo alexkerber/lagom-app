@@ -17,6 +17,7 @@ pub(crate) enum AgentChange {
     /// Revoke in the store, then remove what Connect wrote.
     Disconnect(String),
     DisconnectAll,
+    RemoveRemote(String),
     Select(Option<String>),
     /// Agent "" is the global matrix.
     Level(String, Access),
@@ -80,7 +81,7 @@ mod files {
             None => core(store.create_agent(kind, agent.name(), &a.host, false))?,
         };
         // A Disconnect that failed half-way leaves its receipt; finish it before writing again.
-        remove(store, &id)?;
+        remove(store, &id, false)?;
         let plan = plan(a, Some(store), agent, &id)?;
         let token = core(store.issue_token(&id, TokenScope::Local))?;
         plan.connect_saved(&token, |receipt| {
@@ -89,7 +90,69 @@ mod files {
         Ok(format!("{} connected", agent.name()))
     }
 
-    pub fn remove(store: &Store, id: &str) -> anyhow::Result<()> {
+    fn token_path(store: &Store, id: &str) -> anyhow::Result<std::path::PathBuf> {
+        Ok(store.path().parent().ok_or_else(|| anyhow::anyhow!("Missing store directory"))?
+            .join("agents").join(format!("{id}.token")))
+    }
+
+    pub(super) fn create_remote(store: &Store, fields: [&str; 4], accounts: &[String], level: lagom_core::agent::policy::Level)
+        -> anyhow::Result<(zeroize::Zeroizing<String>, String)> {
+        use anyhow::{ensure, Context as _};
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let [host, sources, date, key] = fields.map(str::trim);
+        ensure!(!host.is_empty(), "Enter a host name");
+        ensure!(!accounts.is_empty(), "Select at least one account");
+        let ranges = crate::settings::agents::source_ranges(sources)?;
+        let expires = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").context("Use YYYY-MM-DD for expiry")?.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let now = chrono::Utc::now();
+        ensure!(expires > now && expires <= now + chrono::Days::new(365), "Choose an expiry in the next 365 days");
+        ensure!(!key.chars().any(char::is_control), "Paste one SSH public key");
+        let mut parts = key.split_whitespace();
+        let (kind, blob) = parts.next().zip(parts.next()).context("Paste an SSH public key")?;
+        ensure!(kind.starts_with("ssh-") || kind.starts_with("ecdsa-") || kind.starts_with("sk-"), "Paste a plain SSH public key");
+        let key = format!("{kind} {blob}");
+        let mut check = Command::new("/usr/bin/ssh-keygen").args(["-l", "-f", "-"]).stdin(Stdio::piped())
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().context("Could not check the SSH key")?;
+        writeln!(check.stdin.take().unwrap(), "{key}")?;
+        ensure!(check.wait()?.success(), "Invalid SSH public key");
+        let quote = |path: &std::path::Path| -> anyhow::Result<String> {
+            let path = path.to_str().context("Unsupported SSH command path")?;
+            ensure!(!path.chars().any(char::is_control), "Unsupported SSH command path");
+            Ok(format!("'{}'", path.replace('\'', r"'\''")))
+        };
+        let executable = std::env::current_exe()?;
+        let mut command = quote(&executable)?;
+        let data = store.path().parent().context("Missing store directory")?;
+        if dirs::data_dir().map(|p| p.join("lagom")).as_deref() != Some(data) {
+            check_executable(&executable)?;
+            command = format!("/usr/bin/env LAGOM_DATA_DIR={} {command}", quote(&data.canonicalize()?)?);
+        }
+        let (id, token) = core(store.create_remote_agent(host, accounts, level, &ranges, expires.timestamp()))?;
+        if let Err(e) = token_path(store, &id).and_then(|path| crate::agent::detect::write_remote_token(&path, &token)) {
+            core(store.remove_remote_agent(&id))?;
+            return Err(e);
+        }
+        let from = ranges.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+        // sshd unquotes the option before the login shell reads the forced command.
+        let command = command.replace('"', r#"\""#);
+        let line = format!(r#"restrict,from="{from}",expiry-time="{}",command="{command} remote --agent {id}" {key}"#, expires.format("%Y%m%dZ"));
+        Ok((token, line))
+    }
+
+    pub(super) fn check_executable(path: &std::path::Path) -> anyhow::Result<()> {
+        anyhow::ensure!(path.is_absolute() && path.as_os_str().as_encoded_bytes().iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._- ".contains(b)), "Unsupported SSH command path");
+        Ok(())
+    }
+
+    pub fn remove(store: &Store, id: &str, remote: bool) -> anyhow::Result<()> {
+        if remote {
+            match std::fs::remove_file(token_path(store, id)?) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => return Ok(()),
+            }
+        }
         if let Some(receipt) = core(store.agent_connection(id))? {
             let left = serde_json::from_str::<Connection>(&receipt)?.disconnect()?;
             anyhow::ensure!(left.is_empty(), "{}", left.join(", "));
@@ -106,7 +169,7 @@ mod files {
     pub fn detected(_: &Agents) -> Vec<(String, &'static str)> { Vec::new() }
     pub fn preview(_: &Agents, _: Option<&Store>, _: &str) -> anyhow::Result<Vec<String>> { anyhow::bail!("Not supported on this system") }
     pub fn connect(_: &Store, _: &Agents, _: &str) -> anyhow::Result<String> { anyhow::bail!("Not supported on this system") }
-    pub fn remove(_: &Store, _: &str) -> anyhow::Result<()> { Ok(()) }
+    pub fn remove(_: &Store, _: &str, _: bool) -> anyhow::Result<()> { Ok(()) }
 }
 
 impl AgentChange {
@@ -130,15 +193,20 @@ impl AgentChange {
             }
             Self::Disconnect(id) => {
                 core(store.revoke_agent_tokens(&id))?;
-                files::remove(store, &id)?;
+                files::remove(store, &id, a.agent(&id).is_some_and(|r| r.remote))?;
                 Some(format!("{} disconnected", a.agent(&id).map_or("Agent", |r| r.name.as_str())))
+            }
+            Self::RemoveRemote(id) => {
+                files::remove(store, &id, true)?;
+                core(store.remove_remote_agent(&id))?;
+                None
             }
             Self::DisconnectAll => {
                 core(store.revoke_all_agents())?;
                 // Every key is gone already; clean up each agent's files and report the first failure.
                 let mut failed = None;
                 for r in core(store.agents())? {
-                    if let Err(e) = files::remove(store, &r.id) { failed.get_or_insert(e); }
+                    if let Err(e) = files::remove(store, &r.id, r.remote) { failed.get_or_insert(e); }
                 }
                 if let Some(e) = failed { return Err(e); }
                 Some("All agents disconnected".into())
@@ -149,6 +217,23 @@ impl AgentChange {
 }
 
 impl MainWindow {
+    #[cfg(unix)]
+    pub(crate) fn create_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &self.agents.remote else { return };
+        let Some(live) = &self.live else { return self.notify("Start without LAGOM_DEMO to create an agent", cx) };
+        let fields = form.fields.each_ref().map(|f| f.read(cx).text());
+        match files::create_remote(&live.store, fields, &form.accounts, form.level) {
+            Ok(issued) => {
+                self.agents.remote = None;
+                self.agents.show_token = false;
+                self.agents.issued = Some(issued);
+                self.reload_agents(cx);
+            }
+            Err(e) => self.notify(format!("Could not create agent: {e:#}"), cx),
+        }
+        cx.notify();
+    }
+
     pub(crate) fn open_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
         self.agents.pending = None;
@@ -176,6 +261,8 @@ impl MainWindow {
     }
 
     pub(crate) fn agent_change(&mut self, change: AgentChange, cx: &mut Context<Self>) {
+        #[cfg(unix)]
+        { self.agents.issued = None; }
         match change {
             AgentChange::Select(id) => {
                 self.agents.selected = id;
@@ -407,5 +494,67 @@ impl MainWindow {
                             ),
                     ),
             )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use lagom_core::{account::{Security, ServerConfig}, agent::policy::Level};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn forced_command_requires_a_safe_absolute_executable() {
+        use std::path::Path;
+        for path in ["/Applications/mail=app/lagom", "/tmp/mail;app", "/tmp/mail\napp", "lagom"] {
+            assert_eq!(files::check_executable(Path::new(path)).unwrap_err().to_string(), "Unsupported SSH command path");
+        }
+        assert!(files::check_executable(Path::new("/Applications/Lagom Mail.app/Contents/MacOS/lagom")).is_ok());
+    }
+
+    #[test]
+    fn ssh_line_matches_the_issued_scope_and_retires_with_its_agent() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let dir = tempfile::Builder::new().prefix("agent's mail ").tempdir_in(temp.path())?;
+        let store = Store::open(dir.path().join("lagom.sqlite3"))?;
+        let config = ServerConfig { host: "localhost".into(), port: 993, username: "test".into(), security: Security::Tls };
+        let account = Account::new("test@example.org".into(), config.clone(), config)?;
+        store.save_account(&account)?;
+        let date = chrono::Utc::now().date_naive() + chrono::Days::new(30);
+        let expiry = date.to_string();
+        let key = dir.path().join("key");
+        assert!(std::process::Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).status()?.success());
+        let public = std::fs::read_to_string(key.with_extension("pub"))?;
+        let fields = ["build host", "203.0.113.0/24,2001:db8::1", &expiry, &public];
+        let create = || files::create_remote(&store, fields, std::slice::from_ref(&account.id), Level::Triage);
+        let (token, line) = create()?;
+        let source = Some("203.0.113.1");
+        core(store.set_agent_setting(Setting::Enabled, true))?;
+        let global = Access { account: account.id.clone(), resource: lagom_core::agent::policy::Resource::Mail, level: Level::Send };
+        core(store.set_agent_access("", &global))?;
+        assert_eq!(core(store.effective(Some(&token), source, global.resource, &account.id))?, Level::Triage);
+
+        let row = core(store.agents())?.pop().unwrap();
+        let file = dir.path().join("agents").join(format!("{}.token", row.id));
+        assert_eq!(std::fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&file)?, *token);
+        let (options, rest) = line.split_once(",command=\"").unwrap();
+        let (command, key) = rest.split_once("\" ").unwrap();
+        let (bin, id) = command.split_once(" remote --agent ").unwrap();
+        assert_eq!(bin, format!("/usr/bin/env LAGOM_DATA_DIR='{}' '{}'", dir.path().canonicalize()?.display().to_string().replace('\'', r"'\''"), std::env::current_exe()?.display()));
+        assert_eq!(row.id, id);
+        assert_eq!(key, public.split_whitespace().take(2).collect::<Vec<_>>().join(" "));
+        assert_eq!(options, format!("restrict,from=\"203.0.113.0/24,2001:db8::1/128\",expiry-time=\"{}\"", date.format("%Y%m%dZ")));
+        assert_eq!(row.expires, Some(date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()));
+        let mut a = Agents::new();
+        core(a.load(&store))?;
+        AgentChange::Disconnect(id.into()).apply(&store, &a)?;
+        assert!(!file.exists());
+        AgentChange::RemoveRemote(id.into()).apply(&store, &a)?;
+        create()?;
+        assert_ne!(core(store.agents())?[0].id, id);
+        assert!(!file.exists());
+        assert!(store.authenticate(Some(&token), Some("203.0.113.1")).is_err());
+        Ok(())
     }
 }

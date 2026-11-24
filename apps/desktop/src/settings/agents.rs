@@ -1,6 +1,11 @@
 //! Settings > AI Agents: the master switch, the agents on this computer, the access matrices,
 //! confirmations and the audit log. The core enforces every level this page shows.
 
+#[cfg(unix)]
+mod remote;
+#[cfg(unix)]
+pub(crate) use remote::{source_ranges, RemoteForm};
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -23,6 +28,12 @@ const SEGMENT: f32 = 52.;
 /// What the page shows, read from the store when it opens and after each change.
 #[derive(Default)]
 pub struct Agents {
+    #[cfg(unix)]
+    pub remote: Option<RemoteForm>,
+    #[cfg(unix)]
+    pub issued: Option<(zeroize::Zeroizing<String>, String)>,
+    #[cfg(unix)]
+    pub show_token: bool,
     pub enabled: bool,
     pub socket_error: Option<Code>,
     pub confirm: bool,
@@ -93,8 +104,8 @@ impl Agents {
             })
             .collect();
         rows.extend(self.agents.iter()
-            .filter(|a| a.active && (a.remote || !self.detected.iter().any(|(k, _)| *k == a.kind)))
-            .map(|a| (a.kind.clone(), a.name.clone(), a.host.clone(), Some(a))));
+            .filter(|a| a.remote || (a.active && !self.detected.iter().any(|(k, _)| *k == a.kind)))
+            .map(|a| (a.kind.clone(), a.name.clone(), if a.remote { "Remote · SSH".into() } else { a.host.clone() }, Some(a))));
         rows
     }
 
@@ -122,7 +133,7 @@ impl Agents {
     pub fn demo() -> Self {
         let now = chrono::Utc::now().timestamp();
         let agent = |id: &str, kind: &str, name: &str, active| AgentRow {
-            id: id.into(), kind: kind.into(), name: name.into(), host: "studio".into(), remote: false, active,
+            id: id.into(), kind: kind.into(), name: name.into(), host: "studio".into(), remote: false, active, expires: None,
         };
         let access = |resource, account: &str, level| Access { resource, account: account.into(), level };
         let entry = |ago: i64, agent: &str, account: &str, command: &str, result: &str| AuditEntry {
@@ -249,7 +260,7 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
                 .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx))))
             .child(div().flex().flex_col().gap(px(6.)).pb(px(8.))
                 .when_some(a.socket_error, |row, code| row.child(div().text_color(t.danger).child(code.message())))
-                .child(note(t, "Coding agents on this computer can read and act on your mail and calendar, within the levels below."))
+                .child(note(t, "Connected agents can read and act on your mail and calendar, within the levels below."))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4))
                     .child("Connect only agents you trust, on a computer you control. A mail can hold instructions written for the agent."))));
 
@@ -268,7 +279,17 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
             .child(div().flex_1().min_w(px(0.)).flex().flex_col()
                 .child(div().font_weight(FontWeight::MEDIUM).one_line().child(name))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).one_line().child(host)));
-        if let Some(id) = row.filter(|_| active).map(|r| r.id.clone()) {
+        if let Some(remote) = row.filter(|r| r.remote) {
+            let id = remote.id.clone();
+            let expiry = remote.expires.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+            let status = expiry.map_or_else(|| "Revoked".into(), |end| format!("{} {}", if end > chrono::Utc::now() { "Expires" } else { "Expired" }, end.date_naive()));
+            line = line.child(note(t, status))
+                .child(stop(t, button(t, if expiry.is_some() { "Revoke" } else { "Remove" }, None).id(("remote-action", ix)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let change = if expiry.is_some() { AgentChange::Disconnect(id.clone()) } else { AgentChange::RemoveRemote(id.clone()) };
+                        this.agent_change(change, cx)
+                    })));
+        } else if let Some(id) = row.filter(|_| active).map(|r| r.id.clone()) {
             line = line.child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child("Active"))
                 .child(stop(t, button(t, "Disconnect", None).id(SharedString::from(format!("disconnect-{kind}")))
                     .debug_selector({ let kind = kind.clone(); move || format!("disconnect-{kind}") }))
@@ -295,8 +316,11 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
         list = list.child(block);
     }
     let agents = div().flex().flex_col().gap(px(12.))
-        .child(section(t, "Agents", Some("Found on this computer. Connect gives an agent its own key and tells it how to reach lagom.")))
+        .child(section(t, "Agents", Some("Connect a local agent or add one over SSH.")))
         .child(list);
+
+    #[cfg(unix)]
+    let agents = agents.child(remote::view(t, a, accounts, cx));
 
     let selected = a.selected.as_ref().and_then(|id| a.agent(id));
     let mut scope = div().flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.bg);

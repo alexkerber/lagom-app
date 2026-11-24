@@ -85,7 +85,7 @@ fn effective_intersects_live_matrices_and_token_scope() {
             TokenScope::Remote {
                 accounts: std::slice::from_ref(&a.id),
                 level: Level::Triage,
-                ranges: &[],
+                ranges: &["::1/128".parse().unwrap()],
                 expires: None,
             },
         )
@@ -188,7 +188,7 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
         assert_eq!(auth(Some(&token), Some(ip)), Err(Code::Unauthorized));
     }
     assert_eq!(auth(Some(&token), Some("::1")), Ok(()));
-    s.db.execute("UPDATE agent_tokens SET cidr='[]'", [])
+    s.db.execute("UPDATE agent_tokens SET cidr=?", [serde_json::to_string(&ranges).unwrap()])
         .unwrap();
     let ip = Some("203.0.113.1");
     let wrong = format!("{}_{}", &token[..12], "A".repeat(43));
@@ -261,6 +261,23 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
 }
 
 #[test]
+fn remote_tokens_require_a_source_range() {
+    let (_dir, s, a, _) = setup();
+    let agent = s.create_agent("test", "remote", "host", true).unwrap();
+    let issue = |ranges| s.issue_token(&agent, TokenScope::Remote {
+        accounts: std::slice::from_ref(&a.id), level: Level::Read, ranges, expires: None,
+    });
+    let ranges = ["::1/128".parse().unwrap()];
+    assert_eq!(issue(&[]), Err(Code::InvalidRequest));
+    let token = issue(&ranges).unwrap();
+    for cidr in [None, Some("[]"), Some("")] {
+        s.db.execute("UPDATE agent_tokens SET cidr=?", [cidr]).unwrap();
+        assert!(matches!(s.authenticate(Some(&token), Some("::1")),
+            Err(Failure::VerifiedRefusal { reason: TokenFailure::InvalidScope, .. })));
+    }
+}
+
+#[test]
 fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
     let (_dir, s, a, inbox) = setup();
     let agent = s.create_agent("test", "remote", "host", true).unwrap();
@@ -270,7 +287,7 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
             TokenScope::Remote {
                 accounts: std::slice::from_ref(&a.id),
                 level: Level::Send,
-                ranges: &[],
+                ranges: &["::1/128".parse().unwrap()],
                 expires: None,
             },
         )

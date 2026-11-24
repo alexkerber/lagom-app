@@ -3478,6 +3478,7 @@ dependencies = [
  "icu_properties",
  "idna",
  "image",
+ "ipnet",
  "keyring",
  "lagom-core",
  "lettre",

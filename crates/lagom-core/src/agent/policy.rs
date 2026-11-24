@@ -102,18 +102,20 @@ impl Store {
     /// Calendars have no Triage. Evaluation takes the minimum of both matrices, so a stored agent
     /// row above the global one never widens access.
     pub fn set_agent_access(&self, agent: &str, access: &Access) -> Result<(), Code> {
+        self.change_authority(|| self.set_agent_access_inner(agent, access))
+    }
+
+    pub(super) fn set_agent_access_inner(&self, agent: &str, access: &Access) -> Result<(), Code> {
         let kind = match (access.resource, access.level) {
             (Resource::Calendar, Level::Triage) => return Err(Code::InvalidRequest),
             (Resource::Mail, _) => "mail",
             (Resource::Calendar, _) => "calendar",
         };
-        self.change_authority(|| {
-            self.db.execute(
-                "INSERT OR REPLACE INTO agent_access VALUES(?,?,?,?)",
-                params![agent, kind, access.account, access.level as i64],
-            )?;
-            Ok(())
-        })
+        self.db.execute(
+            "INSERT OR REPLACE INTO agent_access VALUES(?,?,?,?)",
+            params![agent, kind, access.account, access.level as i64],
+        )?;
+        Ok(())
     }
 
     /// Disconnect all: every token goes and access switches off, in one transaction.

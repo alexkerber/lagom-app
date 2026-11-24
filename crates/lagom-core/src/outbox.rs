@@ -378,8 +378,9 @@ mod tests {
     fn queued_agent(remote: bool) -> (tempfile::TempDir, Store, Account, String, String, zeroize::Zeroizing<String>, Access) {
         let (_dir, store, account, id) = queued();
         let agent = store.create_agent("test", "sender", "host", remote).unwrap();
+        let ranges = ["127.0.0.1/32".parse().unwrap()];
         let token = store.issue_token(&agent, if remote {
-            TokenScope::Remote { accounts:std::slice::from_ref(&account.id), level:Level::Send, ranges:&[], expires:None }
+            TokenScope::Remote { accounts:std::slice::from_ref(&account.id), level:Level::Send, ranges:&ranges, expires:None }
         } else { TokenScope::Local }).unwrap();
         store.set_agent_setting(Setting::Enabled,true).unwrap();
         let grant = Access { resource:Resource::Mail, account:account.id.clone(), level:Level::Send };
@@ -389,6 +390,16 @@ mod tests {
         let mail = Outgoing { to:vec!["a@example.org".into()], message_id:Some(id.clone()), ..Default::default() };
         store.enqueue_agent(&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap(),&account,&mail,0).unwrap();
         (_dir, store, account, id, agent, token, grant)
+    }
+
+    #[test]
+    fn queued_remote_send_requires_a_stored_source_range() {
+        let (_dir, store, account, _, agent, token, _) = queued_agent(true);
+        let who = store.authenticate(Some(&token), Some("127.0.0.1")).unwrap();
+        for cidr in [None, Some("[]")] {
+            store.db.execute("UPDATE agent_tokens SET cidr=? WHERE id=?", params![cidr, who.token_id()]).unwrap();
+            assert!(!store.agent_may_send(&agent, Some(who.token_id()), &account.id).unwrap());
+        }
     }
 
     #[test]
@@ -466,7 +477,7 @@ mod tests {
                 "lower" => store.set_agent_access("", &Access { level:Level::Read, ..grant }).unwrap(),
                 "issue" => {
                     store.issue_token(&agent, TokenScope::Remote { accounts:std::slice::from_ref(&account.id),
-                        level:Level::Read, ranges:&[], expires:None }).unwrap();
+                        level:Level::Read, ranges:&["127.0.0.1/32".parse().unwrap()], expires:None }).unwrap();
                 }
                 _ => {
                     store.db.execute("UPDATE agent_access SET level=1 WHERE agent=''", []).unwrap();
