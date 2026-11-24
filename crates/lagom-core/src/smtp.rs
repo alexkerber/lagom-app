@@ -339,14 +339,17 @@ pub async fn verify(account: &Account, password: &str) -> Result<()> {
     let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
     for attempt in 0..2 {
         let (host, tls) = endpoint(account)?;
-        let Ok(result) = timeout(LOGIN_DEADLINE, login_smtp(account, host, &tls, &credential)).await else {
+        let probe = async {
+            let mut connection = login_smtp(account, host, &tls, &credential).await?;
+            let connected = connection.test_connected().await;
+            connection.quit().await?;
+            Ok::<_, lettre::transport::smtp::Error>(connected)
+        };
+        let Ok(result) = timeout(LOGIN_DEADLINE, probe).await else {
             return Err(Error::Network("your mail provider did not answer in time"));
         };
         match result {
-            Ok(mut connection) => {
-                let _ = timeout(LOGIN_DEADLINE, connection.quit()).await;
-                return Ok(());
-            }
+            Ok(true) => return Ok(()),
             Err(e) if auth_failure(&e) && oauth && attempt == 0 => {
                 credential = crate::oauth::access_token(account, Some(&credential)).await?;
             }
