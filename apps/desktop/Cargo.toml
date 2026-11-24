@@ -42,8 +42,10 @@ wry = { version = "0.57", default-features = false }
 [target.'cfg(unix)'.dependencies]
 base64 = "0.22"
 libc = "0.2"
+dirs = "6"
 
 [dev-dependencies]
+tempfile = "3"
 keyring = "3.6"
 rusqlite = { version = "0.41", features = ["bundled"] }
 # GPUI's TestAppContext, to drive key dispatch in tests.

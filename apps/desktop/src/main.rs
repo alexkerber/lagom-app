@@ -6,6 +6,8 @@ mod agent;
 mod icon;
 mod accounts;
 mod badge;
+#[cfg(unix)]
+mod cli;
 mod command_palette;
 mod compose;
 #[cfg(target_os = "macos")]
@@ -230,6 +232,8 @@ fn open_mailto(url: &str, demo: bool, cx: &mut App) {
 }
 
 fn main() {
+    #[cfg(unix)]
+    if let Some(status) = cli::dispatch() { std::process::exit(status); }
     let demo = std::env::var_os("LAGOM_DEMO").is_some_and(|v| v == "1");
     let app = Application::new().with_assets(Assets);
     app.on_reopen(move |cx| reopen_main_window(demo, cx));

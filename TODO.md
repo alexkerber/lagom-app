@@ -210,6 +210,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     The developer CLI grants test access to one account. Disabling access closes open requests.
     macOS socket tests verified account isolation, read purity, limits, audit records and revocation.
     Linux, live providers and access from another OS user remain unverified.
+  - [x] The desktop CLI and MCP forward agent commands on `feat/agents-client`. The CLI also installs the bundled skill.
+    A fake socket verified framing, identity, output, errors and MCP calls.
+    The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
+    The live service and Linux remain untested.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
 
 ## Calendar
