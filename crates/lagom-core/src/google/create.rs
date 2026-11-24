@@ -22,7 +22,20 @@ impl NewEvent {
         }).map_err(|_| Error::Invalid("enter a valid start and later end"))
     }
 
-    fn body(&self) -> Result<Value> {
+    pub(super) fn patch_body(&self) -> Result<String> {
+        let mut body = self.body()?;
+        for key in ["start", "end"] {
+            if self.all_day {
+                body[key]["dateTime"] = Value::Null;
+                body[key]["timeZone"] = Value::Null;
+            } else {
+                body[key]["date"] = Value::Null;
+            }
+        }
+        Ok(body.to_string())
+    }
+
+    pub(super) fn body(&self) -> Result<Value> {
         self.event("validation".into())?;
         let time = |value: &str| if self.all_day { json!({ "date": value }) }
             else { json!({ "dateTime": value, "timeZone": self.time_zone }) };
@@ -45,31 +58,17 @@ pub async fn create_event(account: &Account, calendar: &str, draft: &NewEvent) -
         |rejected| async move { oauth::access_token(account, rejected.as_deref()).await }).await
 }
 
-pub async fn create_with<F, Fut>(base: &str, calendar: &str, draft: &NewEvent, mut token: F) -> Result<CreatedEvent>
+pub async fn create_with<F, Fut>(base: &str, calendar: &str, draft: &NewEvent, token: F) -> Result<CreatedEvent>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
-    if calendar.is_empty() { return Err(Error::Invalid("choose a calendar")); }
+    let mut url = change::events_url(base, calendar)?;
     let body = draft.body()?.to_string();
     let client = oauth::http(Duration::from_secs(30))?;
-    let mut url = Url::parse(base).map_err(|_| Error::Invalid("invalid calendar endpoint"))?;
-    url.path_segments_mut().map_err(|_| Error::Invalid("invalid calendar endpoint"))?
-        .pop_if_empty().extend(["calendars", calendar, "events"]);
     url.query_pairs_mut().append_pair("conferenceDataVersion", "1");
     if !draft.attendees.is_empty() { url.query_pairs_mut().append_pair("sendUpdates", "all"); }
-    let send = |access: Zeroizing<String>| client.post(url.clone()).bearer_auth(access.as_str())
-        .header("Content-Type", "application/json").body(body.clone()).send();
-    let mut access = token(None).await?;
-    // shortcut: ambiguous transport failures are not retried; add durable idempotent creation with offline editing.
-    let mut response = send(access.clone()).await.map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?;
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        access = token(Some(access.to_string())).await?;
-        response = send(access).await.map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?;
-    }
-    let status = response.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
-    if status == reqwest::StatusCode::FORBIDDEN { return Err(calendar_forbidden(&oauth::body(response).await?)); }
-    if !status.is_success() { return Err(Error::Network("could not create event")); }
-    let bytes = oauth::body(response).await.map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?;
-    created(serde_json::from_slice(&bytes).map_err(|_| Error::Network("event creation unconfirmed; check your calendar before retrying"))?)
+    let response = write_event(token, |access| client.post(url.clone()).bearer_auth(access)
+        .header("Content-Type", "application/json").body(body.clone())).await?;
+    let bytes = oauth::body(response).await.map_err(|_| Error::Uncertain)?;
+    created(serde_json::from_slice(&bytes).map_err(|_| Error::Uncertain)?).map_err(|_| Error::Uncertain)
 }
 
 #[derive(Clone, Debug)]
@@ -91,11 +90,8 @@ pub async fn fetch_created(account: &Account, calendar: &str, id: &str) -> Resul
 
 pub async fn fetch_created_with<F, Fut>(base: &str, calendar: &str, id: &str, mut token: F) -> Result<CreatedEvent>
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
-    if calendar.is_empty() || id.is_empty() { return Err(Error::Invalid("missing calendar or event ID")); }
+    let url = event_url(base, calendar, id)?;
     let client = oauth::http(Duration::from_secs(30))?;
-    let mut url = Url::parse(base).map_err(|_| Error::Invalid("invalid calendar endpoint"))?;
-    url.path_segments_mut().map_err(|_| Error::Invalid("invalid calendar endpoint"))?
-        .pop_if_empty().extend(["calendars", calendar, "events", id]);
     let remote: RemoteEvent = get(&client, url, &mut token).await?;
     if remote.status == "cancelled" { return Err(Error::NotFound); }
     if remote.id != id { return Err(Error::Network("calendar event ID changed")); }

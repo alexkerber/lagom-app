@@ -1,3 +1,6 @@
+mod change;
+pub use change::{delete_event, fetch_event, update_event, EventSnapshot};
+use change::{event_url, write_event};
 mod create;
 pub use create::{create_event, create_with, fetch_created, fetch_created_with, CreatedEvent};
 
@@ -104,10 +107,8 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     let calendars: Vec<RemoteCalendar> = pages(&client, list, &mut token).await?;
     let mut result = Vec::new();
     for remote in calendars.into_iter().filter(|c| !c.hidden && !c.deleted && c.access_role != "freeBusyReader") {
-        if remote.id.is_empty() { return Err(Error::Network("calendar ID missing")); }
-        let mut url = base.clone();
-        url.path_segments_mut().map_err(|_| Error::Invalid("invalid calendar endpoint"))?
-            .pop_if_empty().extend(["calendars", remote.id.as_str(), "events"]);
+        let mut url = change::events_url(base.as_str(), &remote.id)
+            .map_err(|_| Error::Network("invalid calendar response"))?;
         // shortcut: no RRULE, add when CalDAV lands.
         url.query_pairs_mut().extend_pairs([
             ("singleEvents", "true"), ("showDeleted", "false"), ("maxResults", "50"), ("timeZone", "UTC"),
@@ -152,14 +153,13 @@ where T: serde::de::DeserializeOwned, F: FnMut(Option<String>) -> Fut, Fut: Futu
             .map_err(|_| Error::Network("calendar unavailable"))?;
     }
     let status = response.status();
-    let bytes = oauth::body(response).await?;
     if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
     if status == reqwest::StatusCode::FORBIDDEN {
-        return Err(calendar_forbidden(&bytes));
+        return Err(calendar_forbidden(&oauth::body(response).await?));
     }
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE { return Err(Error::NotFound); }
     if !status.is_success() { return Err(Error::Network("calendar request failed")); }
-    serde_json::from_slice(&bytes).map_err(|_| Error::Network("invalid calendar response"))
+    serde_json::from_slice(&oauth::body(response).await?).map_err(|_| Error::Network("invalid calendar response"))
 }
 
 fn calendar_forbidden(bytes: &[u8]) -> Error {

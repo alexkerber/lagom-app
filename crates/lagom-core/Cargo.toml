@@ -43,6 +43,7 @@ ipnet = { version = "2", features = ["serde"] }
 subtle = "2"
 sha2 = "0.10"
 url = "2"
+percent-encoding = "2"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 hickory-proto = "0.26"
