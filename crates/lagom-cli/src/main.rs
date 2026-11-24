@@ -1,5 +1,3 @@
-mod mcp;
-
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use lagom_core::{
@@ -68,8 +66,6 @@ impl From<SignInProvider> for Provider {
 enum Command {
     /// Enable local Read access for the selected account and print a test token, or disable access.
     Agent { #[arg(long)] off: bool },
-    /// Serve read-only tools over MCP stdio.
-    Mcp,
     Tasks {
         #[command(subcommand)]
         command: TasksCommand,
@@ -307,7 +303,6 @@ async fn main() -> Result<()> {
                 println!("{}", token.as_str());
             }
         }
-        Command::Mcp => mcp::run(&store)?,
         Command::Tasks { command } => match command {
             TasksCommand::Lists => {
                 for list in store.task_lists()? {

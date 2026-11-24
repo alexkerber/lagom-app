@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use lagom_core::{
     agent::{
         audit::Failure,
-        filter::{Filter, FilterReader},
+        filter::Filter,
         id::{MessageId, ObjectId, ResolvedMessage},
         policy::{Level, Resource},
         protocol::{Code, Request},
@@ -21,7 +21,9 @@ pub(crate) fn error(e: Error) -> Code {
         Error::Store(e) => e.into(),
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
-        Error::Invalid("attachment exceeds 64 MiB" | "attachment is too large") => Code::TooLarge,
+        Error::Invalid(
+            "attachment exceeds 64 MiB" | "attachment is too large" | "agent response too large",
+        ) => Code::TooLarge,
         Error::Invalid("unavailable")
         | Error::Network(_)
         | Error::Authentication
@@ -31,27 +33,52 @@ pub(crate) fn error(e: Error) -> Code {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ReadPolicy {
+    token: Zeroizing<String>,
+    ip: Option<String>,
+    generation: i64,
+    expires: Option<i64>,
+    levels: Vec<(String, Resource, Level)>,
+}
+
+impl ReadPolicy {
+    pub(super) fn check(&self, store: &Store) -> Result<Option<i64>> {
+        let identity = store.authenticate(Some(&self.token), self.ip.as_deref())?;
+        if store.agent_generation()? != Some(self.generation) {
+            return Err(Code::Unauthorized.into());
+        }
+        for (account, resource, level) in &self.levels {
+            if store.agent_level(&identity, *resource, account)? < *level {
+                return Err(Failure::OutsideScope);
+            }
+        }
+        Ok(identity.expires)
+    }
+
+    pub(super) fn expired(&self) -> bool {
+        self.expires
+            .is_some_and(|end| chrono::Utc::now().timestamp() >= end)
+    }
+}
+
 pub(crate) const ATTACHMENT_LIMIT: usize = 20 * 1024 * 1024;
 
 pub(crate) struct Attachment {
-    token: Zeroizing<String>,
-    ip: Option<String>,
+    access: ReadPolicy,
     message: MessageId,
     folder: Option<String>,
-    generation: i64,
     pub section: String,
     pub reply: oneshot::Sender<std::result::Result<Vec<u8>, Code>>,
 }
 
 impl Attachment {
     pub(crate) fn resolve(&self, store: &Store) -> std::result::Result<ResolvedMessage, Code> {
-        if store.agent_generation()? != Some(self.generation) {
-            return Err(Code::Unavailable);
-        }
+        self.access.check(store)?;
         store
             .resolve_agent_message(
-                Some(&self.token),
-                self.ip.as_deref(),
+                Some(&self.access.token),
+                self.access.ip.as_deref(),
                 &self.message.encode(),
                 self.folder.as_deref(),
                 Level::Read,
@@ -75,16 +102,9 @@ fn clean(s: &str) -> String {
     out
 }
 
-fn message(store: &Store, req: &Request, mut m: MessageSummary, body: bool) -> Result<Value> {
-    let (key, mut folder) = store.agent_message_key(&m.account, m.id)?;
+fn message(store: &Store, mut m: MessageSummary, body: bool) -> Result<Value> {
+    let (key, mut folder, resolved) = store.agent_message_row(&m.account, m.id)?;
     let id = key.encode();
-    let resolved = store.resolve_agent_message(
-        req.token.as_deref().map(String::as_str),
-        req.source_ip.as_deref(),
-        &id,
-        None,
-        Level::Read,
-    )?;
     if body && resolved.row != m.id {
         let preferred = store.message_summary(resolved.row).map_err(error)?;
         if preferred.thread_id == m.thread_id {
@@ -121,7 +141,9 @@ pub(super) fn dispatch(
     fetch: impl FnOnce(Attachment) -> bool,
     touched: &mut Option<String>,
     target: &mut Option<ResolvedMessage>,
+    access: &std::sync::OnceLock<ReadPolicy>,
     mut off: tokio::sync::watch::Receiver<()>,
+    mut policy: tokio::sync::watch::Receiver<Option<i64>>,
 ) -> Result<Value> {
     let cmd = req.cmd.as_str();
     let keys: &[&str] = match cmd {
@@ -161,19 +183,22 @@ pub(super) fn dispatch(
     let key = if matches!(cmd, "thread" | "attachment") {
         let key = ObjectId::decode(string("id")?.ok_or(Code::InvalidRequest)?)?;
         let account = match (&key, cmd) {
-            (ObjectId::Thread(a, _), "thread") => a,
-            (ObjectId::Attachment(m, _), "attachment") => m.account(),
+            (ObjectId::Thread(a, _) | ObjectId::ThreadHash(a, _), "thread") => a,
+            (ObjectId::Attachment(m, _) | ObjectId::SectionHash(m, _), "attachment") => m.account(),
             _ => return Err(Code::NotFound.into()),
         };
-        *touched = Some(account.to_owned());
+
         if store.agent_level(who, Resource::Mail, account)? < Level::Read {
             return Err(Failure::OutsideScope);
         }
-        Some(key)
+        Some((account.to_owned(), key))
     } else {
         None
     };
-    let account_id = touched.as_deref().or(selector.filter(|s| !s.contains('@')));
+    let account_id = key
+        .as_ref()
+        .map(|(a, _)| a.as_str())
+        .or(selector.filter(|s| !s.contains('@')));
     let mut accounts = store.agent_accounts(who, resources, account_id)?;
     if let Some(sel) = selector {
         accounts.retain(|(id, email)| id == sel || email.eq_ignore_ascii_case(sel));
@@ -183,13 +208,31 @@ pub(super) fn dispatch(
         if accounts.len() != 1 {
             return Err(Code::Conflict.into());
         }
-        if touched.as_ref().is_some_and(|a| a != &accounts[0].0) {
+        if key.as_ref().is_some_and(|(a, _)| a != &accounts[0].0) {
             return Err(Failure::OutsideScope);
         }
     }
-    if accounts.len() == 1 {
+    if key.is_none() && accounts.len() == 1 {
         *touched = Some(accounts[0].0.clone());
     }
+    let generation = store.agent_generation()?.ok_or(Code::Unauthorized)?;
+    let mut levels = Vec::new();
+    for (account, _) in &accounts {
+        for resource in resources {
+            let level = store.agent_level(who, *resource, account)?;
+            if level >= Level::Read {
+                levels.push((account.clone(), *resource, level));
+            }
+        }
+    }
+    let token = req.token.clone().ok_or(Code::Unauthorized)?;
+    let policy_at_start = access.get_or_init(|| ReadPolicy {
+        token,
+        ip: req.source_ip.clone(),
+        generation,
+        levels,
+        expires: who.expires,
+    });
     let now = chrono::Utc::now().timestamp();
     let mut rows = Vec::new();
     let mut size = 0;
@@ -220,9 +263,12 @@ pub(super) fn dispatch(
         }
         "contacts" => {
             for (id, _) in accounts {
-                for c in store.contacts(&id, now).map_err(error)?.entries() {
-                    push(json!({"account":id,"name":clean(&c.name),"address":clean(&c.address)}))?;
-                }
+                store
+                    .agent_contacts(&id, |name, address| {
+                        push(json!({"account":id,"name":clean(name),"address":clean(address)}))
+                            .map_err(|_| Error::Invalid("agent response too large"))
+                    })
+                    .map_err(error)?;
             }
         }
         "emails" | "search" => {
@@ -243,8 +289,7 @@ pub(super) fn dispatch(
                     .transpose()
             };
             let ids = accounts.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-            let (messages, next) = FilterReader::open(store.path())
-                .map_err(error)?
+            let (messages, next) = store
                 .filtered_messages(
                     &ids,
                     &filter,
@@ -255,38 +300,42 @@ pub(super) fn dispatch(
                 )
                 .map_err(error)?;
             for m in messages {
-                push(message(store, req, m, false)?)?;
+                push(message(store, m, false)?)?;
             }
             return Ok(json!({"messages":rows,"next_page":next}));
         }
         "thread" => {
-            let Some(ObjectId::Thread(account, thread)) = &key else {
-                return Err(Code::NotFound.into());
+            let (account, key) = key.as_ref().ok_or(Code::NotFound)?;
+            let thread = match key {
+                ObjectId::Thread(_, thread) => thread.clone(),
+                ObjectId::ThreadHash(_, hash) => store.agent_thread_key(account, hash)?,
+                _ => return Err(Code::NotFound.into()),
             };
             let mut headers = std::collections::HashSet::new();
-            for m in store.thread_messages(account, thread).map_err(error)? {
+            for m in store.thread_messages(account, &thread).map_err(error)? {
                 if !m.message_id.is_empty() && !headers.insert(m.message_id.clone()) {
                     continue;
                 }
-                push(message(store, req, m, true)?)?;
+                push(message(store, m, true)?)?;
             }
             if rows.is_empty() {
                 return Err(Code::NotFound.into());
             }
+            *touched = Some(account.clone());
             return Ok(json!({"messages":rows}));
         }
         "attachment" => {
-            let Some(ObjectId::Attachment(message, section)) = &key else {
-                return Err(Code::NotFound.into());
+            let (account, key) = key.as_ref().ok_or(Code::NotFound)?;
+            let message = match key {
+                ObjectId::Attachment(m, _) | ObjectId::SectionHash(m, _) => m,
+                _ => return Err(Code::NotFound.into()),
             };
-            let (reply, rx) = oneshot::channel();
-            let request = Attachment {
-                token: req.token.clone().ok_or(Code::Unauthorized)?,
-                ip: req.source_ip.clone(),
+            let (reply, mut rx) = oneshot::channel();
+            let mut request = Attachment {
+                access: policy_at_start.clone(),
                 message: message.clone(),
                 folder: string("folder")?.map(str::to_owned),
-                generation: store.agent_generation()?.ok_or(Code::Unauthorized)?,
-                section: section.clone(),
+                section: String::new(),
                 reply,
             };
             let resolved = request.resolve(store)?;
@@ -294,17 +343,47 @@ pub(super) fn dispatch(
                 .attachments(resolved.row)
                 .map_err(error)?
                 .into_iter()
-                .find(|p| p.section == *section)
+                .find(|p| match key {
+                    ObjectId::Attachment(_, section) => &p.section == section,
+                    _ => {
+                        ObjectId::Attachment(message.clone(), p.section.clone()).encode()
+                            == key.encode()
+                    }
+                })
                 .ok_or(Code::NotFound)?;
+            request.section = part.section.clone();
             *target = Some(resolved);
+            *touched = Some(account.clone());
             if !fetch(request) {
                 return Err(Code::Unavailable.into());
             }
             let bytes = tokio::runtime::Handle::current().block_on(async {
-                tokio::select! {
-                    biased;
-                    _ = off.changed() => Err(Code::Unavailable),
-                    r = rx => r.unwrap_or(Err(Code::Unavailable)),
+                let mut expires = who.expires;
+                loop {
+                    let expiry = async {
+                        if let Some(end) = expires {
+                            let millis = end
+                                .saturating_mul(1000)
+                                .saturating_sub(chrono::Utc::now().timestamp_millis());
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                millis.max(0) as u64
+                            ))
+                            .await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = off.changed() => break Err(Code::Unavailable),
+                        _ = expiry => break Err(Code::Unauthorized),
+                        change = policy.changed() => {
+                            if change.is_err() { break Err(Code::Unavailable); }
+                            let fresh = Store::agent_reader(store.path(),|| false)?;
+                            expires = policy_at_start.check(&fresh).map_err(Code::from)?;
+                        },
+                        r = &mut rx => break r.unwrap_or(Err(Code::Unavailable)),
+                    }
                 }
             })?;
             if bytes.len() > ATTACHMENT_LIMIT {
@@ -376,4 +455,77 @@ pub(super) fn dispatch(
         _ => return Err(Code::InvalidRequest.into()),
     }
     Ok(json!({(cmd):rows}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lagom_core::{
+        account::Account,
+        agent::policy::Access,
+        store::{FolderRole, Message},
+    };
+
+    #[test]
+    fn search_uses_the_snapshot_that_granted_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let writer = Store::open(&path).unwrap();
+        let (imap, smtp) = lagom_core::presets::servers("reader@gmail.com").unwrap();
+        let account = Account::new("reader@gmail.com".into(), imap, smtp).unwrap();
+        writer.save_account(&account).unwrap();
+        for resource in [Resource::Mail, Resource::Calendar] {
+            writer
+                .set_agent_access(
+                    "",
+                    &Access {
+                        resource,
+                        account: account.id.clone(),
+                        level: Level::Read,
+                    },
+                )
+                .unwrap();
+        }
+        let token = writer.provision_read_agent(&account.id).unwrap();
+        let folder = writer
+            .save_folder(&account.id, "Inbox", None, FolderRole::Inbox)
+            .unwrap();
+        let reader = Store::agent_reader(&path, || false).unwrap();
+        let who = reader.authenticate(Some(&token), None).unwrap();
+        writer
+            .save_message(&Message {
+                summary: MessageSummary {
+                    account: account.id,
+                    folder,
+                    uid: 1,
+                    message_id: "later".into(),
+                    subject: "later".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let request = Request {
+            v: 1,
+            token: Some(token),
+            source_ip: None,
+            cmd: "search".into(),
+            args: serde_json::from_value(json!({"query":"subject:later"})).unwrap(),
+        };
+        let (_off, watch) = tokio::sync::watch::channel(());
+        let (_policy, changes) = tokio::sync::watch::channel(None);
+        let result = dispatch(
+            &reader,
+            &who,
+            &request,
+            |_| panic!(),
+            &mut None,
+            &mut None,
+            &Default::default(),
+            watch,
+            changes,
+        )
+        .unwrap();
+        assert_eq!(result["messages"], json!([]));
+    }
 }

@@ -22,6 +22,8 @@ impl Store {
     ) -> Result<Self, Code> {
         let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.execute_batch("PRAGMA query_only=ON; BEGIN")?;
+        filter::register_casefold(&db)?;
+        db.busy_timeout(std::time::Duration::ZERO)?;
         db.progress_handler(1024, Some(cancelled))?;
         Ok(Self { db })
     }
@@ -31,6 +33,14 @@ impl Store {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         db.execute_batch("PRAGMA foreign_keys=ON")?;
         Ok(Self { db })
+    }
+
+    pub fn agent_policy_generation(&self) -> Result<i64, Code> {
+        Ok(self.db.query_row(
+            "SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation'",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn agent_enabled(&self) -> Result<bool, Code> {

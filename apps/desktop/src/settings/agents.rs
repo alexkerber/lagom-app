@@ -377,7 +377,7 @@ fn activity(t: &Theme, a: &Agents, accounts: &[Account], cx: &mut Context<MainWi
     }
     let now = chrono::Local::now();
     let mut log = div().flex().flex_col().gap(px(12.))
-        .child(section(t, "Activity", Some("Every request an agent makes, newest first. lagom keeps it for 90 days.")));
+        .child(section(t, "Activity", Some("The latest 50 activity rows per agent. Refusals are grouped by minute. lagom keeps activity for 90 days.")));
     if groups.is_empty() {
         log = log.child(plate(t).px(px(14.)).py(px(12.)).child(note(t, "No requests yet.")));
     }

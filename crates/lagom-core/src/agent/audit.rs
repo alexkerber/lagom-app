@@ -13,6 +13,10 @@ pub enum Failure {
         agent: String,
         token: String,
     },
+    VerifiedBusy {
+        agent: String,
+        token: String,
+    },
     OutsideScope,
 }
 
@@ -20,6 +24,7 @@ impl From<Failure> for Code {
     fn from(error: Failure) -> Self {
         match error {
             Failure::Unauthorized(_) | Failure::VerifiedRefusal { .. } => Code::Unauthorized,
+            Failure::VerifiedBusy { .. } => Code::Busy,
             Failure::OutsideScope => Code::NotFound,
             Failure::Error(code) => code,
         }
@@ -87,7 +92,11 @@ impl Store {
     /// Newest first.
     pub fn agent_audit(&self, limit: u32) -> Result<Vec<AuditEntry>, Code> {
         let mut rows = self.db.prepare(
-            "SELECT at,agent,account,command,result FROM agent_audit ORDER BY at DESC,id DESC LIMIT ?",
+            "SELECT at,agent,CASE WHEN refusals<=1 THEN account END,
+               CASE WHEN refusals>1 THEN 'refusals' ELSE command END,
+               CASE WHEN refusals>1 THEN refusals || ' refused' ELSE result END
+             FROM (SELECT *,row_number() OVER (PARTITION BY agent ORDER BY at DESC,id DESC) n FROM agent_audit)
+             WHERE n<=? ORDER BY at DESC,id DESC",
         )?;
         let rows = rows.query_map([limit], |r| {
             Ok(AuditEntry {
@@ -99,6 +108,16 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn count_anonymous_refusals(&self, minute: i64, count: i64) -> Result<(), Code> {
+        self.db.execute(
+            "INSERT INTO agent_audit(at,command,result) VALUES(?1,'refusals','unauthorized:' || ?2)
+            ON CONFLICT(at) WHERE agent IS NULL AND command='refusals' DO UPDATE
+            SET result='unauthorized:' || (CAST(substr(result,14) AS INTEGER)+?2)",
+            params![minute, count],
+        )?;
+        Ok(())
     }
 
     pub fn prune_agent_audit(&self, now: i64) -> rusqlite::Result<()> {
@@ -113,10 +132,10 @@ impl Store {
     }
 
     pub(super) fn record_agent_audit_at(&self, row: AuditRow<'_>, now: i64) -> Result<(), Code> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.db,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        if self.db.is_autocommit() {
+            return self.agent_audit_transaction(|| self.record_agent_audit_at(row, now));
+        }
+        let tx = &self.db;
         let command = match row.command {
             "accounts" | "folders" | "emails" | "search" | "thread" | "attachment" | "contacts"
             | "events" | "availability" | "draft.list" | "draft.show" | "draft.create"
@@ -127,10 +146,10 @@ impl Store {
             _ => "unknown",
         };
         let (agent, token) = match &row.outcome {
-            Err(Failure::VerifiedRefusal { agent, token, .. }) => {
-                (Some(agent.as_str()), Some(token.as_str()))
-            }
-            Err(Failure::Unauthorized(_)) => (None, None),
+            Err(
+                Failure::VerifiedRefusal { agent, token, .. }
+                | Failure::VerifiedBusy { agent, token },
+            ) => (Some(agent.as_str()), Some(token.as_str())),
             _ => (
                 row.identity.map(Identity::agent_id),
                 row.identity.map(Identity::token_id),
@@ -144,23 +163,30 @@ impl Store {
                 .as_str()
                 .ok_or(Code::Internal)?
                 .into(),
+            Err(Failure::VerifiedBusy { .. }) => "busy".into(),
             Err(Failure::OutsideScope) => "not_found:outside_scope".into(),
             Err(Failure::Unauthorized(reason) | Failure::VerifiedRefusal { reason, .. }) => {
                 format!("unauthorized:{}", reason.label())
             }
         };
+        let minute = now - now.rem_euclid(60);
+        let bucket = agent.is_some() && row.outcome.is_err();
         let mut aggregate = false;
-        if agent.is_none() {
-            let minute = now - now.rem_euclid(60);
+        if bucket {
+            aggregate = tx.execute(
+                "UPDATE agent_audit SET refusals=refusals+1
+                WHERE agent=? AND at=? AND refusals>0",
+                params![agent, minute],
+            )? > 0;
+        } else if agent.is_none() {
             let count: i64 = tx.query_row(
                 "SELECT count(*) FROM agent_audit WHERE at>=? AND agent IS NULL",
                 [minute],
                 |r| r.get(0),
             )?;
             aggregate = count >= 60;
-            if aggregate && tx.execute("UPDATE agent_audit SET result='unauthorized:' || (CAST(substr(result,14) AS INTEGER)+1)
-                WHERE at=? AND command='refusals'", [minute])? == 0 {
-                tx.execute("INSERT INTO agent_audit(at,command,result) VALUES(?,'refusals','unauthorized:1')",[minute])?;
+            if aggregate {
+                self.count_anonymous_refusals(minute, 1)?;
             }
         }
         if let Some(identity) = row.identity {
@@ -197,9 +223,9 @@ impl Store {
                 _ if row.identity.is_some() => row.target.map(ResolvedMessage::audit_target),
                 _ => None,
             };
-            tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail) VALUES(?,?,?,?,?,?,?,?,?)",
-                params![now,agent,token,row.account.map(|id| id.to_string()),command,
-                    target,result,row.source_ip.map(|ip|ip.to_string()),detail])?;
+            tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail,refusals) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params![if bucket {minute} else {now},agent,token,row.account.map(|id| id.to_string()),command,
+                    target,result,row.source_ip.map(|ip|ip.to_string()),detail,bucket])?;
         }
         let last: Option<i64> = tx
             .query_row(
@@ -215,7 +241,19 @@ impl Store {
                 [now],
             )?;
         }
-        tx.commit()?;
         Ok(())
+    }
+
+    pub fn agent_audit_transaction<T>(
+        &self,
+        work: impl FnOnce() -> Result<T, Code>,
+    ) -> Result<T, Code> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let result = work()?;
+        tx.commit()?;
+        Ok(result)
     }
 }

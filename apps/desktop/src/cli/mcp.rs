@@ -209,6 +209,11 @@ mod tests {
                 })
                 .unwrap();
         }
+        for resource in [lagom_core::agent::policy::Resource::Mail, lagom_core::agent::policy::Resource::Calendar] {
+        store.set_agent_access("", &lagom_core::agent::policy::Access {
+            resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
+        }).unwrap();
+    }
         let token = store.provision_read_agent(&allowed.id).unwrap();
         let client =
             Client { source_ip: None, dir: dir.path().into(), identity: Some(("token".into(), token.to_string())) };

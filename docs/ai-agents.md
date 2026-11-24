@@ -23,6 +23,9 @@ processes of the same user, and neither does anything else in this design. Per-a
 between local agents are guardrails against mistakes and prompt injection. They are not a
 boundary against a hostile local process.
 
+Full-text search uses a shared index. Response timing can reveal that a term is frequent in another account.
+A process running as the same user can occupy all eight socket connections and prevent other agents from connecting.
+
 Keychain. Linux Secret Service and Windows Credential Manager give any process of the same user
 the stored secrets. macOS asks before another program reads an item. Not verified for lagom's
 release builds.
@@ -212,8 +215,7 @@ Both lines are JSON objects in UTF-8, ended by `\n`.
 - Concurrency: 8 connections at once, with at most 4 in-flight requests per token. Per token: 300 requests and 30 write commands a minute.
   One waiting confirmation per agent, three in total. Beyond that: `busy`.
 - Every message object carries `account` and `id`, also inside thread and search results.
-- Text from mail is data. The app escapes control characters and direction marks, as `mcp.rs`
-  does today.
+- Text from mail is data. The app escapes control characters and direction marks.
 
 Errors are fixed strings. They never carry a stack trace, a path, SQL, a server reply or data
 from an account.
@@ -255,6 +257,8 @@ IDs are opaque strings. Clients must not parse them.
 | Event `e1.…`                   | account ID, calendar remote ID, event remote ID | sync                                                                         |
 | Attachment `a1.…`              | message ID and MIME section                     | as its message                                                               |
 
+- Long message headers, folder names, thread keys and attachment sections use compact SHA-256 forms.
+  Lookup matches the digest inside the authorized account or message.
 - Each is the prefix plus base64url of the parts. The migration adds an index on
   `messages(account, message_id)` for the lookup.
 - Resolving: decode, then require Read on the account inside the ID, else `not_found`. Then query
@@ -337,6 +341,8 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
 - Each append keeps the latest 50 000 non-write rows per agent. Anonymous refusals have their own bucket.
   Draft changes, sends, mail actions and event changes expire only by age.
 - Refusals without a verified digest are limited to 60 rows a minute, then counted in one row.
+- Verified refusals and busy replies share one counter per agent per minute. The first refusal records its reason.
+- Socket admission failures are counted off the listener thread. Settings shows the newest 50 rows for each agent.
 - Rows have no foreign keys: they outlive the agent, the token and the account.
 - Settings shows the log by agent, newest first, with Revoke on each agent.
 
@@ -389,9 +395,7 @@ Enqueue copies the draft owner into `outbox.draft_agent`. Undo restores ownershi
   file write by the client and creates no token.
 - `lagom-cli` stays a developer test client with the user's full rights: it opens the store,
   reads the keychain and talks to the mail servers itself. It skips every rule here. It is not
-  packaged, not on `PATH` and never named in a skill or an MCP entry. Its `mcp` command and
-  `mcp.rs` are removed in step e, when the replacement can be switched on. `today` and
-  `list_todos` go with it until tasks are exposed.
+  packaged, not on `PATH` and never named in a skill or an MCP entry. Use the desktop binary for MCP. Tasks remain available through the developer CLI.
 
 ## 13. Agent detection and Connect
 

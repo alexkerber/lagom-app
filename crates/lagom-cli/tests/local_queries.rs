@@ -174,6 +174,11 @@ fn developer_agent_enables_only_the_selected_account() {
         let (imap, smtp) = presets::servers(email).unwrap();
         store.save_account(&Account::new(email.into(), imap, smtp).unwrap()).unwrap();
     }
+    for resource in [lagom_core::agent::policy::Resource::Mail, lagom_core::agent::policy::Resource::Calendar] {
+        store.set_agent_access("", &lagom_core::agent::policy::Access {
+            resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
+        }).unwrap();
+    }
     let raw = run(&path, &["agent", "--account", "a@gmail.com"]);
     for a in store.accounts().unwrap() {
         for resource in [Resource::Mail, Resource::Calendar] {
@@ -183,4 +188,14 @@ fn developer_agent_enables_only_the_selected_account() {
     }
     run(&path, &["agent", "--off"]);
     assert!(!store.agent_enabled().unwrap());
+}
+
+#[test]
+fn developer_cli_rejects_mcp_before_opening_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("unused.db");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&db).arg("mcp").output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!db.exists());
 }
