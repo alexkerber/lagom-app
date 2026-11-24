@@ -3,6 +3,8 @@
 #[cfg(target_os = "macos")]
 mod icon;
 mod accounts;
+#[cfg(unix)]
+pub mod agent;
 mod badge;
 mod command_palette;
 mod compose;
