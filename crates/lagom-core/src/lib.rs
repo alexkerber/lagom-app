@@ -50,7 +50,7 @@ pub enum Error {
     RecurringSeries,
     #[error("the calendar event has changed")]
     Conflict,
-    #[error("event change unconfirmed; check your calendar before retrying")]
+    #[error("change unconfirmed; check before retrying")]
     Uncertain,
     #[error("Allow calendar access")]
     CalendarConsent,

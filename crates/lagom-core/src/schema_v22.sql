@@ -27,7 +27,7 @@ CREATE INDEX agent_audit_reads ON agent_audit(agent,read_seq) WHERE read_seq IS 
 CREATE UNIQUE INDEX anonymous_refusal_minute ON agent_audit(at) WHERE agent IS NULL AND command='refusals';
 CREATE INDEX agent_refusal_bucket ON agent_audit(agent,at) WHERE refusals>0;
 CREATE TRIGGER agent_audit_cap AFTER INSERT ON agent_audit
- WHEN NEW.dispatched_write=0 OR NEW.result<>'ok'
+ WHEN NEW.dispatched_write=0 OR NEW.result NOT IN ('ok','pending','revoked')
 BEGIN
  UPDATE agent_audit SET read_seq=1+coalesce(
   (SELECT max(read_seq) FROM agent_audit WHERE agent IS NEW.agent AND read_seq IS NOT NULL),0)

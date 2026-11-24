@@ -87,7 +87,7 @@ impl ImapSync {
                 }
             }
             if found.is_empty() && store.draft_exists(id)? {
-                net(self.session.append(&encode_mailbox(&folder.name), Some("(\\Draft)"), None, &upload.raw)).await?;
+                mutation(self.session.append(&encode_mailbox(&folder.name), Some("(\\Draft)"), None, &upload.raw)).await?;
                 for uid in self.search_uids(&query).await? {
                     if let Some((raw, false, true)) = self.draft_raw(uid).await? {
                         if same_upload(&raw, &upload.raw)? { found.push((uid, raw)); }

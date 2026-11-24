@@ -71,6 +71,13 @@ async fn net_as<T, E: Transient>(
         .map_err(|_| Error::Network(TIMED_OUT))?
         .map_err(|e| Error::Network(if e.transient() { DROPPED } else { what }))
 }
+async fn mutation<T>(f: impl Future<Output = async_imap::error::Result<T>>) -> Result<T> {
+    match tokio::time::timeout(TIMEOUT, f).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_))) => Err(Error::Network(FAILED)),
+        _ => Err(Error::Uncertain),
+    }
+}
 async fn tls(stream: TcpStream, host: &str) -> Result<Wire> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -737,14 +744,15 @@ impl ImapSync {
         let sign = if on { "+" } else { "-" };
         let name = match flag { MailFlag::Seen => "Seen", MailFlag::Flagged => "Flagged" };
         // async-imap's STORE stream discards tagged NO/BAD replies.
-        net(self.session.run_command_and_check_ok(format!("UID STORE {} {sign}FLAGS.SILENT (\\{name})", message.uid))).await?;
-        match flag {
+        mutation(self.session.run_command_and_check_ok(format!("UID STORE {} {sign}FLAGS.SILENT (\\{name})", message.uid))).await?;
+        let cache = match flag {
             MailFlag::Seen => store.set_seen(message.folder, message.uid, on),
             MailFlag::Flagged => {
-                store.db.execute("UPDATE messages SET flagged=? WHERE id=?", (on,id))?;
-                Ok(())
+                store.db.execute("UPDATE messages SET flagged=? WHERE id=?", (on,id)).map(|_| ()).map_err(Error::from)
             }
-        }
+        };
+        if let Err(e) = cache { self.refresh_error = Some(e); }
+        Ok(())
     }
 
     pub async fn mark_seen(&mut self, store: &mut Store, id: i64, seen: bool) -> Result<()> {
@@ -779,7 +787,9 @@ impl ImapSync {
         };
         check(store)?;
         let result = self.move_on_server(store, id, target, check).await;
-        if result.is_err() { store.cancel_move(id)?; }
+        if result.is_err() {
+            if let Err(error) = store.cancel_move(id) { self.refresh_error = Some(error); }
+        }
         result.map(|uid| Moved { folder: target, uid })
     }
     async fn move_on_server(&mut self, store: &mut Store, id: i64, target: i64, check: impl Fn(&Store) -> Result<()>) -> Result<Option<(u32, u32)>> {
@@ -800,17 +810,19 @@ impl ImapSync {
         check(store)?;
         if source.role == FolderRole::Trash {
             // An interrupted empty may have marked the message; MOVE and COPY preserve flags.
-            net(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
+            mutation(self.session.run_command_and_check_ok(format!("UID STORE {} -FLAGS.SILENT (\\Deleted)", message.uid))).await?;
         }
         let mailbox = quoted(&encode_mailbox(&destination.name))?;
-        let copied = if self.capabilities.has_str("MOVE") {
-            self.copy_uid(format!("UID MOVE {} {mailbox}", message.uid), message.uid).await?
-        } else {
-            // shortcut: COPY can leave a destination copy if deletion fails; reconcile duplicates when resumable moves are added.
-            let copied = self.copy_uid(format!("UID COPY {} {mailbox}", message.uid), message.uid).await?;
-            self.delete_uids(&message.uid.to_string(), true).await?;
-            copied
-        };
+        let move_command = self.capabilities.has_str("MOVE");
+        if source.role == FolderRole::Trash { check(store).map_err(|_| Error::Uncertain)?; }
+        let verb = if move_command { "MOVE" } else { "COPY" };
+        let copied = self.copy_uid(format!("UID {verb} {} {mailbox}", message.uid), message.uid).await
+            .map_err(|e| if source.role == FolderRole::Trash { Error::Uncertain } else { e })?;
+        if !move_command {
+            let authorized = || check(store).map_err(|_| Error::Uncertain);
+            authorized()?;
+            self.delete_uids(&message.uid.to_string(), true, authorized).await.map_err(|_| Error::Uncertain)?;
+        }
         // A confirmed move must not be rolled back because a subsequent refresh failed.
         if let Err(error) = store.delete_message(id) {
             self.refresh_error = Some(error);
@@ -882,10 +894,10 @@ impl ImapSync {
         };
         // async-imap's uid_mv and uid_copy discard the response codes.
         tokio::time::timeout(TIMEOUT, async {
-            let tag = net(self.session.run_command(command)).await?;
+            let tag = net(self.session.run_command(command)).await.map_err(|_| Error::Uncertain)?;
             let mut copied = None;
             loop {
-                let response = net(self.session.read_response()).await?.ok_or(Error::Network(DROPPED))?;
+                let response = net(self.session.read_response()).await.map_err(|_| Error::Uncertain)?.ok_or(Error::Uncertain)?;
                 let (outcome, done) = match response.parsed() {
                     Response::Data { status: Status::Ok, outcome } => (outcome, false),
                     Response::Done { tag: done, status, outcome } if *done == tag => {
@@ -901,7 +913,7 @@ impl ImapSync {
                 }
                 if done { return Ok(copied); }
             }
-        }).await.map_err(|_| Error::Network(TIMED_OUT))?
+        }).await.map_err(|_| Error::Uncertain)?
     }
     pub(crate) async fn ensure_role(
         &mut self,
@@ -926,9 +938,10 @@ impl ImapSync {
     pub async fn trash(&mut self, store: &mut Store, id: i64) -> Result<Moved> {
         self.move_checked(store,id,Destination::Trash, |_|Ok(())).await
     }
-    async fn delete_uids(&mut self, set: &str, restore_on_refusal: bool) -> Result<()> {
+    async fn delete_uids(&mut self, set: &str, restore_on_refusal: bool, check: impl Fn() -> Result<()>) -> Result<()> {
         // async-imap's STORE/EXPUNGE streams discard tagged NO/BAD replies.
         net(self.session.run_command_and_check_ok(format!("UID STORE {set} +FLAGS.SILENT (\\Deleted)"))).await?;
+        check()?;
         // shortcut: without UIDPLUS, EXPUNGE also removes other deleted mail; use UID EXPUNGE whenever advertised.
         let command = if self.capabilities.has_str("UIDPLUS") { format!("UID EXPUNGE {set}") } else { "EXPUNGE".into() };
         let result = tokio::time::timeout(TIMEOUT, self.session.run_command_and_check_ok(command)).await
@@ -955,14 +968,14 @@ impl ImapSync {
         uids.sort_unstable();
         // Exact UIDs keep mail arriving during the operation out of the expunge.
         for chunk in uids.chunks(100) {
-            self.delete_uids(&uid_set(chunk), false).await?;
+            self.delete_uids(&uid_set(chunk), false, || Ok(())).await?;
         }
         self.sync_folder(store, id, DEFAULT_LIMIT).await
     }
     pub async fn append_sent(&mut self, store: &mut Store, raw: &[u8]) -> Result<i64> {
         let target = self.ensure_role(store, FolderRole::Sent, "Sent").await?;
         let folder = store.folder(target)?;
-        net(self
+        mutation(self
             .session
             .append(&encode_mailbox(&folder.name), Some("(\\Seen)"), None, raw))
         .await?;
