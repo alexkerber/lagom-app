@@ -204,6 +204,7 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
   - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos. On `feat/agents-detect`, desktop detects six agents and installs or removes their local integrations. Temporary-home tests checked config restoration, token permissions and foreign commands. Live clients remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
+- [ ] AI Agents: local and remote agents read and act on mail and calendar through the running app. Settings > AI Agents (off by default, per-account and per-agent levels None/Read/Triage/Send, confirmation before send and calendar changes, sidebar toggle), a socket-only CLI with `--json`, `skill install` and `mcp`, scoped tokens for remote agents (accounts, level, CIDR, expiry), an audit log with Revoke. Spec: `docs/ai-agents.md`. Branch `wip/ai-agents`.
 
 ## Calendar
 
