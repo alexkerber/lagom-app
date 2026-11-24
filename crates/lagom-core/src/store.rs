@@ -32,13 +32,16 @@ impl Store {
         Self::open(Self::default_path()?)
     }
     /// `LAGOM_DATA_DIR` isolates test runs from the owner's real store.
-    pub fn default_path() -> Result<std::path::PathBuf> {
-        let dir = match std::env::var_os("LAGOM_DATA_DIR") {
+    pub fn data_dir() -> Result<std::path::PathBuf> {
+        Ok(match std::env::var_os("LAGOM_DATA_DIR") {
             Some(dir) => std::path::PathBuf::from(dir),
             None => dirs::data_dir()
                 .ok_or(Error::Invalid("platform data directory unavailable"))?
                 .join("lagom"),
-        };
+        })
+    }
+    pub fn default_path() -> Result<std::path::PathBuf> {
+        let dir = Self::data_dir()?;
         std::fs::create_dir_all(&dir)?;
         owner_only(&dir, 0o700)?;
         Ok(dir.join("lagom.sqlite3"))
