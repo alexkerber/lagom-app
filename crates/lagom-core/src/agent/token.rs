@@ -50,7 +50,7 @@ impl Identity {
     }
 }
 
-/// An agent as Settings lists it. `active`: it holds a token.
+/// An agent as Settings lists it. `active`: it holds a token that has not expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentRow {
     pub id: String,
@@ -64,7 +64,8 @@ pub struct AgentRow {
 impl Store {
     pub fn agents(&self) -> Result<Vec<AgentRow>, Code> {
         let mut rows = self.db.prepare(
-            "SELECT id,kind,name,host,remote,EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent=a.id)
+            "SELECT id,kind,name,host,remote,EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent=a.id
+             AND (t.expires IS NULL OR t.expires>unixepoch()))
              FROM agents a ORDER BY created,id",
         )?;
         let rows = rows.query_map([], |r| {

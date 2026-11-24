@@ -5,11 +5,13 @@ use lagom_core::store::Store;
 
 /// A click on Settings > AI Agents.
 pub(crate) enum AgentChange {
-    Toggle(Setting),
+    /// The value the switch shows after the click, so a second window cannot flip it back.
+    Toggle(Setting, bool),
     /// The first Connect click: list the files, write nothing.
     Preview(String),
     Cancel,
-    Connect(String),
+    /// The kind, and the files the preview listed.
+    Connect(String, Vec<String>),
     /// Revoke in the store, then remove what Connect wrote.
     Disconnect(String),
     DisconnectAll,
@@ -107,15 +109,21 @@ impl AgentChange {
     /// The toast after a change, if it needs one.
     fn apply(self, store: &Store, a: &Agents) -> anyhow::Result<Option<String>> {
         Ok(match self {
-            Self::Toggle(setting) => {
-                core(store.set_agent_setting(setting, !core(store.agent_setting(setting))?))?;
+            Self::Toggle(setting, on) => {
+                core(store.set_agent_setting(setting, on))?;
                 None
             }
             Self::Level(agent, access) => {
                 core(store.set_agent_access(&agent, &access))?;
                 None
             }
-            Self::Connect(kind) => Some(files::connect(store, a, &kind)?),
+            Self::Connect(kind, listed) => {
+                // Write only what the person saw: a changed plan goes back to the preview.
+                if files::preview(a, &kind)? != listed {
+                    anyhow::bail!("the files to write changed. Check the list and connect again");
+                }
+                Some(files::connect(store, a, &kind)?)
+            }
             Self::Disconnect(id) => {
                 core(store.revoke_agent_tokens(&id))?;
                 files::remove(store, &id)?;
@@ -170,6 +178,10 @@ impl MainWindow {
                 self.agents.pending = None;
             }
             AgentChange::Cancel => self.agents.pending = None,
+            AgentChange::Connect(kind, _) if self.live.is_none() => {
+                self.agents.pending = None;
+                self.notify(format!("Demo mode: start without LAGOM_DEMO to connect {kind}"), cx);
+            }
             AgentChange::Preview(kind) => match files::preview(&self.agents, &kind) {
                 Ok(files) => self.agents.pending = Some((kind, files)),
                 Err(e) => self.notify(format!("Could not connect: {e:#}"), cx),

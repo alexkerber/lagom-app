@@ -101,9 +101,15 @@ impl Agents {
         }
     }
 
-    /// The highest level a segment may offer: the global level while an agent is selected.
-    fn cap(&self, resource: Resource, account: &str) -> Level {
-        if self.selected.is_some() { stored(&self.global, resource, account) } else { Level::Send }
+    /// The level a click would replace: the selected agent's own row, else the global one.
+    fn stored(&self, resource: Resource, account: &str) -> Level {
+        stored(if self.selected.is_some() { &self.own } else { &self.global }, resource, account)
+    }
+
+    /// Shown, stored and the highest level a segment may offer: the global level while an agent is selected.
+    fn levels(&self, resource: Resource, account: &str) -> (Level, Level, Level) {
+        let cap = if self.selected.is_some() { stored(&self.global, resource, account) } else { Level::Send };
+        (self.shown(resource, account), self.stored(resource, account), cap)
     }
 
     /// Fixed sample rows for `LAGOM_DEMO=1`; no store, no file system.
@@ -168,7 +174,8 @@ fn note(t: &Theme, text: impl Into<SharedString>) -> Div {
 }
 
 /// A row of segments, one per level. Segments above `cap` are dimmed and do nothing.
-fn levels(t: &Theme, key: String, levels: &[Level], on: Level, cap: Level, agent: &str, resource: Resource, account: &str, cx: &mut Context<MainWindow>) -> Div {
+/// `saved`: the stored level; a click on the shown level still pins an agent whose row is higher.
+fn levels(t: &Theme, key: String, levels: &[Level], (on, saved, cap): (Level, Level, Level), agent: &str, resource: Resource, account: &str, cx: &mut Context<MainWindow>) -> Div {
     let mut row = div().flex().flex_shrink_0().gap(px(2.)).p(px(2.)).rounded(px(radius::CONTROL)).border_1().border_color(t.line).bg(t.bg);
     for &level in levels {
         let id = SharedString::from(format!("{key}-{}", word(level)));
@@ -182,7 +189,7 @@ fn levels(t: &Theme, key: String, levels: &[Level], on: Level, cap: Level, agent
             .when(!allowed, |s| s.opacity(0.35))
             .child(word(level));
         let (agent, account) = (agent.to_string(), account.to_string());
-        row = row.child(if allowed && !selected {
+        row = row.child(if allowed && level != saved {
             stop(t, pressable(segment, t, false)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
                 this.agent_change(AgentChange::Level(agent.clone(), Access { resource, account: account.clone(), level }), cx)
             }))
@@ -199,8 +206,8 @@ fn matrix(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut
         div().flex().items_center().gap(px(12.)).px(px(14.)).py(px(8.))
             .when(!first, |r| r.border_t_1().border_color(t.line))
             .child(label.flex_1().min_w(px(0.)))
-            .child(levels(t, format!("mail-{key}"), &MAIL, a.shown(Resource::Mail, account), a.cap(Resource::Mail, account), &agent, Resource::Mail, account, cx))
-            .child(levels(t, format!("calendar-{key}"), &CALENDAR, a.shown(Resource::Calendar, account), a.cap(Resource::Calendar, account), &agent, Resource::Calendar, account, cx))
+            .child(levels(t, format!("mail-{key}"), &MAIL, a.levels(Resource::Mail, account), &agent, Resource::Mail, account, cx))
+            .child(levels(t, format!("calendar-{key}"), &CALENDAR, a.levels(Resource::Calendar, account), &agent, Resource::Calendar, account, cx))
     };
     let column = |label: &'static str, n: usize| div().w(px(SEGMENT * n as f32 + 2. * (n + 1) as f32 + 2.)).flex_shrink_0()
         .text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).text_color(t.ink2).child(label);
@@ -223,6 +230,7 @@ fn matrix(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut
 
 /// Every Settings page for AI Agents.
 pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut Context<MainWindow>) -> Div {
+    let (enabled, confirm, sidebar) = (a.enabled, a.confirm, a.sidebar);
     let header = div().flex().items_center().gap(px(8.))
         .child(page_title("AI Agents").flex_1())
         .child(stop(t, button(t, "Guide", None))
@@ -232,7 +240,7 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
     let access = div().flex().flex_col().gap(px(12.))
         .child(plate(t).px(px(14.)).py(px(6.))
             .child(stop(t, toggle_row(t, "Enable agent access", a.enabled))
-                .on_click(cx.listener(|this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled), cx))))
+                .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx))))
             .child(div().flex().flex_col().gap(px(6.)).pb(px(8.))
                 .child(note(t, "Coding agents on this computer can read and act on your mail and calendar, within the levels below."))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4))
@@ -266,14 +274,14 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
         }
         let mut block = div().flex().flex_col().when(ix > 0, |b| b.border_t_1().border_color(t.line)).child(line);
         if let Some((_, files)) = pending {
-            let (yes, no) = (kind.clone(), kind.clone());
+            let (yes, no, listed) = (kind.clone(), kind.clone(), files.clone());
             block = block.child(div().flex().flex_col().gap(px(8.)).pl(px(32.)).pr(px(14.)).pb(px(12.))
                 .child(note(t, "Connect writes these files. Disconnect removes them again."))
                 .children(files.iter().map(|f| mono(f.clone(), t.ink).one_line()))
                 .child(div().flex().gap(px(8.)).pt(px(4.))
                     .child(stop(t, button(t, "Connect", Some(t.accent)).id(SharedString::from(format!("confirm-connect-{yes}")))
                         .debug_selector(move || format!("confirm-connect-{no}")))
-                        .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Connect(yes.clone()), cx))))
+                        .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Connect(yes.clone(), listed.clone()), cx))))
                     .child(stop(t, button(t, "Cancel", None))
                         .on_click(cx.listener(|this, _, _, cx| this.agent_change(AgentChange::Cancel, cx))))));
         }
@@ -309,11 +317,11 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
 
     let options = plate(t).px(px(14.)).py(px(6.))
         .child(stop(t, toggle_row(t, "Confirmation pop-ups", a.confirm))
-            .on_click(cx.listener(|this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Confirm), cx))))
+            .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Confirm, !confirm), cx))))
         .child(note(t, "Ask before an agent sends mail or changes an event.").pb(px(8.)))
         .child(div().border_t_1().border_color(t.line).pt(px(4.))
             .child(stop(t, toggle_row(t, "Show AI Agents in sidebar", a.sidebar))
-                .on_click(cx.listener(|this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Sidebar), cx)))));
+                .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Sidebar, !sidebar), cx)))));
 
     div()
         .w_full()

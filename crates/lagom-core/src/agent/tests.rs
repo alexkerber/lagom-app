@@ -348,6 +348,8 @@ fn settings_apis_store_switches_matrices_receipts_and_revoke_all() {
     s.set_agent_connection(&agent, Some("{}")).unwrap();
     assert_eq!(s.agent_connection(&agent).unwrap().as_deref(), Some("{}"));
     assert_eq!(s.agent_connection(&other).unwrap(), None);
+    s.db.execute("UPDATE agent_tokens SET expires=1 WHERE agent=?", [&other]).unwrap();
+    assert_eq!(s.agents().unwrap().iter().filter(|r| r.active).count(), 1, "an expired token is not active");
     s.revoke_all_agents().unwrap();
     assert!(s.agents().unwrap().iter().all(|r| !r.active));
     assert!(!s.agent_setting(Setting::Enabled).unwrap());

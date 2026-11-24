@@ -3143,8 +3143,16 @@ mod tests {
         view.read_with(cx, |v, _| assert_eq!(v.agents.shown(Resource::Mail, &account), Level::Triage));
         view.update(cx, |v, cx| v.agent_change(AgentChange::Level(String::new(), mail(&account, Level::Read)), cx));
         view.read_with(cx, |v, _| assert_eq!(v.agents.shown(Resource::Mail, &account), Level::Read));
+        // A click on the shown Read pins the agent there, below its stored Send.
+        click(cx, format!("mail-{account}-Read"));
+        assert!(store.agent_access(&agent.id).unwrap().contains(&mail(&account, Level::Read)));
         // Disconnect all revokes every agent, switches access off and removes what Connect wrote.
         view.update(cx, |v, cx| v.agent_change(AgentChange::Select(None), cx));
+        // A list that no longer matches the plan writes nothing.
+        let written = snapshot(home.path());
+        view.update(cx, |v, cx| v.agent_change(AgentChange::Connect("Codex".into(), vec!["~/elsewhere".into()]), cx));
+        assert_eq!(snapshot(home.path()), written);
+        assert_eq!(store.agents().unwrap().len(), 1);
         click(cx, "connect-Codex".into());
         click(cx, "confirm-connect-Codex".into());
         assert_eq!(store.agents().unwrap().iter().filter(|a| a.active).count(), 2);
