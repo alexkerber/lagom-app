@@ -45,6 +45,12 @@ pub enum Error {
     Rejected,
     #[error("sign in again")]
     ReauthRequired,
+    #[error("choose a single occurrence of this event")]
+    RecurringSeries,
+    #[error("the calendar event has changed")]
+    Conflict,
+    #[error("event change unconfirmed; check your calendar before retrying")]
+    Uncertain,
     #[error("Allow calendar access")]
     CalendarConsent,
     #[error("Allow Google Tasks access")]
@@ -118,7 +124,7 @@ fn plain(detail: &'static str) -> &'static str {
         "outbox account mismatch" => "message belongs to another account",
         "cross-account moves unsupported" => "mail can only move within one account",
         "invalid IMAP mailbox encoding" => "lagom could not read this folder name",
-        "missing calendar or event ID" => "lagom could not find this event",
+        "invalid calendar or event ID" => "lagom could not find this event",
         "calendar ID missing" => "lagom could not find this calendar",
         "platform data directory unavailable" => "lagom could not find a place to save mail on this device",
         "store was created by a newer lagom version" => "your saved mail is from a newer lagom; update lagom",
