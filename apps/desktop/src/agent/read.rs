@@ -21,7 +21,9 @@ pub(crate) fn error(e: Error) -> Code {
         Error::Store(e) => e.into(),
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
-        Error::Invalid("attachment exceeds 64 MiB" | "attachment is too large" | "agent response too large") => Code::TooLarge,
+        Error::Invalid(
+            "attachment exceeds 64 MiB" | "attachment is too large" | "agent response too large",
+        ) => Code::TooLarge,
         Error::Invalid("unavailable")
         | Error::Network(_)
         | Error::Authentication
@@ -31,27 +33,52 @@ pub(crate) fn error(e: Error) -> Code {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ReadPolicy {
+    token: Zeroizing<String>,
+    ip: Option<String>,
+    generation: i64,
+    expires: Option<i64>,
+    levels: Vec<(String, Resource, Level)>,
+}
+
+impl ReadPolicy {
+    pub(super) fn check(&self, store: &Store) -> Result<Option<i64>> {
+        let identity = store.authenticate(Some(&self.token), self.ip.as_deref())?;
+        if store.agent_generation()? != Some(self.generation) {
+            return Err(Code::Unauthorized.into());
+        }
+        for (account, resource, level) in &self.levels {
+            if store.agent_level(&identity, *resource, account)? < *level {
+                return Err(Failure::OutsideScope);
+            }
+        }
+        Ok(identity.expires)
+    }
+
+    pub(super) fn expired(&self) -> bool {
+        self.expires
+            .is_some_and(|end| chrono::Utc::now().timestamp() >= end)
+    }
+}
+
 pub(crate) const ATTACHMENT_LIMIT: usize = 20 * 1024 * 1024;
 
 pub(crate) struct Attachment {
-    token: Zeroizing<String>,
-    ip: Option<String>,
+    access: ReadPolicy,
     message: MessageId,
     folder: Option<String>,
-    generation: i64,
     pub section: String,
     pub reply: oneshot::Sender<std::result::Result<Vec<u8>, Code>>,
 }
 
 impl Attachment {
     pub(crate) fn resolve(&self, store: &Store) -> std::result::Result<ResolvedMessage, Code> {
-        if store.agent_generation()? != Some(self.generation) {
-            return Err(Code::Unavailable);
-        }
+        self.access.check(store)?;
         store
             .resolve_agent_message(
-                Some(&self.token),
-                self.ip.as_deref(),
+                Some(&self.access.token),
+                self.access.ip.as_deref(),
                 &self.message.encode(),
                 self.folder.as_deref(),
                 Level::Read,
@@ -114,7 +141,9 @@ pub(super) fn dispatch(
     fetch: impl FnOnce(Attachment) -> bool,
     touched: &mut Option<String>,
     target: &mut Option<ResolvedMessage>,
+    access: &std::sync::OnceLock<ReadPolicy>,
     mut off: tokio::sync::watch::Receiver<()>,
+    mut policy: tokio::sync::watch::Receiver<Option<i64>>,
 ) -> Result<Value> {
     let cmd = req.cmd.as_str();
     let keys: &[&str] = match cmd {
@@ -186,6 +215,24 @@ pub(super) fn dispatch(
     if key.is_none() && accounts.len() == 1 {
         *touched = Some(accounts[0].0.clone());
     }
+    let generation = store.agent_generation()?.ok_or(Code::Unauthorized)?;
+    let mut levels = Vec::new();
+    for (account, _) in &accounts {
+        for resource in resources {
+            let level = store.agent_level(who, *resource, account)?;
+            if level >= Level::Read {
+                levels.push((account.clone(), *resource, level));
+            }
+        }
+    }
+    let token = req.token.clone().ok_or(Code::Unauthorized)?;
+    let policy_at_start = access.get_or_init(|| ReadPolicy {
+        token,
+        ip: req.source_ip.clone(),
+        generation,
+        levels,
+        expires: who.expires,
+    });
     let now = chrono::Utc::now().timestamp();
     let mut rows = Vec::new();
     let mut size = 0;
@@ -216,10 +263,12 @@ pub(super) fn dispatch(
         }
         "contacts" => {
             for (id, _) in accounts {
-                store.agent_contacts(&id, |name,address| {
-                    push(json!({"account":id,"name":clean(name),"address":clean(address)}))
-                        .map_err(|_| Error::Invalid("agent response too large"))
-                }).map_err(error)?;
+                store
+                    .agent_contacts(&id, |name, address| {
+                        push(json!({"account":id,"name":clean(name),"address":clean(address)}))
+                            .map_err(|_| Error::Invalid("agent response too large"))
+                    })
+                    .map_err(error)?;
             }
         }
         "emails" | "search" => {
@@ -281,13 +330,11 @@ pub(super) fn dispatch(
                 ObjectId::Attachment(m, _) | ObjectId::SectionHash(m, _) => m,
                 _ => return Err(Code::NotFound.into()),
             };
-            let (reply, rx) = oneshot::channel();
+            let (reply, mut rx) = oneshot::channel();
             let mut request = Attachment {
-                token: req.token.clone().ok_or(Code::Unauthorized)?,
-                ip: req.source_ip.clone(),
+                access: policy_at_start.clone(),
                 message: message.clone(),
                 folder: string("folder")?.map(str::to_owned),
-                generation: store.agent_generation()?.ok_or(Code::Unauthorized)?,
                 section: String::new(),
                 reply,
             };
@@ -311,10 +358,27 @@ pub(super) fn dispatch(
                 return Err(Code::Unavailable.into());
             }
             let bytes = tokio::runtime::Handle::current().block_on(async {
-                tokio::select! {
-                    biased;
-                    _ = off.changed() => Err(Code::Unavailable),
-                    r = rx => r.unwrap_or(Err(Code::Unavailable)),
+                let mut expires = who.expires;
+                loop {
+                    let expiry = async {
+                        if let Some(end) = expires {
+                            let millis = end.saturating_mul(1000).saturating_sub(chrono::Utc::now().timestamp_millis());
+                            tokio::time::sleep(std::time::Duration::from_millis(millis.max(0) as u64)).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = off.changed() => break Err(Code::Unavailable),
+                        _ = expiry => break Err(Code::Unauthorized),
+                        change = policy.changed() => {
+                            if change.is_err() { break Err(Code::Unavailable); }
+                            let fresh = Store::agent_reader(store.path(),|| false)?;
+                            expires = policy_at_start.check(&fresh).map_err(Code::from)?;
+                        },
+                        r = &mut rx => break r.unwrap_or(Err(Code::Unavailable)),
+                    }
                 }
             })?;
             if bytes.len() > ATTACHMENT_LIMIT {

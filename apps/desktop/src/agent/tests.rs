@@ -97,7 +97,11 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
                     account: account.id.clone(),
                     folder,
                     uid: 3,
-                    message_id: if n == 0 { "x".repeat(1500) } else { "<fixture>".into() },
+                    message_id: if n == 0 {
+                        "x".repeat(1500)
+                    } else {
+                        "<fixture>".into()
+                    },
                     subject: format!("needle-{n}"),
                     from_address: format!("writer{n}@example.com"),
                     flagged: true,
@@ -241,9 +245,11 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
         0o600
     );
     let count = || {
-        db.query_row("SELECT count(*) FROM agent_audit", [], |r| {
-            r.get::<_, usize>(0)
-        })
+        db.query_row(
+            "SELECT coalesce(sum(max(refusals,1)),0) FROM agent_audit",
+            [],
+            |r| r.get::<_, usize>(0),
+        )
         .unwrap()
     };
     let call = |cmd: &str, args: Value| {
@@ -342,16 +348,46 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
     let copies = ok("thread", json!({"id":thread_id}));
     assert_eq!(copies["messages"].as_array().unwrap().len(), 1);
     assert_eq!(copies["messages"][0]["folder"], "INBOX");
+    db.execute("DELETE FROM agent_audit WHERE refusals>0", [])
+        .unwrap();
     let missing = call(
         "thread",
         json!({"id":ObjectId::Thread(a.id.clone(),"missing".into()).encode()}),
     );
-    let ObjectId::Thread(_, key) = ObjectId::decode(thread_id).unwrap() else {
-        panic!()
+    let foreign = match ObjectId::decode(thread_id).unwrap() {
+        ObjectId::ThreadHash(_, hash) => ObjectId::ThreadHash(b.id.clone(), hash).encode(),
+        id => panic!("expected compact thread ID, got {id:?}"),
     };
-    let foreign = ObjectId::Thread(b.id.clone(), key).encode();
     assert_eq!(missing, fixed(Code::NotFound));
     assert_eq!(call("thread", json!({"id":foreign})), missing);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM agent_audit WHERE refusals>0 AND account IS NOT NULL",
+            [],
+            |r| r.get::<_, usize>(0)
+        )
+        .unwrap(),
+        0
+    );
+    db.execute("DELETE FROM agent_audit WHERE refusals>0", [])
+        .unwrap();
+    let missing_part = ObjectId::Attachment(
+        lagom_core::agent::id::MessageId::Header(a.id.clone(), "missing".into()),
+        "1".into(),
+    );
+    assert_eq!(
+        call("attachment", json!({"id":missing_part.encode()})),
+        fixed(Code::NotFound)
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT account FROM agent_audit WHERE refusals>0",
+            [],
+            |r| r.get::<_, Option<String>>(0)
+        )
+        .unwrap(),
+        None
+    );
     // Removing the underlying table makes any thread query observable.
     db.execute("ALTER TABLE messages RENAME TO hidden_fixture_messages", [])
         .unwrap();
@@ -394,7 +430,7 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
     for private in ["private-subject", "needle-0", token.as_str()] {
         assert!(!logged.contains(private));
     }
-    assert!(logged.contains("not_found:outside_scope"));
+    assert!(logged.contains("not_found"));
     assert!(logged.contains("unauthorized:missing"));
     store.revoke_agent_tokens(&agent).unwrap();
     assert_eq!(call("accounts", json!({})), fixed(Code::Unauthorized));
@@ -434,10 +470,20 @@ fn socket_ownership_framing_deadlines_and_limits() {
     let sock = dir.join("agent.sock");
     let store = Store::open(&path).unwrap();
     store.save_account(&account).unwrap();
-    for resource in [lagom_core::agent::policy::Resource::Mail, lagom_core::agent::policy::Resource::Calendar] {
-        store.set_agent_access("", &lagom_core::agent::policy::Access {
-            resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
-        }).unwrap();
+    for resource in [
+        lagom_core::agent::policy::Resource::Mail,
+        lagom_core::agent::policy::Resource::Calendar,
+    ] {
+        store
+            .set_agent_access(
+                "",
+                &lagom_core::agent::policy::Access {
+                    resource,
+                    account: String::new(),
+                    level: lagom_core::agent::policy::Level::Read,
+                },
+            )
+            .unwrap();
     }
     let token = store.provision_read_agent(&account.id).unwrap();
     drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
@@ -467,6 +513,8 @@ fn socket_ownership_framing_deadlines_and_limits() {
             socket
         })
         .collect();
+    let lock = Connection::open(&path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut ninth = UnixStream::connect(&sock).unwrap();
     ninth
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -474,6 +522,7 @@ fn socket_ownership_framing_deadlines_and_limits() {
     let mut reply = Vec::new();
     ninth.read_to_end(&mut reply).unwrap();
     assert_eq!(reply, fixed(Code::Busy));
+    lock.execute_batch("ROLLBACK").unwrap();
     for mut socket in pending {
         reply.clear();
         socket.read_to_end(&mut reply).unwrap();
@@ -487,15 +536,168 @@ fn socket_ownership_framing_deadlines_and_limits() {
     let _replacement = store.provision_read_agent(&account.id).unwrap();
     assert_eq!(old.read(&mut [0]).unwrap(), 0);
     let req = request(1);
+    let wrong_source = format!(
+        "{}\n",
+        json!({"v":1,"cmd":"draft.send","args":{},"token":token.as_str(),"source_ip":"::1"})
+    );
     for _ in 1..300 {
-        assert!(matches!(
-            serde_json::from_slice(&wire(&sock, req.as_bytes())),
-            Ok(Response::Success(_))
-        ));
+        assert_eq!(
+            wire(&sock, wrong_source.as_bytes()),
+            fixed(Code::Unauthorized)
+        );
     }
     assert_eq!(wire(&sock, req.as_bytes()), fixed(Code::Busy));
+    assert_eq!(wire(&sock, wrong_source.as_bytes()), fixed(Code::Busy));
+    let (buckets, total): (usize, usize) = lock
+        .query_row(
+            "SELECT count(*),sum(refusals) FROM agent_audit
+        WHERE agent IS NOT NULL AND refusals>0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(buckets <= 2); // The requests can cross a minute boundary.
+    assert_eq!(total, 302);
     drop(first);
     assert!(!sock.exists());
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn waiting_attachments_reauthenticate_before_returning_bytes() {
+    use lagom_core::agent::{
+        id::MessageId,
+        policy::{Access, Level, Resource},
+        token::TokenScope,
+    };
+
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("mail.db");
+    let sock = dir.path().join("agent.sock");
+    let store = Store::open(&path).unwrap();
+    let db = Connection::open(&path).unwrap();
+    let (imap, smtp) = lagom_core::presets::servers("a@gmail.com").unwrap();
+    let account = Account::new("a@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&account).unwrap();
+    let inbox = store
+        .save_folder(&account.id, "INBOX", None, FolderRole::Inbox)
+        .unwrap();
+    let row = store
+        .save_message(&Message {
+            summary: MessageSummary {
+                account: account.id.clone(),
+                folder: inbox,
+                uid: 1,
+                message_id: "header".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    db.execute(
+        "INSERT INTO attachments VALUES(?,'1','a','text/plain',1,'7bit')",
+        [row],
+    )
+    .unwrap();
+    let id = ObjectId::Attachment(
+        MessageId::Header(account.id.clone(), "header".into()),
+        "1".into(),
+    )
+    .encode();
+    store
+        .set_agent_setting(lagom_core::agent::policy::Setting::Enabled, true)
+        .unwrap();
+    let (bridge, mut commands) = Bridge::detached();
+    let _server = Server::start(&path, bridge);
+    wait(|| sock.exists());
+    for change in [
+        "unrelated",
+        "lower",
+        "revoke",
+        "revoke_at_reply",
+        "expire",
+        "source",
+    ] {
+        let agent = store.create_agent("test", "remote", "host", true).unwrap();
+        let mut access = Access {
+            resource: Resource::Mail,
+            account: account.id.clone(),
+            level: Level::Read,
+        };
+        store.set_agent_access("", &access).unwrap();
+        let token = store
+            .issue_token(
+                &agent,
+                TokenScope::Remote {
+                    accounts: std::slice::from_ref(&account.id),
+                    level: Level::Read,
+                    ranges: &[],
+                    expires: (change == "expire").then(|| chrono::Utc::now().timestamp() + 2),
+                },
+            )
+            .unwrap();
+        let req = format!(
+            "{}\n",
+            json!({"v":1,"cmd":"attachment","token":token.as_str(),"source_ip":"::1","args":{"id":id}})
+        );
+        thread::scope(|scope| {
+            let call = scope.spawn(|| wire(&sock, req.as_bytes()));
+            let Cmd::AgentAttachment(request) = commands.blocking_recv().unwrap() else {
+                panic!()
+            };
+            let expected = match change {
+                "unrelated" => {
+                    store.set_agent_access("other", &access).unwrap();
+                    request.reply.send(Ok(vec![7])).unwrap();
+                    assert!(matches!(
+                        serde_json::from_slice(&call.join().unwrap()),
+                        Ok(Response::Success(_))
+                    ));
+                    return;
+                }
+                "lower" => {
+                    access.level = Level::None;
+                    store.set_agent_access("", &access).unwrap();
+                    Code::NotFound
+                }
+                "revoke" | "revoke_at_reply" => {
+                    store.revoke_agent_tokens(&agent).unwrap();
+                    Code::Unauthorized
+                }
+                "expire" => Code::Unauthorized,
+                _ => {
+                    db.execute(
+                        "UPDATE agent_tokens SET cidr='[\"127.0.0.1/32\"]' WHERE agent=?",
+                        [&agent],
+                    )
+                    .unwrap();
+                    Code::Unauthorized
+                }
+            };
+            if change == "revoke_at_reply" {
+                let _ = request.reply.send(Ok(vec![7]));
+                assert_eq!(call.join().unwrap(), fixed(expected));
+            } else {
+                // Hold the worker reply open. The service must finish without it.
+                assert_eq!(call.join().unwrap(), fixed(expected));
+                assert!(request.reply.is_closed());
+                assert_eq!(
+                    request
+                        .resolve(&Store::agent_reader(&path, || false).unwrap())
+                        .unwrap_err(),
+                    expected
+                );
+            }
+            assert_eq!(
+                db.query_row(
+                    "SELECT sum(refusals) FROM agent_audit WHERE agent=?",
+                    [&agent],
+                    |r| r.get::<_, usize>(0)
+                )
+                .unwrap(),
+                1
+            );
+        });
+    }
 }

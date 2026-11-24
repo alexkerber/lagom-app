@@ -123,14 +123,36 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
     let mut calls = JoinSet::new();
     let permits = Arc::new(Semaphore::new(8));
     let rates = Rates::default();
+    let pending = Arc::new(Mutex::new(std::collections::BTreeMap::<i64, i64>::new()));
+    let (wake, mut wakes) = tokio::sync::mpsc::channel(1);
+    let recorder = task::spawn_blocking({
+        let path = path.clone();
+        let pending = pending.clone();
+        move || {
+            while wakes.blocking_recv().is_some() {
+                let counts = std::mem::take(&mut *pending.lock().unwrap());
+                for (minute, count) in counts {
+                    if Store::agent_writer(&path)
+                        .and_then(|s| s.count_anonymous_refusals(minute, count))
+                        .is_err()
+                    {
+                        eprintln!("Could not record agent admission refusals");
+                    }
+                }
+            }
+        }
+    });
     let mut tick = interval(Duration::from_millis(100));
     let (mut enabled, _) = watch::channel(());
+    let (policy, _) = watch::channel(settings.agent_policy_generation().ok());
     let mut bind_error = None;
     loop {
         tokio::select! {
             biased;
             _ = &mut stop => break,
             _ = tick.tick() => {
+                let revision = settings.agent_policy_generation().ok();
+                policy.send_if_modified(|old| { if *old == revision { false } else { *old=revision; true } });
                 let generation = settings.agent_generation().ok().flatten();
                 if socket.as_ref().is_some_and(|bound|Some(bound.generation)!=generation) {
                     socket.take();
@@ -155,15 +177,19 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                 let permit = permits.clone().try_acquire_owned();
                 let failure = if !same_user { Some(Code::Unauthorized) } else if permit.is_err() { Some(Code::Busy) } else { None };
                 if let Some(code) = failure {
-                    let code = audit(&settings,None,None,None,None,Err(code.into())).err().unwrap_or(code);
+                    let minute = chrono::Utc::now().timestamp().div_euclid(60)*60;
+                    *pending.lock().unwrap().entry(minute).or_default() += 1;
+                    let _ = wake.try_send(());
                     let mut stream=stream;
                     let _ = timeout(Duration::from_millis(100),stream.write_all(&line(Response::Failure(code)))).await;
                 } else {
-                    calls.spawn(call(stream,path.clone(),bridge.clone(),rates.clone(),enabled.subscribe(),socket.as_ref().unwrap().generation,permit.unwrap()));
+                    calls.spawn(call(stream,path.clone(),bridge.clone(),rates.clone(),enabled.subscribe(),socket.as_ref().unwrap().generation,policy.subscribe(),permit.unwrap()));
                 }
             }
         }
     }
+    drop(wake);
+    let _ = recorder.await;
     drop(socket);
     drop(enabled);
     while calls.join_next().await.is_some() {}
@@ -204,7 +230,7 @@ fn audit(
     })
 }
 
-fn rate(rates: &Rates, who: &Identity) -> Result<(), Code> {
+fn rate(rates: &Rates, token: &str) -> Result<(), Code> {
     let mut rates = rates.lock().map_err(|_| Code::Internal)?;
     let now = Instant::now();
     rates.retain(|_, times| {
@@ -212,7 +238,7 @@ fn rate(rates: &Rates, who: &Identity) -> Result<(), Code> {
             .back()
             .is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60))
     });
-    let times = rates.entry(who.token_id().to_owned()).or_default();
+    let times = rates.entry(token.to_owned()).or_default();
     while times
         .front()
         .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
@@ -239,6 +265,7 @@ async fn call(
     rates: Rates,
     mut off: watch::Receiver<()>,
     generation: i64,
+    policy: watch::Receiver<Option<i64>>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let parsed = tokio::select! {
@@ -250,7 +277,7 @@ async fn call(
     let (cancel, cancelled) = watch::channel(());
     let mut job = task::spawn_blocking(move || {
         process(
-            &path, parsed, &bridge, &rates, cancelled, deadline, generation,
+            &path, parsed, &bridge, &rates, cancelled, deadline, generation, policy,
         )
     });
     let bytes = tokio::select! {
@@ -286,7 +313,9 @@ fn process(
     off: watch::Receiver<()>,
     deadline: tokio::time::Instant,
     generation: i64,
+    policy: watch::Receiver<Option<i64>>,
 ) -> Vec<u8> {
+    let access = Arc::new(std::sync::OnceLock::<read::ReadPolicy>::new());
     let mut who = None;
     let mut account = None;
     let mut target = None;
@@ -296,16 +325,53 @@ fn process(
         let stop = off.clone();
         let query_deadline = if matches!(req.cmd.as_str(), "emails" | "search") {
             deadline.min(tokio::time::Instant::now() + Duration::from_secs(2))
-        } else { deadline };
+        } else {
+            deadline
+        };
+        let active = access.clone();
+        let mut changes = policy.clone();
+        let db_path = path.to_owned();
         let store = Store::agent_reader(path, move || {
-            stop.has_changed().is_err() || tokio::time::Instant::now() >= query_deadline
+            if stop.has_changed().is_err() || tokio::time::Instant::now() >= query_deadline {
+                return true;
+            }
+            active.get().is_some_and(|grant| {
+                if grant.expired() {
+                    return true;
+                }
+                if matches!(changes.has_changed(), Ok(false)) {
+                    return false;
+                }
+                changes.borrow_and_update();
+                Store::agent_reader(&db_path, || false)
+                    .map_or(true, |fresh| grant.check(&fresh).is_err())
+            })
         })?;
-        let identity =
-            who.insert(store.authenticate(req.token.as_deref().map(String::as_str), req.source_ip.as_deref())?);
+        let identity = match store.authenticate(
+            req.token.as_deref().map(String::as_str),
+            req.source_ip.as_deref(),
+        ) {
+            Ok(identity) => who.insert(identity),
+            Err(e) => {
+                if let Failure::VerifiedRefusal { agent, token, .. } = &e {
+                    match rate(rates, token) {
+                        Err(Code::Busy) => {
+                            return Err(Failure::VerifiedBusy {
+                                agent: agent.clone(),
+                                token: token.clone(),
+                            })
+                        }
+                        Err(code) => return Err(code.into()),
+                        Ok(()) => {}
+                    }
+                }
+                return Err(e);
+            }
+        };
+        rate(rates, identity.token_id())?;
         if store.agent_generation()? != Some(generation) {
             return Err(Code::Unauthorized.into());
         }
-        rate(rates, identity)?;
         if req.v != VERSION {
             return Err(Code::Unsupported.into());
         }
@@ -316,7 +382,9 @@ fn process(
             |request| bridge.send(crate::sync::Cmd::AgentAttachment(request)),
             &mut account,
             &mut target,
+            &access,
             off.clone(),
+            policy.clone(),
         )?;
         let mut bytes =
             serde_json::to_vec(&Response::Success(value)).map_err(|_| Code::Internal)?;
@@ -327,17 +395,24 @@ fn process(
         Ok(bytes)
     })();
     let audited = Store::agent_writer(path).and_then(|store| {
-        if cancelled() || (result.is_ok() && store.agent_generation()? != Some(generation)) {
-            result = Err(Code::Unavailable.into());
-        }
-        audit(
-            &store,
-            parsed.as_ref().ok(),
-            who.as_ref(),
-            account.as_deref(),
-            target.as_ref(),
-            result.as_ref().map(|_| ()).map_err(Clone::clone),
-        )
+        store.agent_audit_transaction(|| {
+            if let Some(grant) = access.get() {
+                if let Err(e) = grant.check(&store) {
+                    result = Err(e);
+                }
+            }
+            if cancelled() {
+                result = Err(Code::Unavailable.into());
+            }
+            audit(
+                &store,
+                parsed.as_ref().ok(),
+                who.as_ref(),
+                account.as_deref(),
+                target.as_ref(),
+                result.as_ref().map(|_| ()).map_err(Clone::clone),
+            )
+        })
     });
     audited
         .map_err(Failure::from)
