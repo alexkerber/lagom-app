@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use std::{
     env,
     io::{self, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::PathBuf,
     time::Duration,
 };
@@ -25,6 +26,7 @@ const ACTIONS: &[&str] =
     &["archive", "move", "read", "unread", "star", "unstar", "snooze", "unsnooze", "trash"];
 
 struct Tool {
+    description: &'static str,
     name: &'static str,
     cmd: &'static str,
     positional: &'static [&'static str],
@@ -34,6 +36,7 @@ struct Tool {
 }
 
 const fn tool(
+    description: &'static str,
     name: &'static str,
     cmd: &'static str,
     positional: &'static [&'static str],
@@ -41,22 +44,95 @@ const fn tool(
     resource: &'static str,
     level: Level,
 ) -> Tool {
-    Tool { name, cmd, positional, flags, resource, level }
+    Tool { description, name, cmd, positional, flags, resource, level }
 }
 
 const TOOLS: &[Tool] = &[
-    tool("list_accounts", "accounts", &[], &[], "", Read),
-    tool("list_folders", "folders", &[], &[], "mail", Read),
-    tool("list_mail", "emails", &[], &["filter", "page", "limit"], "mail", Read),
-    tool("search_mail", "search", &["query"], &["in"], "mail", Read),
-    tool("read_thread", "thread", &["id"], &[], "mail", Read),
-    tool("get_attachment", "attachment", &["id"], &[], "mail", Read),
-    tool("list_contacts", "contacts", &[], &[], "mail", Read),
-    tool("list_events", "events", &[], &["start", "end"], "calendar", Read),
-    tool("find_availability", "availability", &[], &["start", "end"], "calendar", Read),
-    tool("list_drafts", "draft.list", &[], &[], "mail", Read),
-    tool("read_draft", "draft.show", &["id"], &[], "mail", Read),
     tool(
+        "List accessible accounts and their mail and calendar permissions.",
+        "list_accounts",
+        "accounts",
+        &[],
+        &[],
+        "",
+        Read,
+    ),
+    tool(
+        "List folders and unread counts by account.",
+        "list_folders",
+        "folders",
+        &[],
+        &[],
+        "mail",
+        Read,
+    ),
+    tool(
+        "List messages matching an optional filter.",
+        "list_mail",
+        "emails",
+        &[],
+        &["filter", "page", "limit"],
+        "mail",
+        Read,
+    ),
+    tool(
+        "Search mail within the permitted accounts and folders.",
+        "search_mail",
+        "search",
+        &["query"],
+        &["in", "page", "limit"],
+        "mail",
+        Read,
+    ),
+    tool(
+        "Read the messages and attachment metadata in a thread.",
+        "read_thread",
+        "thread",
+        &["id"],
+        &[],
+        "mail",
+        Read,
+    ),
+    tool(
+        "Read a message attachment by ID.",
+        "get_attachment",
+        "attachment",
+        &["id"],
+        &["folder"],
+        "mail",
+        Read,
+    ),
+    tool(
+        "List contacts for the selected accounts.",
+        "list_contacts",
+        "contacts",
+        &[],
+        &[],
+        "mail",
+        Read,
+    ),
+    tool(
+        "List cached calendar events in a time range.",
+        "list_events",
+        "events",
+        &[],
+        &["start", "end"],
+        "calendar",
+        Read,
+    ),
+    tool(
+        "Find free and busy intervals in the selected calendars.",
+        "find_availability",
+        "availability",
+        &[],
+        &["start", "end"],
+        "calendar",
+        Read,
+    ),
+    tool("List drafts.", "list_drafts", "draft.list", &[], &[], "mail", Read),
+    tool("Read a draft by ID.", "read_draft", "draft.show", &["id"], &[], "mail", Read),
+    tool(
+        "Create a mail draft for review.",
         "create_draft",
         "draft.create",
         &[],
@@ -65,6 +141,7 @@ const TOOLS: &[Tool] = &[
         Triage,
     ),
     tool(
+        "Update an agent-owned draft at its current revision.",
         "edit_draft",
         "draft.edit",
         &["id"],
@@ -72,10 +149,35 @@ const TOOLS: &[Tool] = &[
         "mail",
         Triage,
     ),
-    tool("delete_draft", "draft.delete", &["id"], &[], "mail", Triage),
-    tool("send_draft", "draft.send", &["id"], &[], "mail", Send),
-    tool("mail_action", "action", &["action", "id"], &["folder", "until"], "mail", Triage),
     tool(
+        "Delete an agent-owned draft.",
+        "delete_draft",
+        "draft.delete",
+        &["id"],
+        &[],
+        "mail",
+        Triage,
+    ),
+    tool(
+        "Request approval to send a draft.",
+        "send_draft",
+        "draft.send",
+        &["id"],
+        &[],
+        "mail",
+        Send,
+    ),
+    tool(
+        "Apply a triage action to a message.",
+        "mail_action",
+        "action",
+        &["action", "id"],
+        &["folder", "until"],
+        "mail",
+        Triage,
+    ),
+    tool(
+        "Request approval to create a calendar event.",
         "create_event",
         "event.create",
         &[],
@@ -84,6 +186,7 @@ const TOOLS: &[Tool] = &[
         Send,
     ),
     tool(
+        "Request approval to update a calendar event.",
         "update_event",
         "event.update",
         &["id"],
@@ -91,7 +194,15 @@ const TOOLS: &[Tool] = &[
         "calendar",
         Send,
     ),
-    tool("delete_event", "event.delete", &["id"], &[], "calendar", Send),
+    tool(
+        "Request approval to delete a calendar event.",
+        "delete_event",
+        "event.delete",
+        &["id"],
+        &[],
+        "calendar",
+        Send,
+    ),
 ];
 
 impl Tool {
@@ -113,6 +224,7 @@ impl Tool {
                 return Err(INVALID);
             }
             let valid = match key.as_str() {
+                "start" | "end" if matches!(self.cmd, "availability" | "events") => value.is_i64(),
                 "page" => value.as_u64().is_some_and(|n| n >= 1),
                 "limit" => value.as_u64().is_some_and(|n| (1..=100).contains(&n)),
                 "action" => value.as_str().is_some_and(|v| ACTIONS.contains(&v)),
@@ -161,7 +273,29 @@ impl Options {
             }
             let (key, value) = match flag.split_once('=') {
                 Some((k, v)) => (k, v.to_owned()),
-                None => (flag, iter.next().ok_or(INVALID)?),
+                None => {
+                    let value = iter.next().ok_or(INVALID)?;
+                    if let Some(opt) = value.strip_prefix("--") {
+                        let key = opt.split('=').next().unwrap();
+                        if matches!(
+                            key,
+                            "help"
+                                | "version"
+                                | "json"
+                                | "agent"
+                                | "token"
+                                | "account"
+                                | "dir"
+                                | "for"
+                        ) || TOOLS
+                            .iter()
+                            .any(|t| t.flags.contains(&key) || t.positional.contains(&key))
+                        {
+                            return Err(INVALID);
+                        }
+                    }
+                    (flag, value)
+                }
             };
             match key {
                 "token" | "agent" => {
@@ -191,13 +325,28 @@ impl Client {
     fn token(&self) -> Result<String> {
         let token = match &self.identity {
             Some((kind, v)) if kind == "agent" => {
-                if v.len() != 12 || !v.bytes().all(|c| c.is_ascii_hexdigit()) {
+                if v.len() != 12
+                    || !v.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                {
                     return Err(Code::Unauthorized);
                 }
-                std::fs::read_to_string(self.dir.join("agents").join(format!("{v}.token")))
-                    .map_err(|_| Code::Unauthorized)?
-                    .trim_end()
-                    .into()
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(self.dir.join("agents").join(format!("{v}.token")))
+                    .map_err(|_| Code::Unauthorized)?;
+                let meta = file.metadata().map_err(|_| Code::Unauthorized)?;
+                if !meta.is_file()
+                    || meta.uid() != unsafe { libc::geteuid() }
+                    || meta.mode() & 0o077 != 0
+                    || meta.len() > 256
+                {
+                    return Err(Code::Unauthorized);
+                }
+                let mut text = zeroize::Zeroizing::new(String::new());
+                io::Read::read_to_string(&mut io::Read::take(file, 256), &mut text)
+                    .map_err(|_| Code::Unauthorized)?;
+                text.trim_end().into()
             }
             Some((_, v)) => v.clone(),
             None => env::var("LAGOM_TOKEN").map_err(|_| Code::Unauthorized)?,
@@ -211,12 +360,12 @@ impl Client {
     async fn request(&self, cmd: &str, args: Args) -> Result<(Vec<u8>, Response)> {
         let request = Request {
             v: VERSION,
-            token: Some(self.token()?),
+            token: Some(self.token()?.into()),
             cmd: cmd.into(),
             args,
             source_ip: None,
         };
-        let mut bytes = serde_json::to_vec(&request).map_err(|_| INVALID)?;
+        let mut bytes = zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| INVALID)?);
         bytes.push(b'\n');
         if bytes.len() > MAX_REQUEST {
             return Err(Code::TooLarge);
@@ -225,6 +374,11 @@ impl Client {
             let mut stream = UnixStream::connect(self.dir.join("agent.sock"))
                 .await
                 .map_err(|_| Code::AppUnreachable)?;
+            if stream.peer_cred().map_err(|_| Code::Unauthorized)?.uid()
+                != unsafe { libc::geteuid() }
+            {
+                return Err(Code::Unauthorized);
+            }
             stream.write_all(&bytes).await.map_err(|_| Code::Unavailable)?;
             Ok::<_, Code>(stream)
         })
@@ -249,12 +403,15 @@ impl Client {
         .map_err(|_| lost)?
         .map_err(|_| lost)?;
         if frame.len() > MAX_RESPONSE {
-            return Err(Code::TooLarge);
+            return Err(if lost == Code::Uncertain { lost } else { Code::TooLarge });
         }
         if frame.last() != Some(&b'\n') {
             return Err(lost);
         }
         let response = serde_json::from_slice(&frame).map_err(|_| {
+            if lost == Code::Uncertain {
+                return lost;
+            }
             // The shared decoder rejects newer versions before reading their payload.
             match serde_json::from_slice::<Value>(&frame).ok().and_then(|v| v["v"].as_u64()) {
                 Some(v) if v != u64::from(VERSION) => Code::Unsupported,
@@ -266,7 +423,21 @@ impl Client {
 }
 
 fn field(v: &Value) -> String {
-    v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())
+    escape(&v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
+}
+
+fn escape(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_control()
+            || matches!(c,'\u{061c}'|'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+        {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
@@ -276,7 +447,7 @@ fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
                 if v.is_array() {
                     table(out, v)?;
                 } else {
-                    writeln!(out, "{k}\t{}", field(v))?;
+                    writeln!(out, "{}\t{}", escape(k), field(v))?;
                 }
             }
         }
@@ -287,7 +458,7 @@ fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
                 .flat_map(|o| o.keys().map(String::as_str))
                 .collect();
             if !cols.is_empty() {
-                writeln!(out, "{}", cols.iter().copied().collect::<Vec<_>>().join("\t"))?;
+                writeln!(out, "{}", cols.iter().map(|k| escape(k)).collect::<Vec<_>>().join("\t"))?;
                 for row in rows {
                     writeln!(
                         out,
@@ -324,7 +495,7 @@ fn run(opts: Options) -> Result<i32> {
             return Ok(0);
         }
         "--help" if rest.is_empty() && opts.args.is_empty() => {
-            writeln!(io::stdout().lock(), "lagom <command> [--account ID] [--agent ID | --token TOKEN] [--json]\naccounts, folders, emails [--filter FILTER] [--page N] [--limit N], search QUERY [--in SCOPE], thread ID, attachment ID, events, availability, contacts\ndraft list|show|create|edit|delete|send, action archive|move|read|unread|star|unstar|snooze|unsnooze|trash, event create|update|delete\nmcp, skill install [--for KIND] [--dir PATH]").map_err(|_| Code::Internal)?;
+            writeln!(io::stdout().lock(), "lagom <command> [--account ID] [--agent ID] [--json]\nUse --agent ID or LAGOM_TOKEN. --token is visible in process listings.\naccounts, folders, emails [--filter FILTER] [--page N] [--limit N], search QUERY [--in SCOPE], thread ID, attachment ID, events, availability, contacts\ndraft list|show|create|edit|delete|send, action archive|move|read|unread|star|unstar|snooze|unsnooze|trash, event create|update|delete\nmcp, skill install [--for KIND] [--dir PATH]").map_err(|_| Code::Internal)?;
             return Ok(0);
         }
         "--version" if rest.is_empty() && opts.args.is_empty() => {
@@ -333,10 +504,7 @@ fn run(opts: Options) -> Result<i32> {
         }
         _ => {}
     }
-    let dir = env::var_os("LAGOM_DATA_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::data_dir().map(|p| p.join("lagom")))
-        .ok_or(Code::AppUnreachable)?;
+    let dir = lagom_core::store::Store::data_dir().map_err(|_| INVALID)?;
     let client = Client { dir, identity: opts.identity };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -346,7 +514,7 @@ fn run(opts: Options) -> Result<i32> {
         if !rest.is_empty() || !opts.args.is_empty() {
             return Err(INVALID);
         }
-        return mcp::serve(&client, &rt).map(|_| 0);
+        return mcp::serve(client, &rt).map(|_| 0);
     }
     let mut cmd = name.clone();
     if matches!(name.as_str(), "draft" | "event") {
@@ -362,6 +530,15 @@ fn run(opts: Options) -> Result<i32> {
     for (key, v) in tool.positional.iter().zip(rest) {
         if args.insert((*key).into(), Value::from(v.clone())).is_some() {
             return Err(INVALID);
+        }
+    }
+    if matches!(cmd.as_str(), "events" | "availability") {
+        for key in ["start", "end"] {
+            if let Some(value) = args.get_mut(key) {
+                *value = Value::from(
+                    value.as_str().ok_or(INVALID)?.parse::<i64>().map_err(|_| INVALID)?,
+                );
+            }
         }
     }
     let (cmd, args) = tool.command(args)?;
@@ -395,8 +572,11 @@ fn status(code: Code) -> i32 {
 pub fn dispatch() -> Option<i32> {
     let mut probe = env::args_os().skip(1);
     let mut first = probe.next()?;
-    while matches!(first.to_str()?.split('=').next(), Some("--agent" | "--token")) {
-        if !first.to_str()?.contains('=') {
+    while matches!(
+        first.to_str()?.split('=').next(),
+        Some("--agent" | "--token" | "--account" | "--json")
+    ) {
+        if first != "--json" && !first.to_str()?.contains('=') {
             probe.next()?;
         }
         first = probe.next()?;
@@ -428,4 +608,17 @@ pub fn dispatch() -> Option<i32> {
             status(code)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn table_escapes_controls_in_keys_and_values() {
+        let text = "\x1b\x07\r\n\t\x7f\u{9b}\u{202e}";
+        let mut out = Vec::new();
+        table(&mut out, &serde_json::json!([{(text):text}])).unwrap();
+        let escaped = r"\u{1b}\u{7}\r\n\t\u{7f}\u{9b}\u{202e}";
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{escaped}\n{escaped}\n"));
+    }
 }

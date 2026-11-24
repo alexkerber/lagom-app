@@ -34,7 +34,8 @@ impl Store {
     /// `LAGOM_DATA_DIR` isolates test runs from the owner's real store.
     pub fn data_dir() -> Result<std::path::PathBuf> {
         Ok(match std::env::var_os("LAGOM_DATA_DIR") {
-            Some(dir) => std::path::PathBuf::from(dir),
+            Some(dir) if Path::new(&dir).is_absolute() => dir.into(),
+            Some(_) => return Err(Error::Invalid("LAGOM_DATA_DIR must be absolute")),
             None => dirs::data_dir()
                 .ok_or(Error::Invalid("platform data directory unavailable"))?
                 .join("lagom"),

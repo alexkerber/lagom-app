@@ -14,7 +14,7 @@ lagom-core = { path = "../../crates/lagom-core" }
 # Grapheme clusters for the caret and backspace (emoji, combining marks). Already in Cargo.lock.
 unicode-segmentation = "1.13"
 # The mail worker's runtime and channels; the core's IMAP and SMTP need Tokio. Already in Cargo.lock.
-tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "io-util"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "io-util", "io-std"] }
 # Local time zone for list dates and Later times; std has none. Already in Cargo.lock via async-imap.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "unstable-locales"] }
 # System locale for task dates; already in Cargo.lock via GPUI.

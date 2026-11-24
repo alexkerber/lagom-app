@@ -17,9 +17,19 @@ pub(super) fn install(words: &[String], args: &Args) -> Result<()> {
         Some(path) => PathBuf::from(path),
         None => dirs::home_dir().ok_or(Code::Unavailable)?.join(config).join("skills/lagom"),
     };
-    std::fs::create_dir_all(&dir)
-        .and_then(|_| {
-            std::fs::write(dir.join("SKILL.md"), include_bytes!("../../assets/skill/SKILL.md"))
-        })
-        .map_err(|_| Code::Unavailable)
+    let write = || -> io::Result<()> {
+        if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_symlink()) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        std::fs::create_dir_all(&dir)?;
+        let dest = dir.join("SKILL.md");
+        if std::fs::symlink_metadata(&dest).is_ok_and(|m| !m.is_file()) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut file = tempfile::NamedTempFile::new_in(dir)?;
+        file.write_all(include_bytes!("../../assets/skill/SKILL.md"))?;
+        file.persist(dest)?;
+        Ok(())
+    };
+    write().map_err(|_| Code::Unavailable)
 }
