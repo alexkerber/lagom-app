@@ -375,6 +375,27 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_failure_cannot_reverse_an_authority_change() {
+        for action in ["revoke","disable","all","reissue"] {
+            let (_dir, store, _, id, agent, token, _) = queued_agent(false);
+            store.db.execute_batch("CREATE TRIGGER refuse_restore BEFORE INSERT ON drafts BEGIN
+                SELECT RAISE(ABORT,'injected restore failure'); END").unwrap();
+            match action {
+                "disable" => store.disable_agents().unwrap(),
+                "all" => store.revoke_all_agents().unwrap(),
+                "reissue" => { store.issue_token(&agent,TokenScope::Local).unwrap(); }
+                _ => store.revoke_agent_tokens(&agent).unwrap(),
+            }
+            if action == "disable" { assert!(!store.agent_enabled().unwrap()); }
+            else { assert!(store.authenticate(Some(&token),None).is_err()); }
+            assert!(store.claim_send(&id,0).is_err());
+            store.db.execute_batch("DROP TRIGGER refuse_restore").unwrap();
+            assert!(store.claim_send(&id,0).is_err());
+            assert!(store.pending(&id).is_err());
+        }
+    }
+
+    #[test]
     fn claimed_send_cannot_survive_a_policy_cycle() {
         for disable in [true, false] {
             let (_dir, store, _, id, _, _, grant) = queued_agent(false);

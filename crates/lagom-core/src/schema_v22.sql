@@ -37,6 +37,9 @@ BEGIN
 END;
 -- Any change to tokens or access cancels requests that were authorized under the old policy.
 INSERT INTO agent_settings VALUES('policy_generation','0');
+CREATE TRIGGER agent_policy_issue AFTER INSERT ON agent_tokens BEGIN
+ UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
+END;
 CREATE TRIGGER agent_policy_revoke AFTER DELETE ON agent_tokens BEGIN
  UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
 END;
