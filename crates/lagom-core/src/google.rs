@@ -153,14 +153,13 @@ where T: serde::de::DeserializeOwned, F: FnMut(Option<String>) -> Fut, Fut: Futu
             .map_err(|_| Error::Network("calendar unavailable"))?;
     }
     let status = response.status();
-    let bytes = oauth::body(response).await?;
     if status == reqwest::StatusCode::UNAUTHORIZED { return Err(Error::ReauthRequired); }
     if status == reqwest::StatusCode::FORBIDDEN {
-        return Err(calendar_forbidden(&bytes));
+        return Err(calendar_forbidden(&oauth::body(response).await?));
     }
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE { return Err(Error::NotFound); }
     if !status.is_success() { return Err(Error::Network("calendar request failed")); }
-    serde_json::from_slice(&bytes).map_err(|_| Error::Network("invalid calendar response"))
+    serde_json::from_slice(&oauth::body(response).await?).map_err(|_| Error::Network("invalid calendar response"))
 }
 
 fn calendar_forbidden(bytes: &[u8]) -> Error {

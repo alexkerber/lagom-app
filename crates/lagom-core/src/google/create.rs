@@ -68,7 +68,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     let response = write_event(token, |access| client.post(url.clone()).bearer_auth(access)
         .header("Content-Type", "application/json").body(body.clone())).await?;
     let bytes = oauth::body(response).await.map_err(|_| Error::Uncertain)?;
-    created(serde_json::from_slice(&bytes).map_err(|_| Error::Uncertain)?)
+    created(serde_json::from_slice(&bytes).map_err(|_| Error::Uncertain)?).map_err(|_| Error::Uncertain)
 }
 
 #[derive(Clone, Debug)]

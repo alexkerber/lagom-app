@@ -50,14 +50,41 @@ pub struct EventSnapshot {
 struct Details {
     #[serde(flatten)]
     remote: RemoteEvent,
-    recurrence: Option<Vec<String>>,
-    recurring_event_id: Option<String>,
+    #[serde(flatten)]
+    revision: Revision,
     description: Option<String>,
-    etag: Option<String>,
     #[serde(default)]
     attendees: Vec<Attendee>,
     #[serde(default)]
     attendees_omitted: bool,
+}
+
+#[derive(Deserialize)]
+struct WriteTarget {
+    id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(flatten)]
+    revision: Revision,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Revision {
+    recurrence: Option<Vec<String>>,
+    recurring_event_id: Option<String>,
+    etag: Option<String>,
+}
+
+impl Revision {
+    fn checked_etag(self, expected: &str, id: &str, status: &str) -> Result<String> {
+        if id != expected { return Err(Error::Network("invalid calendar response")); }
+        if status == "cancelled" { return Err(Error::NotFound); }
+        if self.recurrence.is_some_and(|rules| !rules.is_empty()) || self.recurring_event_id.as_deref() == Some(id) {
+            return Err(Error::RecurringSeries);
+        }
+        self.etag.filter(|s| valid_etag(s)).ok_or(Error::Network("invalid calendar response"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -72,19 +99,9 @@ pub(super) async fn fetch_event_with<F, Fut>(base: &str, calendar: &str, id: &st
 where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
     let url = event_url(base, calendar, id)?;
     let client = oauth::http(Duration::from_secs(30))?;
-    read_event(&client, url, id, &mut token).await
-}
-
-async fn read_event<F, Fut>(client: &reqwest::Client, url: Url, id: &str, token: &mut F) -> Result<EventSnapshot>
-where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<String>>> {
-    let details: Details = get(client, url, token).await?;
-    if details.remote.id != id { return Err(Error::Network("invalid calendar response")); }
-    if details.remote.status == "cancelled" { return Err(Error::NotFound); }
-    if details.recurrence.is_some_and(|rules| !rules.is_empty()) || details.recurring_event_id.as_deref() == Some(id) {
-        return Err(Error::RecurringSeries);
-    }
+    let details: Details = get(&client, url, &mut token).await?;
+    let etag = details.revision.checked_etag(id, &details.remote.id, &details.remote.status)?;
     if details.attendees_omitted { return Err(Error::Network("invalid calendar response")); }
-    let etag = details.etag.filter(|s| valid_etag(s)).ok_or(Error::Network("invalid calendar response"))?;
     Ok(EventSnapshot { event: event(details.remote)?, etag, description: details.description,
         attendees: details.attendees.into_iter().map(|a| a.email).collect() })
 }
@@ -134,8 +151,10 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     let body = draft.map(NewEvent::patch_body).transpose()?;
     let remove_cached = || store.delete_calendar_event(account, calendar, id);
     let change = async {
-        let snapshot = read_event(&client, url.clone(), id, &mut token).await?;
-        if snapshot.etag != etag { return Err(Error::Conflict); }
+        let mut check = url.clone();
+        check.query_pairs_mut().append_pair("fields", "id,status,recurrence,recurringEventId,etag");
+        let target: WriteTarget = get(&client, check, &mut token).await?;
+        if target.revision.checked_etag(id, &target.id, &target.status)? != etag { return Err(Error::Conflict); }
         url.query_pairs_mut().append_pair("sendUpdates", "all");
         if body.is_some() { url.query_pairs_mut().append_pair("conferenceDataVersion", "1"); }
         write_event(&mut token, |access| {

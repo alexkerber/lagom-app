@@ -2,6 +2,8 @@ use super::*;
 use crate::store::Store;
 use tokio::{net::TcpListener, io::{AsyncReadExt, AsyncWriteExt}};
 
+const TRUNCATED_BODY: &str = "<truncated body>";
+
 async fn server(replies: Vec<(&'static str, &str)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -20,7 +22,9 @@ async fn server(replies: Vec<(&'static str, &str)>) -> (String, tokio::task::Joi
             request.extend(body_bytes);
             requests.push(String::from_utf8(request).unwrap());
             if status.is_empty() { continue; } // Drop the connection after reading the complete request.
-            stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let length = body.len();
+            let body = if body == TRUNCATED_BODY { "" } else { &body };
+            stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").as_bytes()).await.unwrap();
         }
         requests
     });
@@ -283,6 +287,14 @@ async fn insert_unauthorized_stops_after_one_refresh_and_scope_denial_needs_cale
 }
 
 #[tokio::test]
+async fn successful_insert_missing_start_is_uncertain() {
+    let (base, server) = server(vec![("200 OK", r#"{"id":"created","end":{"date":"2026-03-30"}}"#)]).await;
+    let result = create_with(&base, "primary", &draft(), change_token).await;
+    assert!(matches!(result, Err(Error::Uncertain)));
+    assert!(server.await.unwrap()[0].starts_with("POST "));
+}
+
+#[tokio::test]
 async fn invalid_insert_does_not_get_a_token_or_make_a_request() {
     for change in 0..7 {
         let mut draft = draft();
@@ -384,12 +396,13 @@ fn cached_calendar(calendar: &str) -> (tempfile::TempDir, Store, Account) {
 
 #[tokio::test]
 async fn conditional_event_changes_cache_only_confirmed_writes() {
-    let new = BEFORE.replace("old", "new");
+    let target = r#"{"id":"created","etag":"\"old\"","attendeesOmitted":true}"#;
+    let new = target.replace("old", "new");
     let (base, server) = server(vec![("200 OK", BEFORE),
-        ("200 OK", BEFORE), ("412 Precondition Failed", ""),
-        ("200 OK", BEFORE), ("", ""),
-        ("200 OK", BEFORE), ("401 Unauthorized", ""), ("200 OK", CREATED),
-        ("200 OK", BEFORE), ("412 Precondition Failed", ""),
+        ("200 OK", target), ("412 Precondition Failed", ""),
+        ("200 OK", target), ("", ""),
+        ("200 OK", target), ("401 Unauthorized", ""), ("200 OK", CREATED),
+        ("200 OK", target), ("412 Precondition Failed", ""),
         ("200 OK", &new), ("", ""),
         ("200 OK", &new), ("204 No Content", "")]).await;
     let calendar = "fixture/calendar";
@@ -423,6 +436,9 @@ async fn conditional_event_changes_cache_only_confirmed_writes() {
 
     let requests = server.await.unwrap();
     assert!(requests[0].starts_with("GET /calendars/fixture%2Fcalendar/events/created "));
+    for check in requests[1..].iter().filter(|r| r.starts_with("GET ")) {
+        assert!(check.starts_with("GET /calendars/fixture%2Fcalendar/events/created?fields=id%2Cstatus%2Crecurrence%2CrecurringEventId%2Cetag "));
+    }
     let writes: Vec<_> = requests.iter().filter(|request| !request.starts_with("GET ")).collect();
     assert_eq!(writes.len(), 7);
     for (index, request) in writes.iter().enumerate() {
@@ -491,6 +507,29 @@ async fn changes_refuse_series_masters_and_unknown_calendars() {
         assert!(matches!(result, Err(Error::RecurringSeries)));
     }
     assert!(server.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+}
+
+#[tokio::test]
+async fn pre_write_get_with_stale_etag_stops_before_writing() {
+    let (_dir, store, account) = cached_calendar("primary");
+    for form in [None, Some(&draft())] {
+        let (base, server) = server(vec![("200 OK", BEFORE)]).await;
+        let result = change::change_with(&store, &account.id, &base, "primary", "created", r#""stale""#, form, change_token).await;
+        assert!(matches!(result, Err(Error::Conflict)));
+        assert!(server.await.unwrap()[0].starts_with("GET "));
+    }
+}
+
+#[tokio::test]
+async fn missing_pre_write_target_evicts_cache_even_if_body_is_truncated() {
+    for status in ["404 Not Found", "410 Gone"] {
+        let (_dir, store, account) = cached_calendar("primary");
+        let (base, server) = server(vec![(status, TRUNCATED_BODY)]).await;
+        let result = change::change_with(&store, &account.id, &base, "primary", "created", OLD, None, change_token).await;
+        assert!(matches!(result, Err(Error::NotFound)));
+        assert!(store.today_events("2026-03-29", 0, i64::MAX).unwrap().is_empty());
+        assert!(server.await.unwrap()[0].starts_with("GET "));
+    }
 }
 
 #[tokio::test]
