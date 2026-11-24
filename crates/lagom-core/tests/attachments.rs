@@ -62,7 +62,9 @@ async fn attachment_roundtrip(cached: Option<bool>) {
             } else if command == "UID FETCH 1 (UID BODY.PEEK[2.1])" {
                 assert!(synced);
                 downloads += 1;
-                if downloads == 4 {
+                if downloads == 1 {
+                    "* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQAA)\r\n".into()
+                } else if downloads == 4 {
                     "* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAP9o)\r\n".into()
                 } else {
                     "* 2 FETCH (UID 2 BODY[2.1] {4}\r\nAAAA)\r\n* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n* 1 FETCH (UID 1 BODY[2.2] {4}\r\nAAAA)\r\n* 1 FETCH (UID 1 BODY[2.1] {10}\r\nAP9o\r\naQ==)\r\n* 1 FETCH (UID 1 BODY[2.1] {4}\r\nAAAA)\r\n".into()
@@ -106,7 +108,11 @@ async fn attachment_roundtrip(cached: Option<bool>) {
     assert_eq!(parts.len(), 2);
     assert_eq!((&*parts[0].section, &*parts[0].filename, &*parts[0].mime_type, parts[0].size, &*parts[0].encoding),
         ("2.1", "data.bin", "application/octet-stream", 10, "base64"));
+    // The server expects no SELECT or FETCH for this over-budget part.
     assert!(matches!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 3).await,
+        Err(lagom_core::Error::Invalid("attachment is too large"))));
+    // The unpadded fixture fits the wire budget but decodes to six bytes.
+    assert!(matches!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 4).await,
         Err(lagom_core::Error::Invalid("attachment is too large"))));
     assert!(imap.fetch_attachment(&mut store, message.id, "2.1] UID FETCH 2").await.is_err());
     assert_eq!(imap.fetch_attachment_limited(&mut store, message.id, "2.1", 4).await.unwrap(), b"\0\xffhi");

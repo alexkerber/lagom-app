@@ -695,7 +695,14 @@ impl ImapSync {
         if part.size as usize > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
         }
-        if matches!(part.encoding.to_ascii_lowercase().as_str(), "7bit" | "8bit" | "binary") && part.size as usize > limit {
+        let wire = part.size as usize;
+        let minimum = match part.encoding.to_ascii_lowercase().as_str() {
+            // Budget MIME lines of 76 digits plus CRLF, including a short final line and two padding bytes.
+            "base64" => (wire.saturating_sub(2 * wire.div_ceil(78)) / 4 * 3).saturating_sub(2),
+            "7bit" | "8bit" | "binary" => wire,
+            _ => 0,
+        };
+        if minimum > limit {
             return Err(Error::Invalid("attachment is too large"));
         }
         // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.
