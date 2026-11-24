@@ -181,7 +181,7 @@ impl Plan {
         Ok(plan)
     }
 
-    fn in_dir(
+    pub(crate) fn in_dir(
         client: Detected,
         id: &str,
         home: &Path,
@@ -265,6 +265,24 @@ impl Plan {
         previous: Option<&Connection>,
         runner: &Runner,
     ) -> Result<Connection> {
+        self.connect_journaled(token, previous, runner, |_| Ok(()))
+    }
+
+    pub(crate) fn connect_saved(
+        self,
+        token: &str,
+        save: impl FnOnce(&Connection) -> Result<()>,
+    ) -> Result<Connection> {
+        self.connect_journaled(token, None, &run_cli, save)
+    }
+
+    fn connect_journaled(
+        self,
+        token: &str,
+        previous: Option<&Connection>,
+        runner: &Runner,
+        save: impl FnOnce(&Connection) -> Result<()>,
+    ) -> Result<Connection> {
         let _lock = self.lock()?;
         if self.config.is_some() {
             ensure!(
@@ -280,7 +298,7 @@ impl Plan {
             skill_text: None,
             linked: false,
         };
-        connection.install(token, previous, runner)?;
+        connection.install(token, previous, runner, save)?;
         Ok(connection)
     }
 }
@@ -571,9 +589,12 @@ impl Connection {
         previous: Option<&Connection>,
         runner: &Runner,
         undo: &mut Vec<Undo>,
+        save: impl FnOnce(&Connection) -> Result<()>,
     ) -> Result<()> {
         let plan = &self.plan;
         let Some(path) = &plan.config else {
+            save(self)?;
+            self.dirs.clear();
             return Ok(());
         };
         let original = read(path)?;
@@ -588,48 +609,54 @@ impl Connection {
             );
         }
         let desired = plan.entry(&plan.id);
+        let cli = plan.agent.config_env().is_some();
         let mut edit = ConfigEdit {
             entry: None,
             new_file: original.is_none(),
             new_group: false,
         };
-        if plan.agent.config_env().is_some() {
+        let mut replacement = None;
+        if cli {
             ensure!(
                 plan.cli.as_ref().is_some_and(|p| p.is_absolute()
                     && fs::metadata(p)
                         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)),
                 "agent CLI missing; detect the agent again"
             );
-            if current.as_ref() != Some(&desired) {
-                if current.is_some() {
-                    plan.command(runner, None)?;
-                    undo.push(Undo::Registration {
-                        before: current,
-                        after: None,
-                        original: original.clone(),
-                    });
-                }
-                plan.command(runner, Some(&desired))?;
-                undo.push(Undo::Registration {
-                    before: None,
-                    after: Some(desired.clone()),
-                    original: original.clone(),
-                });
-                ensure!(
-                    existing(plan.agent, read(path)?.as_deref())?.as_ref() == Some(&desired),
-                    "registration missing or changed at {}",
-                    path.display()
-                );
-                preserve_endings(path, original.as_deref())?;
-            }
         } else if current.as_ref() != Some(&desired) {
             let (text, metadata) = put_json(original.as_deref(), &desired)?;
             edit = metadata;
+            replacement = Some(text);
+        }
+        edit.entry = Some(desired.clone());
+        self.config = Some(edit);
+        save(self)?;
+        self.dirs.clear();
+        if cli && current.as_ref() != Some(&desired) {
+            if current.is_some() {
+                plan.command(runner, None)?;
+                undo.push(Undo::Registration {
+                    before: current,
+                    after: None,
+                    original: original.clone(),
+                });
+            }
+            plan.command(runner, Some(&desired))?;
+            undo.push(Undo::Registration {
+                before: None,
+                after: Some(desired.clone()),
+                original: original.clone(),
+            });
+            ensure!(
+                existing(plan.agent, read(path)?.as_deref())?.as_ref() == Some(&desired),
+                "registration missing or changed at {}",
+                path.display()
+            );
+            preserve_endings(path, original.as_deref())?;
+        } else if let Some(text) = replacement {
             parents(path.parent().unwrap(), &mut self.dirs)?;
             Undo::write(undo, path, original, text)?;
         }
-        edit.entry = Some(desired);
-        self.config = Some(edit);
         Ok(())
     }
 
@@ -638,6 +665,7 @@ impl Connection {
         token: &str,
         previous: Option<&Connection>,
         runner: &Runner,
+        save: impl FnOnce(&Connection) -> Result<()>,
     ) -> Result<()> {
         let skill = self.plan.skill.as_ref().map(|_| self.plan.skill());
         let old_skill = self.plan.skill.as_deref().map(read).transpose()?.flatten();
@@ -650,9 +678,27 @@ impl Connection {
             self.plan.skill.as_ref().unwrap().display()
         );
         let old_token = read(&self.plan.token)?;
+        // Disconnect can now recover even if Connect stops between two writes.
+        let plan = &self.plan;
+        self.skill_text = skill.clone();
+        self.linked = plan.link.is_some();
+        for path in [&plan.config, &plan.skill, &plan.link]
+            .into_iter()
+            .flatten()
+            .chain([&plan.token])
+        {
+            self.dirs.extend(
+                path.ancestors()
+                    .skip(1)
+                    .take_while(|p| !p.exists())
+                    .map(Path::to_owned),
+            );
+        }
+        self.dirs.sort();
+        self.dirs.dedup();
         let mut undo = vec![];
         let result = (|| -> Result<()> {
-            self.install_config(previous, runner, &mut undo)?;
+            self.install_config(previous, runner, &mut undo, save)?;
             let plan = &self.plan;
             if let (Some(path), Some(text)) = (&plan.skill, &skill) {
                 if old_skill != skill {
@@ -723,20 +769,17 @@ impl Connection {
             }
             return Err(err);
         }
-        let plan = &self.plan;
         if let Some(previous) = previous {
             self.dirs.extend_from_slice(&previous.dirs);
             self.dirs.sort();
             self.dirs.dedup();
             if let (Some(edit), Some(old)) = (&mut self.config, &previous.config) {
-                if previous.plan.config == plan.config {
+                if previous.plan.config == self.plan.config {
                     edit.new_file |= old.new_file;
                     edit.new_group |= old.new_group;
                 }
             }
         }
-        self.skill_text = skill;
-        self.linked = plan.link.is_some();
         Ok(())
     }
 
@@ -838,17 +881,20 @@ impl Connection {
                 .map(read)
                 .transpose()?
                 .flatten();
-            let target = recorded.as_deref().map(Path::new).or_else(|| {
-                (plan.link_receipt.is_none() && self.linked).then_some(plan.binary.as_path())
-            });
+            let target = recorded
+                .as_deref()
+                .map(Path::new)
+                .or_else(|| self.linked.then_some(plan.binary.as_path()));
             if let Some(target) = target {
                 let path = plan.home.join(".local/bin/lagom");
                 match fs::read_link(&path) {
-                    Ok(current) if current == target => fs::remove_file(&path)?,
+                    Ok(current) if current == target || (self.linked && current == plan.binary) => {
+                        fs::remove_file(&path)?
+                    }
                     Err(e) if e.kind() == ErrorKind::NotFound => (),
                     _ => left.push(format!("{}: link was changed", path.display())),
                 }
-                if let Some(receipt) = &plan.link_receipt {
+                if let Some(receipt) = plan.link_receipt.as_ref().filter(|_| recorded.is_some()) {
                     fs::remove_file(receipt)?;
                 }
             }
@@ -1313,6 +1359,27 @@ mod tests {
             assert_eq!(fs::read_to_string(path)?, original);
             assert_eq!(fs::read_link(&link)?, home.join("missing-user-command"));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_connect_can_disconnect_using_only_its_pending_receipt() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let plan = plan(tmp.path(), Cursor, ID)?;
+        let config = plan.config.clone().unwrap();
+        let token = plan.token.clone();
+        let mut pending = String::new();
+        let _ = plan.connect_saved("secret", |receipt| {
+            assert!(!config.exists() && !token.exists());
+            pending = serde_json::to_string(receipt)?;
+            Ok(())
+        })?;
+        assert!(!pending.contains("secret"));
+        fs::remove_file(&token)?;
+        let recovered: Connection = serde_json::from_str(&pending)?;
+        assert!(recovered.disconnect()?.is_empty());
+        assert!(!config.exists());
+        assert!(!token.parent().unwrap().exists());
         Ok(())
     }
 

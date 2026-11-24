@@ -41,20 +41,26 @@ mod files {
     use lagom_core::agent::token::TokenScope;
 
     pub fn detected(a: &Agents) -> Vec<(String, &'static str)> {
-        detect(&a.home, &a.path).into_iter().map(|agent| (agent.kind(), agent.name())).collect()
+        detect(&a.home, &a.path).into_iter().map(|client| (client.agent.kind(), client.agent.name())).collect()
     }
 
     fn agent(kind: &str) -> anyhow::Result<Agent> {
         Agent::ALL.into_iter().find(|a| a.kind() == kind).ok_or_else(|| anyhow::anyhow!("Unknown agent"))
     }
 
-    fn plan(a: &Agents, agent: Agent, id: &str) -> anyhow::Result<Plan> {
-        Plan::new(agent, id, &a.home, &a.path, &std::env::current_exe()?)
+    fn plan(a: &Agents, store: Option<&Store>, agent: Agent, id: &str) -> anyhow::Result<Plan> {
+        let client = detect(&a.home, &a.path).into_iter().find(|c| c.agent == agent)
+            .ok_or_else(|| anyhow::anyhow!("Agent is no longer installed"))?;
+        let data = match store {
+            Some(store) => store.path().parent().ok_or_else(|| anyhow::anyhow!("Missing store directory"))?.to_owned(),
+            None => Store::data_dir()?,
+        };
+        Plan::in_dir(client, id, &a.home, &a.path, &std::env::current_exe()?, &data)
     }
 
     /// The paths Connect will write, with the home directory as ~.
-    pub fn preview(a: &Agents, kind: &str) -> anyhow::Result<Vec<String>> {
-        let plan = plan(a, agent(kind)?, "000000000000")?;
+    pub fn preview(a: &Agents, store: Option<&Store>, kind: &str) -> anyhow::Result<Vec<String>> {
+        let plan = plan(a, store, agent(kind)?, "000000000000")?;
         let short = |p: &std::path::Path| match p.strip_prefix(&a.home) {
             Ok(rest) => format!("~/{}", rest.display()),
             Err(_) => p.display().to_string(),
@@ -73,22 +79,18 @@ mod files {
         };
         // A Disconnect that failed half-way leaves its receipt; finish it before writing again.
         remove(store, &id)?;
-        let plan = plan(a, agent, &id)?;
+        let plan = plan(a, Some(store), agent, &id)?;
         let token = core(store.issue_token(&id, TokenScope::Local))?;
-        let connection = plan.connect(&token).inspect_err(|_| { let _ = store.revoke_agent_tokens(&id); })?;
-        let saved = serde_json::to_string(&connection).map_err(anyhow::Error::from)
-            .and_then(|receipt| core(store.set_agent_connection(&id, Some(&receipt))));
-        if let Err(e) = saved {
-            let _ = store.revoke_agent_tokens(&id);
-            let _ = connection.disconnect();
-            return Err(e);
-        }
+        plan.connect_saved(&token, |receipt| {
+            core(store.set_agent_connection(&id, Some(&serde_json::to_string(receipt)?)))
+        }).inspect_err(|_| { let _ = store.revoke_agent_tokens(&id); })?;
         Ok(format!("{} connected", agent.name()))
     }
 
     pub fn remove(store: &Store, id: &str) -> anyhow::Result<()> {
         if let Some(receipt) = core(store.agent_connection(id))? {
-            serde_json::from_str::<Connection>(&receipt)?.disconnect()?;
+            let left = serde_json::from_str::<Connection>(&receipt)?.disconnect()?;
+            anyhow::ensure!(left.is_empty(), "{}", left.join(", "));
             core(store.set_agent_connection(id, None))?;
         }
         Ok(())
@@ -100,7 +102,7 @@ mod files {
 mod files {
     use super::*;
     pub fn detected(_: &Agents) -> Vec<(String, &'static str)> { Vec::new() }
-    pub fn preview(_: &Agents, _: &str) -> anyhow::Result<Vec<String>> { anyhow::bail!("Not supported on this system") }
+    pub fn preview(_: &Agents, _: Option<&Store>, _: &str) -> anyhow::Result<Vec<String>> { anyhow::bail!("Not supported on this system") }
     pub fn connect(_: &Store, _: &Agents, _: &str) -> anyhow::Result<String> { anyhow::bail!("Not supported on this system") }
     pub fn remove(_: &Store, _: &str) -> anyhow::Result<()> { Ok(()) }
 }
@@ -119,7 +121,7 @@ impl AgentChange {
             }
             Self::Connect(kind, listed) => {
                 // Write only what the person saw: a changed plan goes back to the preview.
-                if files::preview(a, &kind)? != listed {
+                if files::preview(a, Some(store), &kind)? != listed {
                     anyhow::bail!("the files to write changed. Check the list and connect again");
                 }
                 Some(files::connect(store, a, &kind)?)
@@ -182,7 +184,7 @@ impl MainWindow {
                 self.agents.pending = None;
                 self.notify(format!("Demo mode: start without LAGOM_DEMO to connect {kind}"), cx);
             }
-            AgentChange::Preview(kind) => match files::preview(&self.agents, &kind) {
+            AgentChange::Preview(kind) => match files::preview(&self.agents, self.live.as_ref().map(|live| live.store.as_ref()), &kind) {
                 Ok(files) => self.agents.pending = Some((kind, files)),
                 Err(e) => self.notify(format!("Could not connect: {e:#}"), cx),
             },

@@ -3110,7 +3110,7 @@ mod tests {
         let snapshot = |dir: &std::path::Path| { let mut found = Vec::new(); files(dir, &mut found); found.sort(); found };
         let (view, cx, _rx) = window(cx);
         let home = tempfile::tempdir().unwrap();
-        for dir in [".claude", ".codex", "bin"] { std::fs::create_dir(home.path().join(dir)).unwrap(); }
+        for dir in [".hermes", ".openclaw", "bin"] { std::fs::create_dir(home.path().join(dir)).unwrap(); }
         let (store, account) = view.update_in(cx, |v, window, cx| {
             v.agents.home = home.path().into();
             v.agents.path = home.path().join("bin").into();
@@ -3131,14 +3131,14 @@ mod tests {
         click(cx, "Enable agent access".into());
         assert!(store.agent_setting(Setting::Enabled).unwrap());
         // The first Connect only lists the files; the second writes them.
-        click(cx, "connect-ClaudeCode".into());
+        click(cx, "connect-Hermes".into());
         assert!(view.read_with(cx, |v, _| v.agents.pending.as_ref().is_some_and(|(_, f)| f.iter().any(|f| f.ends_with("SKILL.md")))));
         assert_eq!(snapshot(home.path()), before);
         assert!(store.agents().unwrap().is_empty());
-        click(cx, "confirm-connect-ClaudeCode".into());
+        click(cx, "confirm-connect-Hermes".into());
         let agent = store.agents().unwrap().into_iter().next().unwrap();
-        assert!(agent.active && agent.kind == "ClaudeCode");
-        assert!(snapshot(home.path()).iter().any(|(p, _)| p.ends_with(format!("{}.token", agent.id))));
+        assert!(agent.active && agent.kind == "Hermes");
+        assert!(store.path().with_file_name("agents").join(format!("{}.token", agent.id)).is_file());
         // A global level persists; an agent's own level never shows above it.
         let mail = |account: &str, level| Access { resource: Resource::Mail, account: account.into(), level };
         view.update(cx, |v, cx| v.agent_change(AgentChange::Level(String::new(), mail(&account, Level::Triage)), cx));
@@ -3155,11 +3155,11 @@ mod tests {
         view.update(cx, |v, cx| v.agent_change(AgentChange::Select(None), cx));
         // A list that no longer matches the plan writes nothing.
         let written = snapshot(home.path());
-        view.update(cx, |v, cx| v.agent_change(AgentChange::Connect("Codex".into(), vec!["~/elsewhere".into()]), cx));
+        view.update(cx, |v, cx| v.agent_change(AgentChange::Connect("OpenClaw".into(), vec!["~/elsewhere".into()]), cx));
         assert_eq!(snapshot(home.path()), written);
         assert_eq!(store.agents().unwrap().len(), 1);
-        click(cx, "connect-Codex".into());
-        click(cx, "confirm-connect-Codex".into());
+        click(cx, "connect-OpenClaw".into());
+        click(cx, "confirm-connect-OpenClaw".into());
         assert_eq!(store.agents().unwrap().iter().filter(|a| a.active).count(), 2);
         click(cx, "Disconnect all".into());
         assert!(store.agents().unwrap().iter().all(|a| !a.active));
