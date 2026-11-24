@@ -1,25 +1,33 @@
 use crate::{
-    store::{fts_query, summary_row, MessageSummary, Store, VISIBLE_SUMMARY_COLUMNS},
+    store::{summary_row, MessageSummary, VISIBLE_SUMMARY_COLUMNS},
     Error, Result,
 };
 use chrono::NaiveDate;
-use rusqlite::{params_from_iter, types::Value};
+use rusqlite::{
+    functions::FunctionFlags, params_from_iter, types::Value, Connection, ErrorCode, OpenFlags,
+};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
+use unicase::UniCase;
 
-const INVALID: Error = Error::Invalid("invalid_filter");
+const INVALID: Error = Error::Invalid("invalid_request");
 const MAX_BYTES: usize = 4096;
+const MAX_OFFSET: i64 = 10_000;
 const MAX_TERMS: usize = 64;
 
 /// Adjacent terms are required. OR joins alternatives within one required group.
 #[derive(Debug)]
 pub struct Filter(Vec<Vec<Term>>);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Term {
     negated: bool,
     predicate: Predicate,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Predicate {
     From(String),
     To(String),
@@ -58,9 +66,14 @@ impl Filter {
                 .find(|c: char| c == ':' || c == '"' || c.is_whitespace())
                 .unwrap_or(rest.len());
             let (head, suffix) = rest.split_at(end);
-            let (operator, rest) = match suffix.strip_prefix(':') {
-                Some(value) => (Some(head), value),
-                None => (None, rest),
+            let head = head.to_ascii_lowercase();
+            let (operator, rest) = match (head.as_str(), suffix.strip_prefix(':')) {
+                (
+                    op @ ("from" | "to" | "cc" | "subject" | "is" | "has" | "in" | "after"
+                    | "before" | "newer_than" | "older_than"),
+                    Some(value),
+                ) => (Some(op), value),
+                _ => (None, rest),
             };
             let quoted = rest.starts_with('"');
             let (value, tail) = if let Some(rest) = rest.strip_prefix('"') {
@@ -75,7 +88,7 @@ impl Filter {
                 return Err(INVALID);
             }
             input = tail;
-            if operator.is_none() && !quoted && value == "OR" {
+            if operator.is_none() && !quoted && value.eq_ignore_ascii_case("OR") {
                 if negated || terms == 0 || alternative {
                     return Err(INVALID);
                 }
@@ -87,17 +100,24 @@ impl Filter {
                 return Err(INVALID);
             }
             let predicate = match operator {
-                None if quoted => Predicate::FullText(format!("\"{value}\"")),
-                None => Predicate::FullText(fts_query(value).ok_or(INVALID)?),
-                Some("from") => Predicate::From(value.into()),
-                Some("to") => Predicate::To(value.into()),
-                Some("cc") => Predicate::Cc(value.into()),
-                Some("subject") => Predicate::Subject(value.into()),
-                Some("is") if value == "unread" || value == "read" => {
-                    Predicate::Seen(value == "read")
+                None => {
+                    // FTS prefixes apply to the last token in a quoted string.
+                    let last_word = value.rsplit(|c: char| !c.is_alphanumeric()).next().unwrap();
+                    let prefix = if !quoted && last_word.chars().count() >= 3 {
+                        "*"
+                    } else {
+                        ""
+                    };
+                    Predicate::FullText(format!("\"{value}\"{prefix}"))
                 }
-                Some("is") if value == "starred" => Predicate::Starred,
-                Some("has") if value == "attachment" => Predicate::Attachment,
+                Some("from") => Predicate::From(UniCase::new(value).to_folded_case()),
+                Some("to") => Predicate::To(UniCase::new(value).to_folded_case()),
+                Some("cc") => Predicate::Cc(UniCase::new(value).to_folded_case()),
+                Some("subject") => Predicate::Subject(UniCase::new(value).to_folded_case()),
+                Some("is") if value.eq_ignore_ascii_case("unread") => Predicate::Seen(false),
+                Some("is") if value.eq_ignore_ascii_case("read") => Predicate::Seen(true),
+                Some("is") if value.eq_ignore_ascii_case("starred") => Predicate::Starred,
+                Some("has") if value.eq_ignore_ascii_case("attachment") => Predicate::Attachment,
                 Some("in") => Predicate::Folder(value.into()),
                 Some("after") => Predicate::After(midnight(value)?),
                 Some("before") => Predicate::Before(midnight(value)?),
@@ -108,13 +128,23 @@ impl Filter {
             if !alternative {
                 groups.push(Vec::new());
             }
-            groups.last_mut().unwrap().push(Term { negated, predicate });
+            let group = groups.last_mut().unwrap();
+            let term = Term { negated, predicate };
+            if !group.contains(&term) {
+                group.push(term);
+            }
             alternative = false;
         }
         if alternative {
             return Err(INVALID);
         }
-        Ok(Self(groups))
+        let mut unique = Vec::new();
+        for group in groups {
+            if !unique.contains(&group) {
+                unique.push(group);
+            }
+        }
+        Ok(Self(unique))
     }
 }
 
@@ -163,7 +193,7 @@ fn age_seconds(value: &str) -> Result<i64> {
 }
 
 impl Predicate {
-    fn sql(&self, now: i64, args: &mut Vec<Value>) -> String {
+    fn sql(&self, now: i64, negated: bool, args: &mut Vec<Value>) -> String {
         let mut bind = |value| {
             args.push(value);
             format!("?{}", args.len())
@@ -171,15 +201,12 @@ impl Predicate {
         match self {
             Self::From(s) => {
                 let p = bind(s.clone().into());
-                format!("(instr(lower(m.from_address),lower({p})) OR instr(lower(m.from_name),lower({p})))")
+                format!("(instr(casefold(m.from_address),{p}) OR instr(casefold(m.from_name),{p}))")
             }
-            Self::To(s) => format!(
-                "instr(lower(m.to_addresses),lower({}))",
-                bind(s.clone().into())
-            ),
-            Self::Cc(s) => format!("instr(lower(m.cc),lower({}))", bind(s.clone().into())),
+            Self::To(s) => format!("instr(casefold(m.to_addresses),{})", bind(s.clone().into())),
+            Self::Cc(s) => format!("instr(casefold(m.cc),{})", bind(s.clone().into())),
             Self::Subject(s) => {
-                format!("instr(lower(m.subject),lower({}))", bind(s.clone().into()))
+                format!("instr(casefold(m.subject),{})", bind(s.clone().into()))
             }
             Self::FullText(q) => format!(
                 "m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH {})",
@@ -191,12 +218,22 @@ impl Predicate {
             Self::Folder(s) => match s.to_ascii_lowercase().as_str() {
                 "all" => "1".into(),
                 "later" => format!("coalesce(m.snoozed_until>{},0)", bind(now.into())),
-                "inbox" | "archive" | "sent" => format!(
-                    "(f.role={} AND (m.snoozed_until IS NULL OR m.snoozed_until<={}))",
-                    bind(s.to_ascii_lowercase().into()),
-                    bind(now.into())
-                ),
-                _ => format!("f.name={} COLLATE NOCASE", bind(s.clone().into())),
+                role => {
+                    let folder = match role {
+                        "inbox" | "archive" | "sent" | "trash" | "drafts" | "junk" => {
+                            format!("f.role={}", bind(role.to_owned().into()))
+                        }
+                        "spam" => "f.role='junk'".into(),
+                        _ => format!("f.name={} COLLATE NOCASE", bind(s.clone().into())),
+                    };
+                    if negated {
+                        return folder;
+                    }
+                    format!(
+                        "({folder} AND (m.snoozed_until IS NULL OR m.snoozed_until<={}))",
+                        bind(now.into())
+                    )
+                }
             },
             Self::After(t) => format!("m.date>={}", bind((*t).into())),
             Self::Before(t) => format!("m.date<{}", bind((*t).into())),
@@ -206,10 +243,30 @@ impl Predicate {
     }
 }
 
-impl Store {
+/// The dispatcher opens a dedicated query-only connection for agent searches.
+pub struct FilterReader {
+    db: Connection,
+}
+
+impl FilterReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.pragma_update(None, "query_only", true)?;
+        // A lock wait cannot be interrupted by the progress handler.
+        db.busy_timeout(Duration::ZERO)?;
+        db.create_scalar_function(
+            "casefold",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(UniCase::new(ctx.get_raw(0).as_str()?).to_folded_case()),
+        )?;
+        Ok(Self { db })
+    }
+
+    /// The largest permitted offset is 10,000 rows.
     /// Returns the page and its successor, if another matching row exists.
     pub fn filtered_messages(
-        &self,
+        &mut self,
         accounts: &[String],
         filter: &Filter,
         scope: Option<&str>,
@@ -219,10 +276,14 @@ impl Store {
     ) -> Result<(Vec<MessageSummary>, Option<u32>)> {
         let limit = limit.unwrap_or(20).min(100);
         if page == 0 || limit == 0 {
-            return Err(Error::Invalid("invalid_request"));
+            return Err(INVALID);
+        }
+        let offset = i64::from(page - 1) * i64::from(limit);
+        if offset > MAX_OFFSET {
+            return Err(INVALID);
         }
         if scope.is_some_and(|s| {
-            s.trim().is_empty() || s.len() > MAX_BYTES || s.chars().any(char::is_control)
+            s.len() > MAX_BYTES || s.trim().is_empty() || s.chars().any(char::is_control)
         }) {
             return Err(INVALID);
         }
@@ -238,8 +299,9 @@ impl Store {
         );
         if let Some(scope) = scope {
             sql.push_str(" AND ");
-            sql.push_str(&Predicate::Folder(scope.into()).sql(now, &mut args));
+            sql.push_str(&Predicate::Folder(scope.into()).sql(now, false, &mut args));
         }
+        let mut explicit_folders = Vec::new();
         for group in &filter.0 {
             sql.push_str(" AND (");
             for (i, term) in group.iter().enumerate() {
@@ -249,30 +311,94 @@ impl Store {
                 if term.negated {
                     sql.push_str("NOT ");
                 }
-                sql.push_str(&term.predicate.sql(now, &mut args));
+                let clause = term.predicate.sql(now, term.negated, &mut args);
+                sql.push_str(&clause);
+                if !term.negated && matches!(term.predicate, Predicate::Folder(_)) {
+                    explicit_folders.push(clause);
+                }
+            }
+            sql.push(')');
+        }
+        if scope.is_none() {
+            sql.push_str(" AND (f.role NOT IN ('trash','junk')");
+            for folder in explicit_folders {
+                sql.push_str(" OR ");
+                sql.push_str(&folder);
             }
             sql.push(')');
         }
         sql.push_str(" ORDER BY m.date DESC,m.id DESC LIMIT ? OFFSET ?");
         args.push((limit + 1).into());
-        args.push((i64::from(page - 1) * i64::from(limit)).into());
-        let mut stmt = self.db.prepare(&sql)?;
-        let mut rows = stmt
-            .query_map(params_from_iter(args), summary_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        args.push(offset.into());
+        let mut rows = self.rows(&sql, args, Instant::now() + Duration::from_secs(2))?;
         let next = if rows.len() > limit as usize {
             rows.pop();
-            page.checked_add(1)
+            (offset + i64::from(limit) <= MAX_OFFSET).then_some(page + 1)
         } else {
             None
         };
         Ok((rows, next))
+    }
+
+    fn rows(
+        &mut self,
+        sql: &str,
+        args: Vec<Value>,
+        deadline: Instant,
+    ) -> Result<Vec<MessageSummary>> {
+        self.db
+            .progress_handler(100, Some(move || Instant::now() >= deadline))?;
+        let result = self.db.prepare(sql).and_then(|mut stmt| {
+            stmt.query_map(params_from_iter(args), summary_row)?
+                .collect()
+        });
+        self.db.progress_handler(0, None::<fn() -> bool>)?;
+        match result {
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(
+                        ErrorCode::OperationInterrupted
+                            | ErrorCode::DatabaseBusy
+                            | ErrorCode::DatabaseLocked
+                    )
+                ) =>
+            {
+                Err(Error::Invalid("unavailable"))
+            }
+            result => Ok(result?),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_filter_deadline_interrupts_sqlite_and_releases_handler() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut reader = FilterReader::open(file.path()).unwrap();
+        assert!(reader
+            .db
+            .pragma_query_value(None, "query_only", |r| r.get::<_, bool>(0))
+            .unwrap());
+        let sql = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000)
+                   SELECT sum(x) FROM n HAVING sum(x)=0";
+        assert!(matches!(
+            reader.rows(sql, vec![], Instant::now()),
+            Err(Error::Invalid("unavailable"))
+        ));
+        assert!(reader
+            .db
+            .prepare(sql)
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn agent_filter_grammar_and_limits() {
@@ -288,7 +414,6 @@ mod tests {
             assert_eq!(age_seconds(age).unwrap(), days * 86400);
         }
         for bad in [
-            "private:secret",
             "subject:",
             "to:\"\"",
             "is:draft",
@@ -313,12 +438,13 @@ mod tests {
         ] {
             assert_eq!(
                 Filter::parse(bad).unwrap_err().to_string(),
-                "invalid_filter"
+                "invalid_request"
             );
         }
         assert!(Filter::parse(&"a".repeat(MAX_BYTES)).is_ok());
         assert!(Filter::parse(&"a".repeat(MAX_BYTES + 1)).is_err());
-        assert!(Filter::parse(&"x ".repeat(MAX_TERMS)).is_ok());
+        assert_eq!(Filter::parse(&"x ".repeat(MAX_TERMS)).unwrap().0.len(), 1);
+        assert_eq!(Filter::parse("x OR x").unwrap().0[0].len(), 1);
         assert!(Filter::parse(&"x ".repeat(MAX_TERMS + 1)).is_err());
     }
 }

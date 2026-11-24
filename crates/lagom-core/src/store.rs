@@ -1736,51 +1736,128 @@ pub(crate) mod mail_tests {
     }
     #[test]
     fn agent_filter_scopes_every_alternative_before_paging() {
-        use crate::agent::filter::Filter;
-        let (_temp, store, account, inbox) = setup();
+        use crate::agent::filter::{Filter, FilterReader};
+        let (temp, store, account, inbox) = setup();
         let mut other = account.clone();
         other.id = "other".into();
         store.save_account(&other).unwrap();
         let sent = store.save_folder(&other.id, "Sent Items", None, FolderRole::Sent).unwrap();
         let hidden = store.save_message(&mail(&other, sent, 999)).unwrap();
         store.snooze(hidden, Some(100)).unwrap();
+        let mut expected = Vec::new();
         for uid in 1..=102 {
             let mut m = mail(&account, inbox, uid);
             m.summary.cc = "Team".into();
             m.summary.to = "List".into();
             m.summary.has_attachments = true;
             m.summary.flagged = true;
-            store.save_message(&m).unwrap();
+            expected.push(store.save_message(&m).unwrap());
         }
-        store.db.pragma_update(None, "query_only", true).unwrap();
+        let mut reader = FilterReader::open(&temp.path().join("mail.db")).unwrap();
+        expected.reverse();
+        let ids = |rows: &[MessageSummary]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
         let allowed = [account.id.clone()];
-        let search = |query, scope, page, limit| {
-            store.filtered_messages(&allowed, &Filter::parse(query).unwrap(), scope, 86400, page, limit).unwrap()
+        let mut search = |query, scope, page, limit| {
+            reader.filtered_messages(&allowed, &Filter::parse(query).unwrap(), scope, 86400, page, limit).unwrap()
         };
         let filter = r#"from:alice to:list cc:team subject:hello is:starred is:unread has:attachment in:inbox after:1970/01/01 before:1970-01-02 newer_than:1d older_than:1w OR -is:read "rust sqlite" sea"#;
         let (rows, next) = search(filter, None, 1, None);
-        assert_eq!((rows.len(), next), (20, Some(2)));
-        assert_eq!(rows[0].uid, 102);
+        assert_eq!(ids(&rows), expected[..20]);
+        assert_eq!(next, Some(2));
         let query = r#""rust sqlite" OR in:sent"#;
         let (rows, next) = search(query, None, 1, Some(200));
-        assert_eq!((rows.len(), next), (100, Some(2)));
-        assert!(rows.iter().all(|row| row.account == account.id));
+        assert_eq!(ids(&rows), expected[..100]);
+        assert_eq!(next, Some(2));
         let (rows, next) = search(query, None, 2, Some(200));
-        assert_eq!(rows.iter().map(|row| row.uid).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(ids(&rows), expected[100..]);
         assert_eq!(next, None);
         for q in [r#""rust search""#, "-in:all", "subject:%", "is:read", "older_than:1w"] {
             assert!(search(q, None, 1, None).0.is_empty());
         }
         assert!(search(query, Some("Sent Items"), 1, None).0.is_empty());
         let empty = Filter::parse("").unwrap();
-        assert!(store.filtered_messages(&[], &empty, None, 0, 1, None).unwrap().0.is_empty());
-        assert!(store.filtered_messages(&allowed, &empty, None, 0, 0, None).is_err());
+        assert!(reader.filtered_messages(&[], &empty, None, 0, 1, None).unwrap().0.is_empty());
+        assert!(reader.filtered_messages(&allowed, &empty, None, 0, 0, None).is_err());
         let both = [account.id, other.id.clone()];
-        let (rows, _) = store.filtered_messages(&both, &empty, Some("sent"), 100, 1, None).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].account, other.id);
-        let (rows, _) = store.filtered_messages(&both, &Filter::parse("in:later").unwrap(), None, 99, 1, None).unwrap();
+        let (rows, _) = reader.filtered_messages(&both, &empty, Some("sent"), 100, 1, None).unwrap();
+        assert_eq!(ids(&rows), [hidden]);
+        let (rows, _) = reader.filtered_messages(&both, &Filter::parse("in:later").unwrap(), None, 99, 1, None).unwrap();
         assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [hidden]);
+    }
+
+    #[test]
+    fn agent_filter_matches_literal_terms_in_allowed_folders() {
+        use crate::agent::filter::{Filter, FilterReader};
+        let (temp, store, a, inbox) = setup();
+        let mut b = a.clone();
+        b.id = "other".into();
+        store.save_account(&b).unwrap();
+        let terms = (0..64).map(|n| format!("term{n:02}")).collect::<Vec<_>>().join(" ");
+        let mut m = mail(&a, inbox, 1);
+        m.body_text = format!("NEAR AND col http://x 12:30 {terms}");
+        m.summary.subject = "Återbetalning MÖTE Straße".into();
+        m.summary.from_name = "MÖTE_%".into();
+        m.summary.to = "MÖTE_%".into();
+        m.summary.cc = "MÖTE_%".into();
+        let hit = store.save_message(&m).unwrap();
+        let insert = |account, name, role, uid| {
+            let folder = store.save_folder(account, name, None, role).unwrap();
+            let mut m = mail(&a, folder, uid);
+            m.summary.account = account.into();
+            store.save_message(&m).unwrap()
+        };
+        let custom = insert(&a.id, "Project", FolderRole::Other, 2);
+        let other = insert(&b.id, "Project", FolderRole::Other, 3);
+        let trash = insert(&a.id, "[Gmail]/Trash", FolderRole::Trash, 4);
+        let junk = insert(&a.id, "Junk Email", FolderRole::Junk, 5);
+        let draft = insert(&a.id, "Entwürfe", FolderRole::Drafts, 6);
+        let archive = insert(&a.id, "Alle Nachrichten", FolderRole::Archive, 7);
+        let later = store.save_message(&mail(&a, inbox, 8)).unwrap();
+        store.snooze(later, Some(11)).unwrap();
+        let later_custom = insert(&a.id, "Project", FolderRole::Other, 9);
+        store.snooze(later_custom, Some(11)).unwrap();
+        let other_trash = insert(&b.id, "Deleted Items", FolderRole::Trash, 10);
+
+        let allowed = [a.id.clone()];
+        let both = [a.id, b.id];
+        let mut reader = FilterReader::open(&temp.path().join("mail.db")).unwrap();
+        let mut ids = |accounts: &[String], query: &str, scope| {
+            let (rows, next) = reader.filtered_messages(accounts, &Filter::parse(query).unwrap(), scope, 10, 1, None).unwrap();
+            assert_eq!(next, None);
+            rows.into_iter().map(|r| r.id).collect::<Vec<_>>()
+        };
+        for query in [terms.as_str(), "NEAR", "AND", "col:", "http://x", "12:30",
+                      r#""NEAR AND" "col:""#, "FROM:möte_% TO:möte_% CC:möte_%",
+                      "SUBJECT:återbetalning subject:möte subject:STRASSE", "ter", "from:%", "from:_",
+                      "to:%", "to:_", "cc:%", "cc:_"] {
+            assert_eq!(ids(&allowed, query, None), [hit], "{query}");
+        }
+        for query in ["*", "^", r#""*""#, r#""^""#, "te", "te:"] {
+            assert!(ids(&allowed, query, None).is_empty(), "{query}");
+        }
+        assert_eq!(ids(&allowed, "", None), [later_custom, later, archive, draft, custom, hit]);
+        assert_eq!(ids(&allowed, "-rust", None), [hit]);
+        assert_eq!(ids(&allowed, "-col:", None), [later_custom, later, archive, draft, custom]);
+        assert_eq!(ids(&both, "in:Project", None), [other, custom]);
+        assert_eq!(ids(&both, "", Some("Project")), [other, custom]);
+        assert_eq!(ids(&allowed, "in:inbox", None), [hit]);
+        assert_eq!(ids(&allowed, "in:later", None), [later_custom, later]);
+        assert_eq!(ids(&both, "in:trash", None), [other_trash, trash]);
+        assert_eq!(ids(&allowed, "in:trash OR subject:möte", None), [trash, hit]);
+        assert_eq!(ids(&allowed, "-in:trash", Some("all")), [later_custom, later, archive, draft, junk, custom, hit]);
+        assert_eq!(ids(&allowed, "in:junk", None), [junk]);
+        assert_eq!(ids(&allowed, "in:spam", None), [junk]);
+        assert_eq!(ids(&allowed, "in:drafts", None), [draft]);
+        assert_eq!(ids(&allowed, "in:archive", None), [archive]);
+
+        let empty = Filter::parse("").unwrap();
+        for scope in ["", " \t", "a\0b", &format!("{}x", " ".repeat(4096))] {
+            assert!(matches!(reader.filtered_messages(&allowed, &empty, Some(scope), 10, 1, None), Err(Error::Invalid("invalid_request"))));
+        }
+        for (page, limit) in [(1, 0), (u32::MAX, 100), (102, 100)] {
+            assert!(matches!(reader.filtered_messages(&allowed, &empty, None, 10, page, Some(limit)), Err(Error::Invalid("invalid_request"))));
+        }
+        assert!(reader.filtered_messages(&allowed, &empty, None, 10, 101, Some(100)).unwrap().0.is_empty());
     }
 
     #[test]
