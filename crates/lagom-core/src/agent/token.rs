@@ -164,8 +164,10 @@ impl Store {
         scope: TokenScope<'_>,
     ) -> Result<Zeroizing<String>, Code> {
         let tx = self.db.unchecked_transaction()?;
+        let local = matches!(scope, TokenScope::Local);
         let raw = self.issue_token_inner(agent, scope)?;
         tx.commit()?;
+        if local { self.cleanup_revoked_queue(Some(agent)); }
         Ok(raw)
     }
 
@@ -182,7 +184,7 @@ impl Store {
                 })?;
         let (level, accounts, cidr, expires) = match (remote, scope) {
             (0, TokenScope::Local) => {
-                self.revoke_agent_queue(agent)?;
+                self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
                 (Level::Send, None, None, None)
             }
             (
@@ -248,15 +250,8 @@ impl Store {
     }
 
     pub fn revoke_agent_tokens(&self, agent: &str) -> Result<(), Code> {
-        let tx = self.db.unchecked_transaction()?;
-        self.revoke_agent_queue(agent)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn revoke_agent_queue(&self, agent: &str) -> Result<(), Code> {
         self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
-        self.return_agent_queue(Some(agent)).map_err(|_| Code::Internal)?;
+        self.cleanup_revoked_queue(Some(agent));
         Ok(())
     }
 

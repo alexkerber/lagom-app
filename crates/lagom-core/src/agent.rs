@@ -80,6 +80,7 @@ impl Store {
         let tx = self.db.unchecked_transaction()?;
         self.disable_agent_listener()?;
         tx.commit()?;
+        self.cleanup_revoked_queue(None);
         Ok(())
     }
 
@@ -93,7 +94,8 @@ impl Store {
             ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
             [],
         )?;
-        self.return_agent_queue(None).map_err(|_| Code::Internal)
+        self.db.execute("UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation'", [])?;
+        Ok(())
     }
 
     pub fn agent_accounts(

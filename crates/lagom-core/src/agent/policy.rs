@@ -118,6 +118,7 @@ impl Store {
         tx.execute("DELETE FROM agent_tokens", [])?;
         self.disable_agent_listener()?;
         tx.commit()?;
+        self.cleanup_revoked_queue(None);
         Ok(())
     }
 

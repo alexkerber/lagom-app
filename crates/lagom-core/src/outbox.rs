@@ -110,8 +110,9 @@ impl Store {
         let id = mail.message_id.get_or_insert_with(|| smtp::message_id(&account.email)).clone();
         let raw = smtp::compose_message(account, &mail, None, origin.is_some())?.formatted();
         let tx = self.db.is_autocommit().then(|| self.db.unchecked_transaction()).transpose()?;
-        self.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent,agent_token)
-            VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,?6,?7)",
+        self.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent,agent_token,agent_policy_generation)
+            VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,?6,?7,
+                CASE WHEN ?6 IS NOT NULL THEN (SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation') END)",
             params![id, account.id, encode(&mail)?, raw, ready_at, origin.map(|i| i.agent_id()), origin.map(|i| i.token_id())])?;
         self.db.execute("DELETE FROM drafts WHERE id=?1 AND account=?2", params![id, account.id])?;
         if let Some(tx) = tx { tx.commit()?; }
@@ -169,10 +170,11 @@ impl Store {
     }
 
     fn restore_revoked_send(&self, id: &str) -> Result<bool> {
-        let (agent, account, token): (Option<String>, String, Option<String>) = self.db.query_row(
-            "SELECT draft_agent,account,agent_token FROM outbox WHERE id=? AND submitted=0", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let (agent, account, token, current): (Option<String>, String, Option<String>, bool) = self.db.query_row(
+            "SELECT draft_agent,account,agent_token,coalesce(agent_policy_generation =
+                (SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation'),0) FROM outbox WHERE id=? AND submitted=0", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         if let Some(agent) = agent {
-            if !self.agent_may_send(&agent, token.as_deref(), &account)? {
+            if !current || !self.agent_may_send(&agent, token.as_deref(), &account)? {
                 self.db.execute("UPDATE outbox SET started=0 WHERE id=?", [id])?;
                 self.return_revoked_draft(id, &agent, &account)?;
                 return Ok(true);
@@ -182,22 +184,35 @@ impl Store {
     }
 
     fn return_revoked_draft(&self, id: &str, agent: &str, account: &str) -> Result<()> {
-        if !self.restore_queued_draft(id)? { return Err(Error::Invalid("missing queued draft")); }
+        let collision = self.db.execute("DELETE FROM outbox WHERE id=?1 AND started=0 AND submitted=0
+            AND EXISTS(SELECT 1 FROM drafts WHERE id=?1)", [id])?;
+        if collision == 0 && !self.restore_queued_draft(id)? { return Err(Error::Invalid("missing queued draft")); }
         let target = crate::agent::id::ObjectId::Draft(account.to_owned(), id.into()).encode();
         self.db.execute("INSERT INTO agent_audit(at,agent,account,command,target,result,dispatched_write)
             VALUES(unixepoch(),?,?,'draft.send',?,'revoked',1)", params![agent, account, target])?;
         Ok(())
     }
 
-    pub(crate) fn return_agent_queue(&self, agent: Option<&str>) -> Result<()> {
+    pub(crate) fn cleanup_revoked_queue(&self, agent: Option<&str>) {
+        // Authority is already committed. A failed restoration still fails the SMTP check.
+        if let Err(error) = self.return_agent_queue(agent) {
+            eprintln!("Could not restore revoked agent sends: {error}");
+        }
+    }
+
+    fn return_agent_queue(&self, agent: Option<&str>) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let mut stmt = self.db.prepare("SELECT id,draft_agent,account FROM outbox
-            WHERE started=0 AND submitted=0 AND state='ready' AND draft_agent IS NOT NULL
+            WHERE started=0 AND submitted=0 AND state<>'uncertain' AND draft_agent IS NOT NULL
+              AND (agent_token IS NULL OR agent_policy_generation IS NOT (SELECT CAST(value AS INTEGER) FROM agent_settings WHERE key='policy_generation'))
               AND (?1 IS NULL OR draft_agent=?1)")?;
         let rows = stmt.query_map([agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (id, owner, account) in rows {
             self.return_revoked_draft(&id, &owner, &account)?;
         }
+        drop(stmt);
+        tx.commit()?;
         Ok(())
     }
 
@@ -327,23 +342,72 @@ mod tests {
         (dir, store, account, id)
     }
 
+    use crate::agent::{policy::{Access, Level, Resource, Setting}, token::TokenScope};
+
+    fn queued_agent(remote: bool) -> (tempfile::TempDir, Store, Account, String, String, zeroize::Zeroizing<String>, Access) {
+        let (_dir, store, account, id) = queued();
+        let agent = store.create_agent("test", "sender", "host", remote).unwrap();
+        let token = store.issue_token(&agent, if remote {
+            TokenScope::Remote { accounts:std::slice::from_ref(&account.id), level:Level::Send, ranges:&[], expires:None }
+        } else { TokenScope::Local }).unwrap();
+        store.set_agent_setting(Setting::Enabled,true).unwrap();
+        let grant = Access { resource:Resource::Mail, account:account.id.clone(), level:Level::Send };
+        for owner in ["", &agent] { store.set_agent_access(owner, &grant).unwrap(); }
+        assert!(store.undo_send(&id).unwrap());
+        store.set_draft_agent(&id,&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap()).unwrap();
+        let mail = Outgoing { to:vec!["a@example.org".into()], message_id:Some(id.clone()), ..Default::default() };
+        store.enqueue_agent(&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap(),&account,&mail,0).unwrap();
+        (_dir, store, account, id, agent, token, grant)
+    }
+
+    #[test]
+    fn compose_resave_survives_agent_revocation() {
+        let (_dir, store, account, id, agent, token, _) = queued_agent(false);
+        let personal = Draft { id:id.clone(), account:account.id.clone(), text:"My new draft".into(), ..Default::default() };
+        store.save_draft(&personal).unwrap();
+        store.revoke_agent_tokens(&agent).unwrap();
+        assert!(store.authenticate(Some(&token),None).is_err());
+        assert_eq!(store.draft(&id).unwrap(), personal);
+        assert!(store.agent_draft_meta(&account.id,&id).unwrap().1.is_none());
+        assert!(!store.claim_send(&id,i64::MAX).unwrap());
+        assert!(store.pending(&id).is_err());
+        assert_eq!(store.agent_audit(1).unwrap()[0].result,"revoked");
+    }
+
+    #[test]
+    fn claimed_send_cannot_survive_a_policy_cycle() {
+        for disable in [true, false] {
+            let (_dir, store, _, id, _, _, grant) = queued_agent(false);
+            assert!(store.claim_send(&id,0).unwrap());
+            if disable {
+                store.disable_agents().unwrap();
+                store.set_agent_setting(Setting::Enabled,true).unwrap();
+            } else {
+                store.set_agent_access("", &Access { level:Level::Read, ..grant.clone() }).unwrap();
+                store.set_agent_access("", &grant).unwrap();
+            }
+            assert!(store.authorize_queued_send(&id).is_err());
+            assert!(store.pending(&id).is_err());
+            assert_eq!(store.agent_audit(1).unwrap()[0].result,"revoked");
+        }
+    }
+
+    #[test]
+    fn revoke_restores_failed_and_retrying_sends() {
+        for error in [Error::ReauthRequired,Error::Rejected,Error::Network("offline")] {
+            let (_dir, store, account, id, agent, _, _) = queued_agent(false);
+            assert!(store.claim_send(&id,0).unwrap());
+            store.send_failed(&id,&error,0).unwrap();
+            store.revoke_agent_tokens(&agent).unwrap();
+            assert!(store.pending(&id).is_err());
+            assert_eq!(store.agent_draft_meta(&account.id,&id).unwrap().1,Some(agent));
+        }
+    }
+
     #[test]
     fn agent_send_rechecks_access_and_restores_owned_draft() {
-        use crate::agent::{policy::{Access, Level, Resource, Setting}, token::TokenScope};
         for change in ["disable", "revoke", "lower", "expire", "scope", "rotate_claimed", "rotate", "undo_off", "undo_revoke", "undo_all"] {
-            let (_dir, store, account, id) = queued();
-            let remote = matches!(change, "scope" | "expire");
-            let agent = store.create_agent("test", "sender", "host", remote).unwrap();
-            let token = store.issue_token(&agent, if remote {
-                TokenScope::Remote { accounts:std::slice::from_ref(&account.id), level:Level::Send, ranges:&[], expires:None }
-            } else { TokenScope::Local }).unwrap();
-            store.set_agent_setting(Setting::Enabled,true).unwrap();
-            let grant = Access { resource:Resource::Mail, account:account.id.clone(), level:Level::Send };
-            for owner in ["", &agent] { store.set_agent_access(owner, &grant).unwrap(); }
-            assert!(store.undo_send(&id).unwrap());
-            store.set_draft_agent(&id,&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap()).unwrap();
-            let mail = Outgoing { to:vec!["a@example.org".into()], message_id:Some(id.clone()), ..Default::default() };
-            store.enqueue_agent(&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap(),&account,&mail,0).unwrap();
+            let (_dir, store, account, id, agent, token, grant) = queued_agent(matches!(change,"scope" | "expire"));
             if matches!(change,"rotate" | "undo_off" | "undo_revoke" | "undo_all") {
                 match change {
                     "rotate" => { store.issue_token(&agent, TokenScope::Local).unwrap(); }
