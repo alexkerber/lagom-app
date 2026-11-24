@@ -72,6 +72,12 @@ impl Drop for Server {
     }
 }
 
+pub(crate) fn socket_path(dir: &Path) -> Result<PathBuf, Code> {
+    let path = dir.join("agent.sock");
+    std::os::unix::net::SocketAddr::from_pathname(&path).map_err(|_| Code::SocketPathTooLong)?;
+    Ok(path)
+}
+
 struct Socket {
     listener: UnixListener,
     path: PathBuf,

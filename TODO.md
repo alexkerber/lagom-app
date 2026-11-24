@@ -221,6 +221,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
 - [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+  - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
+    Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
+    Settings and the client explain when the socket path is too long.
+    Core and desktop tests passed on macOS. The desktop app built. Live Gmail and visual Settings checks remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
     Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
     Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.

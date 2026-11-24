@@ -373,7 +373,7 @@ impl Client {
             return Err(Code::TooLarge);
         }
         let mut stream = timeout(Duration::from_secs(5), async {
-            let mut stream = UnixStream::connect(self.dir.join("agent.sock"))
+            let mut stream = UnixStream::connect(crate::agent::socket_path(&self.dir)?)
                 .await
                 .map_err(|_| Code::AppUnreachable)?;
             if stream.peer_cred().map_err(|_| Code::Unauthorized)?.uid()
@@ -483,10 +483,65 @@ fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
+fn list_table(out: &mut impl Write, cmd: &str, value: &Value, client: &Client,
+              rt: &tokio::runtime::Runtime) -> Result<()> {
+    let (key, columns): (_, &[&str]) = match cmd {
+        "emails" | "search" => ("messages", &["date", "from", "subject", "id"]),
+        "folders" => (cmd, &["name", "role", "unread"]),
+        "accounts" => (cmd, &["email", "mail", "calendar", "id"]),
+        "contacts" => (cmd, &["name", "address"]),
+        "events" => (cmd, &["start", "end", "title"]),
+        _ => return table(out, value).map_err(|_| Code::Internal),
+    };
+    let rows = value[key].as_array().ok_or(INVALID)?;
+    let mut ids = rows.iter().filter_map(|row| row["account"].as_str());
+    let first = ids.next();
+    let mut columns = columns.to_vec();
+    let mut emails = std::collections::HashMap::new();
+    if ids.any(|id| Some(id) != first) {
+        let (_, response) = rt.block_on(client.request("accounts", Args::new()))?;
+        let accounts = match response {
+            Response::Success(data) => data,
+            Response::Failure(code) => return Err(code),
+        };
+        for row in accounts["accounts"].as_array().ok_or(INVALID)? {
+            emails.insert(row["id"].as_str().ok_or(INVALID)?.to_owned(), field(&row["email"]));
+        }
+        columns.push("account");
+    }
+    if !rows.is_empty() {
+        writeln!(out, "{}", columns.join("\t")).map_err(|_| Code::Internal)?;
+    }
+    for row in rows {
+        let mut cells = Vec::new();
+        for &column in &columns {
+            let cell = match column {
+                "account" => emails.get(row[column].as_str().ok_or(INVALID)?)
+                    .ok_or(Code::NotFound)?.clone(),
+                "date" => row[column].as_str().and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+                    .map(|date| date.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default(),
+                _ => row.get(column).map(field).unwrap_or_default(),
+            };
+            cells.push(cell);
+        }
+        writeln!(out, "{}", cells.join("\t")).map_err(|_| Code::Internal)?;
+    }
+    if let Some(next) = value.get("next_page") {
+        writeln!(out, "next_page\t{}", field(next)).map_err(|_| Code::Internal)?;
+    }
+    Ok(())
+}
+
 fn run(mut opts: Options) -> Result<i32> {
     let Some((name, rest)) = opts.words.split_first() else {
         return Err(INVALID);
     };
+    if name == "contacts" && rest == ["--help"] {
+        writeln!(io::stdout().lock(), "lagom contacts [--account ID|EMAIL] [--agent ID] [--json]\nLists all contacts. Only emails and search accept --page and --limit.")
+            .map_err(|_| Code::Internal)?;
+        return Ok(0);
+    }
     match name.as_str() {
         "skill" => {
             skill::install(rest, &opts.args)?;
@@ -497,7 +552,7 @@ fn run(mut opts: Options) -> Result<i32> {
             return Ok(0);
         }
         "--help" if rest.is_empty() && opts.args.is_empty() => {
-            writeln!(io::stdout().lock(), "lagom <command> [--account ID] [--agent ID] [--json]\nUse --agent ID or LAGOM_TOKEN. --token is visible in process listings.\naccounts, folders, emails [--filter FILTER] [--page N] [--limit N], search QUERY [--in SCOPE], thread ID, attachment ID, events, availability, contacts\ndraft list|show|create|edit|delete|send, action archive|move|read|unread|star|unstar|snooze|unsnooze|trash, event create|update|delete\nmcp, skill install [--for KIND] [--dir PATH]").map_err(|_| Code::Internal)?;
+            writeln!(io::stdout().lock(), "lagom <command> [--account ID] [--agent ID] [--json]\nUse --agent ID or LAGOM_TOKEN. --token is visible in process listings.\naccounts, folders, emails [--filter FILTER] [--page N] [--limit N], search QUERY [--in SCOPE] [--page N] [--limit N], thread ID, attachment ID, events [--start UNIX] [--end UNIX], availability [--start UNIX] [--end UNIX], contacts\nOnly emails and search accept --page and --limit.\ndraft list|show|create|edit|delete|send, action archive|move|read|unread|star|unstar|snooze|unsnooze|trash, event create|update|delete\nmcp, skill install [--for KIND] [--dir PATH]").map_err(|_| Code::Internal)?;
             return Ok(0);
         }
         "--version" if rest.is_empty() && opts.args.is_empty() => {
@@ -572,7 +627,7 @@ fn run_client(client: Client, options: Result<Options>) -> Result<i32> {
         });
     }
     match response {
-        Response::Success(value) => table(&mut out, &value).map(|_| 0).map_err(|_| Code::Internal),
+        Response::Success(value) => list_table(&mut out, &cmd, &value, &client, &rt).map(|_| 0),
         Response::Failure(code) => Err(code),
     }
 }

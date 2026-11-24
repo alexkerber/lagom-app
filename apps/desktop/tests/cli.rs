@@ -37,6 +37,10 @@ fn cli_socket_and_mcp_round_trip() {
         ("environment","accounts",json!({}),"{\"v\":1,\"ok\":true,\"result\":{\"accounts\":[{\"mail\":\"read\",\"calendar\":\"none\"}]}}\n"),
         ("environment","emails",json!({"limit":1}),success),
         ("environment","emails",json!({}),success),
+        ("environment","search",json!({"query":"hi"}),r#"{"v":1,"ok":true,"result":{"messages":[{"account":"a","date":"2025-02-01T01:15:00Z","from":"sender","subject":"Hi","id":"1"},{"account":"b","id":"2"}]}}
+"#),
+        ("environment","accounts",json!({}),r#"{"v":1,"ok":true,"result":{"accounts":[{"id":"a","email":"one@example.com"},{"id":"b","email":"two@example.com"}]}}
+"#),
     ];
     let listener = UnixListener::bind(dir.join("agent.sock")).unwrap();
     let server = thread::spawn(move || {
@@ -102,7 +106,14 @@ fn cli_socket_and_mcp_round_trip() {
     assert_eq!(replies[2]["result"]["isError"], false);
     assert_eq!(replies[2]["result"]["content"][0]["text"], r#"{"messages":[{"subject":"Hi"}]}"#);
     let out = run(&["emails"]).output().unwrap();
-    assert_eq!(out.stdout, b"subject\nHi\n");
+    assert_eq!(out.stdout, b"date\tfrom\tsubject\tid\n\t\tHi\t\n");
+    let out = run(&["search", "hi"]).env("TZ", "America/New_York").output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(),
+        "date\tfrom\tsubject\tid\taccount\n2025-01-31 20:15\tsender\tHi\t1\tone@example.com\n\t\t\t2\ttwo@example.com\n");
+    let out = run(&["contacts", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().contains("lagom contacts [--account"));
     server.join().unwrap();
 
     for (args, status, message) in [
@@ -157,6 +168,7 @@ fn cli_rejects_unsafe_credentials_paths_and_missing_option_values() {
     }
     assert_eq!(run(dir.path(), &["draft", "create", "--body", "--token=X"]), "invalid_request");
     assert_eq!(run(dir.path(), &["--account", "x", "accounts"]), "app_unreachable");
+    assert_eq!(run(&dir.path().join("x".repeat(120)), &["accounts"]), "socket_path_too_long");
     fs::write(&file, b"fixture").unwrap();
     for (size, mode) in [(7, 0o644), (257, 0o600)] {
         fs::write(&file, vec![b'x'; size]).unwrap();

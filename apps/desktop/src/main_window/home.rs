@@ -507,10 +507,13 @@ mod tests {
         let full = cx.debug_bounds("sidebar").unwrap();
         let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         for hide in [true, false] {
-            view.update(cx, |v, cx| { v.panes.sidebar_hidden = hide; v.sidebar_slide = Some(Instant::now() - SLIDE / 4); cx.notify(); });
+            view.update(cx, |v, cx| { v.panes.sidebar_hidden = hide; cx.notify(); });
             // The test window can report the previous frame's bounds, so draw twice.
-            draw(cx);
-            draw(cx);
+            // Restart the slide before each draw so a slow machine still measures mid-slide.
+            for _ in 0..2 {
+                view.update(cx, |v, cx| { v.sidebar_slide = Some(Instant::now() - SLIDE / 4); cx.notify(); });
+                draw(cx);
+            }
             // Mid-slide: same width, moved left, so no row reflows.
             let mid = cx.debug_bounds("sidebar").unwrap();
             assert_eq!(mid.size.width, full.size.width);
