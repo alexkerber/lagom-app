@@ -300,6 +300,17 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
         args["account"] = json!(b.email);
         assert_eq!(call(cmd, args), fixed(Code::NotFound));
     }
+    db.execute("DELETE FROM agent_audit WHERE refusals>0", [])
+        .unwrap();
+    assert_eq!(call("draft.send", json!({})), fixed(Code::InvalidRequest));
+    let classified: (String, bool) = db
+        .query_row(
+            "SELECT command,read_seq IS NOT NULL FROM agent_audit WHERE refusals>0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(classified, ("unknown".to_owned(), true));
     let list = ok(
         "emails",
         json!({"filter":"subject:needle-0","page":1,"limit":1,"account":a.email}),

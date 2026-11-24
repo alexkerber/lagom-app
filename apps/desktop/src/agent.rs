@@ -188,10 +188,10 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
             }
         }
     }
-    drop(wake);
-    let _ = recorder.await;
     drop(socket);
     drop(enabled);
+    drop(wake);
+    let _ = recorder.await;
     while calls.join_next().await.is_some() {}
 }
 
@@ -218,11 +218,12 @@ fn audit(
     account: Option<&str>,
     target: Option<&ResolvedMessage>,
     outcome: Result<(), Failure>,
+    dispatched: bool,
 ) -> Result<(), Code> {
     store.record_agent_audit(AuditRow {
         identity: who,
         account: account.and_then(|s| s.parse().ok()),
-        command: req.map_or("", |r| &r.cmd),
+        command: req.filter(|_| dispatched).map_or("", |r| &r.cmd),
         target,
         outcome,
         source_ip: req.and_then(|r| r.source_ip.as_ref()?.parse().ok()),
@@ -411,6 +412,7 @@ fn process(
                 account.as_deref(),
                 target.as_ref(),
                 result.as_ref().map(|_| ()).map_err(Clone::clone),
+                access.get().is_some(),
             )
         })
     });
