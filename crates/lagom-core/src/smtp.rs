@@ -60,7 +60,7 @@ fn header_value(value: &str) -> Result<()> {
     }
 }
 pub fn compose(account: &Account, outgoing: &Outgoing) -> Result<Message> {
-    compose_message(account, outgoing, None)
+    compose_message(account, outgoing, None, false)
 }
 
 pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, token: &str) -> Result<Vec<u8>> {
@@ -68,10 +68,10 @@ pub(crate) fn compose_draft(account: &Account, draft: &crate::outbox::Draft, tok
     let outgoing = Outgoing { subject: draft.subject.clone(), text: draft.text.clone(),
         attachments: draft.attachments.clone(), in_reply_to, references, message_id: Some(format!("<{token}@draft.lagommail.app>")),
         quoted: draft.quoted.clone(), ..Default::default() };
-    Ok(compose_message(account, &outgoing, Some(draft))?.formatted())
+    Ok(compose_message(account, &outgoing, Some(draft), false)?.formatted())
 }
 
-fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>) -> Result<Message> {
+pub(crate) fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate::outbox::Draft>, plain_only: bool) -> Result<Message> {
     account.validate()?;
     if draft.is_none() && outgoing.to.is_empty() && outgoing.cc.is_empty() && outgoing.bcc.is_empty() {
         return Err(Error::Invalid("at least one recipient required"));
@@ -143,7 +143,7 @@ fn compose_message(account: &Account, outgoing: &Outgoing, draft: Option<&crate:
         Some(q) => format!("{}{QUOTE_BREAK}{}", outgoing.text, q.text),
         None => outgoing.text.clone(),
     };
-    let html = markdown_html(&outgoing.text, quote.as_deref());
+    let html = if plain_only { None } else { markdown_html(&outgoing.text, quote.as_deref()) };
     let alternative = || {
         let html = SinglePart::html(html.clone().unwrap_or_default());
         let alternative = MultiPart::alternative().singlepart(SinglePart::plain(text.clone()));
@@ -252,11 +252,11 @@ async fn send_within(
 ) -> Result<()> {
     let message = compose(account, outgoing)?;
     let raw = message.formatted();
-    submit_within(account, password, &message, &raw, login, submit).await?;
+    submit_within(account, password, &message, &raw, login, submit, || Ok(())).await?;
     save_sent(account, password, &raw, store, None).await
 }
 
-async fn submit_within(account: &Account, password: &str, message: &Message, raw: &[u8], login: Duration, submit: Duration) -> Result<()> {
+async fn submit_within(account: &Account, password: &str, message: &Message, raw: &[u8], login: Duration, submit: Duration, authorize: impl Fn() -> Result<()>) -> Result<()> {
     let oauth = matches!(account.auth, Auth::OAuth(_));
     let mut credential = if oauth { crate::oauth::access_token(account, None).await? } else { zeroize::Zeroizing::new(password.to_owned()) };
     for attempt in 0..2 {
@@ -269,6 +269,7 @@ async fn submit_within(account: &Account, password: &str, message: &Message, raw
                 Ok(Err(e)) if e.is_permanent() => return Err(Error::Rejected),
                 _ => return Err(Error::Network("could not reach your mail provider to send")),
             }
+            authorize()?;
             match timeout(submit, transport.send_raw(message.envelope(), raw)).await {
                 Err(_) => Err(Error::MaybeSent),
                 Ok(Err(e)) if auth_failure(&e) => Err(Error::Authentication),
@@ -292,8 +293,9 @@ pub async fn send_queued(account: &Account, password: &str, pending: &crate::out
     }
     let result = async {
         if !pending.submitted {
+            store.authorize_queued_send(&pending.id)?;
             let message = compose(account, &pending.mail)?;
-            submit_within(account, password, &message, &pending.raw, LOGIN_DEADLINE, SUBMIT_DEADLINE).await?;
+            submit_within(account, password, &message, &pending.raw, LOGIN_DEADLINE, SUBMIT_DEADLINE, || store.authorize_queued_send(&pending.id)).await?;
             store.submitted(&pending.id).map_err(|_| Error::MaybeSent)?;
         }
         if !pending.copied {
