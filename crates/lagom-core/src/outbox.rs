@@ -239,9 +239,12 @@ impl Store {
             Error::Rejected | Error::Authentication | Error::ReauthRequired | Error::Invalid(_) => "failed",
             _ => "ready",
         };
-        self.db.execute("UPDATE outbox SET started=0,error=?2,state=?3,
+        let agent: Option<String> = self.db.query_row("UPDATE outbox SET started=0,error=?2,state=?3,
             ready_at=?4+min(60000*(1 << min(attempts,6)),3600000),attempts=attempts+1
-            WHERE id=?1 AND started=1", params![id, error.to_string(), state, now])?;
+            WHERE id=?1 AND started=1 RETURNING CASE WHEN submitted=0 AND state<>'uncertain' THEN draft_agent END",
+            params![id, error.to_string(), state, now], |r| r.get(0)).optional()?.flatten();
+        // Revocation may have skipped this row while the worker held its claim.
+        if let Some(agent) = agent { self.cleanup_revoked_queue(Some(&agent)); }
         Ok(())
     }
 
@@ -418,8 +421,13 @@ mod tests {
         for error in [Error::ReauthRequired,Error::Rejected,Error::Network("offline")] {
             let (_dir, store, account, id, agent, _, _) = queued_agent(false);
             assert!(store.claim_send(&id,0).unwrap());
-            store.send_failed(&id,&error,0).unwrap();
-            store.revoke_agent_tokens(&agent).unwrap();
+            if matches!(error, Error::ReauthRequired) {
+                store.revoke_agent_tokens(&agent).unwrap();
+                store.send_failed(&id,&error,0).unwrap();
+            } else {
+                store.send_failed(&id,&error,0).unwrap();
+                store.revoke_agent_tokens(&agent).unwrap();
+            }
             assert!(store.pending(&id).is_err());
             assert_eq!(store.agent_draft_meta(&account.id,&id).unwrap().1,Some(agent));
         }
