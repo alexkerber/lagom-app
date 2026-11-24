@@ -1,6 +1,6 @@
 use super::{
     audit::{Failure, TokenFailure},
-    policy::Level,
+    policy::{Access, Level, Resource},
     protocol::Code,
 };
 use crate::store::Store;
@@ -60,13 +60,15 @@ pub struct AgentRow {
     pub host: String,
     pub remote: bool,
     pub active: bool,
+    pub expires: Option<i64>,
 }
 
 impl Store {
     pub fn agents(&self) -> Result<Vec<AgentRow>, Code> {
         let mut rows = self.db.prepare(
             "SELECT id,kind,name,host,remote,EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent=a.id
-             AND (t.expires IS NULL OR t.expires>unixepoch()))
+             AND (t.expires IS NULL OR t.expires>unixepoch())),
+             (SELECT max(expires) FROM agent_tokens t WHERE t.agent=a.id)
              FROM agents a ORDER BY created,id",
         )?;
         let rows = rows.query_map([], |r| {
@@ -77,6 +79,7 @@ impl Store {
                 host: r.get(3)?,
                 remote: r.get(4)?,
                 active: r.get(5)?,
+                expires: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -123,6 +126,63 @@ impl Store {
         Ok(id)
     }
 
+    pub fn create_remote_agent(
+        &self,
+        host: &str,
+        accounts: &[String],
+        level: Level,
+        ranges: &[IpNet],
+        expires: i64,
+    ) -> Result<(String, Zeroizing<String>), Code> {
+        if host.trim().is_empty() || accounts.is_empty() || ranges.is_empty() {
+            return Err(Code::InvalidRequest);
+        }
+        let tx = self.db.unchecked_transaction()?;
+        let id = self.create_agent("remote", host, host, true)?;
+        tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&id])?;
+        for account in accounts {
+            if !tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
+                [account],
+                |r| r.get::<_, bool>(0),
+            )? {
+                return Err(Code::NotFound);
+            }
+            for resource in [Resource::Mail, Resource::Calendar] {
+                let level = if resource == Resource::Calendar && level == Level::Triage {
+                    Level::Read
+                } else {
+                    level
+                };
+                self.set_agent_access(
+                    &id,
+                    &Access {
+                        resource,
+                        account: account.clone(),
+                        level,
+                    },
+                )?;
+            }
+        }
+        let token = self.issue_token_inner(
+            &id,
+            TokenScope::Remote {
+                accounts,
+                level,
+                ranges,
+                expires: Some(expires),
+            },
+        )?;
+        tx.commit()?;
+        Ok((id, token))
+    }
+
+    pub fn remove_remote_agent(&self, id: &str) -> Result<(), Code> {
+        self.db
+            .execute("DELETE FROM agents WHERE id=? AND remote=1", [id])?;
+        Ok(())
+    }
+
     pub fn issue_token(
         &self,
         agent: &str,
@@ -161,7 +221,7 @@ impl Store {
                 },
             ) => {
                 let end = expires.unwrap_or(now + 30 * DAY);
-                if end <= now || end > now + 365 * DAY || accounts.iter().any(String::is_empty) {
+                if ranges.is_empty() || end <= now || end > now + 365 * DAY || accounts.iter().any(String::is_empty) {
                     return Err(Code::InvalidRequest);
                 }
                 (
@@ -280,17 +340,18 @@ impl Store {
                 if end <= created || end > created.saturating_add(365 * DAY) {
                     return Err(refused(InvalidScope));
                 }
+                let nets: Vec<IpNet> = serde_json::from_str(&cidr.ok_or_else(|| refused(InvalidScope))?)
+                    .map_err(|_| refused(InvalidScope))?;
+                if nets.is_empty() {
+                    return Err(refused(InvalidScope));
+                }
                 let ip = source_ip
                     .ok_or_else(|| refused(Source))?
                     .parse::<IpAddr>()
                     .map_err(|_| refused(Source))?
                     .to_canonical();
-                if let Some(cidr) = cidr {
-                    let nets: Vec<IpNet> =
-                        serde_json::from_str(&cidr).map_err(|_| refused(InvalidScope))?;
-                    if !nets.is_empty() && !nets.iter().any(|n| n.contains(&ip)) {
-                        return Err(refused(Source));
-                    }
+                if !nets.iter().any(|n| n.contains(&ip)) {
+                    return Err(refused(Source));
                 }
                 Some(
                     serde_json::from_str(&accounts.ok_or_else(|| refused(InvalidScope))?)

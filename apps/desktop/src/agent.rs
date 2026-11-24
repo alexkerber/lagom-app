@@ -31,8 +31,13 @@ use tokio::{
 
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 32 * 1024 * 1024;
+const MAX_PER_TOKEN: usize = 4;
 const ANSWER: Duration = Duration::from_secs(30);
-type Rates = Arc<Mutex<HashMap<String, VecDeque<Instant>>>>;
+struct TokenLimit {
+    times: VecDeque<Instant>,
+    permits: Arc<Semaphore>,
+}
+type Rates = Arc<Mutex<HashMap<String, TokenLimit>>>;
 
 pub(crate) struct Server {
     stop: Option<oneshot::Sender<()>>,
@@ -237,15 +242,19 @@ fn audit(
     })
 }
 
-fn rate(rates: &Rates, token: &str) -> Result<(), Code> {
+fn admit(rates: &Rates, token_id: &str) -> Result<tokio::sync::OwnedSemaphorePermit, Code> {
     let mut rates = rates.lock().map_err(|_| Code::Internal)?;
     let now = Instant::now();
-    rates.retain(|_, times| {
-        times
+    rates.retain(|_, limit| {
+        limit.permits.available_permits() < MAX_PER_TOKEN || limit.times
             .back()
             .is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60))
     });
-    let times = rates.entry(token.to_owned()).or_default();
+    let limit = rates.entry(token_id.to_owned()).or_insert_with(|| TokenLimit {
+        times: VecDeque::new(),
+        permits: Arc::new(Semaphore::new(MAX_PER_TOKEN)),
+    });
+    let times = &mut limit.times;
     while times
         .front()
         .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
@@ -256,7 +265,7 @@ fn rate(rates: &Rates, token: &str) -> Result<(), Code> {
         return Err(Code::Busy);
     }
     times.push_back(now);
-    Ok(())
+    limit.permits.clone().try_acquire_owned().map_err(|_| Code::Busy)
 }
 
 fn line(response: Response) -> Vec<u8> {
@@ -287,7 +296,7 @@ async fn call(
             &path, parsed, &bridge, &rates, cancelled, deadline, generation, policy,
         )
     });
-    let bytes = tokio::select! {
+    let (bytes, _token_permit) = tokio::select! {
         biased;
         _ = off.changed() => {
             drop(stream); drop(cancel);
@@ -296,7 +305,7 @@ async fn call(
         },
         result = timeout_at(deadline,&mut job) => match result {
             Ok(Ok(bytes)) => bytes,
-            Ok(Err(_)) => line(Response::Failure(Code::Internal)),
+            Ok(Err(_)) => (line(Response::Failure(Code::Internal)), None),
             Err(_) => {
                 drop(stream); drop(cancel);
                 let _ = job.await;
@@ -321,7 +330,9 @@ fn process(
     deadline: tokio::time::Instant,
     generation: i64,
     policy: watch::Receiver<Option<i64>>,
-) -> Vec<u8> {
+) -> (Vec<u8>, Option<tokio::sync::OwnedSemaphorePermit>) {
+    let mut permit = None;
+    let mut handled_remote_refusal = false;
     let access = Arc::new(std::sync::OnceLock::<read::ReadPolicy>::new());
     let mut who = None;
     let mut account = None;
@@ -361,7 +372,7 @@ fn process(
             Ok(identity) => who.insert(identity),
             Err(e) => {
                 if let Failure::VerifiedRefusal { agent, token, .. } = &e {
-                    match rate(rates, token) {
+                    match admit(rates, token).map(drop) {
                         Err(Code::Busy) => {
                             return Err(Failure::VerifiedBusy {
                                 agent: agent.clone(),
@@ -375,12 +386,16 @@ fn process(
                 return Err(e);
             }
         };
-        rate(rates, identity.token_id())?;
+        permit = Some(admit(rates, identity.token_id())?);
         if store.agent_generation()? != Some(generation) {
             return Err(Code::Unauthorized.into());
         }
         if req.v != VERSION {
             return Err(Code::Unsupported.into());
+        }
+        if req.cmd == "remote.refused" {
+            handled_remote_refusal = true;
+            return Err(Code::InvalidRequest.into());
         }
         let value = read::dispatch(
             &store,
@@ -418,13 +433,33 @@ fn process(
                 account.as_deref(),
                 target.as_ref(),
                 result.as_ref().map(|_| ()).map_err(Clone::clone),
-                access.get().is_some(),
+                handled_remote_refusal || access.get().is_some(),
             )
         })
     });
-    audited
+    let bytes = audited
         .map_err(Failure::from)
         .and(result)
-        .unwrap_or_else(|e| line(Response::Failure(e.into())))
+        .unwrap_or_else(|e| line(Response::Failure(e.into())));
+    (bytes, permit)
 }
 pub mod detect;
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn four_calls_per_token_leave_room_for_another_token() {
+        let rates = Rates::default();
+        let mut held: Vec<_> = (0..4).map(|_| admit(&rates, "one").unwrap()).collect();
+        assert!(matches!(admit(&rates, "one"), Err(Code::Busy)));
+        let _other = admit(&rates, "two").unwrap();
+        held.pop();
+        assert!(admit(&rates, "one").is_ok());
+        for _ in 6..300 {
+            drop(admit(&rates, "one").unwrap());
+        }
+        assert!(matches!(admit(&rates, "one"), Err(Code::Busy)));
+    }
+}

@@ -230,19 +230,16 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
             lagom_core::agent::token::TokenScope::Remote {
                 accounts: std::slice::from_ref(&a.id),
                 level: lagom_core::agent::policy::Level::Read,
-                ranges: &[],
+                ranges: &["127.0.0.1/32".parse().unwrap()],
                 expires: None,
             },
         )
         .unwrap();
-    wait(|| sock.exists());
+    // bind creates the path before the server applies its final mode.
+    wait(|| std::fs::metadata(&sock).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600));
     assert_eq!(
         std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
         0o700
-    );
-    assert_eq!(
-        std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777,
-        0o600
     );
     let count = || {
         db.query_row(
@@ -265,6 +262,12 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
         assert_eq!(count(), n + 1);
         bytes
     };
+    let refusal: Value = serde_json::from_slice(&call("remote.refused", json!({}))).unwrap();
+    assert_eq!(refusal["error"]["code"], "invalid_request");
+    let counted: i64 = db.query_row(
+        "SELECT count(*) FROM agent_audit WHERE agent=? AND command='remote.refused' AND result='refused' AND read_seq IS NOT NULL",
+        [&agent], |r| r.get(0)).unwrap();
+    assert_eq!(counted, 1);
     let ok = |cmd, args| {
         let bytes = call(cmd, args);
         let value: Value = serde_json::from_slice(&bytes).unwrap();
@@ -467,6 +470,36 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
 }
 
 #[test]
+fn remote_refusal_is_named_only_after_dispatch() {
+    use lagom_core::agent::{policy::Setting, token::TokenScope};
+
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("mail.db");
+    let sock = dir.path().join("agent.sock");
+    let store = Store::open(&path).unwrap();
+    store.set_agent_setting(Setting::Enabled, true).unwrap();
+    let (bridge, _) = Bridge::detached();
+    let _server = Server::start(&path, bridge);
+    wait(|| sock.exists());
+    let db = Connection::open(&path).unwrap();
+    for (version, code, command, result) in [
+        (1, Code::InvalidRequest, "remote.refused", "refused"),
+        (2, Code::Unsupported, "unknown", "unsupported"),
+    ] {
+        let agent = store.create_agent("test", "fixture", "local", false).unwrap();
+        let token = store.issue_token(&agent, TokenScope::Local).unwrap();
+        let req = json!({"v":version,"cmd":"remote.refused","args":{},"token":token.as_str()});
+        assert_eq!(wire(&sock, format!("{req}\n").as_bytes()), fixed(code));
+        let count: usize = db.query_row(
+            "SELECT count(*) FROM agent_audit WHERE agent=? AND command=? AND result=?
+             AND dispatched_write=0 AND read_seq IS NOT NULL AND refusals=1",
+            params![agent, command, result], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
+#[test]
 fn socket_ownership_framing_deadlines_and_limits() {
     let config = ServerConfig {
         host: "localhost".into(),
@@ -643,7 +676,7 @@ fn waiting_attachments_reauthenticate_before_returning_bytes() {
                 TokenScope::Remote {
                     accounts: std::slice::from_ref(&account.id),
                     level: Level::Read,
-                    ranges: &[],
+                    ranges: &["::1/128".parse().unwrap()],
                     expires: (change == "expire").then(|| chrono::Utc::now().timestamp() + 2),
                 },
             )

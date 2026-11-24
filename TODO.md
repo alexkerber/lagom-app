@@ -233,6 +233,15 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     Tests verified cancellation, EOF, credential checks and interrupted setup.
     The macOS release measured 19.60 MB against the 30 MB budget.
     Live providers, external agent sessions and Linux remain untested.
+  - [x] Hardened remote SSH agents on `feat/agents-remote`.
+    Remote tokens require source ranges. Settings previews canonical ranges and rejects broad networks.
+    Verified refusals count toward the token’s rate limit. Each token can hold four requests.
+    The audit log names remote refusals only after the server handles them. Earlier rejections use “unknown”.
+    SSH keys use restrict, source and expiry limits, and a checked executable path.
+    Settings hides the token until requested. macOS marks copied tokens as concealed.
+    Socket tests verified refusal logging and permission checks while attachments were pending.
+    Core and desktop tests passed. The macOS desktop build passed.
+    Live SSH login, manual Settings checks and Linux remain unverified.
 
 ## Calendar
 
