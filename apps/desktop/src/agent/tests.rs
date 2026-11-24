@@ -800,6 +800,17 @@ fn writes_scope_all_inputs_and_keep_other_agents_and_personal_drafts_read_only()
         ..Default::default()
     };
     f.store.save_draft(&personal).unwrap();
+    f.level(1);
+    let listing = response(f.start("draft.list",json!({})));
+    let drafts = listing["result"]["drafts"].as_array().unwrap();
+    assert_eq!(drafts.len(),2);
+    for draft in drafts {
+        assert!(draft.get("revision").is_none());
+        let shown = response(f.start("draft.show",json!({"id":draft["id"]})));
+        assert_eq!(shown["ok"],true);
+        assert!(shown["result"].get("revision").is_none());
+    }
+    f.level(3);
     for id in [
         foreign["result"]["id"].clone(),
         json!(ObjectId::Draft(f.account.id.clone(), personal.id).encode()),
@@ -854,7 +865,7 @@ fn writes_scope_all_inputs_and_keep_other_agents_and_personal_drafts_read_only()
 
 #[test]
 fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
-    for mode in ["unsupported", "move", "lost", "revoked_after_copy"] {
+    for mode in ["unsupported", "move", "lost", "revoked_after_copy", "revoked_after_store"] {
         let supported = mode != "unsupported";
         let mut f = WriteFixture::new();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -928,7 +939,7 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
                     let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
                     let data = match cmd {
                         "LOGIN \"fixture\" \"fixture\"" => "",
-                        "CAPABILITY" if mode == "revoked_after_copy" => "* CAPABILITY IMAP4rev1 UIDPLUS\r\n",
+                        "CAPABILITY" if mode.starts_with("revoked_after_") => "* CAPABILITY IMAP4rev1 UIDPLUS\r\n",
                         "CAPABILITY" if supported => "* CAPABILITY IMAP4rev1 MOVE\r\n",
                         "CAPABILITY" => "* CAPABILITY IMAP4rev1\r\n",
                         _ if supported && cmd.starts_with("LIST ") => {
@@ -936,6 +947,14 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
                         }
                         _ if supported && cmd.starts_with("SELECT ") => {
                             "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 1] next\r\n"
+                        }
+                        "UID COPY 1 \"Archive\"" if mode == "revoked_after_store" => {
+                            moves += 1;
+                            ""
+                        }
+                        "UID STORE 1 +FLAGS.SILENT (\\Deleted)" if mode == "revoked_after_store" => {
+                            Connection::open(&path).unwrap().execute("DELETE FROM agent_tokens", []).unwrap();
+                            ""
                         }
                         "UID COPY 1 \"Archive\"" if mode == "revoked_after_copy" => {
                             Connection::open(&path).unwrap().execute("DELETE FROM agent_tokens", []).unwrap();
@@ -971,7 +990,7 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
                 json!({"id":id})
             };
             let result = f.write(cmd, args);
-            if matches!(mode, "lost" | "revoked_after_copy") {
+            if matches!(mode, "lost" | "revoked_after_copy" | "revoked_after_store") {
                 assert_eq!(result["error"]["code"], "uncertain");
                 assert_eq!(f.store.agent_audit(1).unwrap()[0].result, "uncertain");
             } else if supported {
@@ -1022,7 +1041,7 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         .unwrap();
     f.store.set_agent_setting(Setting::Confirm, false).unwrap();
     let id = ObjectId::Event(f.account.id.clone(), "primary".into(), "existing".into()).encode();
-    let create = json!({"title":"New event","start":"2026-11-24","end":"2026-11-25","calendar":"primary"});
+    let create = json!({"guests":"guest@xn--bcher-kva.example,GUEST@bücher.example","title":"New event","start":"2026-11-24","end":"2026-11-25","calendar":"primary"});
     let update = json!({"id":id,"title":"Updated"});
     let delete = json!({"id":id});
     f.level(1);
@@ -1034,6 +1053,11 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         assert_eq!(response(f.start(cmd, args))["error"]["code"], "forbidden");
     }
     f.level(3);
+    for bad in [r#""quoted"@example.org"#, "å@example.org"] {
+        let mut invalid = create.clone();
+        invalid["guests"] = json!(bad);
+        assert_eq!(response(f.start("event.create",invalid))["error"]["code"],"invalid_request");
+    }
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let base = format!("http://{}/", listener.local_addr().unwrap());
     crate::agent::write::CALENDAR_FIXTURES
@@ -1088,6 +1112,10 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
                 .unwrap_or(0);
             let mut bytes = vec![0; length];
             io.read_exact(&mut bytes).unwrap();
+            if method == "POST" {
+                let payload: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(payload["attendees"],json!([{"email":"guest@xn--bcher-kva.example"}]));
+            }
             if status != 0 {
                 if method == "PATCH" && status == 200 {
                     Connection::open(&policy_path).unwrap().execute("UPDATE agent_access SET level=1 WHERE kind='calendar'", []).unwrap();
@@ -1115,6 +1143,7 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         };
         let row = |label: &str, value: &str| sheet.rows.iter().find(|r| r.label == label && r.value == value);
         assert!(row("Calendar", "Fixture").is_some());
+        if cmd == "event.create" { assert_eq!(sheet.rows.iter().filter(|r| r.label == "Guest").count(),1); }
         if cmd != "event.create" {
             // Google's current guest shows once, untagged; the unchanged description is the body.
             assert!(row("Guest", "hidden@example.org").is_some_and(|r| r.tag.is_none()));
@@ -1403,6 +1432,9 @@ fn protocol_limits_apply_before_confirmation() {
     let addresses = vec!["a@example.org"; 101].join(",");
     for (cmd, args) in [
         ("draft.create", json!({"to":addresses})),
+        ("draft.create", json!({"body":"å".repeat(100_001)})),
+        ("event.create", json!({"description":"å".repeat(8193)})),
+        ("event.create", json!({"location":"å".repeat(1025)})),
         ("event.create", json!({"guests":addresses})),
         ("event.create", json!({"title":"a\nb"})),
         ("event.update", json!({"location":"a\rb"})),
@@ -1416,16 +1448,30 @@ fn protocol_limits_apply_before_confirmation() {
 #[test]
 fn draft_show_limits_unicode_body_and_audits_its_target() {
     let mut f = WriteFixture::new();
-    let d = f.write("draft.create", json!({"body":"å".repeat(100_001),"to":"Joe <j@example.org>","cc":"j@example.org"}));
+    let d = f.write("draft.create", json!({"body":"å".repeat(100_000),"to":"Joe <j@bücher.org>","cc":"J@xn--bcher-kva.org"}));
     let id = &d["result"]["id"];
     let result = response(f.start("draft.show", json!({"id":id})));
     assert_eq!(result["result"]["body"].as_str().unwrap().chars().count(),100_000);
-    assert_eq!(result["result"]["truncated"],true);
+    assert_eq!(result["result"]["truncated"],false);
     let target:String = Connection::open(f.store.path()).unwrap().query_row(
         "SELECT target FROM agent_audit WHERE command='draft.show'", [], |r|r.get(0)).unwrap();
     assert_eq!(&target, id.as_str().unwrap());
     let (_, sheet) = f.sending(id);
+    assert_eq!(sheet.body.chars().count(), 100_000);
     assert_eq!(sheet.rows.iter().filter(|r| matches!(r.label,"To"|"Cc")).count(),1);
+    let ObjectId::Draft(_, raw) = ObjectId::decode(id.as_str().unwrap()).unwrap() else { panic!() };
+    let mut draft = f.store.draft(&raw).unwrap();
+    draft.text.push('å');
+    f.store.save_draft(&draft).unwrap();
+    let shown = response(f.start("draft.show",json!({"id":id})));
+    assert_eq!(shown["result"]["truncated"],true);
+    assert_eq!(shown["result"]["body"].as_str().unwrap().chars().count(),100_000);
+    assert_eq!(response(f.start("draft.send",json!({"id":id})))["error"]["code"],"invalid_request");
+    f.store.set_agent_setting(lagom_core::agent::policy::Setting::Confirm,false).unwrap();
+    for bad in [r#""quoted"@example.org"#, "å@example.org"] {
+        let draft = f.write("draft.create",json!({"to":bad}));
+        assert_eq!(response(f.start("draft.send",json!({"id":draft["result"]["id"]})))["error"]["code"],"invalid_request");
+    }
 }
 
 #[test]

@@ -89,11 +89,14 @@ impl Attachment {
 }
 
 pub(super) fn clean(s: &str) -> String {
+    use icu_properties::{CodePointMapData, CodePointSetData, props::{DefaultIgnorableCodePoint, GeneralCategory}};
+    let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
+    let category = CodePointMapData::<GeneralCategory>::new();
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if c.is_control() && c != '\n' {
             out.extend(c.escape_default());
-        } else if matches!(c,'\u{200b}'..='\u{200f}'|'\u{2060}'|'\u{feff}'|'\u{2028}'|'\u{2029}'|'\u{061c}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+        } else if ignorable.contains(c) || category.get(c) == GeneralCategory::Format || matches!(c, '\u{2028}' | '\u{2029}')
         {
             out.extend(c.escape_unicode());
         } else {
@@ -272,7 +275,8 @@ pub(super) fn dispatch(
                 for id in ids {
                     let (revision, agent) = store.agent_draft_meta(&a, &id)?;
                     let d = store.draft(&id).map_err(error)?;
-                    let mut value = json!({"id":ObjectId::Draft(a.clone(),id).encode(),"account":a,"agent":agent,"revision":revision,"subject":clean(&d.subject),"to":clean(&d.to)});
+                    let mut value = json!({"id":ObjectId::Draft(a.clone(),id).encode(),"account":a,"agent":agent,"subject":clean(&d.subject),"to":clean(&d.to)});
+                    if agent.as_deref() == Some(who.agent_id()) { value["revision"] = json!(revision); }
                     if cmd == "draft.show" {
                         value["cc"] = json!(clean(&d.cc));
                         value["bcc"] = json!(clean(&d.bcc));

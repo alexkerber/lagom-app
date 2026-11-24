@@ -122,10 +122,11 @@ fn recipients(groups: &mut [&mut Vec<String>]) -> Result<()> {
     }
     let mut seen = std::collections::HashSet::new();
     for group in groups {
-        group.retain(|s| {
-            let address = lagom_core::contacts::recipient_address(s).unwrap_or_else(|| s.clone());
-            seen.insert(address.to_ascii_lowercase())
-        });
+        for value in std::mem::take(*group) {
+            if seen.insert(super::confirm::normal(&value)?) {
+                group.push(value);
+            }
+        }
     }
     Ok(())
 }
@@ -137,6 +138,11 @@ fn scope(store: &Store, who: &Identity, r: &Request) -> Result<String> {
         .any(|(k, v)| !v.is_string() || k != "account" && !keys.contains(&k.as_str()))
     {
         return Err(Code::InvalidRequest.into());
+    }
+    for (key, limit) in [("body", 100_000), ("description", 8192), ("location", 1024)] {
+        if field(r, key).is_some_and(|v| v.chars().nth(limit).is_some()) {
+            return Err(Code::InvalidRequest.into());
+        }
     }
     for key in ["title", "subject"] {
         if let Some(value) = field(r, key) { check_subject(value)?; }
@@ -266,6 +272,7 @@ fn outgoing(mut d: Draft) -> Result<Outgoing> {
         d.text.push_str("\n\n");
         d.text.push_str(&quote.text);
     }
+    if d.text.chars().nth(100_000).is_some() { return Err(Code::InvalidRequest.into()); }
     Ok(Outgoing {
         to,
         cc,
@@ -597,6 +604,7 @@ pub fn draft_change(
             d.text = body.into();
         }
     }
+    if d.text.chars().nth(100_000).is_some() { return Err(Code::InvalidRequest.into()); }
     check_subject(&d.subject)?;
     store.save_draft(&d).map_err(error)?;
     if creating {

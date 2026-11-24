@@ -59,21 +59,23 @@ fn address(value: &str) -> Result<String, Code> {
         if warn { " ⚠" } else { "" }
     );
     if let Some(name) = &mailbox.name {
-        let mut short: String = name.chars().take(64).collect();
-        if short.len() < name.len() {
-            short.pop();
-            short.push('…');
-        }
-        result.push_str(&format!(" ({short})"));
+        let mut chars = name.chars();
+        let shown: String = chars.by_ref().take(64).collect();
+        result.push_str(&format!(" ({shown})"));
+        let remaining = chars.count();
+        if remaining > 0 { result.push_str(&format!(" ({remaining} more characters)")); }
     }
     Ok(result)
 }
 
 /// The address a calendar compares: punycode domain, any case, no display name.
-fn normal(value: &str) -> Result<String, Code> {
+pub(super) fn normal(value: &str) -> Result<String, Code> {
     let mailbox = value
         .parse::<lettre::message::Mailbox>()
         .map_err(|_| Code::InvalidRequest)?;
+    if !mailbox.email.user().is_ascii() || mailbox.email.user().contains('"') || value.chars().any(char::is_control) {
+        return Err(Code::InvalidRequest);
+    }
     let domain = idna::domain_to_ascii(mailbox.email.domain()).map_err(|_| Code::InvalidRequest)?;
     Ok(format!("{}@{domain}", mailbox.email.user()).to_lowercase())
 }
@@ -116,7 +118,7 @@ fn local_time(value: &str) -> String {
 }
 
 impl Sheet {
-    pub fn decide(self, approve: bool) {
+    pub fn decide(self, approve: bool) -> bool {
         use std::io::{ErrorKind, Read};
         // Check the socket at the click even if the listener has not handled EOF yet.
         let connected = approve
@@ -125,9 +127,7 @@ impl Sheet {
                 .peer
                 .upgrade()
                 .is_some_and(|s| matches!((&*s).read(&mut [0]),Err(e) if e.kind()==ErrorKind::WouldBlock));
-        let _ = self
-            .answer
-            .send(if connected { Ok(()) } else { Err(Code::Denied) });
+        self.answer.send(if connected { Ok(()) } else { Err(Code::Denied) }).is_ok() && connected
     }
 
     pub fn new(
@@ -288,7 +288,9 @@ Noor, you are welcome too. Bring the card game.\n\n"
 #[derive(Default)]
 pub(crate) struct Waiting {
     pub sheets: std::collections::VecDeque<Sheet>,
-    pub pressed: Option<usize>,
+    pub pressed: Option<(usize, bool)>,
+    pub withdrawn: bool,
+    pub scroll: [gpui::ScrollHandle; 2],
     pub front_since: Option<(usize, std::time::Instant)>,
 }
 
@@ -308,17 +310,35 @@ impl Denials {
 impl gpui::Global for Waiting {}
 
 impl Waiting {
+    pub fn prune(&mut self, denials: &mut Denials) {
+        if self.sheets.front().is_some_and(|s| s.answer.is_closed()) {
+            self.scroll = Default::default();
+            self.withdrawn = true;
+            self.pressed = None;
+        }
+        self.sheets.retain(|s| {
+            if !s.answer.is_closed() { return true; }
+            denials.deny(s.agent.clone());
+            false
+        });
+    }
+
+    pub fn delay(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(if self.withdrawn { 1500 } else { 700 })
+    }
+
     pub fn armed(&self, serial: usize, keyboard: bool, activating: bool, active: bool) -> bool {
         !keyboard
             && !activating
             && active
             && self
                 .front_since
-                .is_some_and(|(id, at)| id == serial && at.elapsed() >= std::time::Duration::from_millis(700))
+                .is_some_and(|(id, at)| id == serial && at.elapsed() >= self.delay())
     }
     pub fn push(&mut self, sheet: Sheet, denials: &mut Denials) -> bool {
-        self.sheets.retain(|s| !s.answer.is_closed());
+        self.prune(denials);
         if sheet.answer.is_closed() {
+            denials.deny(sheet.agent);
             return false;
         }
         if denials.cooling_down(&sheet.agent)
@@ -343,10 +363,16 @@ mod tests {
             line("a\n\t\u{200b}\u{200c}\u{200d}\u{2060}\u{feff}\u{2028}\u{2029}\u{202e}"),
             r"a\n\t\u{200b}\u{200c}\u{200d}\u{2060}\u{feff}\u{2028}\u{2029}\u{202e}"
         );
+        for c in ['\u{ad}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{2061}', '\u{2064}', '\u{e0000}', '\u{e007f}', '\u{600}'] {
+            assert_eq!(line(&c.to_string()), c.escape_unicode().to_string());
+        }
+        for bad in [r#""quoted"@example.org"#, "å@example.org"] {
+            assert_eq!(normal(bad), Err(Code::InvalidRequest));
+        }
         let name = "a".repeat(70);
         assert_eq!(
             address(&format!("{name} <me@bücher.example>")).unwrap(),
-            format!("me@xn--bcher-kva.example ⚠ ({}…)", "a".repeat(63))
+            format!("me@xn--bcher-kva.example ⚠ ({}) (6 more characters)", "a".repeat(64))
         );
         let time = |v| local_time(v).split(' ').nth(2).unwrap().to_owned();
         assert!(time("2026-11-26T14:00:30+00:00").ends_with(":30"));

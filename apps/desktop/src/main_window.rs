@@ -2675,7 +2675,7 @@ impl Render for MainWindow {
         let t = self.theme;
         #[cfg(unix)]
         {
-            self.agent_sheets.sheets.retain(|s|!s.answer.is_closed());
+            self.agent_sheets.prune(cx.default_global::<crate::agent::confirm::Denials>());
             if let Some(sheet) = self.agent_sheets.sheets.front() {
                 if self.agent_sheets.front_since.is_none_or(|(id, _)| id != sheet.serial) {
                     self.agent_sheets.front_since = Some((sheet.serial, std::time::Instant::now()));

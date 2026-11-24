@@ -211,7 +211,7 @@ impl MainWindow {
 #[cfg(unix)]
 impl MainWindow {
     pub(super) fn watch_agent_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.agent_sheets.sheets.retain(|s| !s.answer.is_closed());
+        self.agent_sheets.prune(cx.default_global::<crate::agent::confirm::Denials>());
         for sheet in &mut self.agent_sheets.sheets {
             if let Some(done) = sheet.closed.take() {
                 cx.spawn(async move |this, cx| {
@@ -231,8 +231,11 @@ impl MainWindow {
             return;
         }
         if let Some(sheet) = self.agent_sheets.sheets.pop_front() {
-            if !approve { cx.default_global::<crate::agent::confirm::Denials>().deny(sheet.agent.clone()); }
-            sheet.decide(approve);
+            let agent = sheet.agent.clone();
+            let approved = sheet.decide(approve);
+            self.agent_sheets.scroll = Default::default();
+            self.agent_sheets.withdrawn = approve && !approved;
+            if !approved { cx.default_global::<crate::agent::confirm::Denials>().deny(agent); }
         }
         if self.agent_sheets.sheets.is_empty() {
             self.focus.focus(window);
@@ -246,16 +249,19 @@ impl MainWindow {
         let sheet = &self.agent_sheets.sheets[0];
         let serial = sheet.serial;
         let t = self.theme;
-        let truncated = !sheet.expanded && (!sheet.body.is_empty() || sheet.previous_description.is_some());
-        let body = if truncated {
-            sheet.body.chars().take(2000).collect()
-        } else {
-            sheet.body.clone()
+        let overflow = |scroll: &gpui::ScrollHandle| {
+            let max = scroll.max_offset().height;
+            (max > px(0.), max + scroll.offset().y > px(0.5))
         };
+        let status = self.agent_sheets.scroll.each_ref().map(overflow);
+        cx.on_next_frame(window, move |this, _, cx| {
+            if this.agent_sheets.sheets.front().is_some_and(|s| s.serial == serial)
+                && this.agent_sheets.scroll.each_ref().map(overflow) != status { cx.notify(); }
+        });
         // Show the arming state only; the click handlers check it again.
         let armed = self.agent_sheets.armed(serial, false, false, window.is_window_active());
         if let Some(left) = self.agent_sheets.front_since.filter(|_| !armed)
-            .and_then(|(_, at)| std::time::Duration::from_millis(700).checked_sub(at.elapsed())) {
+            .and_then(|(_, at)| self.agent_sheets.delay().checked_sub(at.elapsed())) {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(left + std::time::Duration::from_millis(10)).await;
                 this.update(cx, |_, cx| cx.notify()).ok();
@@ -277,8 +283,7 @@ impl MainWindow {
                 plates.push(div().flex_shrink_0().flex().flex_col().rounded(px(radius::PANEL)).bg(t.subtle).border_1().border_color(t.line).overflow_hidden());
             }
             last = Some(g);
-            let one = matches!(r.label, "Title" | "Subject");
-            let text = |v: &String| div().min_w(px(0.)).when(one, |d| d.one_line()).child(v.clone());
+            let text = |v: &String| div().min_w(px(0.)).child(v.clone());
             let value = div().flex_1().min_w(px(0.)).flex().flex_wrap().text_size(px(size::BASE))
                 .when(matches!(r.label, "Agent" | "Title" | "Subject"), |v| v.font_weight(FontWeight::MEDIUM))
                 .children(r.old.as_ref().map(|old| text(old).text_color(t.ink2).line_through()))
@@ -299,9 +304,10 @@ impl MainWindow {
             }
         }
         let caption = |text: &'static str| div().flex_shrink_0().pt(px(4.)).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM).text_color(t.ink2).child(text);
-        let text_box = |id: &'static str, text: String, cap: f32, ink: Rgba| div().id(id).flex_shrink_0().max_h(px(cap)).overflow_y_scroll()
+        let text_box = |index: usize, id: &'static str, text: String, cap: f32, ink: Rgba| div().flex_shrink_0().child(div().id((id, serial)).flex_shrink_0().max_h(px(cap)).overflow_y_scroll().track_scroll(&self.agent_sheets.scroll[index])
             .px(px(14.)).py(px(10.)).rounded(px(radius::PANEL)).bg(t.subtle).border_1().border_color(t.line)
-            .text_size(px(size::BASE)).line_height(relative(1.45)).text_color(ink).child(text);
+            .text_size(px(size::BASE)).line_height(relative(1.45)).text_color(ink).child(text))
+            .when(status[index].1, |d| d.child(caption("More below ↓").debug_selector(move || format!("more-{id}"))));
         let delete = sheet.approve_label == "Delete event";
         let approve = if armed {
             button(&t, sheet.approve_label, Some(if delete { t.danger } else { t.accent })).border_1().border_color(gpui::transparent_black())
@@ -309,6 +315,21 @@ impl MainWindow {
             // Before arming it is no stronger than Deny.
             button(&t, sheet.approve_label, None).border_1().border_color(t.line).text_color(t.ink2)
         };
+        let guarded = |button: gpui::Stateful<gpui::Div>, approve: bool| button.id((if approve { "approve-agent" } else { "revoke-agent" }, serial))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, w, _| {
+                this.agent_sheets.pressed = this.agent_sheets.armed(serial, false, event.first_mouse, w.is_window_active()).then_some((serial, approve));
+            }))
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, w, cx| {
+                if this.agent_sheets.pressed.take() != Some((serial, approve))
+                    || !this.agent_sheets.armed(serial, event.is_keyboard(), event.first_focus(), w.is_window_active()) {
+                    return;
+                }
+                if let Some(sheet) = this.agent_sheets.sheets.front().filter(|s| s.serial == serial) {
+                    let agent = sheet.agent.clone();
+                    this.answer_agent(serial, approve, w, cx);
+                    if !approve { this.agent_change(AgentChange::Disconnect(agent), cx); }
+                }
+            }));
         div()
             .size_full()
             .flex()
@@ -338,6 +359,7 @@ impl MainWindow {
                     .w(px(560.))
                     .max_h_full()
                     .child(page_title(sheet.heading))
+                    .when(self.agent_sheets.withdrawn, |d| d.child("The previous request was withdrawn"))
                     .child(
                         div()
                             .id("agent-preview")
@@ -347,11 +369,11 @@ impl MainWindow {
                             .gap(px(8.))
                             .children(plates)
                             .when_some(sheet.previous_description.clone(), |d, description| d.child(caption("Current description"))
-                                .child(text_box("current-description", description, if sheet.expanded { 320. } else { 120. }, t.ink2)))
+                                .child(text_box(1, "current-description", description, if sheet.expanded { 320. } else { 120. }, t.ink2)))
                             .child(caption(if sheet.approve_label == "Send" { "Message" } else { "Description" }))
-                            .child(text_box("confirmation-body", body, if sheet.expanded { 320. } else { 180. }, t.ink))
-                            .when(truncated, |d| {
-                                d.child(div().flex().child(button(&t, "Show all", None).ml(px(-12.)).text_color(t.ink2).on_click(cx.listener(|this, _, _, cx| {
+                            .child(text_box(0, "confirmation-body", sheet.body.clone(), if sheet.expanded { 320. } else { 180. }, t.ink))
+                            .when(!sheet.expanded && status.iter().any(|s| s.0), |d| {
+                                d.child(div().flex().child(button(&t, "Expand", None).ml(px(-12.)).text_color(t.ink2).on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(s) = this.agent_sheets.sheets.front_mut() {
                                         s.expanded = true;
                                     }
@@ -365,13 +387,7 @@ impl MainWindow {
                             .items_center()
                             .gap(px(8.))
                             .child(
-                                button(&t, "Deny and revoke", None).ml(px(-12.)).text_color(t.danger).on_click(cx.listener(move |this, _, w, cx| {
-                                    if let Some(sheet) = this.agent_sheets.sheets.front().filter(|s| s.serial == serial) {
-                                        let agent = sheet.agent.clone();
-                                        this.answer_agent(serial, false, w, cx);
-                                        this.agent_change(AgentChange::Disconnect(agent), cx);
-                                    }
-                                })),
+                                guarded(button(&t, "Deny and revoke", None).ml(px(-12.)).text_color(if armed { t.danger } else { t.ink2 }), false),
                             )
                             .child(div().flex_1())
                             .child(
@@ -385,18 +401,7 @@ impl MainWindow {
                                     ),
                             )
                             .child(
-                                approve
-                                .id(("approve-agent", serial))
-                                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, w, _| {
-                                    this.agent_sheets.pressed = this.agent_sheets.armed(serial, false, event.first_mouse, w.is_window_active()).then_some(serial);
-                                }))
-                                .on_click(
-                                    cx.listener(move |this, event: &gpui::ClickEvent, w, cx| {
-                                        if this.agent_sheets.pressed.take() == Some(serial) && this.agent_sheets.armed(serial, event.is_keyboard(), event.first_focus(), w.is_window_active()) {
-                                            this.answer_agent(serial, true, w, cx);
-                                        }
-                                    }),
-                                ),
+                                guarded(approve, true),
                             ),
                     ),
             )

@@ -4379,6 +4379,49 @@ mod tests {
 
     #[cfg(unix)]
     #[gpui::test]
+    fn confirmation_scrolls_to_the_end_and_marks_withdrawals(cx: &mut TestAppContext) {
+        use crate::agent::{confirm::Sheet,write::Snapshot};
+        use lagom_core::agent::{protocol::{Code,Request},token::AgentRow};
+        let (view,cx,_) = window(cx);
+        let show = |id: &str, text: &str, cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |v,w,cx| {
+                let agent = AgentRow { id:id.into(),name:id.into(),kind:"fixture".into(),host:"here".into(),remote:false,active:true };
+                let req: Request = serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
+                let (done,closed) = tokio::sync::oneshot::channel();
+                let mail = lagom_core::smtp::Outgoing {text:text.into(),..Default::default()};
+                let (sheet, answer) = Sheet::new(agent,v.live.as_ref().unwrap().account().unwrap(),&req,
+                    &Snapshot::Mail(String::new(),mail),closed,Default::default()).unwrap();
+                v.on_events(vec![Event::AgentConfirm(sheet)],w,cx);
+                (done,answer)
+            })
+        };
+        let first = show("one","short",cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Expand").is_none());
+        let _second = show("two",&"Long message line\n".repeat(500),cx);
+        drop(first);
+        cx.run_until_parked();
+        assert_eq!(show("one","again",cx).1.try_recv().unwrap(), Err(Code::Busy));
+        view.update(cx,|v,_| {
+            assert!(v.agent_sheets.withdrawn);
+            let (serial, at) = v.agent_sheets.front_since.as_mut().unwrap();
+            let serial = *serial;
+            *at -= std::time::Duration::from_millis(800);
+            assert!(!v.agent_sheets.armed(serial,false,false,true));
+        });
+        assert!(cx.debug_bounds("Expand").is_some());
+        assert!(cx.debug_bounds("more-confirmation-body").is_some());
+        view.update(cx,|v,cx| {
+            let scroll = &v.agent_sheets.scroll[0];
+            scroll.set_offset(gpui::point(px(0.),-scroll.max_offset().height));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("more-confirmation-body").is_none());
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
     fn agent_sheet_focus_keys_and_background_notice(cx: &mut TestAppContext) {
         use crate::agent::{confirm::Sheet,write::Snapshot};
         use lagom_core::agent::{protocol::{Code,Request},token::AgentRow};
@@ -4414,7 +4457,7 @@ mod tests {
                 cx.run_until_parked();
                 let label = if action == "approve" { "Send" } else { "Deny and revoke" };
                 let at = cx.debug_bounds(label).unwrap().center();
-                if action == "approve" {
+                {
                     cx.simulate_click(at, Default::default());
                     assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
                     view.update(cx,|v,_| v.agent_sheets.front_since.as_mut().unwrap().1 -= std::time::Duration::from_secs(1));
