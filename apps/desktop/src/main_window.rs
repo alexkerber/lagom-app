@@ -633,7 +633,7 @@ impl MainWindow {
                 this.settings_scroll.scroll_to_bottom();
             }
             #[cfg(unix)]
-            "agent-confirm-send" | "agent-confirm-event" if demo => {
+            "agent-confirm-send" | "agent-confirm-event" | "agent-confirm-delete" if demo => {
                 this.agent_sheets.sheets.extend(crate::agent::confirm::demo(screen));
                 this.watch_agent_sheets(window, cx);
             }

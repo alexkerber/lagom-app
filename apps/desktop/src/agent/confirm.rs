@@ -17,11 +17,25 @@ pub(crate) struct Sheet {
     pub agent: String,
     pub heading: &'static str,
     pub approve_label: &'static str,
-    pub rows: Vec<(&'static str, String)>,
+    pub rows: Vec<Row>,
     pub previous_description: Option<String>,
     pub body: String,
     pub expanded: bool,
     pub answer: oneshot::Sender<Result<(), Code>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tag {
+    Added,
+    Removed,
+}
+
+/// One fixed label and its escaped value. `old`: the current value when a change replaces it.
+pub(crate) struct Row {
+    pub label: &'static str,
+    pub value: String,
+    pub old: Option<String>,
+    pub tag: Option<Tag>,
 }
 
 fn line(value: &str) -> String {
@@ -53,6 +67,40 @@ fn address(value: &str) -> Result<String, Code> {
         result.push_str(&format!(" ({short})"));
     }
     Ok(result)
+}
+
+/// The address a calendar compares: punycode domain, any case, no display name.
+fn normal(value: &str) -> Result<String, Code> {
+    let mailbox = value
+        .parse::<lettre::message::Mailbox>()
+        .map_err(|_| Code::InvalidRequest)?;
+    let domain = idna::domain_to_ascii(mailbox.email.domain()).map_err(|_| Code::InvalidRequest)?;
+    Ok(format!("{}@{domain}", mailbox.email.user()).to_lowercase())
+}
+
+/// Each guest once, as the event will have them. On a change (`old` and `new`), a guest that
+/// only `new` has is Added and one that only `old` has is Removed.
+fn guests(old: Option<&[String]>, new: Option<&[String]>) -> Result<Vec<(String, Option<Tag>)>, Code> {
+    let parse = |list: &[String]| list.iter().map(|g| Ok((normal(g)?, address(g)?))).collect::<Result<Vec<_>, Code>>();
+    let before = old.map(parse).transpose()?.unwrap_or_default();
+    let after = new.map(parse).transpose()?;
+    let compare = old.is_some() && after.is_some();
+    let has = |list: &[(String, String)], key: &str| list.iter().any(|(k, _)| k == key);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (key, shown) in after.as_deref().unwrap_or(&before) {
+        if seen.insert(key.clone()) {
+            out.push((shown.clone(), (compare && !has(&before, key)).then_some(Tag::Added)));
+        }
+    }
+    if compare {
+        for (key, shown) in &before {
+            if seen.insert(key.clone()) {
+                out.push((shown.clone(), Some(Tag::Removed)));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn local_time(value: &str) -> String {
@@ -92,7 +140,8 @@ impl Sheet {
     ) -> Result<(Self, oneshot::Receiver<Result<(), Code>>), Code> {
         let (answer, rx) = oneshot::channel();
         let mut rows = Vec::new();
-        let mut row = |label, value: &str| rows.push((label, line(value)));
+        let mut push = |label, value: &str, old: Option<&str>, tag| rows.push(Row { label, value: line(value), old: old.map(line), tag });
+        let mut row = |label, value: &str| push(label, value, None, None);
         row("Agent", &format!("{} ({})", agent.name, agent.host));
         let from = if matches!(snapshot, Snapshot::Mail(..)) { "From" } else { "Account" };
         row(from, &address(&account.email)?);
@@ -112,48 +161,39 @@ impl Sheet {
                 body = m.text.clone();
             }
             Snapshot::Event { name, old, new, .. } => {
-                if let Some(s) = old {
-                    for guest in &s.attendees {
-                        row("Current guest", &address(guest)?);
-                    }
-                }
-                if let Some(e) = new {
-                    let guests = if e.attendees.is_empty() {
-                        old.as_ref().map(|s| &s.attendees).unwrap_or(&e.attendees)
-                    } else {
-                        &e.attendees
-                    };
-                    for guest in guests {
-                        row("Guest", &address(guest)?);
-                    }
+                let current = old.as_ref().map(|s| s.attendees.as_slice());
+                // A change without guests keeps the current ones.
+                let next = new.as_ref().map(|e| if e.attendees.is_empty() { current.unwrap_or_default() } else { &e.attendees[..] });
+                for (guest, tag) in guests(current, next)? {
+                    push("Guest", &guest, None, tag);
                 }
                 let was = old.as_ref().map(|s| &s.event);
-                let location = |e: &NewEvent| e.location.as_deref().or_else(|| was?.location.as_deref()).unwrap_or("").to_owned();
-                // Each current value sits right above its new one, so a change reads as a pair.
+                let or_none = |v: Option<&str>| v.filter(|v| !v.is_empty()).unwrap_or("None").to_owned();
+                let meet = |e: &NewEvent| if e.meet { "New link".into() } else { or_none(was.and_then(|w| w.join_url.as_deref())) };
                 let fields = [
-                    ("Current title", "Title", was.map(|e| e.title.clone()), new.as_ref().map(|e| e.title.clone())),
-                    ("Current start", "Start", was.map(|e| local_time(&e.start)), new.as_ref().map(|e| local_time(&e.start))),
-                    ("Current end", "End", was.map(|e| local_time(&e.end)), new.as_ref().map(|e| local_time(&e.end))),
-                    ("Current location", "Location", was.map(|e| e.location.clone().unwrap_or_default()), new.as_ref().map(location)),
-                    ("Current Meet", "Create Meet link", was.map(|e| e.join_url.clone().unwrap_or_else(|| "None".into())),
-                        new.as_ref().map(|e| if e.meet { "Yes" } else { "No" }.into())),
+                    ("Title", was.map(|e| e.title.clone()), new.as_ref().map(|e| e.title.clone())),
+                    ("Calendar", None, Some(name.clone())),
+                    ("Start", was.map(|e| local_time(&e.start)), new.as_ref().map(|e| local_time(&e.start))),
+                    ("End", was.map(|e| local_time(&e.end)), new.as_ref().map(|e| local_time(&e.end))),
+                    ("Location", was.map(|e| or_none(e.location.as_deref())),
+                        new.as_ref().map(|e| or_none(e.location.as_deref().or_else(|| was?.location.as_deref())))),
+                    ("Meet", was.map(|e| or_none(e.join_url.as_deref())), new.as_ref().map(meet)),
                 ];
-                for (ix, (current, next, before, after)) in fields.into_iter().enumerate() {
-                    if let Some(v) = before {
-                        row(current, &v);
-                    }
-                    if let Some(v) = after {
-                        row(next, &v);
-                    }
-                    if ix == 0 {
-                        row("Calendar", name);
+                // A changed field is one row: the current value, then the new one.
+                for (label, before, after) in fields {
+                    match (before, after) {
+                        (Some(b), Some(a)) if b != a => push(label, &a, Some(&b), None),
+                        (b, a) => if let Some(v) = a.or(b) { push(label, &v, None, None) },
                     }
                 }
-                previous_description = old.as_ref().and_then(|s| s.description.as_deref()).map(super::read::clean);
+                let current = old.as_ref().and_then(|s| s.description.as_deref()).unwrap_or("");
                 body = match new {
-                    Some(e) => e.description.as_deref().or_else(|| old.as_ref()?.description.as_deref()).unwrap_or("").to_owned(),
-                    None => String::new(),
+                    Some(e) => e.description.as_deref().unwrap_or(current).to_owned(),
+                    None => current.to_owned(),
                 };
+                if new.is_some() && !current.is_empty() && super::read::clean(current) != super::read::clean(&body) {
+                    previous_description = Some(super::read::clean(current));
+                }
             }
             Snapshot::None => unreachable!(),
         }
@@ -185,7 +225,7 @@ impl Sheet {
     }
 }
 
-/// `LAGOM_SCREEN=agent-confirm-send` and `agent-confirm-event`: a sample sheet for screenshots.
+/// `LAGOM_SCREEN=agent-confirm-send`, `agent-confirm-event` and `agent-confirm-delete`: a sample sheet for screenshots.
 pub(crate) fn demo(screen: &str) -> Option<Sheet> {
     use lagom_core::{calendar::Event, google::EventSnapshot, smtp::Outgoing};
     let (cmd, snapshot) = match screen {
@@ -199,7 +239,7 @@ Noor, you are welcome too. Bring the card game.\n\n"
                 .repeat(14) + "See you then,\nAlex",
             ..Default::default()
         })),
-        "agent-confirm-event" => {
+        "agent-confirm-event" | "agent-confirm-delete" => {
             let old = EventSnapshot {
                 event: Event {
                     remote_id: String::new(),
@@ -228,7 +268,10 @@ Noor, you are welcome too. Bring the card game.\n\n"
                 attendees: vec!["you@home.example".into(), "mia@family.example".into(), "Noor <noor@friends.example>".into()],
                 meet: false,
             };
-            ("event.update", Snapshot::Event { calendar: String::new(), name: "Family".into(), old: Some(old), new: Some(new) })
+            match screen {
+                "agent-confirm-delete" => ("event.delete", Snapshot::Event { calendar: String::new(), name: "Family".into(), old: Some(old), new: None }),
+                _ => ("event.update", Snapshot::Event { calendar: String::new(), name: "Family".into(), old: Some(old), new: Some(new) }),
+            }
         }
         _ => return None,
     };
@@ -308,6 +351,28 @@ mod tests {
         let time = |v| local_time(v).split(' ').nth(2).unwrap().to_owned();
         assert!(time("2026-11-26T14:00:30+00:00").ends_with(":30"));
         assert_eq!(time("2026-11-26T14:00:00+00:00").len(), 5);
+    }
+
+    #[test]
+    fn guest_tags_compare_the_full_address() {
+        let list = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let old = list(&["Mia <mia@family.example>", "ola@family.example", "you@home.example"]);
+        let new = list(&["Mia Berg <mia@family.example>", "OLA@Family.Example", "you@home.example.org", "you@home.example"]);
+        assert_eq!(guests(Some(&old), Some(&new)).unwrap(), [
+            ("mia@family.example (Mia Berg)".into(), None),
+            ("OLA@family.example".into(), None),
+            ("you@home.example.org".into(), Some(Tag::Added)),
+            ("you@home.example".into(), None),
+        ]);
+        let gone = list(&["mia@family.example"]);
+        assert_eq!(guests(Some(&old), Some(&gone)).unwrap(), [
+            ("mia@family.example".into(), None),
+            ("ola@family.example".into(), Some(Tag::Removed)),
+            ("you@home.example".into(), Some(Tag::Removed)),
+        ]);
+        // A create or a delete lists guests without tags, each once.
+        assert_eq!(guests(None, Some(&list(&["a@x.example", "A@X.example"]))).unwrap(), [("a@x.example".into(), None)]);
+        assert!(guests(Some(&old), None).unwrap().iter().all(|(_, tag)| tag.is_none()));
     }
 
     #[test]

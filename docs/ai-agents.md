@@ -305,13 +305,18 @@ The Confirmation toggle in Settings controls mail sends for all agents.
 2. A sheet opens in the main window, in the app's own style, not a system dialog. If the window
    is not in front, a system notification says that an agent waits. The notification has no
    Approve button.
-3. Fixed rows show the agent, account and each recipient or guest. Addresses appear first.
-   Display names are limited to 64 characters. Internationalized domains use punycode with a warning mark.
+3. Fixed rows show the agent, the account and each recipient or guest. A mail labels the account
+   From. Addresses appear first, one per row. Display names are limited to 64 characters.
+   Internationalized domains use punycode with a warning mark.
    The sheet escapes control, direction, zero-width and Unicode line separator characters.
    Subjects and titles occupy one line with an ellipsis. Calendars appear by display name.
-   Timed events show local start and end with the UTC offset. All-day events show calendar dates.
-   Event changes include Google's current guests and values. Body and description appear last in
-   height-limited areas with Show all. Replies and forwards send only the reviewed plain text and listed attachments.
+   Timed events show local start and end with the weekday and UTC offset. All-day events show calendar dates.
+   An event change compares with Google's current event. Each guest appears once. A guest the
+   change adds is marked Added, and one it removes is marked Removed. The comparison uses the
+   whole address: punycode domain, any case, no display name. An unchanged field shows once. A
+   changed field shows one row with the current value struck through, an arrow and the new value.
+   The current description appears only when the change replaces it. Body and description appear
+   last in height-limited areas with Show all. Replies and forwards send only the reviewed plain text and listed attachments.
 4. **Deny** has focus and Escape declines. **Deny and revoke** also revokes the agent's tokens.
    After either denial the same agent receives `busy` for 30 seconds.
    Approval requires a mouse click in the active window. Each front sheet and window activation

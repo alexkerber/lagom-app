@@ -1,6 +1,8 @@
 use super::*;
 use crate::settings::agents::{Agents, AGENTS};
 use lagom_core::agent::{policy::{Access, Setting}, protocol::Code};
+#[cfg(unix)]
+use crate::agent::confirm::Tag;
 use lagom_core::store::Store;
 
 /// A click on Settings > AI Agents.
@@ -262,39 +264,36 @@ impl MainWindow {
         // Who and from where, then who receives it, then what it is.
         let group = |label: &str| match label {
             "Agent" | "From" | "Account" => 0,
-            "To" | "Cc" | "Bcc" | "Guest" | "Current guest" => 1,
+            "To" | "Cc" | "Bcc" | "Guest" => 1,
             _ => 2,
         };
-        // On a change, mark guests that the change adds or removes. The address is the first word.
-        let guests = |which: &str| sheet.rows.iter().filter(|(l, _)| *l == which)
-            .map(|(_, v)| v.split(' ').next().unwrap_or_default()).collect::<std::collections::HashSet<_>>();
-        let (before, after) = (guests("Current guest"), guests("Guest"));
-        let compare = !before.is_empty() && !after.is_empty();
+        // Tags are outlined, not tinted: a tint drops red text below 4.5:1 on the plate.
         let mut plates: Vec<Div> = Vec::new();
         let mut last = None;
-        for (label, value) in &sheet.rows {
-            let g = group(label);
+        for r in &sheet.rows {
+            let g = group(r.label);
             let first = last != Some(g);
             if first {
                 plates.push(div().flex_shrink_0().flex().flex_col().rounded(px(radius::PANEL)).bg(t.subtle).border_1().border_color(t.line).overflow_hidden());
             }
             last = Some(g);
-            let current = label.starts_with("Current");
-            let address = value.split(' ').next().unwrap_or_default();
-            let tag = match *label {
-                "Guest" if compare && !before.contains(address) => Some(("Added", t.accent)),
-                "Current guest" if compare && !after.contains(address) => Some(("Removed", t.danger)),
-                _ => None,
-            };
+            let one = matches!(r.label, "Title" | "Subject");
+            let text = |v: &String| div().min_w(px(0.)).when(one, |d| d.one_line()).child(v.clone());
+            let value = div().flex_1().min_w(px(0.)).flex().flex_wrap().text_size(px(size::BASE))
+                .when(matches!(r.label, "Agent" | "Title" | "Subject"), |v| v.font_weight(FontWeight::MEDIUM))
+                .children(r.old.as_ref().map(|old| text(old).text_color(t.ink2).line_through()))
+                .children(r.old.as_ref().map(|_| div().flex_shrink_0().mx(px(6.)).text_color(t.ink2).child("→")))
+                .child(text(&r.value));
+            let tag = r.tag.map(|tag| match tag {
+                Tag::Added => ("Added", t.accent),
+                Tag::Removed => ("Removed", t.danger),
+            });
             let row = div().flex().items_start().gap(px(12.)).px(px(14.)).py(px(7.)).line_height(px(20.))
                 .when(!first, |r| r.border_t_1().border_color(t.line))
-                .child(div().w(px(112.)).flex_shrink_0().text_size(px(size::SNIPPET)).text_color(t.ink2).child(*label))
-                .child(div().flex_1().min_w(px(0.)).text_size(px(size::BASE))
-                    .text_color(if current { t.ink2 } else { t.ink })
-                    .when(matches!(*label, "Agent" | "Title" | "Subject"), |v| v.font_weight(FontWeight::MEDIUM))
-                    .when(matches!(*label, "Title" | "Current title" | "Subject"), |d| d.one_line())
-                    .child(value.clone()))
-                .children(tag.map(|(word, color)| div().flex_shrink_0().text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).text_color(color).child(word)));
+                .child(div().w(px(112.)).flex_shrink_0().text_size(px(size::SNIPPET)).text_color(t.ink2).child(r.label))
+                .child(value)
+                .children(tag.map(|(word, color)| div().flex_shrink_0().px(px(6.)).rounded(px(radius::KEY)).border_1().border_color(color)
+                    .text_size(px(size::SNIPPET)).font_weight(FontWeight::MEDIUM).text_color(color).child(word)));
             if let Some(plate) = plates.pop() {
                 plates.push(plate.child(row));
             }

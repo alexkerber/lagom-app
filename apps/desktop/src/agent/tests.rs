@@ -685,7 +685,7 @@ fn draft_confirmation_sends_only_the_reviewed_revision_and_undo_restores_ownersh
         panic!()
     };
     let (s, sheet) = f.sending(id);
-    assert!(sheet.rows.iter().any(|(k,v)| *k == "Agent" && v.contains("Test Agent")) && sheet.rows.contains(&("To","a@example.com".into())));
+    assert!(sheet.rows.iter().any(|r| r.label == "Agent" && r.value.contains("Test Agent")) && sheet.rows.iter().any(|r| r.label == "To" && r.value == "a@example.com"));
     assert_eq!(sheet.body, "first");
     assert!(f.store.pending(&raw).is_err());
     sheet.answer.send(Err(Code::Denied)).unwrap();
@@ -1113,9 +1113,15 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         let Cmd::AgentConfirm(sheet) = f.recv() else {
             panic!("calendar skipped approval")
         };
-        assert!(sheet.rows.contains(&("Calendar", "Fixture".into())));
+        let row = |label: &str, value: &str| sheet.rows.iter().find(|r| r.label == label && r.value == value);
+        assert!(row("Calendar", "Fixture").is_some());
         if cmd != "event.create" {
-            assert!(sheet.rows.contains(&("Current guest","hidden@example.org".into())) && sheet.previous_description.as_deref() == Some("Original details"));
+            // Google's current guest shows once, untagged; the unchanged description is the body.
+            assert!(row("Guest", "hidden@example.org").is_some_and(|r| r.tag.is_none()));
+            assert!(sheet.previous_description.is_none() && sheet.body == "Original details");
+        }
+        if cmd == "event.update" {
+            assert_eq!(row("Title", "Updated").and_then(|r| r.old.as_deref()), Some("Old event"));
         }
         let (release, held) = tokio::sync::oneshot::channel();
         let stale = stale_rows.clone();
@@ -1419,7 +1425,7 @@ fn draft_show_limits_unicode_body_and_audits_its_target() {
         "SELECT target FROM agent_audit WHERE command='draft.show'", [], |r|r.get(0)).unwrap();
     assert_eq!(&target, id.as_str().unwrap());
     let (_, sheet) = f.sending(id);
-    assert_eq!(sheet.rows.iter().filter(|(k,_)| matches!(*k,"To"|"Cc")).count(),1);
+    assert_eq!(sheet.rows.iter().filter(|r| matches!(r.label,"To"|"Cc")).count(),1);
 }
 
 #[test]
