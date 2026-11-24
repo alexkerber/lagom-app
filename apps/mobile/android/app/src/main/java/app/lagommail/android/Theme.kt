@@ -138,7 +138,7 @@ internal val lagom: LagomColors @Composable @ReadOnlyComposable get() = LocalLag
 /** Every bar on every page is this tall, so moving between pages never shifts the title. */
 internal val BarHeight = 56.dp
 
-// Inter for body text, Hauora (DisplayFace) for headings (Alex 2026-11-22), with Android's existing line-height override.
+// Inter for body text, Hauora (DisplayFace) for headings, with Android's existing line-height override.
 private fun style(size: TextUnit, weight: FontWeight = FontWeight.Normal) =
     TextStyle(fontFamily = TextFace, fontSize = size, lineHeight = size * Leading, fontWeight = weight, letterSpacing = 0.sp)
 
@@ -209,11 +209,14 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
             .semantics { if (iconOnly) contentDescription = text }
             .padding(horizontal = if (iconOnly) 9.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
-            icon?.let { LagomIcon(it, tint = if (primary) c.accentFillInk else if (danger) c.danger else c.ink2) }
+            icon?.takeIf { iconOnly || text in IconActions }?.let { LagomIcon(it, tint = if (primary) c.accentFillInk else if (danger) c.danger else c.ink2) }
             if (!iconOnly) Text(text, color = ink, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
+
+/** Text buttons are text, as on iOS and the Mac; the message actions keep their icons, being the reading toolbar. */
+private val IconActions = setOf("Reply", "Reply all", "Forward", "Later", "Done", "Move", "Move to Inbox", "Mark unread", "Mark read", "Delete", "More")
 
 /** A borderless glyph, desktop `icon_button`: 36 dp drawn, 48 dp to touch. */
 @Composable internal fun LagomIconButton(label: String, @DrawableRes icon: Int, modifier: Modifier = Modifier, enabled: Boolean = true,
@@ -236,6 +239,15 @@ private fun scheme(c: LagomColors, dark: Boolean): ColorScheme {
 /** A 1 dp `line` along the bottom, or the top, as desktop's bar borders. */
 internal fun Modifier.drawHairline(color: Color, top: Boolean = false) = drawBehind {
     drawRect(color, topLeft = Offset(0f, if (top) 0f else size.height - 1.dp.toPx()), size = Size(size.width, 1.dp.toPx()))
+}
+
+/** Every page's app bar, as on iOS: the title at the left in one
+ *  size, the page's actions at the right. */
+@Composable internal fun PageTitle(title: String, trailing: @Composable RowScope.() -> Unit = {}) {
+    TopBar(Modifier.statusBarsPadding()) {
+        BarTitle(title, Modifier.weight(1f))
+        trailing()
+    }
 }
 
 /** A page title as on desktop and iOS: semibold at the title size. */

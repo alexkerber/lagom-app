@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// The Mac's Settings page (Alex 2026-11-20: one Settings page on every platform): Accounts, a row per account
+/// The Mac's Settings page: Accounts, a row per account
 /// that opens its page (Your name, Signature, Remove account), then General and About. A page in the iPad
 /// sidebar; on a phone a sheet from the mailbox menu's last item. Mobile has no keyboard shortcuts.
 struct SettingsView: View {
@@ -15,9 +15,6 @@ struct SettingsView: View {
     @State private var signing: MailAccount?
     @State private var naming: MailAccount?
     @State private var newName = ""
-    @Environment(\.horizontalSizeClass) private var width
-    /// Dynamic Type scale of the display size, so tracking stays the same share of an em.
-    @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
 
@@ -56,13 +53,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var mainPage: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Settings").font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
-                .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
-            closeButton
-        }
+        PageTitle(title: "Settings") { closeButton }
         group("Accounts", note: "The email addresses in lagom. Only you see them.") {
             ForEach(Array(model.accounts.enumerated()), id: \.element.id) { index, account in
                 if index > 0 { hairline(inset: 64) }
@@ -70,8 +61,8 @@ struct SettingsView: View {
                     open = account.id
                 }
             }
-            if !model.accounts.isEmpty { hairline(inset: 64) }
-            row(title: "Add account", mark: Icon("account-add").foregroundStyle(Theme.secondary), chevron: false) { addAccount = true }
+            if !model.accounts.isEmpty { hairline(inset: 16) }
+            row(title: "Add account", chevron: false, tint: Theme.accent) { addAccount = true }
                 .disabled(model.core == nil)
         }
         group("General") {
@@ -102,15 +93,7 @@ struct SettingsView: View {
     /// One account, as on the Mac: Your name and Signature, then Remove account.
     @ViewBuilder private func accountPage(_ account: MailAccount, color: Color) -> some View {
         HStack {
-            Button { open = nil } label: {
-                HStack(spacing: 4) {
-                    Icon("chevron-left")
-                    Text("Settings").lagomFont(.base)
-                }
-                .foregroundStyle(Theme.secondary).frame(minHeight: 44).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back to Settings")
+            BackButton(label: "Back to Settings") { open = nil }
             Spacer()
             closeButton
         }
@@ -133,7 +116,7 @@ struct SettingsView: View {
             row(title: "Signature", detail: "Added to new mail, replies and forwards.") { signing = account }
         }
         group(nil, note: nil) {
-            row(title: "Remove account", mark: Icon("remove-account").foregroundStyle(Theme.danger), chevron: false, tint: Theme.danger) { removing = account }
+            row(title: "Remove account", chevron: false, tint: Theme.danger) { removing = account }
                 .modifier(RemoveAccountDialog(model: model, removing: $removing))
         } footer: {
             Text("Removes the account and its saved mail from this \(UIDevice.current.model). Your mail stays with your provider.")
@@ -142,7 +125,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var closeButton: some View {
-        if sheet { IconButton(title: "Close", icon: "close") { dismiss() }.padding(.trailing, -10) }
+        if sheet { BarButton(title: "Close", icon: "close") { dismiss() } }
     }
 
     /// A titled group: a mono label, an optional line, then its rows in one hairline frame.

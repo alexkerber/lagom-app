@@ -45,9 +45,13 @@ struct ButtonLabel: View {
     var primary = false
     var iconOnly = false
 
+    /// Text buttons are text. The message actions keep their
+    /// icons: they are the reading toolbar, as on the Mac.
+    static let iconActions: Set = ["Reply", "Reply all", "Forward", "Later", "Done", "Move", "Move to Inbox", "Mark unread", "Mark read", "Delete", "More"]
+
     var body: some View {
         HStack(spacing: 6) {
-            Icon(icon).foregroundStyle(primary ? Theme.accentFillInk : Theme.secondary)
+            if iconOnly || Self.iconActions.contains(title) { Icon(icon).foregroundStyle(primary ? Theme.accentFillInk : Theme.secondary) }
             if !iconOnly { Text(title).lineLimit(1) }
         }
         .accessibilityElement(children: .ignore)
@@ -80,7 +84,40 @@ struct IconButton: View {
     }
 }
 
-/// The unread count on Mail in the sidebar: a quiet number, as on desktop (Alex 2026-11-15). Numbers roll, they do not jump.
+/// Back as the system's navigation bar draws it: a round glass button with
+/// the system chevron, which also turns round in right-to-left languages.
+struct BackButton: View {
+    var label = "Back"
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.backward").font(.system(size: 17, weight: .semibold))
+                .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.ink)
+        .modifier(RailGlass())
+        .accessibilityLabel(label)
+    }
+}
+
+/// An action in a page's title bar: a round glass button, as Back. The main action is tinted with the accent.
+struct BarButton: View {
+    let title: String
+    let icon: String
+    var primary = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) { Icon(icon, label: title).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }
+            .buttonStyle(.plain)
+            .foregroundStyle(primary ? Theme.accentInk : Theme.ink)
+            .modifier(RailGlass(primary: primary))
+    }
+}
+
+/// The unread count on Mail in the sidebar: a quiet number, as on desktop. Numbers roll, they do not jump.
 struct Badge: View {
     let count: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -153,28 +190,30 @@ struct GroupHeader: View {
     }
 }
 
-/// A page title as on desktop: semibold at the title size, actions on the right.
+/// Every page's title: Hauora at the subject size, the one size
+/// Today, Mail, Calendar, To-do and Settings share.
+struct PageTitleText: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2)).lineLimit(1)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The app bar of a page: the title at the left, its actions as round glass `BarButton`s at the right.
 struct PageTitle<Trailing: View>: View {
     let title: String
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(title).font(.custom(Theme.Face.display, size: TextSize.title.points, relativeTo: .headline)).accessibilityAddTraits(.isHeader)
+            PageTitleText(text: title)
             Spacer(minLength: 8)
             trailing
         }
         .foregroundStyle(Theme.ink)
         .frame(minHeight: 44)
-    }
-}
-
-/// A section heading in a page: Schedule, To do, a task list's name.
-struct Heading: View {
-    let title: String
-
-    var body: some View {
-        Text(title).lagomFont(.base, .semibold).foregroundStyle(Theme.ink).accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -262,32 +301,82 @@ struct SearchField: View {
     }
 }
 
-/// A sheet as the desktop compose sheet: a subtle title bar with Cancel, the content, and a footer
-/// whose first item is the primary action.
+/// A sheet's primary action: Send, Save, Add. `systemImage` is for the system bar.
+struct SheetConfirm {
+    let title: String
+    let systemImage: String
+    var disabled = false
+    let action: () -> Void
+}
+
+/// A sheet as Apple's Mail and Calendar draw one: the system bar with
+/// Cancel at the leading edge and the primary action at the trailing edge, in Liquid Glass on iOS 26; the
+/// content; then a footer for anything else. The Duo keeps Cancel in its rail and the action in the footer.
 struct SheetScaffold<Content: View, Footer: View>: View {
     let title: String
     var cancelDisabled = false
     let cancel: () -> Void
+    var confirm: SheetConfirm? = nil
     @ViewBuilder var content: Content
     @ViewBuilder var footer: Footer
     @Environment(\.railInset) private var railInset
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(title).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).accessibilityAddTraits(.isHeader)
-                Spacer()
-                if railInset == 0 { IconButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }
+        if railInset == 0 {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    content
+                    if Footer.self != EmptyView.self { footerBar }
+                }
+                .foregroundStyle(Theme.ink)
+                .background(Theme.raised)
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { cancelButton.disabled(cancelDisabled) }
+                    if let confirm {
+                        ToolbarItem(placement: .confirmationAction) { confirmButton(confirm).disabled(confirm.disabled) }
+                    }
+                }
             }
-            .padding(.leading, 16).padding(.trailing, 6).frame(minHeight: 50)
-            .background(Theme.subtle)
-            content
-            HStack(spacing: 10) { footer }
+        } else {
+            VStack(spacing: 0) {
+                Text(title).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).accessibilityAddTraits(.isHeader)
+                    .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading).padding(.leading, 16)
+                    .background(Theme.subtle)
+                content
+                HStack(spacing: 10) {
+                    if let confirm {
+                        Button(confirm.title, action: confirm.action).buttonStyle(HouseButtonStyle(primary: true)).disabled(confirm.disabled)
+                    }
+                    footer
+                }
                 .padding(.horizontal, 16).frame(minHeight: 64)
+            }
+            .foregroundStyle(Theme.ink)
+            .background(Theme.raised)
+            .railColumn(top: { RailButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }, bottom: { EmptyView() })
         }
-        .foregroundStyle(Theme.ink)
-        .background(Theme.raised)
-        .railColumn(top: { RailButton(title: "Cancel", icon: "close", action: cancel).disabled(cancelDisabled) }, bottom: { EmptyView() })
+    }
+
+    private var footerBar: some View {
+        HStack(spacing: 10) { footer }.padding(.horizontal, 16).frame(minHeight: 64)
+    }
+
+    // iOS 26 draws the close role as a glass circle with an xmark, and the confirm role in the accent's prominent glass.
+    @ViewBuilder private var cancelButton: some View {
+        // Ink, as in Apple's Mail and Calendar; only the primary action takes the accent.
+        if #available(iOS 26.0, *) { Button(role: .close, action: cancel).tint(Theme.ink) }
+        else { Button("Cancel", role: .cancel, action: cancel) }
+    }
+
+    @ViewBuilder private func confirmButton(_ confirm: SheetConfirm) -> some View {
+        if #available(iOS 26.0, *) {
+            Button(role: .confirm, action: confirm.action) { Label(confirm.title, systemImage: confirm.systemImage) }
+                .tint(Theme.accent)
+        } else {
+            Button(confirm.title, action: confirm.action).fontWeight(.semibold)
+        }
     }
 }
 
@@ -475,10 +564,10 @@ extension EnvironmentValues {
 }
 private struct PageMarginKey: EnvironmentKey { static let defaultValue: CGFloat = 16 }
 
-/// The page edges every page shares (Alex 2026-11-20: "Apple best practice"), so titles and the content under them
+/// The page edges every page shares, so titles and the content under them
 /// start on one line. Sides: the system's layout margin. Top: 8 pt under the safe area; on the Duo, whose status bar
 /// sits in the right column and leaves no top inset, the same layout margin as the sides (HIG: content starts at the
-/// safe area plus the layout margin). A first row level with the rail's clock sat too low (Alex 2026-11-20).
+/// safe area plus the layout margin). A first row level with the rail's clock sat too low.
 struct PageEdges: ViewModifier {
     var top = true
     var sides = true
@@ -526,7 +615,7 @@ private struct SystemMargin: UIViewRepresentable {
     }
 }
 
-/// The Duo's right column (Alex 2026-11-17), the same on every screen: close, back and secondary actions at
+/// The Duo's right column, the same on every screen: close, back and secondary actions at
 /// the top under the status bar; the main action, and Delete, at the bottom. Elsewhere it draws nothing.
 private struct RailColumn<Top: View, Bottom: View>: ViewModifier {
     @Environment(\.railInset) private var inset
@@ -627,4 +716,10 @@ struct RailGlass<S: Shape>: ViewModifier {
 
 extension RailGlass where S == Circle {
     init(primary: Bool = false) { self.primary = primary; shape = Circle() }
+}
+
+extension SheetScaffold where Footer == EmptyView {
+    init(title: String, cancelDisabled: Bool = false, cancel: @escaping () -> Void, confirm: SheetConfirm? = nil, @ViewBuilder content: () -> Content) {
+        self.init(title: title, cancelDisabled: cancelDisabled, cancel: cancel, confirm: confirm, content: content, footer: { EmptyView() })
+    }
 }

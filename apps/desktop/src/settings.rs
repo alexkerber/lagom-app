@@ -103,8 +103,8 @@ pub fn view(t: &Theme, d: Data, cx: &mut Context<MainWindow>) -> Div {
             .justify_center()
             // Content keeps its own height, so a long page scrolls instead of overflowing.
             .items_start()
-            .px(px(24.))
-            .py(px(32.))
+            // The top edge of every page, so the title does not jump between pages.
+            .p(px(24.))
             .rounded(px(radius::PANEL))
             .child(content),
     )
@@ -162,8 +162,7 @@ fn main_page(t: &Theme, d: &Data, cx: &mut Context<MainWindow>) -> Div {
         .flex()
         .flex_col()
         .gap(px(32.))
-        // A window-title-sized heading, as in System Settings panes.
-        .child(div().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD).child("Settings"))
+        .child(crate::main_window::page_title("Settings"))
         .child(accounts)
         .child(general)
         .children(lists)

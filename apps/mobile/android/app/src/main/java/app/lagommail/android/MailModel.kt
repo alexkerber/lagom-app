@@ -136,6 +136,8 @@ internal class MailModel(
     var emptyingTrash by mutableStateOf(false); private set
     var searchText by mutableStateOf(""); private set
     var unreadOnly by mutableStateOf(false)
+    /** The search field is open: Search in the app bar opens it, the list's row shows it. */
+    var searching by mutableStateOf(false)
     // Trash shows Empty Trash instead of the filter, so it lists everything Empty Trash deletes. A search replaces the
     // filter, so it finds read mail too; the filter comes back with the mailbox. Same on iOS.
     val visibleRows: List<MailRow> get() =

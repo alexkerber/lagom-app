@@ -6,6 +6,8 @@ struct TodayView: View {
     let model: MailModel
     let openMail: (Int64?) -> Void
     let open: (AppSection) -> Void
+    /// A phone's way to Settings beside the title; the iPad has its sidebar row.
+    var openSettings: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var width
     /// Dynamic Type scale of the display size, so tracking stays the same share of an em.
     @ScaledMetric(relativeTo: .largeTitle) private var typeScale: CGFloat = 1
@@ -30,7 +32,7 @@ struct TodayView: View {
         .sheet(isPresented: $newTask) { NewTaskView(planner: planner, list: planner.defaultList, due: Date()).duoRail() }
     }
 
-    /// The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page.
+    /// The desktop's Today sentence in two tones: the counts are ink and open their page.
     private var sentence: some View {
         let now = Date.now
         let greeting = switch Calendar.current.component(.hour, from: now) {
@@ -52,8 +54,11 @@ struct TodayView: View {
         line += part(count(planner.today?.events.count ?? 0, "event", "events", "no events"), "calendar") + part(" and ")
         line += part(count(dueCount(planner.today?.tasks ?? [], day: planner.today?.day ?? ""), "task due", "tasks due", "nothing due"), "todo") + part(".")
         return VStack(alignment: .leading, spacing: 12) {
-            // A 44 pt first row, as every page title, so it shares the row the page edges place.
-            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide))).frame(minHeight: 44)
+            // The app bar every page shares, then the day.
+            PageTitle(title: "Today") {
+                if let openSettings { BarButton(title: "Settings", icon: "settings", action: openSettings) }
+            }
+            MonoLabel(text: now.formatted(.dateTime.weekday(.wide).day().month(.wide)))
             Text(line)
                 .font(.custom(Theme.Face.display, size: width == .regular ? 48 : 34, relativeTo: .largeTitle))
                 .tracking((width == .regular ? 48 : 34) * typeScale * Theme.Face.displayTracking)
@@ -165,7 +170,7 @@ struct CalendarAccessButtons: View {
         if !accounts.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(accounts, id: \.id) { account in
-                    CalendarAccessButton(planner: planner, model: model, account: account, icon: tasks ? "todo" : "calendar",
+                    CalendarAccessButton(planner: planner, model: model, account: account,
                                          title: account.googleHostedPassword ? "Sign in with Google · \(account.email)" : accounts.count == 1 ? (tasks ? "Allow Google Tasks access" : "Show your Google Calendar")
                                             : "\(tasks ? "Allow Google Tasks" : "Show calendar") · \(account.email)")
                 }
@@ -179,7 +184,6 @@ private struct CalendarAccessButton: View {
     let planner: PlannerModel
     let model: MailModel
     let account: MailAccount
-    let icon: String
     let title: String
     @Environment(\.webAuthenticationSession) private var browser
     @State private var connecting = false
@@ -187,7 +191,7 @@ private struct CalendarAccessButton: View {
     var body: some View {
         Button { Task { await allow() } } label: {
             HStack(spacing: 6) {
-                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) } else { Icon(icon).foregroundStyle(Theme.accentFillInk) }
+                if connecting { ProgressView().controlSize(.small).tint(Theme.accentFillInk) }
                 Text(connecting ? "Connecting…" : title).lineLimit(1).truncationMode(.middle)
             }
         }
@@ -389,8 +393,8 @@ private enum AddField: Hashable {
     }
 }
 
-/// Local task lists, as on the desktop's To-do page. Adding happens where the eye is (Alex 2026-11-20, "plus
-/// uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips
+/// Local task lists, as on the desktop's To-do page. Adding happens where the eye is, not in a corner:
+/// "New task" ends each list and turns into a field in place, with due chips
 /// above the keyboard. Return adds and keeps the field open for the next task; leaving the field keeps its text.
 struct TodoView: View {
     let planner: PlannerModel
@@ -682,7 +686,9 @@ struct NewTaskView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        SheetScaffold(title: "New task", cancel: { dismiss() }) {
+        SheetScaffold(title: "New task", cancel: { dismiss() },
+                      confirm: SheetConfirm(title: "Add task", systemImage: "checkmark",
+                                            disabled: saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty, action: save)) {
             VStack(spacing: 0) {
                 FieldRow(label: "Task") {
                     TextField("", text: $title).focused($focused).submitLabel(.done).onSubmit(save).accessibilityLabel("Task")
@@ -707,10 +713,6 @@ struct NewTaskView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 16)
-        } footer: {
-            HouseButton(title: "Add task", icon: "plus", primary: true, action: save)
-                .disabled(saving || list == nil || title.trimmingCharacters(in: .whitespaces).isEmpty)
-            Spacer(minLength: 0)
         }
         .onAppear { focused = true }
         .presentationDetents([.medium, .large])
@@ -754,7 +756,8 @@ struct NewEventView: View {
 
     var body: some View {
         let calendars = planner.eventCalendars
-        SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() }) {
+        SheetScaffold(title: "New event", cancelDisabled: saving, cancel: { dismiss() },
+                      confirm: SheetConfirm(title: "Save event", systemImage: "checkmark", disabled: saving || calendars.isEmpty, action: save)) {
             ScrollView {
                 VStack(spacing: 0) {
                     FieldRow(label: "Title", labelWidth: 84) {
@@ -800,10 +803,6 @@ struct NewEventView: View {
                 .disabled(saving)
             }
             .scrollDismissesKeyboard(.interactively)
-        } footer: {
-            Button(saving ? "Saving…" : "Save event", action: save).buttonStyle(HouseButtonStyle(primary: true))
-                .disabled(saving || calendars.isEmpty)
-            Spacer(minLength: 0)
         }
         // An event moves as a whole: a later start keeps its length, as Apple's Calendar does.
         .onChange(of: start) { old, new in end = end.addingTimeInterval(new.timeIntervalSince(old)) }
@@ -858,7 +857,7 @@ struct NewEventView: View {
     }
 }
 
-/// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo (Alex 2026-11-17).
+/// The desktop week on iPad; a phone shows one day of it under a week strip, as Spark on the Duo.
 struct CalendarView: View {
     let planner: PlannerModel
     let model: MailModel
@@ -1002,20 +1001,23 @@ private struct WeekGrid: View {
         let title = DateWords().monthTitle(month)
         return HStack(spacing: 8) {
             HStack(spacing: 6) {
-                Text(title.month).font(.custom(Theme.Face.display, size: TextSize.subject.points, relativeTo: .title2))
+                PageTitleText(text: title.month)
                 if let year = title.year { Text(year).lagomFont(.subject).foregroundStyle(Theme.secondary) }
             }
             .lineLimit(1).layoutPriority(1)
             .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             if !(oneDay && railInset > 0) {
-                IconButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
-                Button("Today") { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } }.buttonStyle(HouseButtonStyle())
-                IconButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
+                BarButton(title: "Previous week", icon: "chevron-left") { Task { await planner.showWeek(-1) } }
+                Button { selected = calendar.startOfDay(for: .now); Task { await planner.showWeek(0) } } label: {
+                    Text("Today").lagomFont(.base, .medium).padding(.horizontal, 16).frame(minHeight: 44).contentShape(Capsule())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.ink).modifier(RailGlass(shape: Capsule()))
+                BarButton(title: "Next week", icon: "chevron-right") { Task { await planner.showWeek(1) } }
             }
             // The Mac's accent New event after the week buttons; a phone shows only its plus. On the Duo it is in the column.
             if railInset == 0 && !planner.eventCalendars.isEmpty {
-                HouseButton(title: "New event", icon: "plus", primary: true, iconOnly: oneDay) { newEvent = true }
+                BarButton(title: "New event", icon: "plus", primary: true) { newEvent = true }
             }
         }
         .frame(minHeight: 44)

@@ -120,14 +120,6 @@ internal val AppSection.icon: Int get() = when (this) {
     }
 }
 
-/** A page title as on desktop and iOS: semibold, actions on the right. */
-@Composable private fun PageTitle(title: String, trailing: @Composable RowScope.() -> Unit = {}) {
-    TopBar(Modifier.statusBarsPadding()) {
-        BarTitle(title, Modifier.weight(1f))
-        trailing()
-    }
-}
-
 /** The task circles' column: a list's dot, the add and Completed glyphs sit in it, so every line's words start
  *  where the task titles do. */
 @Composable private fun Lead(content: @Composable () -> Unit) = Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) { content() }
@@ -157,7 +149,7 @@ internal val AppSection.icon: Int get() = when (this) {
     Text(text.uppercase(), modifier.semantics { heading(); contentDescription = text }, color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontFamily = LabelFace, fontWeight = FontWeight.Medium, fontSize = 13.sp)
 
-/** The desktop's Today sentence in two tones (Alex 2026-11-17): the counts are ink and open their page. */
+/** The desktop's Today sentence in two tones: the counts are ink and open their page. */
 @Composable private fun TodaySentence(planner: PlannerModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
     val ink = MaterialTheme.colorScheme.onSurface
     val greeting = when (LocalTime.now().hour) { in 0..11 -> "Good morning."; in 12..17 -> "Good afternoon."; else -> "Good evening." }
@@ -213,11 +205,12 @@ private fun openLink(context: android.content.Context, planner: PlannerModel, li
 private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
 
 /** The calm Today page, as iOS `TodayView`: schedule, what is due, and a short look at unread mail. */
-@Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, open: (AppSection) -> Unit, openMail: (Long?) -> Unit) {
+@Composable internal fun TodayScreen(planner: PlannerModel, model: MailModel, open: (AppSection) -> Unit, openSettings: (() -> Unit)? = null, openMail: (Long?) -> Unit) {
     var newTask by rememberSaveable { mutableStateOf(false) }
     val now = nowSeconds()
     val words = DateWords()
     Column(Modifier.fillMaxSize()) {
+        PageTitle(AppSection.TODAY.title) { openSettings?.let { LagomIconButton("Settings", R.drawable.ic_settings, onClick = it) } }
         Refreshable(planner, { planner.reload() }, Modifier.weight(1f)) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(32.dp)) {
                 TodaySentence(planner, open, openMail)
@@ -368,8 +361,8 @@ private fun AgendaItem.webLink(): String? = joinUrl?.takeIf { it.startsWith("htt
 /** The inline field's target when it adds a list rather than a task. */
 private const val NEW_LIST = Long.MIN_VALUE
 
-/** Local task lists, as iOS `TodoView` and the desktop's Todo page. Adding happens where the eye is (Alex 2026-11-20,
- *  "plus uppe i hörnet … old school"): "New task" ends each list and turns into a field in place, with due chips above
+/** Local task lists, as iOS `TodoView` and the desktop's Todo page. Adding happens where the eye is, not in a corner:
+ *  "New task" ends each list and turns into a field in place, with due chips above
  *  the keyboard. Enter adds and keeps the field open for the next task; Close or Back keeps what was typed. */
 @Composable internal fun TodoScreen(planner: PlannerModel, model: MailModel) {
     // The list the field is open in, NEW_LIST, or null.
@@ -730,7 +723,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
     var creating by rememberSaveable { mutableStateOf<LocalDate?>(null) }
     // 16 dp as Today and To-do, on phones and tablets alike.
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3), compact = oneDay,
+        WeekHeader(planner, if (oneDay) selected else planner.weekStart.plusDays(3),
             newEvent = {
                 planner.eventAnswer = null
                 creating = if (oneDay) selected else calendarDay(planner.weekStart, LocalDate.now())
@@ -777,7 +770,7 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
 }
 
 /** The selected day's month on phones, the week's Thursday on tablets, and the week buttons. */
-@Composable private fun WeekHeader(planner: PlannerModel, month: LocalDate, compact: Boolean, newEvent: (() -> Unit)?, onToday: () -> Unit) {
+@Composable private fun WeekHeader(planner: PlannerModel, month: LocalDate, newEvent: (() -> Unit)?, onToday: () -> Unit) {
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.weight(1f).semantics(mergeDescendants = true) { heading() }, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -789,8 +782,10 @@ private val Gutter: Dp @Composable get() = maxOf(48.dp, timeColumn() + 8.dp)
         LagomIconButton("Previous week", R.drawable.ic_chevron_left) { planner.perform { planner.showWeek(-1) } }
         HouseButton("Today", onClick = onToday)
         LagomIconButton("Next week", R.drawable.ic_chevron_right) { planner.perform { planner.showWeek(1) } }
-        // A phone's header holds the month and the week buttons on one line, so New event shows its icon there.
-        newEvent?.let { HouseButton("New event", R.drawable.ic_new_event, primary = true, iconOnly = compact, onClick = it) }
+        // Round and filled, Material's own icon button, as the iOS bar's glass plus.
+        newEvent?.let { FilledIconButton(onClick = it, Modifier.semantics { contentDescription = "New event" }) {
+            LagomIcon(R.drawable.ic_plus, tint = lagom.accentInk)
+        } }
     }
 }
 

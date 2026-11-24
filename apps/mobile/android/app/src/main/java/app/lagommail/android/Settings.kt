@@ -33,7 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.lagommail.core.MailAccount
 
-/** The Mac's Settings page (Alex 2026-11-20: one Settings page on every platform): Accounts, a row per account that
+/** The Mac's Settings page: Accounts, a row per account that
  *  opens its page (Your name, Signature, Remove account), then General and About. From the mailbox menu's last item;
  *  the same page as iOS, without keyboard shortcuts. */
 @Composable internal fun SettingsScreen(model: MailModel, close: () -> Unit) {
@@ -52,12 +52,9 @@ import app.lagommail.core.MailAccount
     // A Surface, not a Column: it takes every touch, so nothing reaches the list underneath.
     Surface(Modifier.fillMaxSize(), color = lagom.bg) { Column(Modifier.fillMaxSize()) {
         TopBar(Modifier.statusBarsPadding(), start = if (index >= 0) 4.dp else 16.dp) {
+            // Back as the Mail page's, an icon alone.
             if (index >= 0) {
-                Row(Modifier.heightIn(min = 48.dp).clickable(onClickLabel = "Back to Settings", role = Role.Button) { open = null }
-                    .padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    LagomIcon(R.drawable.ic_chevron_left, Modifier.padding(horizontal = 12.dp))
-                    Text("Settings", color = lagom.ink2, style = MaterialTheme.typography.bodyLarge)
-                }
+                LagomIconButton("Back to Settings", R.drawable.ic_chevron_left) { open = null }
                 Spacer(Modifier.weight(1f))
             } else BarTitle("Settings", Modifier.weight(1f))
             LagomIconButton("Close", R.drawable.ic_close, onClick = close)
@@ -73,8 +70,8 @@ import app.lagommail.core.MailAccount
                             if (at > 0) Hairline()
                             SettingsRow(account.email, detail = accountKind(account), mark = { Avatar(account, accountAccent(at), 32) }) { open = account.id }
                         }
-                        if (model.accounts.isNotEmpty()) Hairline()
-                        SettingsRow("Add account", mark = { LagomIcon(R.drawable.ic_account_add) }, chevron = false, enabled = model.core != null) {
+                        if (model.accounts.isNotEmpty()) Hairline(16)
+                        SettingsRow("Add account", chevron = false, tint = lagom.accent, enabled = model.core != null) {
                             model.accountForm = AccountForm(choosing = true)
                         }
                     }
@@ -142,7 +139,7 @@ internal fun accountKind(account: MailAccount): String =
         SettingsRow("Signature", detail = "Added to new mail, replies and forwards.") { sign(account) }
     }
     Column {
-        Rows { SettingsRow("Remove account", mark = { LagomIcon(R.drawable.ic_account_remove, tint = lagom.danger) }, chevron = false,
+        Rows { SettingsRow("Remove account", chevron = false,
             tint = lagom.danger) { remove(account) } }
         Text("Removes the account and its saved mail from this device. Your mail stays with your provider.", Modifier.padding(top = 8.dp),
             color = lagom.ink2, style = MaterialTheme.typography.bodySmall)

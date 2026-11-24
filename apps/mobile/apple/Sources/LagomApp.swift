@@ -222,11 +222,10 @@ struct MailView: View {
             }
         }
         .task(id: model.selectedID) { await model.select(model.selectedID) }
-        .sheet(isPresented: $settingsOpen) { SettingsView(model: model, sheet: true).duoRail() }
     }
 
     private var composeButton: some View {
-        IconButton(title: "New message", icon: "compose") {
+        BarButton(title: "New message", icon: "compose") {
             let account = model.accountID ?? model.accounts.first?.id ?? ""
             Task { await model.newMessage(account: account) }
         }
@@ -244,7 +243,7 @@ struct MailView: View {
             // A message opened from a notification can be outside the loaded page; its own row stands in.
             let row = model.rows.first { $0.id == id || $0.messageIds.contains(id) } ?? model.message?.row
             VStack(spacing: 4) {
-                // Back first, under the status bar, though a swipe goes back too (Alex 2026-11-17).
+                // Back first, under the status bar, though a swipe goes back too.
                 railButton("Back", icon: "chevron-left") { model.selectedID = nil }.padding(.bottom, 8)
                 RailGroup {
                 railButton("Reply", icon: "reply") { Task { await model.prepareCompose(id: id, kind: .reply) } }
@@ -261,7 +260,7 @@ struct MailView: View {
             }
             .disabled(model.working || model.preparingCompose)
         } else {
-            // The filter stays in the list header beside the mailbox: it sorts the list, it is not an action (Alex 2026-11-17).
+            // The filter stays in the list header beside the mailbox: it sorts the list, it is not an action.
             railButton("New message", icon: "compose") {
                 let account = model.accountID ?? model.accounts.first?.id ?? ""
                 Task { await model.newMessage(account: account) }
@@ -277,19 +276,18 @@ struct MailView: View {
         }
     }
 
-    /// The list header (Alex 2026-11-20): the lagom mark with the mailbox on the right, then the filter with
-    /// search and New message on the right. The iPad keeps the mailbox at the left, under its sidebar's brandless list.
+    /// The list header, the app bar every page shares: the mailbox as the title at the left,
+    /// Search and New message as glass buttons at the right, then the filter.
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                if !sidebar {
-                    Image("LaunchIcon").resizable().frame(width: 28, height: 28).accessibilityHidden(true)
-                    Spacer(minLength: 8)
+            // A long mailbox name or large text puts the buttons on their own row, so the title never ends in "…".
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 8) { mailboxMenu.fixedSize(); Spacer(minLength: 8); if !searchOpen { headerButtons } }
+                VStack(alignment: .leading, spacing: 4) {
+                    mailboxMenu
+                    if !searchOpen { HStack { Spacer(minLength: 0); headerButtons } }
                 }
-                mailboxMenu
-                if sidebar { Spacer(minLength: 0) }
             }
-            .frame(minHeight: 44)
             if searchOpen {
                 HStack(spacing: 8) {
                     SearchField(text: $model.searchText).focused($searchFocused)
@@ -298,11 +296,7 @@ struct MailView: View {
                 // The keyboard rises once, with the field the button opened, not each time a kept search reappears.
                 .onAppear { if focusOnOpen { searchFocused = true; focusOnOpen = false } }
             } else {
-                // At the largest text sizes the buttons go under the filter, so nothing collapses to "…".
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) { listControl; Spacer(minLength: 8); headerButtons }
-                    VStack(alignment: .leading, spacing: 4) { listControl; HStack(spacing: 8) { Spacer(minLength: 0); headerButtons } }
-                }
+                listControl
             }
         }
         .pageEdges().padding(.bottom, 6)
@@ -320,17 +314,15 @@ struct MailView: View {
         } else if !model.accounts.isEmpty && model.mailbox != .drafts { FilterControl(unreadOnly: $unreadOnly) }
     }
 
-    /// Search, a button that opens the field as on the Mac (Alex 2026-11-20), and New message without a rail.
+    /// Search, a button that opens the field as on the Mac, and New message without a rail.
     /// iOS 26's minimized `.searchable` draws nothing here: the bar it lives in is hidden for lagom's own header.
     @ViewBuilder private var headerButtons: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             if model.mailbox != .drafts {
-                IconButton(title: "Search", icon: "search") { searching = true; focusOnOpen = true }
+                BarButton(title: "Search", icon: "search") { searching = true; focusOnOpen = true }
             }
             if railInset == 0 { composeButton }
         }
-        // The last glyph ends on the mailbox title's right edge (measured on the folded Duo).
-        .padding(.trailing, -14)
     }
 
     private var searchOpen: Bool { model.mailbox != .drafts && (searching || !model.searchText.isEmpty) }
@@ -361,21 +353,23 @@ struct MailView: View {
                 ForEach(model.accounts, id: \.id) { Text($0.email).tag(Optional($0.id)) }
             }
             // The menu is a phone's sidebar, so Settings closes it as on the Mac; accounts and their names,
-            // signatures and removal live there (Alex 2026-11-20).
+            // signatures and removal live there.
             if !sidebar {
                 Section { Button { settingsOpen = true } label: { Label { Text("Settings") } icon: { Image("settings") } } }
             }
         } label: {
-            VStack(alignment: sidebar ? .leading : .trailing, spacing: 1) {
+            // The title row is 44 pt as on every page, so the mailbox sits level with Today, Calendar and To-do.
+            VStack(alignment: .leading, spacing: -6) {
                 HStack(spacing: 4) {
-                    Text(name).font(.custom(Theme.Face.display, size: TextSize.base.points, relativeTo: .body)).lineLimit(1)
+                    PageTitleText(text: name)
                     Icon("chevron", size: 14).foregroundStyle(Theme.secondary)
                 }
+                .frame(minHeight: 44)
                 .foregroundStyle(Theme.ink)
                 HStack(spacing: 6) {
                     // Synced is the quiet default: the cloud shows only while it syncs or fails.
                     if status.icon != "cloud-synced" { Icon(status.icon == "cloud-failed" ? "cloud-failed" : "cloud-syncing", size: 16) }
-                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(sidebar ? .leading : .trailing)
+                    Text(status.text).lagomFont(.small).monospacedDigit().lineLimit(2).multilineTextAlignment(.leading)
                         .contentTransition(.numericText()).animation(reduceMotion ? nil : Motion.fade, value: left)
                 }
                 .foregroundStyle(Theme.secondary)
@@ -384,6 +378,7 @@ struct MailView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([name, status.text, "mailboxes and accounts"].joined(separator: ", "))
         }
+        .accessibilityAddTraits(.isHeader)
         .task(id: model.syncing) {
             guard model.syncing else { syncShown = false; return }
             guard (try? await Task.sleep(for: Motion.calm)) != nil else { return }
@@ -570,9 +565,9 @@ struct MailView: View {
             VStack(spacing: 0) {
                 if railInset == 0 {
                     HStack {
-                        if !split { IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil } }
+                        if !split { BackButton { model.selectedID = nil } }
                     }
-                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
                 }
                 MessagePreview(row: row)
             }
@@ -582,8 +577,8 @@ struct MailView: View {
         } else {
             // A message outside the loaded rows, while it loads or when it failed to: only the way back.
             VStack(alignment: .leading, spacing: 0) {
-                IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }
-                    .padding(.horizontal, 10).frame(minHeight: 56)
+                BackButton { model.selectedID = nil }
+                    .padding(.horizontal, 16).frame(minHeight: 56)
                 Spacer()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -599,7 +594,7 @@ extension MailView {
         let id = model.selectedID ?? message.row.id
         return HStack(spacing: 8) {
             if !split {
-                IconButton(title: "Back", icon: "chevron-left") { model.selectedID = nil }.padding(.leading, -6)
+                BackButton { model.selectedID = nil }
             }
             HouseButton(title: "Reply", icon: "reply", iconOnly: iconOnly) { Task { await model.prepareCompose(id: id, kind: .reply) } }
                 .disabled(model.preparingCompose)

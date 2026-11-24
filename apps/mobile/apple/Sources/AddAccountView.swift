@@ -25,7 +25,11 @@ struct AddAccountView: View {
 
     var body: some View {
         let outlook = isOutlookAddress(email: email)
-        SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() }) {
+        SheetScaffold(title: "Add account", cancelDisabled: connecting, cancel: { password = ""; dismiss() },
+                      confirm: (!providers || form) && !outlook ? SheetConfirm(title: passwordStep ? "Sign in" : "Continue", systemImage: passwordStep ? "checkmark" : "arrow.right", disabled: email.isEmpty || connecting || (passwordStep && password.isEmpty)) {
+                          if passwordStep { Task { await connect() } }
+                          else { passwordStep = true; imapUser = email; smtpUser = email }
+                      } : nil) {
             if providers && !form {
                 ScrollView {
                     ChooseMail(model: model, connecting: $connecting, signedIn: { dismiss() }) { form = true }
@@ -67,15 +71,8 @@ struct AddAccountView: View {
         } footer: {
             if !providers || form {
             if providers {
-                IconButton(title: "Back", icon: "chevron-left") { back() }
+                BackButton { back() }
                     .disabled(connecting)
-            }
-            if !outlook {
-                HouseButton(title: passwordStep ? "Sign in" : "Continue", icon: "account-add", primary: true) {
-                    if passwordStep { Task { await connect() } }
-                    else { passwordStep = true; imapUser = email; smtpUser = email }
-                }
-                .disabled(email.isEmpty || connecting || (passwordStep && password.isEmpty))
             }
             if connecting {
                 ProgressView()
@@ -156,6 +153,7 @@ extension MailModel {
     /// `exchanging` runs once the page has returned, while the core trades its code for tokens.
     func signIn(_ provider: SignInProvider, browser: WebAuthenticationSession, exchanging: () -> Void) async throws -> Bool {
         guard let core else { return false }
+        if let mock = Storage.mockSignIn, provider == .google { return try await mockSignIn(mock, exchanging: exchanging) }
         return try await authenticate(core.beginSignIn(provider: provider), browser: browser, exchanging: exchanging)
     }
 
@@ -164,6 +162,19 @@ extension MailModel {
         guard let core else { return false }
         // No mailbox reload here: the planner refreshes first and the mail sync that follows reloads.
         return try await authenticate(core.beginCalendarAccess(accountId: account), browser: browser, exchanging: exchanging, reload: false)
+    }
+
+    /// `Storage.mockSignIn`: page and exchange take two seconds; ok seeds the demo's
+    /// Google accounts (mail scopes only, so Calendar offers its grant).
+    private func mockSignIn(_ outcome: String, exchanging: () -> Void) async throws -> Bool {
+        // At once, unlike the real page: the page's modal sheet is what keeps Back and the rows from a second tap.
+        exchanging()
+        try await Task.sleep(for: .seconds(2))
+        if outcome == "cancel" { return false }
+        if outcome == "error" { throw MailError.Failed(reason: "Google did not accept the sign-in. Try again.") }
+        try seedDemoWithoutCalendar(dataDir: Storage.directory().path, state: "google")
+        await reload()
+        return true
     }
 
     private func authenticate(_ start: SignInStart, browser: WebAuthenticationSession, exchanging: () -> Void, reload reloads: Bool = true) async throws -> Bool {
@@ -193,7 +204,8 @@ struct SignatureView: View {
     @State private var error: String?
 
     var body: some View {
-        SheetScaffold(title: "Signature", cancelDisabled: saving, cancel: { dismiss() }) {
+        SheetScaffold(title: "Signature", cancelDisabled: saving, cancel: { dismiss() },
+                      confirm: SheetConfirm(title: "Save", systemImage: "checkmark", disabled: !loaded || saving) { Task { await save() } }) {
             VStack(alignment: .leading, spacing: 0) {
                 FieldRow(label: "Account") { Text(account.email).lineLimit(1) }
                     .padding(.horizontal, 16)
@@ -211,10 +223,6 @@ struct SignatureView: View {
                     .accessibilityLabel("Signature")
                 if let error { Text(error).lagomFont(.snippet).foregroundStyle(Theme.danger).padding(16) }
             }
-        } footer: {
-            HouseButton(title: "Save", icon: "done", primary: true) { Task { await save() } }
-                .disabled(!loaded || saving)
-            Spacer(minLength: 0)
         }
         .interactiveDismissDisabled(saving)
         .task {

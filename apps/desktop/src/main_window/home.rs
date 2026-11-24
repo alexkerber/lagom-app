@@ -95,7 +95,7 @@ impl MainWindow {
         cx.notify();
     }
 
-    /// The day said as a sentence in two tones (Alex 2026-11-17 chose this over large counts and a serif).
+    /// The day said as a sentence in two tones.
     /// The counts are ink and open their page; the words between them are ink2.
     fn today_sentence(&self, now: chrono::DateTime<chrono::Local>, events: usize, due: usize, cx: &mut Context<Self>) -> Div {
         use chrono::Timelike;
@@ -129,9 +129,10 @@ impl MainWindow {
         let has_calendar = (self.demo && self.live.is_none()) || self.today.calendar_accounts.iter().any(|(_, allowed)| *allowed);
         let schedule = events > 0 || !has_calendar;
         div().flex_1().min_w(px(0.)).flex().flex_col()
+            .child(div().px(px(24.)).pt(px(24.)).child(page_title("Today")))
             .child(div().id("today-groups").debug_selector(|| "today-groups".into()).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.today.scroll)
                 .child(// A block, not a flex column: inside a column, taffy sized task titles to their shortest sibling and cut them.
-                    div().w_full().px(px(48.)).pt(px(40.)).pb(px(48.))
+                    div().w_full().px(px(24.)).pt(px(16.)).pb(px(48.))
                     .child(self.today_sentence(now, events, due, cx))
                     .child(div().flex().gap(px(48.)).when(stacked || !schedule, |d| d.flex_col())
                         .when(schedule, |d| d.child(div().min_w(px(0.)).when(!stacked, |d| d.flex_1()).child(self.agenda_view(cx))))
@@ -491,6 +492,31 @@ mod tests {
             assert_eq!(view.read_with(cx, |v, _| v.sidebar_mail), section == 1);
             assert!(view.read_with(cx, |v, _| v.sidebar_fade.is_none()));
         }
+    }
+
+    #[gpui::test]
+    fn sidebar_slides_out_and_back_at_full_width(cx: &mut TestAppContext) {
+        cx.update(|cx| bind_keys(cx));
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "inbox", window, cx));
+        cx.run_until_parked();
+        let full = cx.debug_bounds("sidebar").unwrap();
+        let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        for hide in [true, false] {
+            view.update(cx, |v, cx| { v.panes.sidebar_hidden = hide; v.sidebar_slide = Some(Instant::now() - SLIDE / 4); cx.notify(); });
+            // The test window can report the previous frame's bounds, so draw twice.
+            draw(cx);
+            draw(cx);
+            // Mid-slide: same width, moved left, so no row reflows.
+            let mid = cx.debug_bounds("sidebar").unwrap();
+            assert_eq!(mid.size.width, full.size.width);
+            assert!(mid.origin.x < full.origin.x);
+            view.update(cx, |v, cx| { v.sidebar_slide = Some(Instant::now() - SLIDE); cx.notify(); });
+            cx.run_until_parked();
+            // A test window keeps the last drawn bounds of a removed element, so check the state.
+            assert_eq!(view.read_with(cx, |v, _| v.sidebar_w > 0.), !hide);
+            assert!(view.read_with(cx, |v, _| v.sidebar_slide.is_none()));
+        }
+        assert_eq!(cx.debug_bounds("sidebar").unwrap(), full);
     }
 
     #[gpui::test]

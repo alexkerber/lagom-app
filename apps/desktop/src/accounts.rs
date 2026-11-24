@@ -1094,7 +1094,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn account_controls_render_icons_and_submit_validates_without_a_worker(cx: &mut gpui::TestAppContext) {
+    fn account_controls_are_text_and_submit_validates_without_a_worker(cx: &mut gpui::TestAppContext) {
         cx.update(crate::text_input::bind_keys);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = AddAccount::new(true, vec![], window, cx);
@@ -1103,11 +1103,10 @@ mod tests {
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
+        // Text buttons, without icons.
         for (label, path) in [("Sign in", "connect"), ("sec-false-STARTTLS", "access"), ("sec-false-None", "close")] {
-            let control = cx.debug_bounds(label).unwrap();
-            let glyph = cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).unwrap();
-            assert_eq!(glyph.size, gpui::size(px(16.), px(16.)));
-            assert!(control.contains(&glyph.center()), "{label}");
+            assert!(cx.debug_bounds(label).is_some(), "{label}");
+            assert!(cx.debug_bounds(format!("icon-icons/{path}.svg").leak()).is_none(), "{label}");
         }
         let plain = cx.debug_bounds("sec-false-None").unwrap().center();
         cx.simulate_click(plain, Default::default());

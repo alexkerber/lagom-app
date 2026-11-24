@@ -50,7 +50,7 @@ impl MainWindow {
             .when(multiple && slot != 0, |d| d.child(pressable(div().id(("disclosure", slot)), t, false)
                 .debug_selector(move || format!("disclosure-{label}"))
                 .group("mailbox-disclosure").w(px(16.)).h(px(24.))
-                // The chevron glyph is centred in 16 px; -4 puts its centre on a one-digit count's (Alex 2026-11-15).
+                // The chevron glyph is centred in 16 px; -4 puts its centre on a one-digit count's.
                 .mr(px(-4.)).flex().items_center().justify_center()
                 .child(icon(if expanded { "icons/chevron.svg" } else { "icons/chevron-right.svg" }, t.ink2, 16.)
                     .group_hover("mailbox-disclosure", { let ink = t.ink; move |s| s.text_color(ink) }))

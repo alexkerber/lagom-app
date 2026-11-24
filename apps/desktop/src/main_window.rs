@@ -97,6 +97,7 @@ pub fn bind_keys(cx: &mut App) {
 // Motion per docs/motion.md: the state changes at once, the animation only paints on top.
 // Under reduced motion (`motion::reduced`) nothing travels: rows fade and close the gap.
 const MOTION: Duration = crate::theme::motion::ROW;
+const SLIDE: Duration = crate::theme::motion::SPRING;
 /// Colour change behind a swiped row when it crosses a threshold.
 const TINT_FADE: Duration = crate::theme::motion::TINT;
 /// Vertical padding and line gap inside a message row.
@@ -371,6 +372,10 @@ pub struct MainWindow {
     sidebar_scroll: ScrollHandle,
     sidebar_mail: bool,
     sidebar_fade: Option<Instant>,
+    /// When the sidebar started to slide in or out; it slides as an AppKit split view collapses.
+    sidebar_slide: Option<Instant>,
+    /// The sidebar's drawn width this frame; it narrows while the sidebar slides.
+    sidebar_shown_w: f32,
     scroll: ScrollHandle,
     // (list offset when the trackpad gesture started, hold it): a sideways swipe and its momentum
     // keep the list where it was, including the drift before the direction locked.
@@ -509,6 +514,8 @@ impl MainWindow {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_mail: false,
             sidebar_fade: None,
+            sidebar_slide: None,
+            sidebar_shown_w: 0.,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
             glide: None,
@@ -1265,7 +1272,7 @@ impl MainWindow {
         // A drag that locks vertical, or a swipe carried onto the sidebar, picks the message up for a folder.
         // shortcut: GPUI starts its drag on the move after this one, so a release on the very move that
         // crosses onto the sidebar lands nowhere; fine while the sidebar's padding sits before its folders.
-        let over_sidebar = !self.panes.sidebar_hidden && f32::from(e.position.x) < self.sidebar_w;
+        let over_sidebar = f32::from(e.position.x) < self.sidebar_shown_w;
         let picked = match (before, self.swipe) {
             (Swipe::Undecided { id, .. }, Swipe::Scroll) => Some(id),
             (_, Swipe::Row { id, dx }) if over_sidebar => {
@@ -1562,6 +1569,11 @@ pub(crate) fn pressable(el: Stateful<Div>, t: &Theme, selected: bool) -> Statefu
 
 /// A push button. `fill`: the colour of a primary button; `None` is a borderless one that fills on hover. Shortcuts
 /// live in the menus and the command palette, not on the button.
+/// The title row every page starts with, as on iOS and Android: Calendar's month, at the height of its buttons.
+pub(crate) fn page_title(text: &'static str) -> Div {
+    div().min_h(px(30.)).flex().items_center().font_family(font::DISPLAY).font_weight(FontWeight::BOLD).text_size(px(size::SUBJECT)).child(text)
+}
+
 pub(crate) fn button(t: &Theme, label: &'static str, fill: Option<Rgba>) -> Stateful<Div> {
     button_label(t, label, fill, None)
 }
@@ -1579,7 +1591,7 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         .text_size(px(size::BASE))
         .font_weight(FontWeight::MEDIUM)
         .gap(px(6.))
-        .children(action_icon(label).map(|path| action_glyph(t, path, fill)))
+        .children(action_icon(label).filter(|_| shows_icon(label)).map(|path| action_glyph(t, path, fill)))
         .child(gpui::StyledText::new(label).with_highlights(shortcut.map(|ix| (ix..ix + 1, gpui::HighlightStyle {
             underline: Some(gpui::UnderlineStyle { thickness: px(1.), color: None, wavy: false }), ..Default::default()
         }))))
@@ -1593,6 +1605,12 @@ fn button_label(t: &Theme, label: &'static str, fill: Option<Rgba>, shortcut: Op
         Some(bg) => base.bg(bg).text_color(t.accent_ink).hover(|s| s.opacity(0.92)).active(|s| s.opacity(0.8)),
         None => pressable(base.text_color(t.ink), t, false),
     }
+}
+
+/// Text buttons are text, as macOS push buttons are. The message
+/// actions keep theirs: they are the reading pane's toolbar, and its More menu shares the drawings.
+pub(crate) fn shows_icon(label: &str) -> bool {
+    matches!(label, "Reply" | "Reply all" | "Forward" | "Later" | "Done" | "Move" | "Move to Inbox" | "Mark unread" | "Mark read" | "Delete")
 }
 
 fn action_glyph(t: &Theme, path: &'static str, fill: Option<Rgba>) -> gpui::Svg {
@@ -1793,9 +1811,9 @@ impl MainWindow {
                     .children(SECTIONS.iter().enumerate().map(|(ix, &(label, path))| {
                         let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                         let theme = *t;
-                        // Alex 2026-11-14: no ⌘ keys on the rows; the tooltip still names them.
+                        // No ⌘ keys on the rows; the tooltip still names them.
                         sidebar_nav(t, path, label, None, active, self.window_active, true).debug_selector(move || format!("section-{ix}"))
-                            // Alex 2026-11-15: a quiet number, as on every other row; no filled pill.
+                            // A quiet number, as on every other row; no filled pill.
                             .when(ix == 1 && unread > 0, |d| d.child(roll(
                                 mono(unread.to_string(), t.ink2).debug_selector(|| "mail-unread-badge".into()), format!("mail-{unread}"))))
                             .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "To-do · ⌘4"][ix].into())).into())
@@ -1867,7 +1885,7 @@ impl MainWindow {
         let row = |id: ElementId, active: bool| {
             polish::mailbox_style(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
-        // The 28 px button's glyph ends where the row counts and chevrons end (Alex 2026-11-15).
+        // The 28 px button's glyph ends where the row counts and chevrons end.
         let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder").mr(px(-6.))
             .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
         #[cfg(test)]
@@ -1903,7 +1921,7 @@ impl MainWindow {
             list = list.child(
                 row(("folder", f).into(), active)
                     .debug_selector(move || format!("folder-{f}"))
-                    // Alex 2026-11-15: less indent. Top-level icons line up with Inbox; each level adds one icon width.
+                    // Top-level icons line up with Inbox; each level adds one icon width.
                     .pl(px(10. + 16. * depth as f32))
                     .text_color(color)
                     .on_click(cx.listener(move |this, _, _, cx| this.open_box(Some(f), cx)))
@@ -1916,8 +1934,8 @@ impl MainWindow {
                         .child(all[f].name.clone()))
                     // A zero count is calm: no number at all.
                     .when(unread > 0, |d| d.child(roll(mono(unread.to_string(), t.ink2), format!("folder-{f}-{unread}"))))
-                    // Trailing, as on Sent and Done: 6 px right padding puts the centre on a one-digit count's
-                    // (Alex 2026-11-15). A negative margin here collapsed the label to a few letters.
+                    // Trailing, as on Sent and Done: 6 px right padding puts the centre on a one-digit count's.
+                    // A negative margin here collapsed the label to a few letters.
                     .when(chevron.is_some(), |d| d.pr(px(6.)))
                     .children(chevron.map(|c| div().flex_shrink_0().child(c))),
             );
@@ -2627,12 +2645,19 @@ impl Render for MainWindow {
         }
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
-        (self.sidebar_w, self.list_w) = self.panes.fit(f32::from(window.viewport_size().width));
+        // How much of the sidebar shows, 0 to 1, while it slides.
+        let slide = self.sidebar_slide.map(|at| at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).filter(|t| *t < 1.).map(|t| ease_out_quint()(t));
+        if slide.is_some() { window.request_animation_frame(); } else { self.sidebar_slide = None; }
+        let shown = match (slide, self.panes.sidebar_hidden) { (Some(p), hidden) => if hidden { 1. - p } else { p }, (None, hidden) => if hidden { 0. } else { 1. } };
+        // A sliding sidebar keeps its full width; only its clip narrows.
+        (self.sidebar_w, self.list_w) = Panes { sidebar_hidden: shown == 0., ..self.panes }.fit(f32::from(window.viewport_size().width));
         self.web_frame(window, cx);
         self.forget_hidden_images(cx);
         crate::rich::release(window, cx);
         let welcome = self.welcome();
-        let panel_top = if welcome || (self.panes.sidebar_hidden && cfg!(target_os = "macos")) { 36. } else { 8. };
+        self.sidebar_shown_w = if welcome { 0. } else { self.sidebar_w * shown };
+        // macOS: with the sidebar gone, the panel clears the traffic lights.
+        let panel_top = if welcome { 36. } else if cfg!(target_os = "macos") { 8. + 28. * (1. - shown) } else { 8. };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
@@ -2703,7 +2728,7 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        if welcome || self.panes.sidebar_hidden { self.glass.hide(); }
+        if welcome || (self.panes.sidebar_hidden && self.sidebar_slide.is_none()) { self.glass.hide(); }
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", Page::Settings(_) => "MainWindow Settings", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
@@ -2762,6 +2787,12 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.finish_resize(cx);
                 this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
+                // A toggle mid-slide reverses from where the sidebar is: the eased position p maps
+                // back to the time where the reverse slide shows the same width (ease is 1 - (1 - t)^5).
+                let done = this.sidebar_slide.map(|at| (at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).min(1.)).unwrap_or(1.);
+                let p = 1. - (1. - done).powi(5);
+                let from = 1. - p.powf(0.2);
+                this.sidebar_slide = (!crate::motion::reduced()).then(|| Instant::now() - SLIDE.mul_f32(from));
                 this.save_panes(cx);
                 cx.notify();
             }))
@@ -2784,7 +2815,12 @@ impl Render for MainWindow {
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
-            .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.sidebar(cx)))
+            .when(!welcome && shown > 0., |d| d.child(match shown < 1. {
+                // The sidebar keeps its width and slides under a clip, so no row reflows.
+                true => div().w(px(self.sidebar_w * shown)).h_full().flex_shrink_0().flex().overflow_hidden()
+                    .child(self.sidebar(cx).ml(px(self.sidebar_w * (shown - 1.)))),
+                false => self.sidebar(cx),
+            }))
             .child(
                 // The content meets the sidebar at a straight edge: no inset panel, so no stray corner.
                 div().flex_1().min_w(px(0.)).h_full().flex().bg(t.bg).child(div()
@@ -2800,9 +2836,10 @@ impl Render for MainWindow {
                     .relative()
                     .child(panel)
                     .children(toasts)
-                    .when(matches!(self.page, Page::Mail) && !empty, |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
+                    // The list divider waits for a slide to end, so a drag never moves under the pointer.
+                    .when(matches!(self.page, Page::Mail) && !empty && self.sidebar_slide.is_none(), |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
             )
-            .when(!welcome && !self.panes.sidebar_hidden, |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
+            .when(!welcome && shown == 1., |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
             .child(self.resize_events(cx))
             .children(self.palette.clone())
             .children(self.sending.clone())
@@ -4597,6 +4634,9 @@ mod dispatch {
         cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(widths(cx).0, 220.);
         cx.simulate_keystrokes("alt-secondary-s");
+        // The sidebar keeps its width while it slides out.
+        assert_eq!(widths(cx).0, if crate::motion::reduced() { 0. } else { 220. });
+        view.update(cx, |v, cx| { v.sidebar_slide = None; cx.notify(); });
         assert_eq!(widths(cx).0, 0.);
         assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
     }

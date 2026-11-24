@@ -335,18 +335,39 @@ class MainActivity : ComponentActivity() {
         if (section == AppSection.TODAY) planner.reloadMail()
         if (section == AppSection.TODO) planner.reloadTodos()
     }
+    var todaySettings by rememberSaveable { mutableStateOf(false) }
+    // The sidebar folds to a rail, as Material's expandable navigation; the choice comes back at the next start.
+    var sidebarOpen by remember { mutableStateOf(settings.getBoolean("sidebar", true)) }
+    fun openSidebar(open: Boolean) { sidebarOpen = open; settings.edit().putBoolean("sidebar", open).apply() }
+    // Add account from Today's Settings opens on Mail; when it closes, Settings and Today come back.
+    LaunchedEffect(section) { if (section != AppSection.TODAY && !mailOpen) todaySettings = false }
+    LaunchedEffect(mailOpen) { if (!mailOpen && todaySettings && section == AppSection.MAIL) show(AppSection.TODAY) }
     // A message reads full height on a phone; its back returns to the list and the bar.
     val bar = !mailOpen && !(section == AppSection.MAIL && model.selectedId != null && !twoPane)
     Scaffold(containerColor = if (sidebar) lagom.sidebar else lagom.bg,
         bottomBar = { if (!sidebar && bar) LagomBar(section, planner.unreadCount, ::choose) }) { padding ->
         Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            if (sidebar) LagomSidebar(model, section, planner.unreadCount, enabled = !mailOpen, choose = ::choose)
+            if (sidebar) {
+                AnimatedVisibility(sidebarOpen, enter = expandHorizontally(), exit = shrinkHorizontally()) {
+                    LagomSidebar(model, section, planner.unreadCount, enabled = !mailOpen, hide = { openSidebar(false) }, choose = ::choose)
+                }
+                AnimatedVisibility(!sidebarOpen, enter = expandHorizontally(), exit = shrinkHorizontally()) {
+                    LagomRail(section, planner.unreadCount, enabled = !mailOpen, show = { openSidebar(true) }, choose = ::choose)
+                }
+            }
             // The page meets the sidebar at a straight edge and runs to the screen's edges, as desktop and iPad.
             Box(Modifier.weight(1f).fillMaxHeight().background(lagom.bg)) {
                 when (section) {
-                    AppSection.TODAY -> TodayScreen(planner, model, open = ::show) { id ->
-                        show(AppSection.MAIL)
-                        opening = model.perform { model.openInbox(id) }
+                    // Today's title opens Settings too. Settings covers
+                    // Today instead of replacing it, so Back finds Today where it was.
+                    AppSection.TODAY -> Box(Modifier.fillMaxSize()) {
+                        Box(if (todaySettings) Modifier.clearAndSetSemantics {} else Modifier) {
+                            TodayScreen(planner, model, open = ::show, openSettings = { todaySettings = true }) { id ->
+                                show(AppSection.MAIL)
+                                opening = model.perform { model.openInbox(id) }
+                            }
+                        }
+                        if (todaySettings) Box(Modifier.fillMaxSize().background(lagom.bg)) { SettingsScreen(model) { todaySettings = false } }
                     }
                     AppSection.MAIL -> MailScreen(model, twoPane)
                     // The tablet layouts' breakpoint: a phone, also in landscape, keeps the one-day grid.
@@ -369,6 +390,25 @@ private enum class Stage { LOADING, ONBOARDING, HOME }
     planner.error?.takeIf { model.error == null }?.let { error ->
         AlertDialog(onDismissRequest = { planner.error = null }, title = { Text("lagom") }, text = { Text(error) },
             confirmButton = { TextButton(onClick = { planner.error = null }) { Text("OK") } })
+    }
+}
+
+/** The folded sidebar: Material's navigation rail with the pages and the button that unfolds it. */
+@Composable private fun LagomRail(section: AppSection, unread: Int, enabled: Boolean, show: () -> Unit, choose: (AppSection) -> Unit) {
+    val c = lagom
+    NavigationRail(containerColor = c.sidebar, header = { LagomIconButton("Show sidebar", R.drawable.ic_sidebar, onClick = show) }) {
+        AppSection.entries.forEach { page ->
+            NavigationRailItem(page == section, { choose(page) }, enabled = enabled,
+                modifier = Modifier.semantics { if (page == AppSection.MAIL && unread > 0) stateDescription = "$unread unread" },
+                icon = {
+                    BadgedBox(badge = { if (page == AppSection.MAIL && unread > 0) Badge(containerColor = c.ink2, contentColor = c.sidebar) {
+                        val size = with(LocalDensity.current) { 11.dp.toSp() }
+                        Text("$unread", fontSize = size, lineHeight = size)
+                    } }) { LagomIcon(page.icon, tint = if (page == section) c.selIcon else c.ink2, size = 24.dp) }
+                },
+                label = { Text(page.title, maxLines = 1) },
+                colors = NavigationRailItemDefaults.colors(indicatorColor = c.sel, selectedTextColor = c.ink, unselectedTextColor = c.ink2))
+        }
     }
 }
 
