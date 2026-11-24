@@ -38,4 +38,4 @@ Use `--quick` to skip tests.
 
 In Settings > AI Agents, enable access, choose the permitted accounts and levels,
 and connect the agent. For manual MCP setup, use the desktop binary's absolute
-path with `lagom mcp --agent <id>`. Use the ID shown for that agent.
+path with `lagom mcp --agent <id>`. Use the agent ID from its generated MCP entry or installed lagom skill.
