@@ -19,8 +19,21 @@ CREATE TABLE agent_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT INTO agent_settings VALUES('enabled','0'),('confirm','1');
 CREATE TABLE agent_drafts (draft TEXT PRIMARY KEY REFERENCES drafts(id) ON DELETE CASCADE, agent TEXT NOT NULL);
 CREATE TABLE agent_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, agent TEXT, token TEXT,
- account TEXT, command TEXT NOT NULL, target TEXT, result TEXT NOT NULL, source_ip TEXT, detail TEXT);
+ account TEXT, command TEXT NOT NULL, target TEXT, result TEXT NOT NULL, source_ip TEXT, detail TEXT, read_seq INTEGER);
 CREATE INDEX agent_audit_at ON agent_audit(at);
+CREATE INDEX agent_audit_reads ON agent_audit(agent,read_seq) WHERE read_seq IS NOT NULL;
+-- Reads are numbered per agent and capped at 50 000; write rows have no sequence and expire only by age.
+CREATE TRIGGER agent_audit_cap AFTER INSERT ON agent_audit
+ WHEN NEW.command NOT IN ('draft.create','draft.edit','draft.delete','draft.send')
+ AND NEW.command NOT GLOB 'action.*' AND NEW.command NOT GLOB 'event.*'
+BEGIN
+ UPDATE agent_audit SET read_seq=1+coalesce(
+  (SELECT max(read_seq) FROM agent_audit WHERE agent IS NEW.agent AND read_seq IS NOT NULL),0)
+ WHERE id=NEW.id;
+ DELETE FROM agent_audit WHERE agent IS NEW.agent AND read_seq <=
+  (SELECT read_seq-50000 FROM agent_audit WHERE id=NEW.id);
+END;
+ALTER TABLE outbox ADD COLUMN draft_agent TEXT;
 CREATE INDEX messages_account_message_id ON messages(account,message_id);
 PRAGMA user_version = 22;
 COMMIT;

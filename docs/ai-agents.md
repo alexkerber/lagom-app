@@ -361,7 +361,7 @@ CREATE INDEX agent_audit_at ON agent_audit(at);
 CREATE INDEX messages_account_message_id ON messages(account, message_id);
 ```
 
-Migration `schema_v23.sql` clears old audit targets and indexes counted rows by agent and sequence.
+Migration `schema_v22.sql` also indexes counted read rows by agent and sequence.
 Enqueue copies the draft owner into `outbox.draft_agent`. Undo restores ownership in the draft transaction.
 
 `Store::delete_account` also deletes the account's `agent_access` rows.
