@@ -119,6 +119,14 @@ fn message(store: &Store, mut m: MessageSummary, body: bool) -> Result<Value> {
     let mut result = json!({"id":id,"account":m.account,"thread":ObjectId::Thread(m.account.clone(),m.thread_id).encode(),
         "folder":clean(&folder),"from":clean(&m.from_address),"subject":clean(&m.subject),"date":date,
         "unread":!m.seen,"starred":m.flagged,"ambiguous":resolved.ambiguous});
+    if !body {
+        result["folders"] = if m.message_id.is_empty() {
+            json!([clean(&folder)])
+        } else {
+            json!(store.agent_message_folders(&m.account, &m.message_id)?
+                .iter().map(|name| clean(name)).collect::<Vec<_>>())
+        };
+    }
     if body {
         let text = store.agent_body(&m.account, m.id)?;
         let available = text != lagom_core::mime::BODY_UNAVAILABLE;

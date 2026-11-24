@@ -158,6 +158,15 @@ impl Store {
         )?)
     }
 
+    pub fn agent_message_folders(&self, account: &str, header: &str) -> Result<Vec<String>, Code> {
+        let mut stmt = self.db.prepare(&format!("SELECT f.name FROM messages m
+            JOIN folders f ON f.id=coalesce(m.move_target,m.folder) AND f.account=m.account
+            WHERE m.account=? AND m.message_id=? GROUP BY f.id ORDER BY {},min(m.id)",
+            id::FOLDER_PRIORITY))?;
+        let names = stmt.query_map([account, header], |r| r.get(0))?;
+        Ok(names.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn agent_message_key(
         &self,
         account: &str,

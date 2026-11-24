@@ -9,6 +9,9 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(super) const FOLDER_PRIORITY: &str = "CASE f.role WHEN 'inbox' THEN 0 WHEN 'sent' THEN 2
+    WHEN 'archive' THEN 3 WHEN 'junk' THEN 4 WHEN 'trash' THEN 5 ELSE 1 END";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MessageId {
     Header(String, String),
@@ -228,16 +231,15 @@ impl Store {
             }
             MessageId::Header(_, header) => {
                 self.db.query_row(
-                    "WITH copies AS (
-                    SELECT m.id,m.account,m.message_id,f.name,f.role,m.folder,m.date,m.size,m.from_address,m.from_name,m.subject
+                    &format!("WITH copies AS (
+                    SELECT m.id,m.account,m.message_id,f.name,{FOLDER_PRIORITY} AS priority,m.folder,m.date,m.size,m.from_address,m.from_name,m.subject
                     FROM messages m JOIN folders f ON f.id=m.folder AND f.account=m.account
                     WHERE m.account=?1 AND m.message_id=?2)
                     SELECT id, (SELECT count(*)<>count(DISTINCT folder) OR min(date)<>max(date)
                         OR min(size)<>max(size) OR min(from_address)<>max(from_address)
                         OR min(from_name)<>max(from_name) OR min(subject)<>max(subject) FROM copies), account,message_id
                     FROM copies WHERE ?3 IS NULL OR name=?3
-                    ORDER BY CASE role WHEN 'inbox' THEN 0 WHEN 'sent' THEN 2 WHEN 'archive' THEN 3
-                        WHEN 'junk' THEN 4 WHEN 'trash' THEN 5 ELSE 1 END, id LIMIT 1",
+                    ORDER BY priority, id LIMIT 1"),
                     params![account, header, folder],
                     |r| Ok(ResolvedMessage {
                         row: r.get(0)?, ambiguous: r.get(1)?,

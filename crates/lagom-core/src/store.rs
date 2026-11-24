@@ -1796,6 +1796,37 @@ pub(crate) mod mail_tests {
     }
 
     #[test]
+    fn agent_mail_pages_count_messages_per_account_before_applying_the_limit() {
+        use crate::agent::filter::Filter;
+        let (_temp, store, a, inbox) = setup();
+        let archive = store.save_folder(&a.id, "[Gmail]/All Mail", None, FolderRole::Archive).unwrap();
+        let mut other = a.clone();
+        other.id = "other".into();
+        store.save_account(&other).unwrap();
+        let second_inbox = store.save_folder(&other.id, "INBOX", None, FolderRole::Inbox).unwrap();
+        let mut copy = mail(&a, inbox, 1);
+        copy.summary.message_id = "<shared>".into();
+        let primary = store.save_message(&copy).unwrap();
+        copy.summary.folder = archive;
+        store.save_message(&copy).unwrap();
+        copy.summary.account = other.id.clone();
+        copy.summary.folder = second_inbox;
+        let separate = store.save_message(&copy).unwrap();
+
+        let reader = Store::agent_reader(store.path(), || false).unwrap();
+        let accounts = [a.id.clone(), other.id];
+        for query in ["", "subject:hello"] {
+            let filter = Filter::parse(query).unwrap();
+            for (page, id, next) in [(1, separate, Some(2)), (2, primary, None)] {
+                let (rows, next_page) = reader.filtered_messages(&accounts, &filter, None, 0, page, Some(1)).unwrap();
+                assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), [id]);
+                assert_eq!(next_page, next);
+            }
+        }
+        assert_eq!(store.agent_message_folders(&a.id, "<shared>").unwrap(), ["INBOX", "[Gmail]/All Mail"]);
+    }
+
+    #[test]
     fn agent_filter_matches_literal_terms_in_allowed_folders() {
         use crate::agent::filter::{Filter, FilterReader};
         let (temp, store, a, inbox) = setup();

@@ -225,6 +225,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     The write policy below resolves mail and calendar actions.
   - [ ] Agent task changes are deferred.
 - [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+  - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
+    Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
+    Settings and the client explain when the socket path is too long.
+    Core and desktop tests passed on macOS. The desktop app built. Live Gmail and visual Settings checks remain unverified.
   - [x] Desktop agents can triage mail, manage their own drafts and change calendar events on `feat/agents-write`.
     The worker checks access again before writing. Every calendar change requires approval.
     Socket tests covered revocation, expiry, draft conflicts, disconnects, the two-minute timeout and Undo.

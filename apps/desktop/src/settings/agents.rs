@@ -24,6 +24,7 @@ const SEGMENT: f32 = 52.;
 #[derive(Default)]
 pub struct Agents {
     pub enabled: bool,
+    pub socket_error: Option<Code>,
     pub confirm: bool,
     pub sidebar: bool,
     /// Kind and name of each agent found on this computer when the page opened.
@@ -54,6 +55,11 @@ impl Agents {
 
     pub fn load(&mut self, store: &Store) -> Result<(), Code> {
         self.enabled = store.agent_setting(Setting::Enabled)?;
+        #[cfg(unix)]
+        {
+            self.socket_error = store.path().parent().filter(|_| self.enabled)
+                .and_then(|dir| crate::agent::socket_path(dir).err());
+        }
         self.confirm = store.agent_setting(Setting::Confirm)?;
         self.sidebar = store.agent_setting(Setting::Sidebar)?;
         self.agents = store.agents()?;
@@ -242,6 +248,7 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
             .child(stop(t, toggle_row(t, "Enable agent access", a.enabled))
                 .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx))))
             .child(div().flex().flex_col().gap(px(6.)).pb(px(8.))
+                .when_some(a.socket_error, |row, code| row.child(div().text_color(t.danger).child(code.message())))
                 .child(note(t, "Coding agents on this computer can read and act on your mail and calendar, within the levels below."))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4))
                     .child("Connect only agents you trust, on a computer you control. A mail can hold instructions written for the agent."))));
@@ -386,4 +393,23 @@ fn activity(t: &Theme, a: &Agents, accounts: &[Account], cx: &mut Context<MainWi
         log = log.child(group);
     }
     log
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enabled_access_shows_the_socket_path_error_in_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("x".repeat(120));
+        std::fs::create_dir(&dir).unwrap();
+        let store = Store::open(dir.join("lagom.sqlite3")).unwrap();
+        let mut settings = Agents::new();
+        for enabled in [true, false] {
+            store.set_agent_setting(Setting::Enabled, enabled).unwrap();
+            settings.load(&store).unwrap();
+            assert_eq!(settings.socket_error, enabled.then_some(Code::SocketPathTooLong));
+        }
+    }
 }
