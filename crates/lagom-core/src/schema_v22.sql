@@ -52,6 +52,11 @@ END;
 CREATE TRIGGER agent_policy_remove AFTER DELETE ON agent_access BEGIN
  UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
 END;
+ALTER TABLE drafts ADD COLUMN created INTEGER NOT NULL DEFAULT 0;
+UPDATE drafts SET created=updated;
+CREATE TRIGGER draft_created AFTER INSERT ON drafts BEGIN
+ UPDATE drafts SET created=unixepoch() WHERE id=NEW.id;
+END;
 ALTER TABLE outbox ADD COLUMN draft_agent TEXT;
 ALTER TABLE outbox ADD COLUMN agent_token TEXT REFERENCES agent_tokens(id) ON DELETE SET NULL;
 ALTER TABLE outbox ADD COLUMN agent_policy_generation INTEGER;

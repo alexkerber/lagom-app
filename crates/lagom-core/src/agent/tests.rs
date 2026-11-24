@@ -16,6 +16,19 @@ use rusqlite::params;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn draft_list_keeps_creation_order_across_autosaves() {
+    let (_dir, store, account, _) = setup();
+    for id in ["c", "b", "a"] {
+        store.save_draft(&crate::outbox::Draft { id:id.into(), account:account.id.clone(), ..Default::default() }).unwrap();
+    }
+    store.db.execute("UPDATE drafts SET created=CASE WHEN id='c' THEN 1 ELSE 2 END,updated=0", []).unwrap();
+    let mut edited = store.draft("c").unwrap();
+    edited.text = "personal edit".into();
+    store.autosave_draft(&edited,&store.draft_revision("c").unwrap()).unwrap();
+    assert_eq!(store.agent_draft_ids(&account.id).unwrap(), ["a","b","c"]);
+}
+
+#[test]
 fn effective_intersects_live_matrices_and_token_scope() {
     let (_dir, s, a, _) = setup();
     let b = Account::new("b@example.org".into(), a.imap.clone(), a.smtp.clone()).unwrap();

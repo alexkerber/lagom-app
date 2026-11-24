@@ -28,7 +28,7 @@ impl Store {
     }
 
     pub fn agent_draft_ids(&self, account: &str) -> Result<Vec<String>, Code> {
-        let mut stmt = self.db.prepare("SELECT id FROM drafts WHERE account=? ORDER BY updated DESC")?;
+        let mut stmt = self.db.prepare("SELECT id FROM drafts WHERE account=? ORDER BY created DESC,id")?;
         let ids = stmt.query_map([account], |r| r.get(0))?;
         Ok(ids.collect::<rusqlite::Result<_>>()?)
     }
