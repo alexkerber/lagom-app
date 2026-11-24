@@ -223,29 +223,10 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
         s.resolve_agent_message(Some(&token), Some("::1"), &key.encode(), folder, required)
             .map_err(Code::from)
     };
-    let snapshot = crate::store::Store::agent_reader(s.path(), || false).unwrap();
-    let who = snapshot.authenticate(Some(&token), Some("::1")).unwrap();
-    let allowed = snapshot.agent_accounts(&who, &[Mail], None).unwrap();
-    assert_eq!(allowed[0].0, a.id);
     let key = MessageId::Header(a.id.clone(), "m@example.org".into());
     let mut m = mail(&a, inbox, 1);
     m.summary.message_id = "m@example.org".into();
     let first = s.save_message(&m).unwrap();
-    let (rows, _) = snapshot
-        .filtered_messages(
-            &[allowed[0].0.clone()],
-            &super::filter::Filter::parse("").unwrap(),
-            None,
-            0,
-            1,
-            None,
-        )
-        .unwrap();
-    assert!(
-        rows.is_empty(),
-        "a later insert cannot enter the authorized snapshot"
-    );
-    drop(snapshot);
     m.summary.folder = s
         .save_folder(&a.id, "Archive", None, FolderRole::Archive)
         .unwrap();

@@ -362,8 +362,13 @@ pub(super) fn dispatch(
                 loop {
                     let expiry = async {
                         if let Some(end) = expires {
-                            let millis = end.saturating_mul(1000).saturating_sub(chrono::Utc::now().timestamp_millis());
-                            tokio::time::sleep(std::time::Duration::from_millis(millis.max(0) as u64)).await;
+                            let millis = end
+                                .saturating_mul(1000)
+                                .saturating_sub(chrono::Utc::now().timestamp_millis());
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                millis.max(0) as u64
+                            ))
+                            .await;
                         } else {
                             std::future::pending::<()>().await;
                         }
@@ -450,4 +455,77 @@ pub(super) fn dispatch(
         _ => return Err(Code::InvalidRequest.into()),
     }
     Ok(json!({(cmd):rows}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lagom_core::{
+        account::Account,
+        agent::policy::Access,
+        store::{FolderRole, Message},
+    };
+
+    #[test]
+    fn search_uses_the_snapshot_that_granted_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let writer = Store::open(&path).unwrap();
+        let (imap, smtp) = lagom_core::presets::servers("reader@gmail.com").unwrap();
+        let account = Account::new("reader@gmail.com".into(), imap, smtp).unwrap();
+        writer.save_account(&account).unwrap();
+        for resource in [Resource::Mail, Resource::Calendar] {
+            writer
+                .set_agent_access(
+                    "",
+                    &Access {
+                        resource,
+                        account: account.id.clone(),
+                        level: Level::Read,
+                    },
+                )
+                .unwrap();
+        }
+        let token = writer.provision_read_agent(&account.id).unwrap();
+        let folder = writer
+            .save_folder(&account.id, "Inbox", None, FolderRole::Inbox)
+            .unwrap();
+        let reader = Store::agent_reader(&path, || false).unwrap();
+        let who = reader.authenticate(Some(&token), None).unwrap();
+        writer
+            .save_message(&Message {
+                summary: MessageSummary {
+                    account: account.id,
+                    folder,
+                    uid: 1,
+                    message_id: "later".into(),
+                    subject: "later".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let request = Request {
+            v: 1,
+            token: Some(token),
+            source_ip: None,
+            cmd: "search".into(),
+            args: serde_json::from_value(json!({"query":"subject:later"})).unwrap(),
+        };
+        let (_off, watch) = tokio::sync::watch::channel(());
+        let (_policy, changes) = tokio::sync::watch::channel(None);
+        let result = dispatch(
+            &reader,
+            &who,
+            &request,
+            |_| panic!(),
+            &mut None,
+            &mut None,
+            &Default::default(),
+            watch,
+            changes,
+        )
+        .unwrap();
+        assert_eq!(result["messages"], json!([]));
+    }
 }

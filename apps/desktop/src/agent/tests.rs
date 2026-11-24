@@ -643,7 +643,12 @@ fn waiting_attachments_reauthenticate_before_returning_bytes() {
         );
         thread::scope(|scope| {
             let call = scope.spawn(|| wire(&sock, req.as_bytes()));
-            let Cmd::AgentAttachment(request) = commands.blocking_recv().unwrap() else {
+            let mut queued = None;
+            wait(|| {
+                queued = commands.try_recv().ok();
+                queued.is_some()
+            });
+            let Some(Cmd::AgentAttachment(request)) = queued else {
                 panic!()
             };
             let expected = match change {
