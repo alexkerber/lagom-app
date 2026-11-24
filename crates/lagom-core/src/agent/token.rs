@@ -35,6 +35,7 @@ pub enum TokenScope<'a> {
 }
 
 pub struct Identity {
+    pub expires: Option<i64>,
     pub(super) agent: String,
     pub(super) token: String,
     pub(super) level: Level,
@@ -195,9 +196,9 @@ impl Store {
         let agent = self.create_agent("developer", "Manual test", "local", false)?;
         tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&agent])?;
         for kind in ["mail", "calendar"] {
-            tx.execute("INSERT INTO agent_access SELECT '',?1,?2,1 WHERE coalesce((SELECT level FROM agent_access
-                WHERE agent='' AND kind=?1 AND account IN ('',?2) ORDER BY account<>'' DESC LIMIT 1),0)=0
-                ON CONFLICT DO UPDATE SET level=1", params![kind,account])?;
+            if self.matrix("", kind, account)? < Level::Read {
+                return Err(Code::Forbidden);
+            }
             tx.execute(
                 "INSERT INTO agent_access VALUES(?,?,?,1)",
                 params![agent, kind, account],
@@ -300,6 +301,7 @@ impl Store {
         };
         let level = Level::from_db(level).ok_or_else(|| refused(InvalidScope))?;
         Ok(Identity {
+            expires,
             agent,
             token: id.into(),
             level,

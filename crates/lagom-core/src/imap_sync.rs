@@ -688,7 +688,12 @@ impl ImapSync {
         if part.size as usize > MAX_LITERAL {
             return Err(Error::Invalid("attachment exceeds 64 MiB"));
         }
-        if part.size as usize > limit && matches!(part.encoding.to_ascii_lowercase().as_str(), "7bit" | "8bit" | "binary") {
+        let estimated = if part.encoding.eq_ignore_ascii_case("base64") {
+            u64::from(part.size) * 3 / 4
+        } else {
+            u64::from(part.size)
+        };
+        if estimated > limit as u64 {
             return Err(Error::Invalid("attachment is too large"));
         }
         // Include SELECT/read-ahead in the budget; allow 64 KiB for protocol framing.

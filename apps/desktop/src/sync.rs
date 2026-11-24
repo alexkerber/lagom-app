@@ -481,6 +481,11 @@ impl Worker {
                         },
                         Err(e) => Err(e),
                     };
+                    let result = result.and_then(|bytes| {
+                        let reader = Store::agent_reader(self.store.path(), || false)?;
+                        request.resolve(&reader)?;
+                        Ok(bytes)
+                    });
                     let _ = request.reply.send(result);
                 }
             }

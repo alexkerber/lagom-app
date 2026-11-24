@@ -202,7 +202,11 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
-  - [x] read-only slice: `lagom-cli mcp` over stdio with list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos (2026-11-17). Protocol tests and a stdio smoke; not tried in a real MCP client.
+  - [x] Closed the agent read security review on `feat/agents-socket`. Settings provisions authenticated MCP access.
+    Pending reads recheck permissions. Search uses one snapshot. Contacts, attachments and audit refusals have limits.
+    Long identifiers resolve within their account. Settings shows the latest 50 activity rows per agent.
+    Core, desktop and developer CLI tests passed. The macOS desktop build passed.
+    Live providers, external MCP clients and Linux remain unverified.
   - [x] Agent security review on `feat/agents-core`. Audit targets require a store lookup. Read limits protect each agent’s history.
     Verified token refusals retain their IDs. Source checks distinguish local and remote tokens. Undo restores draft ownership.
     Core and FFI tests passed. The desktop app built. Live agent connections were not tested.
@@ -214,7 +218,6 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     A fake socket verified framing, identity, output, errors and MCP calls.
     The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
     The live service and Linux remain untested.
-  - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] Agent task changes are deferred.
 - [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
