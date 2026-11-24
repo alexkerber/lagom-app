@@ -323,9 +323,11 @@ impl Store {
         let mut args: Vec<Value> = accounts.iter().cloned().map(Value::Text).collect();
         let slots = vec!["?"; accounts.len()].join(",");
         let mut sql = format!(
-            "SELECT {VISIBLE_SUMMARY_COLUMNS} FROM messages m
+            "WITH matches AS (SELECT m.id, row_number() OVER (
+                PARTITION BY m.account,coalesce(nullif(m.message_id,''),m.id)
+                ORDER BY {priority},m.id) AS copy FROM messages m
             JOIN folders f ON f.id=coalesce(m.move_target,m.folder) AND f.account=m.account
-            WHERE m.account IN ({slots})"
+            WHERE m.account IN ({slots})", priority = super::id::FOLDER_PRIORITY
         );
         if let Some(scope) = scope {
             sql.push_str(" AND ");
@@ -357,7 +359,8 @@ impl Store {
             }
             sql.push(')');
         }
-        sql.push_str(" ORDER BY m.date DESC,m.id DESC LIMIT ? OFFSET ?");
+        sql.push_str(&format!(") SELECT {VISIBLE_SUMMARY_COLUMNS} FROM matches JOIN messages m ON m.id=matches.id
+            WHERE copy=1 ORDER BY m.date DESC,m.id DESC LIMIT ? OFFSET ?"));
         args.push((limit + 1).into());
         args.push(offset.into());
         let mut rows = self.filter_rows(&sql, args)?;

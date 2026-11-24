@@ -158,7 +158,7 @@ effective(resource) = min( global level,   # the account's row, else the group d
 | `accounts`                                                                  | —        | lists accounts with Read or more on mail or calendar |         |
 | `folders`                                                                   | mail     | Read                                                 |         |
 | `emails [--filter] [--page] [--limit]`                                      | mail     | Read                                                 |         |
-| `search <topic or filter> [--in <scope>]`                                   | mail     | Read                                                 |         |
+| `search <topic or filter> [--in <scope>] [--page] [--limit]`                | mail     | Read                                                 |         |
 | `thread <id>`                                                               | mail     | Read                                                 |         |
 | `attachment <id>`                                                           | mail     | Read                                                 |         |
 | `contacts`                                                                  | mail     | Read                                                 |         |
@@ -177,7 +177,7 @@ effective(resource) = min( global level,   # the account's row, else the group d
   `has:attachment`, `in:<folder>`, `before:` and `after:` (`YYYY-MM-DD`), and bare words for full
   text. The core parses it into bound SQL parameters. An unknown operator is `invalid_request`.
 - `--in` takes `inbox`, `sent`, `archive`, `later`, `all` or a folder name. `--limit` is 20 by
-  default and 100 at most. `--page` starts at 1.
+  default and 100 at most. `--page` starts at 1. Only `emails` and `search` accept these paging flags.
 - Drafts. `draft edit`, `draft delete` and `draft send` work only on a draft that the same agent
   created. Every other draft is read-only. `draft edit` names the revision it read; a draft that
   changed since gives `conflict`. The Drafts list marks a draft an agent created. An agent draft
@@ -235,8 +235,9 @@ from an account.
 | `too_large`       | Too large.                                             | A size limit above.                                                              |
 | `internal`        | Internal error.                                        | Anything else. The detail goes to the app's log only.                            |
 
-The client adds one of its own: `app_unreachable` ("lagom is not running, or agent access is
-off."). An ID or account outside the caller's scope gives the same bytes as one that does not
+The client reports `app_unreachable` ("lagom is not running, or agent access is
+off.") or `socket_path_too_long` ("Agent access could not start. The socket path is too long.").
+An ID or account outside the caller's scope gives the same bytes as one that does not
 exist, and the app decides it before any lookup. `forbidden` appears only for objects the caller
 can already read. The audit log keeps the real reason.
 
@@ -267,7 +268,8 @@ IDs are opaque strings. Clients must not parse them.
 - Copies. One mail can sit in several folders of one account, for example Gmail's Inbox and All
   Mail. Rows with one Message-ID and the same date, size, sender and subject are copies. A
   command takes the first copy in this order: Inbox, other folders, Sent, Archive, Junk, Trash.
-  `--folder` picks another.
+  `emails` and `search` page over distinct IDs per account. Each row names the preferred matching
+  folder and lists all its folders in `folders`. `--folder` picks another.
 - Collisions. The sender chooses the Message-ID, so a stranger can reuse one. When the rows for
   an ID are not all copies, or two of them share a folder, every write gives `conflict` and a
   read marks the object `"ambiguous":true`. What stays: a forgery with equal date, size, sender

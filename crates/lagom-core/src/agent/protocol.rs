@@ -30,6 +30,7 @@ pub enum Code {
     TooLarge,
     Internal,
     AppUnreachable,
+    SocketPathTooLong,
 }
 
 impl Code {
@@ -47,6 +48,7 @@ impl Code {
             Self::Unsupported => "Not supported.",
             Self::TooLarge => "Too large.",
             Self::Internal => "Internal error.",
+            Self::SocketPathTooLong => "Agent access could not start. The socket path is too long.",
             Self::AppUnreachable => "lagom is not running, or agent access is off.",
         }
     }
