@@ -674,6 +674,22 @@ fn response(s: UnixStream) -> Value {
 }
 
 #[test]
+fn approved_send_waiting_for_worker_cannot_survive_a_policy_cycle() {
+    let mut f = WriteFixture::new();
+    let draft = f.write("draft.create", json!({"to":"a@example.com","body":"approved"}));
+    let (socket, sheet) = f.sending(&draft["result"]["id"]);
+    sheet.answer.send(Ok(())).unwrap();
+    let job = f.recv();
+    f.level(1);
+    f.level(3);
+    f.run(job);
+    assert_eq!(response(socket)["error"]["code"], "forbidden");
+    let drafts = f.store.drafts().unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert!(f.store.pending(&drafts[0].id).is_err());
+}
+
+#[test]
 fn draft_confirmation_sends_only_the_reviewed_revision_and_undo_restores_ownership() {
     let mut f = WriteFixture::new();
     let created = f.write(

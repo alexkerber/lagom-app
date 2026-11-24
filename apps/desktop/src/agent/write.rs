@@ -29,6 +29,7 @@ pub(crate) struct Job {
     pub req: Request,
     pub sender: Account,
     pub generation: i64,
+    policy_generation: i64,
     pub snapshot: Snapshot,
     pub approved: bool,
     pub audit_id: i64,
@@ -386,6 +387,7 @@ pub(super) fn dispatch(
     mut off: watch::Receiver<()>,
     peer: Option<&std::sync::Arc<std::os::unix::net::UnixStream>>,
 ) -> Result<Value> {
+    let policy_generation = store.agent_policy_generation()?;
     let id = scope(store, who, req)?;
     audit.dispatched = true;
     audit.account = Some(id.clone());
@@ -472,7 +474,7 @@ pub(super) fn dispatch(
     audit.worker_audit = true;
     let (reply, rx) = oneshot::channel();
     let result = if bridge.send(Cmd::AgentWrite(Box::new(Job {
-        req: req.clone(), sender: account, generation, snapshot, approved: confirm, audit_id, cancelled: off, reply,
+        req: req.clone(), sender: account, generation, policy_generation, snapshot, approved: confirm, audit_id, cancelled: off, reply,
     }))) {
         rt.block_on(rx).unwrap_or(Err(Code::Uncertain.into()))
     } else {
@@ -519,6 +521,9 @@ pub fn draft_change(
             }
             if !job.approved && store.agent_setting(Setting::Confirm)? {
                 return Err(Code::Denied.into());
+            }
+            if store.agent_policy_generation()? != job.policy_generation {
+                return Err(Code::Forbidden.into());
             }
             store
                 .enqueue_agent(
