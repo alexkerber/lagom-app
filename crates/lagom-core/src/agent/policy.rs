@@ -41,7 +41,7 @@ impl Store {
         Ok(level)
     }
 
-    pub(super) fn agent_level(
+    pub fn agent_level(
         &self,
         identity: &Identity,
         resource: Resource,

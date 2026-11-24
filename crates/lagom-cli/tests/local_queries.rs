@@ -163,3 +163,24 @@ fn tasks_reject_missing_ambiguous_and_invalid_inputs() {
     assert!(run(&db, &["tasks", "add", "1", "By id"]).contains("By id"));
     assert_eq!(store.tasks(1, false).unwrap().len(), 1);
 }
+
+#[test]
+fn developer_agent_enables_only_the_selected_account() {
+    use lagom_core::agent::policy::{Level, Resource};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cli.db");
+    let store = Store::open(&path).unwrap();
+    for email in ["a@gmail.com", "b@gmail.com"] {
+        let (imap, smtp) = presets::servers(email).unwrap();
+        store.save_account(&Account::new(email.into(), imap, smtp).unwrap()).unwrap();
+    }
+    let raw = run(&path, &["agent", "--account", "a@gmail.com"]);
+    for a in store.accounts().unwrap() {
+        for resource in [Resource::Mail, Resource::Calendar] {
+            assert_eq!(store.effective(Some(raw.trim()), None, resource, &a.id).unwrap(),
+                if a.email == "a@gmail.com" { Level::Read } else { Level::None });
+        }
+    }
+    run(&path, &["agent", "--off"]);
+    assert!(!store.agent_enabled().unwrap());
+}

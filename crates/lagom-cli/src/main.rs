@@ -66,6 +66,8 @@ impl From<SignInProvider> for Provider {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Enable local Read access for the selected account and print a test token, or disable access.
+    Agent { #[arg(long)] off: bool },
     /// Serve read-only tools over MCP stdio.
     Mcp,
     Tasks {
@@ -296,6 +298,15 @@ async fn main() -> Result<()> {
     };
     oauth::configure_refresh_store(store.path());
     match args.command {
+        Command::Agent { off } => {
+            if off {
+                store.disable_agents().map_err(|e| anyhow::anyhow!(e.message()))?;
+            } else {
+                let account = selected(&store,args.account.as_deref())?;
+                let token = store.provision_read_agent(&account.id).map_err(|e| anyhow::anyhow!(e.message()))?;
+                println!("{}", token.as_str());
+            }
+        }
         Command::Mcp => mcp::run(&store)?,
         Command::Tasks { command } => match command {
             TasksCommand::Lists => {

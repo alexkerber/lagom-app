@@ -3468,6 +3468,7 @@ name = "lagom"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "block2",
  "chrono",
  "embed-resource",
@@ -3476,6 +3477,7 @@ dependencies = [
  "image",
  "keyring",
  "lagom-core",
+ "libc",
  "notify-rust",
  "objc2",
  "objc2-app-kit",

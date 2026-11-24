@@ -1,5 +1,7 @@
 // Release builds start without a console window on Windows; debug builds keep it for logs.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#[cfg(unix)]
+mod agent;
 #[cfg(target_os = "macos")]
 mod icon;
 mod accounts;

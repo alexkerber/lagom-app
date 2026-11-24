@@ -71,14 +71,27 @@ impl Store {
         agent: &str,
         scope: TokenScope<'_>,
     ) -> Result<Zeroizing<String>, Code> {
-        let now = chrono::Utc::now().timestamp();
         let tx = self.db.unchecked_transaction()?;
-        let remote: i64 = tx.query_row("SELECT remote FROM agents WHERE id=?", [agent], |r| {
-            r.get(0)
-        })?;
+        let raw = self.issue_token_inner(agent, scope)?;
+        tx.commit()?;
+        Ok(raw)
+    }
+
+    fn issue_token_inner(
+        &self,
+        agent: &str,
+        scope: TokenScope<'_>,
+    ) -> Result<Zeroizing<String>, Code> {
+        let now = chrono::Utc::now().timestamp();
+        let remote: i64 =
+            self.db
+                .query_row("SELECT remote FROM agents WHERE id=?", [agent], |r| {
+                    r.get(0)
+                })?;
         let (level, accounts, cidr, expires) = match (remote, scope) {
             (0, TokenScope::Local) => {
-                tx.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+                self.db
+                    .execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
                 (Level::Send, None, None, None)
             }
             (
@@ -108,10 +121,39 @@ impl Store {
         let mut raw = Zeroizing::new(format!("lgm_{id}_"));
         URL_SAFE_NO_PAD.encode_string(&*secret, &mut raw);
         let hash = Sha256::digest(raw.as_bytes());
-        tx.execute("INSERT INTO agent_tokens(id,agent,hash,level,accounts,cidr,expires,created) VALUES(?,?,?,?,?,?,?,?)",
+        self.db.execute("INSERT INTO agent_tokens(id,agent,hash,level,accounts,cidr,expires,created) VALUES(?,?,?,?,?,?,?,?)",
             params![id,agent,&hash[..],level as i64,accounts,cidr,expires,now])?;
-        tx.commit()?;
         Ok(raw)
+    }
+
+    pub fn provision_read_agent(&self, account: &str) -> Result<Zeroizing<String>, Code> {
+        let tx = self.db.unchecked_transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
+            [account],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(Code::NotFound);
+        }
+        let agent = self.create_agent("developer", "Manual test", "local", false)?;
+        tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&agent])?;
+        for kind in ["mail", "calendar"] {
+            tx.execute("INSERT INTO agent_access SELECT '',?1,?2,1 WHERE coalesce((SELECT level FROM agent_access
+                WHERE agent='' AND kind=?1 AND account IN ('',?2) ORDER BY account<>'' DESC LIMIT 1),0)=0
+                ON CONFLICT DO UPDATE SET level=1", params![kind,account])?;
+            tx.execute(
+                "INSERT INTO agent_access VALUES(?,?,?,1)",
+                params![agent, kind, account],
+            )?;
+        }
+        let token = self.issue_token_inner(&agent, TokenScope::Local)?;
+        tx.execute(
+            "UPDATE agent_settings SET value='1' WHERE key='enabled'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(token)
     }
 
     pub fn revoke_agent_tokens(&self, agent: &str) -> Result<(), Code> {

@@ -173,7 +173,17 @@ impl Store {
     }
 
     pub fn cached_attachment(&self, message: i64, section: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.db.query_row("SELECT data FROM attachment_cache WHERE message=?1 AND section=?2", params![message, section], |r| r.get(0)).optional()?)
+        self.cached_attachment_limited(message, section, usize::MAX)
+    }
+
+    pub fn cached_attachment_limited(&self, message: i64, section: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        match self.db.query_row("SELECT CASE WHEN length(data)<=?3 THEN data END FROM attachment_cache WHERE message=?1 AND section=?2",
+            params![message, section, limit], |r| r.get::<_, Option<Vec<u8>>>(0)).optional()? {
+            None => Ok(None),
+            Some(Some(data)) => Ok(Some(data)),
+            Some(None) => Err(Error::Invalid("attachment is too large")),
+        }
     }
 
     pub fn cached_forward_attachments(&self, message: i64) -> Result<Option<Vec<crate::smtp::OutgoingAttachment>>> {

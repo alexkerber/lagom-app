@@ -79,6 +79,8 @@ pub enum Cmd {
     Inline(i64),
     ForwardAttachments { draft: String, id: i64 },
     OpenMessage(i64),
+    #[cfg(unix)]
+    AgentAttachment(crate::agent::read::Attachment),
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
     Send(String),
@@ -211,7 +213,7 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
         return;
     }
     let _ = events.send(Event::Changed);
-    let mut w = Worker { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events };
+    let mut w = Worker::new(store, me, events);
     for account in w.store.accounts().unwrap_or_default() {
         w.watch(&account);
     }
@@ -335,6 +337,10 @@ struct Worker {
 }
 
 impl Worker {
+    fn new(store: Store, me: UnboundedSender<Cmd>, events: UnboundedSender<Event>) -> Self {
+        Self { store, sessions: HashMap::new(), idle: HashMap::new(), moved: HashMap::new(), deferred: VecDeque::new(), sign_in: None, reauth: None, calendar_consent: false, calendars: tokio::task::JoinSet::new(), calendar_tasks: HashMap::new(), event_creates: tokio::task::JoinSet::new(), create_tasks: HashMap::new(), pending_events: Vec::new(), task_sync: None, reauth_required: HashSet::new(), discovery: None, me, events }
+    }
+
     fn emit(&self, event: Event) {
         let _ = self.events.send(event);
     }
@@ -444,6 +450,20 @@ impl Worker {
             Cmd::OpenMessage(id) => {
                 let result = self.cache_eml(id).await.map_err(|e| shown(&e));
                 self.emit(Event::MessageFile(result));
+            }
+            #[cfg(unix)]
+            Cmd::AgentAttachment(mut request) => {
+                if !request.reply.is_closed() {
+                    let result = match Store::agent_reader(self.store.path(), || false).and_then(|reader| request.resolve(&reader)) {
+                        Ok(row) => tokio::select! {
+                            biased;
+                            _ = request.reply.closed() => return,
+                            result = self.attachment_bytes(row, &request.section, crate::agent::read::ATTACHMENT_LIMIT) => result.map_err(crate::agent::read::error),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    let _ = request.reply.send(result);
+                }
             }
             Cmd::Download { id, section } => {
                 let result = self.download(id, &section).await.map_err(|e| shown(&e));
@@ -1037,11 +1057,11 @@ impl Worker {
         result
     }
 
-    async fn attachment_bytes(&mut self, id: i64, section: &str) -> lagom_core::Result<Vec<u8>> {
-        if let Some(data) = self.store.cached_attachment(id, section)? { return Ok(data); }
+    async fn attachment_bytes(&mut self, id: i64, section: &str, limit: usize) -> lagom_core::Result<Vec<u8>> {
+        if let Some(data) = self.store.cached_attachment_limited(id, section, limit)? { return Ok(data); }
         let account = self.account(&self.store.message_summary(id)?.account)?;
         let mut session = self.take(&account).await?;
-        let result = session.fetch_attachment(&mut self.store, id, section).await;
+        let result = session.fetch_attachment_limited(&mut self.store, id, section, limit).await;
         self.give(&account.id, session, &result);
         result
     }
@@ -1057,7 +1077,7 @@ impl Worker {
         }
         let mut parts = Vec::new();
         for part in self.store.attachments(id)? {
-            let data = self.attachment_bytes(id, &part.section).await?;
+            let data = self.attachment_bytes(id, &part.section, usize::MAX).await?;
             parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
         }
         Ok(parts)
@@ -1075,7 +1095,7 @@ impl Worker {
     async fn download(&mut self, id: i64, section: &str) -> lagom_core::Result<PathBuf> {
         let id = self.resolve(id).await?;
         let part = self.store.attachments(id)?.into_iter().find(|p| p.section == section).ok_or(Error::NotFound)?;
-        let data = self.attachment_bytes(id, section).await?;
+        let data = self.attachment_bytes(id, section, usize::MAX).await?;
         lagom_core::attachment::save_download(&part.filename, &data)
     }
 
@@ -2256,3 +2276,7 @@ mod mail_basics_tests;
 
 #[cfg(test)]
 mod create_tests;
+
+#[cfg(all(unix, test))]
+#[path = "agent/tests.rs"]
+mod agent_socket_tests;

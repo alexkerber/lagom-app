@@ -291,6 +291,23 @@ fn audit_limits_anonymous_refusals_and_prunes_by_age_and_count() {
 
 #[test]
 fn replies_accept_only_one_payload_and_fixed_error_text() {
+    for (code, name, message) in [
+        (Code::Unauthorized, "unauthorized", "Token missing, invalid, expired or revoked."),
+        (Code::Forbidden, "forbidden", "This agent's access level does not allow this command."),
+        (Code::NotFound, "not_found", "Not found."),
+        (Code::InvalidRequest, "invalid_request", "Invalid request."),
+        (Code::Denied, "denied", "Not approved."),
+        (Code::Conflict, "conflict", "Changed or ambiguous. Read it again."),
+        (Code::Uncertain, "uncertain", "The outcome is unknown. Check before you retry."),
+        (Code::Busy, "busy", "Too many requests. Try again."),
+        (Code::Unavailable, "unavailable", "Temporarily unavailable. Try again."),
+        (Code::Unsupported, "unsupported", "Not supported."),
+        (Code::TooLarge, "too_large", "Too large."),
+        (Code::Internal, "internal", "Internal error."),
+    ] {
+        assert_eq!(serde_json::to_value(Response::Failure(code)).unwrap(),
+            serde_json::json!({"v":1,"ok":false,"error":{"code":name,"message":message}}));
+    }
     for reply in [
         Response::Success(serde_json::Value::Null),
         Response::Failure(Code::Unauthorized),

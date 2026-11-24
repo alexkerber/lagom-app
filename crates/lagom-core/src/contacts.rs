@@ -95,6 +95,8 @@ impl Contacts {
         Self { entries, prefixes }
     }
 
+    pub fn entries(&self) -> &[Contact] { &self.entries }
+
     pub fn suggest(&self, query: &str) -> Vec<Contact> {
         self.prefixes.get(&folded(query.trim())).into_iter().flatten().map(|i| self.entries[*i].clone()).collect()
     }
@@ -106,7 +108,7 @@ impl Store {
     // shortcut: old cached To/Cc have no names; learn them from From or subsequent sync.
     // shortcut: refreshed when compose opens; refresh an open sheet on sync if live suggestions are needed.
     pub fn contacts(&self, account: &str, now: i64) -> Result<Contacts> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self.db.is_autocommit().then(|| self.db.unchecked_transaction()).transpose()?;
         let mut own = HashSet::new();
         let mut stmt = self.db.prepare("SELECT email FROM accounts WHERE id=?1")?;
         for row in stmt.query_map([account], |r| r.get::<_, String>(0))? {
@@ -151,7 +153,7 @@ impl Store {
                 }
             }
         }
-        tx.commit()?;
+        if let Some(tx) = tx { tx.commit()?; }
         // Incoming mail must not rank or name an address the user wrote to: only sent mail does.
         Ok(Contacts::new(entries.into_values().map(|(mut c, (named_sent, _), received)| {
             if !c.written { c.score = received; } else if !named_sent { c.name.clear(); }

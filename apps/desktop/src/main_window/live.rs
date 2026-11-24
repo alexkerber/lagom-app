@@ -138,6 +138,11 @@ impl Mail {
                 }
             }).ok();
         });
+        #[cfg(unix)]
+        {
+            let mut server = Some(crate::agent::Server::start(store.path(), bridge.clone()));
+            cx.on_app_quit(move |_| { server.take(); async {} }).detach();
+        }
         cx.set_global(Self { store: Rc::new(store), bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: task });
     }
 

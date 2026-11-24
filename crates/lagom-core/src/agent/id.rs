@@ -74,7 +74,11 @@ impl Store {
         folder: Option<&str>,
         required: Level,
     ) -> Result<ResolvedMessage, Failure> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self
+            .db
+            .is_autocommit()
+            .then(|| self.db.unchecked_transaction())
+            .transpose()?;
         let identity = self.authenticate(token, ip)?;
         let key = MessageId::decode(id)?;
         let account = key.account();
@@ -117,7 +121,9 @@ impl Store {
         if required > Level::Read && result.ambiguous {
             return Err(Code::Conflict.into());
         }
-        tx.commit()?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(result)
     }
 }

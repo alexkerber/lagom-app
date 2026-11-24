@@ -136,14 +136,18 @@ impl Store {
             FROM events e JOIN calendars c ON c.id=e.calendar WHERE c.shown=1 AND
             ((e.all_day=1 AND e.start<=?1 AND e.end>?1) OR (e.all_day=0 AND e.start_utc<?3 AND e.end_utc>?2))
             ORDER BY e.all_day DESC,e.start_utc,c.account,c.name,e.remote_id")?;
-        let rows = query.query_map(params![day, start, end], |r| Ok(AgendaEvent {
-            account: r.get(0)?, calendar: r.get(1)?, calendar_id: r.get(12)?, event: Event {
-                remote_id: r.get(2)?, title: r.get(3)?, start: r.get(4)?, end: r.get(5)?,
-                start_utc: r.get(6)?, end_utc: r.get(7)?, all_day: r.get(8)?, location: r.get(9)?, join_url: r.get(10)?, html_link: r.get(11)?,
-            },
-        }))?;
+        let rows = query.query_map(params![day, start, end], agenda_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+}
+
+pub(crate) fn agenda_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgendaEvent> {
+    Ok(AgendaEvent {
+        account: r.get(0)?, calendar: r.get(1)?, calendar_id: r.get(12)?, event: Event {
+            remote_id: r.get(2)?, title: r.get(3)?, start: r.get(4)?, end: r.get(5)?,
+            start_utc: r.get(6)?, end_utc: r.get(7)?, all_day: r.get(8)?, location: r.get(9)?, join_url: r.get(10)?, html_link: r.get(11)?,
+        },
+    })
 }
 
 #[cfg(test)]

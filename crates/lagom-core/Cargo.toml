@@ -12,7 +12,7 @@ chrono = "0.4"
 thiserror = "2"
 dirs = "6"
 tempfile = "3"
-rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint", "hooks"] }
 uuid = { version = "1", features = ["v4"] }
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 zeroize = "1"
@@ -63,7 +63,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-rusqlite = { version = "0.41", features = ["hooks"] }
 
 # Not on iOS: hickory 0.26 reads Apple DNS settings through SCDynamicStore, which the iOS SDK marks unavailable.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
