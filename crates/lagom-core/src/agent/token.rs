@@ -182,8 +182,7 @@ impl Store {
                 })?;
         let (level, accounts, cidr, expires) = match (remote, scope) {
             (0, TokenScope::Local) => {
-                self.db
-                    .execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+                self.revoke_agent_queue(agent)?;
                 (Level::Send, None, None, None)
             }
             (
@@ -249,15 +248,22 @@ impl Store {
     }
 
     pub fn revoke_agent_tokens(&self, agent: &str) -> Result<(), Code> {
-        self.db
-            .execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+        let tx = self.db.unchecked_transaction()?;
+        self.revoke_agent_queue(agent)?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub(crate) fn agent_may_send(&self, agent: &str, account: &str) -> crate::Result<bool> {
+    fn revoke_agent_queue(&self, agent: &str) -> Result<(), Code> {
+        self.db.execute("DELETE FROM agent_tokens WHERE agent=?", [agent])?;
+        self.return_agent_queue(Some(agent)).map_err(|_| Code::Internal)?;
+        Ok(())
+    }
+
+    pub(crate) fn agent_may_send(&self, agent: &str, token: Option<&str>, account: &str) -> crate::Result<bool> {
         let mut stmt = self.db.prepare("SELECT a.remote,t.id,t.level,t.accounts,t.cidr,t.expires,t.created
-            FROM agents a JOIN agent_tokens t ON a.id=t.agent WHERE a.id=? AND t.level=3")?;
-        let mut rows = stmt.query([agent])?;
+            FROM agents a JOIN agent_tokens t ON a.id=t.agent WHERE a.id=? AND t.id=? AND t.level=3")?;
+        let mut rows = stmt.query(params![agent, token])?;
         while let Some(row) = rows.next()? {
             let expires = row.get(5)?;
             let Ok((level, accounts)) = token_scope(row.get(0)?,row.get(2)?,row.get(3)?,row.get(4)?,expires,row.get(6)?,None) else { continue };

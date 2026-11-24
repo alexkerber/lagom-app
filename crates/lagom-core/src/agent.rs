@@ -84,6 +84,7 @@ impl Store {
     }
 
     fn disable_agent_listener(&self) -> Result<(), Code> {
+        self.return_agent_queue(None).map_err(|_| Code::Internal)?;
         self.db.execute(
             "UPDATE agent_settings SET value='0' WHERE key='enabled'",
             [],

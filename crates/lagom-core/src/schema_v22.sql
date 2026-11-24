@@ -53,6 +53,7 @@ CREATE TRIGGER agent_policy_remove AFTER DELETE ON agent_access BEGIN
  UPDATE agent_settings SET value=CAST(value AS INTEGER)+1 WHERE key='policy_generation';
 END;
 ALTER TABLE outbox ADD COLUMN draft_agent TEXT;
+ALTER TABLE outbox ADD COLUMN agent_token TEXT;
 CREATE INDEX messages_account_message_id ON messages(account,message_id);
 PRAGMA user_version = 22;
 COMMIT;

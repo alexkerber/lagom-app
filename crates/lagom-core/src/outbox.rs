@@ -98,21 +98,21 @@ impl Store {
 
     /// `ready_at` is Unix milliseconds: the Undo window survives a restart too.
     pub fn enqueue(&self, account: &Account, mail: &Outgoing, ready_at: i64) -> Result<String> {
-        self.enqueue_with_format(account, mail, ready_at, false)
+        self.enqueue_with_origin(account, mail, ready_at, None)
     }
 
-    pub fn enqueue_agent(&self, account: &Account, mail: &Outgoing, ready_at: i64) -> Result<String> {
-        self.enqueue_with_format(account, mail, ready_at, true)
+    pub fn enqueue_agent(&self, who: &crate::agent::token::Identity, account: &Account, mail: &Outgoing, ready_at: i64) -> Result<String> {
+        self.enqueue_with_origin(account, mail, ready_at, Some(who))
     }
 
-    fn enqueue_with_format(&self, account: &Account, mail: &Outgoing, ready_at: i64, plain_only: bool) -> Result<String> {
+    fn enqueue_with_origin(&self, account: &Account, mail: &Outgoing, ready_at: i64, origin: Option<&crate::agent::token::Identity>) -> Result<String> {
         let mut mail = mail.clone();
         let id = mail.message_id.get_or_insert_with(|| smtp::message_id(&account.email)).clone();
-        let raw = smtp::compose_message(account, &mail, None, plain_only)?.formatted();
+        let raw = smtp::compose_message(account, &mail, None, origin.is_some())?.formatted();
         let tx = self.db.is_autocommit().then(|| self.db.unchecked_transaction()).transpose()?;
-        self.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent)
-            VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,(SELECT agent FROM agent_drafts WHERE draft=?1))",
-            params![id, account.id, encode(&mail)?, raw, ready_at])?;
+        self.db.execute("INSERT INTO outbox(id,account,content,raw,draft,ready_at,draft_agent,agent_token)
+            VALUES (?1,?2,?3,?4,(SELECT content FROM drafts WHERE id=?1 AND account=?2),?5,?6,?7)",
+            params![id, account.id, encode(&mail)?, raw, ready_at, origin.map(|i| i.agent_id()), origin.map(|i| i.token_id())])?;
         self.db.execute("DELETE FROM drafts WHERE id=?1 AND account=?2", params![id, account.id])?;
         if let Some(tx) = tx { tx.commit()?; }
         Ok(id)
@@ -169,19 +169,36 @@ impl Store {
     }
 
     fn restore_revoked_send(&self, id: &str) -> Result<bool> {
-        let (agent, account): (Option<String>, String) = self.db.query_row(
-            "SELECT draft_agent,account FROM outbox WHERE id=? AND submitted=0", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (agent, account, token): (Option<String>, String, Option<String>) = self.db.query_row(
+            "SELECT draft_agent,account,agent_token FROM outbox WHERE id=? AND submitted=0", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         if let Some(agent) = agent {
-            if !self.agent_may_send(&agent, &account)? {
+            if !self.agent_may_send(&agent, token.as_deref(), &account)? {
                 self.db.execute("UPDATE outbox SET started=0 WHERE id=?", [id])?;
-                if !self.restore_queued_draft(id)? { return Err(Error::Invalid("missing queued draft")); }
-                let target = crate::agent::id::ObjectId::Draft(account.clone(), id.into()).encode();
-                self.db.execute("INSERT INTO agent_audit(at,agent,account,command,target,result,dispatched_write)
-                    VALUES(unixepoch(),?,?,'draft.send',?,'revoked',1)", params![agent, account, target])?;
+                self.return_revoked_draft(id, &agent, &account)?;
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    fn return_revoked_draft(&self, id: &str, agent: &str, account: &str) -> Result<()> {
+        if !self.restore_queued_draft(id)? { return Err(Error::Invalid("missing queued draft")); }
+        let target = crate::agent::id::ObjectId::Draft(account.to_owned(), id.into()).encode();
+        self.db.execute("INSERT INTO agent_audit(at,agent,account,command,target,result,dispatched_write)
+            VALUES(unixepoch(),?,?,'draft.send',?,'revoked',1)", params![agent, account, target])?;
+        Ok(())
+    }
+
+    pub(crate) fn return_agent_queue(&self, agent: Option<&str>) -> Result<()> {
+        let mut stmt = self.db.prepare("SELECT id,draft_agent,account FROM outbox
+            WHERE started=0 AND submitted=0 AND state='ready' AND draft_agent IS NOT NULL
+              AND (?1 IS NULL OR draft_agent=?1)")?;
+        let rows = stmt.query_map([agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, owner, account) in rows {
+            self.return_revoked_draft(&id, &owner, &account)?;
+        }
+        Ok(())
     }
 
     // shortcut: one mail worker per store; add a process lease before supporting concurrent app instances.
@@ -277,16 +294,14 @@ mod tests {
         assert!(!String::from_utf8_lossy(&store.pending(&id).unwrap().raw).contains("hidden@example.com"));
         assert!(store.undo_send(&id).unwrap());
         assert_eq!(store.drafts().unwrap(), [draft]);
-        assert_eq!(store.db.query_row("SELECT agent FROM agent_drafts WHERE draft=?", [&id], |r| r.get::<_, String>(0)).unwrap(), agent);
-        store.issue_token(&agent, crate::agent::token::TokenScope::Local).unwrap();
-        store.set_agent_setting(crate::agent::policy::Setting::Enabled,true).unwrap();
-        for owner in ["", &agent] {
-            store.set_agent_access(owner, &crate::agent::policy::Access { account:account.id.clone(),
-                resource:crate::agent::policy::Resource::Mail,level:crate::agent::policy::Level::Send }).unwrap();
-        }
+        assert!(store.agent_draft_meta(&account.id,&id).unwrap().1.is_none());
+        store.db.execute("INSERT INTO agent_drafts VALUES(?,?)", params![id, agent]).unwrap();
+        store.set_agent_access(&agent, &crate::agent::policy::Access { account:account.id.clone(),
+            resource:crate::agent::policy::Resource::Mail,level:crate::agent::policy::Level::Triage }).unwrap();
         store.enqueue(&account, &mail, 5000).unwrap();
         assert!(!store.claim_send(&id, 4999).unwrap());
         assert!(store.claim_send(&id, 5000).unwrap());
+        store.authorize_queued_send(&id).unwrap();
         assert!(!store.claim_send(&id, 5000).unwrap());
         assert!(!store.undo_send(&id).unwrap());
         store.submitted(&id).unwrap();
@@ -315,7 +330,7 @@ mod tests {
     #[test]
     fn agent_send_rechecks_access_and_restores_owned_draft() {
         use crate::agent::{policy::{Access, Level, Resource, Setting}, token::TokenScope};
-        for change in ["disable", "revoke", "lower", "expire", "scope"] {
+        for change in ["disable", "revoke", "lower", "expire", "scope", "rotate_claimed", "rotate", "undo_off", "undo_revoke", "undo_all"] {
             let (_dir, store, account, id) = queued();
             let remote = matches!(change, "scope" | "expire");
             let agent = store.create_agent("test", "sender", "host", remote).unwrap();
@@ -328,10 +343,24 @@ mod tests {
             assert!(store.undo_send(&id).unwrap());
             store.set_draft_agent(&id,&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap()).unwrap();
             let mail = Outgoing { to:vec!["a@example.org".into()], message_id:Some(id.clone()), ..Default::default() };
-            store.enqueue_agent(&account,&mail,0).unwrap();
+            store.enqueue_agent(&store.authenticate(Some(&token),remote.then_some("127.0.0.1")).unwrap(),&account,&mail,0).unwrap();
+            if matches!(change,"rotate" | "undo_off" | "undo_revoke" | "undo_all") {
+                match change {
+                    "rotate" => { store.issue_token(&agent, TokenScope::Local).unwrap(); }
+                    "undo_off" => store.disable_agents().unwrap(),
+                    "undo_all" => store.revoke_all_agents().unwrap(),
+                    _ => store.revoke_agent_tokens(&agent).unwrap(),
+                }
+                let reopened = Store::open(store.path()).unwrap();
+                assert!(reopened.pending(&id).is_err());
+                assert_eq!(reopened.agent_draft_meta(&account.id,&id).unwrap().1.as_ref(),Some(&agent));
+                assert_eq!(reopened.agent_audit(1).unwrap()[0].result,"revoked");
+                continue;
+            }
             assert!(store.claim_send(&id,0).unwrap());
             store.authorize_queued_send(&id).unwrap();
             match change {
+                "rotate_claimed" => { store.issue_token(&agent, TokenScope::Local).unwrap(); }
                 "disable" => store.disable_agents().unwrap(),
                 "lower" => store.set_agent_access("", &Access { level:Level::Read, ..grant }).unwrap(),
                 "scope" => { store.db.execute("UPDATE agent_tokens SET accounts='[]'",[]).unwrap(); }

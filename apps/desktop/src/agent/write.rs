@@ -512,6 +512,7 @@ pub fn draft_change(
             }
             store
                 .enqueue_agent(
+                    &who,
                     account,
                     mail,
                     chrono::Utc::now().timestamp_millis() + crate::compose::UNDO_WINDOW.as_millis() as i64,
