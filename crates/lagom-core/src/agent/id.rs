@@ -34,6 +34,9 @@ impl MessageId {
         }
     }
     pub fn decode(id: &str) -> Result<Self, Code> {
+        if id.len() > 2048 {
+            return Err(Code::NotFound);
+        }
         match id.split_once('.') {
             Some(("m1", data)) => {
                 let (a, h): (String, String) = parts(data)?;
@@ -61,8 +64,15 @@ impl MessageId {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedMessage {
+    target: String,
     pub row: i64,
     pub ambiguous: bool,
+}
+
+impl ResolvedMessage {
+    pub(super) fn audit_target(&self) -> &str {
+        &self.target
+    }
 }
 
 impl Store {
@@ -92,26 +102,32 @@ impl Store {
                     return Err(Code::NotFound.into());
                 }
                 self.db.query_row(
-                    "SELECT m.id FROM folders f JOIN messages m ON m.folder=f.id
+                    "SELECT m.id,m.account,f.name,f.uidvalidity,m.uid FROM folders f JOIN messages m ON m.folder=f.id
                     WHERE f.account=?1 AND m.account=?1 AND f.name=?2 AND f.uidvalidity=?3 AND m.uid=?4
                     AND m.message_id=''", params![account, name, validity, uid],
-                    |r| Ok(ResolvedMessage { row: r.get(0)?, ambiguous: false }),
+                    |r| Ok(ResolvedMessage {
+                        row: r.get(0)?, ambiguous: false,
+                        target: MessageId::Uid(r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?).encode(),
+                    }),
                 ).optional()?
             }
             MessageId::Header(_, header) => {
                 self.db.query_row(
                     "WITH copies AS (
-                    SELECT m.id,f.name,f.role,m.folder,m.date,m.size,m.from_address,m.from_name,m.subject
+                    SELECT m.id,m.account,m.message_id,f.name,f.role,m.folder,m.date,m.size,m.from_address,m.from_name,m.subject
                     FROM messages m JOIN folders f ON f.id=m.folder AND f.account=m.account
                     WHERE m.account=?1 AND m.message_id=?2)
                     SELECT id, (SELECT count(*)<>count(DISTINCT folder) OR min(date)<>max(date)
                         OR min(size)<>max(size) OR min(from_address)<>max(from_address)
-                        OR min(from_name)<>max(from_name) OR min(subject)<>max(subject) FROM copies)
+                        OR min(from_name)<>max(from_name) OR min(subject)<>max(subject) FROM copies), account,message_id
                     FROM copies WHERE ?3 IS NULL OR name=?3
                     ORDER BY CASE role WHEN 'inbox' THEN 0 WHEN 'sent' THEN 2 WHEN 'archive' THEN 3
                         WHEN 'junk' THEN 4 WHEN 'trash' THEN 5 ELSE 1 END, id LIMIT 1",
                     params![account, header, folder],
-                    |r| Ok(ResolvedMessage { row: r.get(0)?, ambiguous: r.get(1)? }),
+                    |r| Ok(ResolvedMessage {
+                        row: r.get(0)?, ambiguous: r.get(1)?,
+                        target: MessageId::Header(r.get(2)?, r.get(3)?).encode(),
+                    }),
                 ).optional()?
             }
         }.ok_or(Code::NotFound)?;
@@ -149,6 +165,9 @@ impl ObjectId {
     }
 
     pub fn decode(id: &str) -> Result<Self, Code> {
+        if id.len() > 2048 {
+            return Err(Code::NotFound);
+        }
         let (prefix, data) = id.split_once('.').ok_or(Code::NotFound)?;
         match prefix {
             "m1" | "u1" => Ok(Self::Message(MessageId::decode(id)?)),

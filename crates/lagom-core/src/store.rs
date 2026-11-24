@@ -152,15 +152,18 @@ impl Store {
         if version < 22 {
             store.db.execute_batch(include_str!("schema_v22.sql"))?;
         }
-        store.prune_agent_audit(chrono::Utc::now().timestamp())?;
+        store.db.busy_timeout(std::time::Duration::ZERO)?;
+        match store.prune_agent_audit(chrono::Utc::now().timestamp()) {
+            Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
+            result => result?,
+        }
         if store.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_credentials)", [], |r| r.get(0))? {
-            store.db.busy_timeout(std::time::Duration::ZERO)?;
             match store.clean_pending(None) {
                 Err(Error::Store(e)) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
                 result => result?,
             }
-            store.db.busy_timeout(busy_timeout)?;
         }
+        store.db.busy_timeout(busy_timeout)?;
         Ok(store)
     }
     pub fn signature(&self, account: &str) -> Result<String> {
@@ -455,9 +458,15 @@ mod tests {
         let path = temp.path().join("busy.sqlite3");
         let writer = Store::open(&path).unwrap();
         writer.db.execute("INSERT INTO pending_credentials VALUES ('account','key')", []).unwrap();
-        let _tx = writer.credential_transaction().unwrap();
+        writer.db.execute("INSERT INTO agent_audit(at,command,result) VALUES(0,'emails','ok')", []).unwrap();
+        let tx = writer.credential_transaction().unwrap();
         let reader = Store::open(&path).unwrap();
         assert_eq!(reader.db.query_row("SELECT credential_key FROM pending_credentials", [], |r| r.get::<_, String>(0)).unwrap(), "key");
+        let rows = |store: &Store| store.db.query_row("SELECT count(*) FROM agent_audit", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(rows(&reader), 1);
+        drop(tx);
+        reader.prune_agent_audit(chrono::Utc::now().timestamp()).unwrap();
+        assert_eq!(rows(&reader), 0);
     }
 
     #[test]
@@ -1320,8 +1329,10 @@ pub(crate) mod mail_tests {
         legacy.as_object_mut().unwrap().remove("forward_source");
         old.db.execute("INSERT INTO drafts(id,account,content,revision) VALUES (?1,?2,?3,'revision')", params![draft.id, account.id, legacy.to_string()]).unwrap();
         let outgoing = Outgoing { to: vec!["recipient@example.com".into()], text: "Queued".into(), ..Default::default() };
-        let queued = old.enqueue(&account, &outgoing, 123).unwrap();
-        let raw = old.pending(&queued).unwrap().raw;
+        let queued = "queued@example.com";
+        let raw = crate::smtp::compose(&account, &outgoing).unwrap().formatted();
+        old.db.execute("INSERT INTO outbox(id,account,content,raw,ready_at) VALUES(?,?,?,?,123)",
+            params![queued, account.id, serde_json::to_string(&outgoing).unwrap(), raw]).unwrap();
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
@@ -1333,7 +1344,7 @@ pub(crate) mod mail_tests {
         assert_eq!(store.drafts().unwrap(), [draft.clone()]);
         assert_eq!(store.owned_drafts().unwrap(), [draft.clone()]);
         assert_eq!(store.due_drafts(&account.id, 0).unwrap(), [draft.id.clone()]);
-        assert_eq!(store.pending(&queued).unwrap().raw, raw);
+        assert_eq!(store.pending(queued).unwrap().raw, raw);
         assert_eq!(store.tasks(task.list, false).unwrap(), [task]);
         assert_eq!(store.signature(&account.id).unwrap(), if version == 11 { "Existing signature" } else { "" });
         store.set_signature(&account.id, "**Team**\nContact").unwrap();

@@ -203,6 +203,9 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - Very fast: mail, meetings and todos in one app. Open source, so people can add to it. No AI inside the app; AI connects from outside through MCP.
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
   - [x] read-only slice: `lagom-cli mcp` over stdio with list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos (2026-11-17). Protocol tests and a stdio smoke; not tried in a real MCP client.
+  - [x] Agent security review on `feat/agents-core`. Audit targets require a store lookup. Read limits protect each agent’s history.
+    Verified token refusals retain their IDs. Source checks distinguish local and remote tokens. Undo restores draft ownership.
+    Core and FFI tests passed. The desktop app built. Live agent connections were not tested.
   - [x] Desktop agents read permitted mail and calendars through a private socket on `feat/agents-socket`.
     The developer CLI grants test access to one account. Disabling access closes open requests.
     macOS socket tests verified account isolation, read purity, limits, audit records and revocation.
