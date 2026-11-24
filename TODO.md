@@ -217,7 +217,15 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
-- [ ] AI Agents: local and remote agents read and act on mail and calendar through the running app. Settings > AI Agents (off by default, per-account and per-agent levels None/Read/Triage/Send, confirmation before send and calendar changes, sidebar toggle), a socket-only CLI with `--json`, `skill install` and `mcp`, scoped tokens for remote agents (accounts, level, CIDR, expiry), an audit log with Revoke. Spec: `docs/ai-agents.md`. Branch `wip/ai-agents`.
+- [ ] Local and remote agents read and act on mail and calendars. The full plan is in `docs/ai-agents.md` on `wip/ai-agents`.
+  - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
+    Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
+    Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
+    Connect records cleanup instructions before writing files. Tokens live beside the open store.
+    A temporary socket verified CLI and MCP reads, account isolation and access off.
+    Tests verified cancellation, EOF, credential checks and interrupted setup.
+    The macOS release measured 19.60 MB against the 30 MB budget.
+    Live providers, external agent sessions and Linux remain untested.
 
 ## Calendar
 
