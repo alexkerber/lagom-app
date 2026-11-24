@@ -19,6 +19,7 @@ pub(super) type Result<T> = std::result::Result<T, Failure>;
 pub(crate) fn error(e: Error) -> Code {
     match e {
         Error::Store(e) => e.into(),
+        Error::Uncertain => Code::Uncertain,
         Error::NotFound => Code::NotFound,
         Error::Invalid("invalid_request" | "invalid_filter") => Code::InvalidRequest,
         Error::Invalid(
@@ -90,9 +91,9 @@ impl Attachment {
 pub(super) fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() && c != '\n' && c != '\t' {
+        if c.is_control() && c != '\n' {
             out.extend(c.escape_default());
-        } else if matches!(c,'\u{200e}'|'\u{200f}'|'\u{061c}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+        } else if matches!(c,'\u{200b}'..='\u{200f}'|'\u{2060}'|'\u{feff}'|'\u{2028}'|'\u{2029}'|'\u{061c}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
         {
             out.extend(c.escape_unicode());
         } else {
@@ -267,7 +268,11 @@ pub(super) fn dispatch(
                     if cmd == "draft.show" {
                         value["cc"] = json!(clean(&d.cc));
                         value["bcc"] = json!(clean(&d.bcc));
-                        value["body"] = json!(clean(&d.text));
+                        let end = d.text.char_indices().nth(100_000).map(|(i, _)| i);
+                        value["body"] = json!(clean(&d.text[..end.unwrap_or(d.text.len())]));
+                        value["truncated"] = json!(end.is_some());
+                        *target = Some(store.agent_object_target(&ObjectId::Draft(a.clone(), d.id))?);
+                        *touched = Some(a.clone());
                         return Ok(value);
                     }
                     push(value)?;

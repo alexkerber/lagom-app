@@ -31,6 +31,8 @@ pub(crate) struct Job {
     pub generation: i64,
     pub snapshot: Snapshot,
     pub approved: bool,
+    pub audit_id: i64,
+    pub cancelled: watch::Receiver<()>,
     pub reply: oneshot::Sender<Result<(Value, Option<AuditTarget>)>>,
 }
 
@@ -39,6 +41,7 @@ pub(crate) enum Snapshot {
     Mail(String, Outgoing),
     Event {
         calendar: String,
+        name: String,
         old: Option<EventSnapshot>,
         new: Option<NewEvent>,
     },
@@ -106,6 +109,27 @@ pub fn handles(cmd: &str) -> bool {
         || cmd.starts_with("draft.") && !matches!(cmd, "draft.list" | "draft.show")
 }
 
+fn check_subject(value: &str) -> Result<()> {
+    if value.contains(['\r', '\n', '\u{2028}', '\u{2029}']) || value.chars().count() > 998 {
+        return Err(Code::InvalidRequest.into());
+    }
+    Ok(())
+}
+
+fn recipients(groups: &mut [&mut Vec<String>]) -> Result<()> {
+    if groups.iter().map(|g| g.len()).sum::<usize>() > 100 {
+        return Err(Code::InvalidRequest.into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for group in groups {
+        group.retain(|s| {
+            let address = lagom_core::contacts::recipient_address(s).unwrap_or_else(|| s.clone());
+            seen.insert(address.to_ascii_lowercase())
+        });
+    }
+    Ok(())
+}
+
 fn scope(store: &Store, who: &Identity, r: &Request) -> Result<String> {
     let (resource, _, keys) = policy(&r.cmd)?;
     if r.args
@@ -113,6 +137,17 @@ fn scope(store: &Store, who: &Identity, r: &Request) -> Result<String> {
         .any(|(k, v)| !v.is_string() || k != "account" && !keys.contains(&k.as_str()))
     {
         return Err(Code::InvalidRequest.into());
+    }
+    for key in ["title", "subject"] {
+        if let Some(value) = field(r, key) { check_subject(value)?; }
+    }
+    if field(r, "location").is_some_and(|v| v.contains(['\r', '\n', '\u{2028}', '\u{2029}'])) {
+        return Err(Code::InvalidRequest.into());
+    }
+    for keys in [&["to", "cc", "bcc"][..], &["guests"][..]] {
+        if keys.iter().filter_map(|k| field(r, k)).map(|s| split_recipients(s).len()).sum::<usize>() > 100 {
+            return Err(Code::InvalidRequest.into());
+        }
     }
     let source = match (field(r, "reply"), field(r, "forward")) {
         (Some(_), Some(_)) => return Err(Code::InvalidRequest.into()),
@@ -157,7 +192,7 @@ fn require_level(store: &Store, who: &Identity, r: &Request, account: &str) -> R
 
 impl Job {
     pub fn check(&self, store: &Store) -> Result<Identity> {
-        if !self.approved && self.reply.is_closed() {
+        if !self.approved && (self.cancelled.has_changed().is_err() || self.reply.is_closed()) {
             return Err(Code::Denied.into());
         }
         if store.agent_generation()? != Some(self.generation) {
@@ -216,23 +251,30 @@ fn scoped_draft(store: &Store, account: &str, id: &str) -> Result<Draft> {
     Ok(draft)
 }
 
-fn outgoing(d: Draft) -> Result<Outgoing> {
+fn outgoing(mut d: Draft) -> Result<Outgoing> {
     if d.forward_source.is_some() {
         return Err(Code::Unavailable.into());
     }
     let (in_reply_to, references) = d.reply.unwrap_or_default();
-    let [to, cc] = d
+    let [mut to, mut cc] = d
         .recipient_tokens
         .unwrap_or_else(|| [split_recipients(&d.to), split_recipients(&d.cc)]);
+    let mut bcc = split_recipients(&d.bcc);
+    check_subject(&d.subject)?;
+    recipients(&mut [&mut to, &mut cc, &mut bcc])?;
+    if let Some(quote) = d.quoted.take() {
+        d.text.push_str("\n\n");
+        d.text.push_str(&quote.text);
+    }
     Ok(Outgoing {
         to,
         cc,
-        bcc: split_recipients(&d.bcc),
+        bcc,
         subject: d.subject,
         text: d.text,
         message_id: Some(d.id),
         attachments: d.attachments,
-        quoted: d.quoted,
+        quoted: None,
         in_reply_to,
         references,
     })
@@ -249,7 +291,7 @@ pub fn calendar_error(e: Error) -> Code {
     }
 }
 
-pub fn calendar_allowed(store: &Store, account: &Account, calendar: &str) -> Result<()> {
+pub fn calendar_allowed(store: &Store, account: &Account, calendar: &str) -> Result<String> {
     let c = store
         .calendars(&account.id)
         .map_err(error)?
@@ -262,7 +304,7 @@ pub fn calendar_allowed(store: &Store, account: &Account, calendar: &str) -> Res
     if !c.writable || !oauth::calendar_writable(&store.account_scopes(&account.id).map_err(error)?) {
         return Err(Code::Forbidden.into());
     }
-    Ok(())
+    Ok(c.name)
 }
 
 fn event_snapshot(store: &Store, r: &Request, account: &Account) -> Result<Snapshot> {
@@ -274,7 +316,7 @@ fn event_snapshot(store: &Store, r: &Request, account: &Account) -> Result<Snaps
         };
         (c, Some(id))
     };
-    calendar_allowed(store, account, &calendar)?;
+    let name = calendar_allowed(store, account, &calendar)?;
     let old = if let Some(id) = id {
         let fetched = tokio::runtime::Handle::current().block_on(fetch_event(account, &calendar, &id));
         if matches!(fetched, Err(Error::CalendarConsent)) {
@@ -286,6 +328,11 @@ fn event_snapshot(store: &Store, r: &Request, account: &Account) -> Result<Snaps
     } else {
         None
     };
+    if let Some(s) = &old {
+        if s.attendees.len() > 100 || s.attendees.iter().any(|g| !lagom_core::contacts::valid_recipient(g)) {
+            return Err(Code::InvalidRequest.into());
+        }
+    }
     let new = if r.cmd == "event.delete" {
         None
     } else {
@@ -293,7 +340,7 @@ fn event_snapshot(store: &Store, r: &Request, account: &Account) -> Result<Snaps
         let start = field(r, "start")
             .or(e.map(|e| e.start.as_str()))
             .ok_or(Code::InvalidRequest)?;
-        let draft = NewEvent {
+        let mut draft = NewEvent {
             title: field(r, "title")
                 .or(e.map(|e| e.title.as_str()))
                 .ok_or(Code::InvalidRequest)?
@@ -314,10 +361,12 @@ fn event_snapshot(store: &Store, r: &Request, account: &Account) -> Result<Snaps
                 .map_err(|_| Code::InvalidRequest)?
                 .unwrap_or(false),
         };
+        recipients(&mut [&mut draft.attendees])?;
+        check_subject(&draft.title)?;
         draft.event("preview".into()).map_err(calendar_error)?;
         Some(draft)
     };
-    Ok(Snapshot::Event { calendar, old, new })
+    Ok(Snapshot::Event { calendar, name, old, new })
 }
 
 pub(super) fn dispatch(
@@ -331,6 +380,7 @@ pub(super) fn dispatch(
     peer: Option<&std::sync::Arc<std::os::unix::net::UnixStream>>,
 ) -> Result<Value> {
     let id = scope(store, who, req)?;
+    audit.dispatched = true;
     audit.account = Some(id.clone());
     if req.cmd.starts_with("action.") {
         audit.target = Some(resolve(store, req, required(req, "id")?, Level::Read)?.target);
@@ -365,9 +415,10 @@ pub(super) fn dispatch(
             .collect(),
         _ => vec![],
     };
+    let mut seen = std::collections::HashSet::new();
     for a in addresses {
-        if let Some(address) = lagom_core::contacts::recipient_address(a).and_then(|a| a.parse().ok()) {
-            if !audit.recipients.contains(&address) {
+        if let Some(address) = lagom_core::contacts::recipient_address(a).and_then(|a| a.parse::<lagom_core::agent::audit::Address>().ok()) {
+            if seen.insert(address.clone()) {
                 audit.recipients.push(address);
             }
         }
@@ -389,7 +440,7 @@ pub(super) fn dispatch(
             &snapshot,
             done,
             std::sync::Arc::downgrade(peer.ok_or(Code::Denied)?),
-        );
+        )?;
         let expires = sheet.expires;
         if !bridge.send(Cmd::AgentConfirm(sheet)) {
             return Err(Code::Unavailable.into());
@@ -403,28 +454,33 @@ pub(super) fn dispatch(
             }
         })?;
     }
-    let (reply, rx) = oneshot::channel();
-    if !bridge.send(Cmd::AgentWrite(Box::new(Job {
-        req: req.clone(),
-        sender: account,
-        generation,
-        snapshot,
-        approved: confirm,
-        reply,
-    }))) {
-        return Err(Code::Unavailable.into());
-    }
-    let (value, created) = rt.block_on(async {
-        tokio::select! {
-            biased;
-            r=rx=>r.map_err(|_|Code::Unavailable)?,
-            _=off.changed(), if !confirm=>Err(Code::Denied.into()),
-        }
+    let writer = Store::agent_writer(store.path())?;
+    let audit_id = writer.begin_agent_write(lagom_core::agent::audit::AuditRow {
+        identity: Some(who), account: id.parse().ok(), command: &req.cmd, target: audit.target.as_ref(),
+        outcome: Ok(()), source_ip: req.source_ip.as_ref().and_then(|s| s.parse().ok()), recipients: &audit.recipients,
     })?;
-    if created.is_some() {
-        audit.target = created;
+    audit.worker_audit = true;
+    let (reply, rx) = oneshot::channel();
+    let result = if bridge.send(Cmd::AgentWrite(Box::new(Job {
+        req: req.clone(), sender: account, generation, snapshot, approved: confirm, audit_id, cancelled: off, reply,
+    }))) {
+        rt.block_on(rx).unwrap_or(Err(Code::Uncertain.into()))
+    } else {
+        Err(Code::Unavailable.into())
+    };
+    let local = req.cmd.starts_with("draft.") || matches!(req.cmd.as_str(), "action.snooze" | "action.unsnooze");
+    if !local || result.is_err() {
+        let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
+        let created = result.as_ref().ok().and_then(|(_, target)| target.as_ref());
+        loop {
+            match writer.finish_agent_write(audit_id, &outcome, created) {
+                Ok(()) => break,
+                Err(Code::Unavailable) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => return Err(Code::Uncertain.into()),
+            }
+        }
     }
-    Ok(value)
+    result.map(|(value, _)| value)
 }
 
 pub fn draft_change(
@@ -455,7 +511,7 @@ pub fn draft_change(
                 return Err(Code::Denied.into());
             }
             store
-                .enqueue(
+                .enqueue_agent(
                     account,
                     mail,
                     chrono::Utc::now().timestamp_millis() + crate::compose::UNDO_WINDOW.as_millis() as i64,
@@ -518,16 +574,7 @@ pub fn draft_change(
             d.to = s.from_address.clone();
             d.reply = Some(crate::mail::reply_headers(&s.message_id, &s.thread_key));
         }
-        if let Some(html) = m.body_html {
-            d.quoted = Some(compose::quote(
-                original,
-                &html,
-                &store.inline_parts(s.id).map_err(error)?,
-                kind,
-            ));
-        } else {
-            d.text = compose::compose_body("", Some(original), kind);
-        }
+        d.text = compose::compose_body("", Some(original), kind);
     }
     for (key, dest) in [
         ("to", &mut d.to),
@@ -549,6 +596,7 @@ pub fn draft_change(
             d.text = body.into();
         }
     }
+    check_subject(&d.subject)?;
     store.save_draft(&d).map_err(error)?;
     if creating {
         store.set_draft_agent(&id, &who)?;

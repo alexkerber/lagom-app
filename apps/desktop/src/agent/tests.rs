@@ -685,7 +685,7 @@ fn draft_confirmation_sends_only_the_reviewed_revision_and_undo_restores_ownersh
         panic!()
     };
     let (s, sheet) = f.sending(id);
-    assert!(sheet.heading.contains("Test Agent") && sheet.details.contains("a@example.com"));
+    assert!(sheet.rows.iter().any(|(k,v)| *k == "Agent" && v.contains("Test Agent")) && sheet.rows.contains(&("To","a@example.com".into())));
     assert_eq!(sheet.body, "first");
     assert!(f.store.pending(&raw).is_err());
     sheet.answer.send(Err(Code::Denied)).unwrap();
@@ -854,7 +854,8 @@ fn writes_scope_all_inputs_and_keep_other_agents_and_personal_drafts_read_only()
 
 #[test]
 fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
-    for supported in [false, true] {
+    for mode in ["unsupported", "move", "lost", "revoked_after_copy"] {
+        let supported = mode != "unsupported";
         let mut f = WriteFixture::new();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         f.account.imap = ServerConfig {
@@ -908,6 +909,11 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
             f.write("action.move", json!({"id":id,"folder":"B only"}))["error"]["code"],
             "not_found"
         );
+        for role in [FolderRole::Sent, FolderRole::Drafts] {
+            f.store.save_folder(&f.account.id, role.as_str(), None, role).unwrap();
+            assert_eq!(f.write("action.move", json!({"id":id,"folder":role.as_str()}))["error"]["code"], "forbidden");
+        }
+        let path = f.store.path().to_owned();
         let peer = thread::spawn(move || {
             let mut moves = 0;
             for _ in 0..if supported { 1 } else { 3 } {
@@ -922,6 +928,7 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
                     let (tag, cmd) = line.trim_end().split_once(' ').unwrap();
                     let data = match cmd {
                         "LOGIN \"fixture\" \"fixture\"" => "",
+                        "CAPABILITY" if mode == "revoked_after_copy" => "* CAPABILITY IMAP4rev1 UIDPLUS\r\n",
                         "CAPABILITY" if supported => "* CAPABILITY IMAP4rev1 MOVE\r\n",
                         "CAPABILITY" => "* CAPABILITY IMAP4rev1\r\n",
                         _ if supported && cmd.starts_with("LIST ") => {
@@ -929,6 +936,15 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
                         }
                         _ if supported && cmd.starts_with("SELECT ") => {
                             "* 0 EXISTS\r\n* OK [UIDVALIDITY 7] valid\r\n* OK [UIDNEXT 1] next\r\n"
+                        }
+                        "UID COPY 1 \"Archive\"" if mode == "revoked_after_copy" => {
+                            Connection::open(&path).unwrap().execute("DELETE FROM agent_tokens", []).unwrap();
+                            moves += 1;
+                            ""
+                        }
+                        "UID MOVE 1 \"Archive\"" if mode == "lost" => {
+                            moves += 1;
+                            break;
                         }
                         "UID MOVE 1 \"Archive\"" if supported => {
                             moves += 1;
@@ -955,7 +971,10 @@ fn archive_requires_triage_and_every_move_requires_targeted_expunge() {
                 json!({"id":id})
             };
             let result = f.write(cmd, args);
-            if supported {
+            if matches!(mode, "lost" | "revoked_after_copy") {
+                assert_eq!(result["error"]["code"], "uncertain");
+                assert_eq!(f.store.agent_audit(1).unwrap()[0].result, "uncertain");
+            } else if supported {
                 assert_eq!(result["ok"], true, "{result}");
                 assert!(f.store.message_summary(row).is_err());
             } else {
@@ -1021,6 +1040,7 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         .lock()
         .unwrap()
         .insert(f.account.id.clone(), base);
+    let policy_path = f.store.path().to_owned();
     let peer = thread::spawn(move || {
         let remote = json!({"id":"existing","etag":"\"old\"","summary":"Old event","description":"Original details",
             "attendees":[{"email":"hidden@example.org"}],"start":{"date":"2026-11-24"},"end":{"date":"2026-11-25"}});
@@ -1069,7 +1089,10 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
             let mut bytes = vec![0; length];
             io.read_exact(&mut bytes).unwrap();
             if status != 0 {
-                let body = if status == 204 { String::new() } else { data.to_string() };
+                if method == "PATCH" && status == 200 {
+                    Connection::open(&policy_path).unwrap().execute("UPDATE agent_access SET level=1 WHERE kind='calendar'", []).unwrap();
+                }
+                let body = if method == "PATCH" && status == 200 { "{}".into() } else if status == 204 { String::new() } else { data.to_string() };
                 write!(
                     io.get_mut(),
                     "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1090,8 +1113,9 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
         let Cmd::AgentConfirm(sheet) = f.recv() else {
             panic!("calendar skipped approval")
         };
+        assert!(sheet.rows.contains(&("Calendar", "Fixture".into())));
         if cmd != "event.create" {
-            assert!(sheet.details.contains("hidden@example.org") && sheet.details.contains("Original details"));
+            assert!(sheet.rows.contains(&("Current guest","hidden@example.org".into())) && sheet.previous_description.as_deref() == Some("Original details"));
         }
         let (release, held) = tokio::sync::oneshot::channel();
         let stale = stale_rows.clone();
@@ -1117,7 +1141,9 @@ fn calendar_writes_confirm_existing_guests_and_reject_stale_responses() {
             assert!(!rows.iter().any(|r| r.event.remote_id == "existing"));
         }
         if cmd == "event.update" && expected.is_none() {
-            assert!(rows.iter().any(|r| r.event.title == "Updated"));
+            assert!(!rows.iter().any(|r| r.event.remote_id == "existing"));
+            f.level(3);
+            f.store.insert_calendar_event(&f.account.id, "primary", &old).unwrap();
         }
         assert!(rows.iter().any(|r| r.event.remote_id == "created"));
     }
@@ -1171,6 +1197,7 @@ fn reply_and_forward_keep_the_original_account_headers_and_cached_files() {
                 ..Default::default()
             },
             body_text: "quoted text".into(),
+            body_html: Some("<p>secret HTML only</p>".into()),
             ..Default::default()
         })
         .unwrap();
@@ -1188,6 +1215,10 @@ fn reply_and_forward_keep_the_original_account_headers_and_cached_files() {
     )
     .unwrap();
     let id = f.store.agent_message_key(&f.account.id, row).unwrap().0.encode();
+    db.execute("INSERT INTO attachments VALUES(?,'3','large','text/plain',20971520,'7bit')", [row]).unwrap();
+    db.execute("INSERT INTO attachment_cache(message,section,data) VALUES(?,'3',zeroblob(20971520))", [row]).unwrap();
+    assert_eq!(f.write("draft.create", json!({"forward":id}))["error"]["code"], "too_large");
+    db.execute("DELETE FROM attachments WHERE message=? AND section='3'", [row]).unwrap();
     for kind in ["reply", "forward"] {
         let result = f.write("draft.create", json!({(kind):id,"body":"new text"}));
         let ObjectId::Draft(a, id) = ObjectId::decode(result["result"]["id"].as_str().unwrap()).unwrap() else {
@@ -1195,7 +1226,15 @@ fn reply_and_forward_keep_the_original_account_headers_and_cached_files() {
         };
         assert_eq!(a, f.account.id);
         let d = f.store.draft(&id).unwrap();
+        assert!(d.quoted.is_none());
         assert!(d.text.starts_with("new text") && d.text.contains("quoted text"));
+        f.store.set_agent_setting(lagom_core::agent::policy::Setting::Confirm, false).unwrap();
+        let key = result["result"]["id"].clone();
+        assert_eq!(f.write("draft.edit",json!({"id":key,"revision":result["result"]["revision"],"to":"recipient@example.org"}))["ok"], true);
+        assert_eq!(f.write("draft.send",json!({"id":key}))["ok"], true);
+        let raw = String::from_utf8(f.store.pending(&d.id).unwrap().raw).unwrap();
+        assert!(!raw.contains("text/html") && !raw.contains("secret HTML only"));
+        assert!(f.store.undo_send(&d.id).unwrap());
         if kind == "reply" {
             assert_eq!(d.to, "sender@example.org");
             assert_eq!(d.reply.unwrap().0.as_deref(), Some("<source@example.org>"));
@@ -1349,5 +1388,73 @@ fn waiting_attachments_reauthenticate_before_returning_bytes() {
                 1
             );
         });
+    }
+}
+
+#[test]
+fn protocol_limits_apply_before_confirmation() {
+    let f = WriteFixture::new();
+    let addresses = vec!["a@example.org"; 101].join(",");
+    for (cmd, args) in [
+        ("draft.create", json!({"to":addresses})),
+        ("event.create", json!({"guests":addresses})),
+        ("event.create", json!({"title":"a\nb"})),
+        ("event.update", json!({"location":"a\rb"})),
+        ("event.create", json!({"title":"å".repeat(999)})),
+        ("draft.edit", json!({"subject":"a".repeat(999)})),
+    ] {
+        assert_eq!(response(f.start(cmd,args))["error"]["code"], "invalid_request");
+    }
+}
+
+#[test]
+fn draft_show_limits_unicode_body_and_audits_its_target() {
+    let mut f = WriteFixture::new();
+    let d = f.write("draft.create", json!({"body":"å".repeat(100_001),"to":"Joe <j@example.org>","cc":"j@example.org"}));
+    let id = &d["result"]["id"];
+    let result = response(f.start("draft.show", json!({"id":id})));
+    assert_eq!(result["result"]["body"].as_str().unwrap().chars().count(),100_000);
+    assert_eq!(result["result"]["truncated"],true);
+    let target:String = Connection::open(f.store.path()).unwrap().query_row(
+        "SELECT target FROM agent_audit WHERE command='draft.show'", [], |r|r.get(0)).unwrap();
+    assert_eq!(&target, id.as_str().unwrap());
+    let (_, sheet) = f.sending(id);
+    assert_eq!(sheet.rows.iter().filter(|(k,_)| matches!(*k,"To"|"Cc")).count(),1);
+}
+
+#[test]
+fn local_write_rolls_back_when_audit_cannot_finish() {
+    let mut f = WriteFixture::new();
+    let client = f.start("draft.create", json!({}));
+    let cmd = f.recv();
+    let db = Connection::open(f.store.path()).unwrap();
+    assert_eq!(f.store.agent_audit(1).unwrap()[0].result, "pending");
+    db.execute_batch("CREATE TRIGGER reject_ok BEFORE UPDATE OF result ON agent_audit WHEN NEW.result='ok'
+        BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+    f.run(cmd);
+    assert_eq!(response(client)["error"]["code"],"internal");
+    assert!(f.store.drafts().unwrap().is_empty());
+    assert_eq!(f.store.agent_audit(1).unwrap()[0].result, "internal");
+}
+
+#[test]
+fn completed_remote_write_finalizes_after_busy_audit_and_disconnected_client() {
+    let mut f = WriteFixture::new();
+    let folder = f.store.save_folder(&f.account.id,"INBOX",None,FolderRole::Inbox).unwrap();
+    let row = f.store.save_message(&Message { summary: MessageSummary { account:f.account.id.clone(),folder,uid:1,
+        message_id:"target".into(),..Default::default() },..Default::default() }).unwrap();
+    let id = f.store.agent_message_key(&f.account.id,row).unwrap().0.encode();
+    for disconnect in [false,true] {
+        let socket = f.start("action.star",json!({"id":id}));
+        let Cmd::AgentWrite(job) = f.recv() else { panic!("missing job"); };
+        assert_eq!(f.store.agent_audit(1).unwrap()[0].result,"pending");
+        let lock = Connection::open(f.store.path()).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let socket = (!disconnect).then_some(socket);
+        job.reply.send(Ok((json!({}),None))).unwrap();
+        if !disconnect { thread::sleep(Duration::from_millis(5200)); }
+        lock.execute_batch("COMMIT").unwrap();
+        if let Some(socket) = socket { assert_eq!(response(socket)["ok"],true); }
+        wait(|| f.store.agent_audit(1).unwrap()[0].result == "ok");
     }
 }

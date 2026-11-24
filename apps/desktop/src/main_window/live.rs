@@ -153,7 +153,10 @@ impl Mail {
             let messages = events.into_iter().filter_map(|event| match event {
                 #[cfg(unix)]
                 Event::AgentConfirm(sheet) => {
-                    if cx.default_global::<crate::agent::confirm::Waiting>().push(sheet) {
+                    let mut waiting = std::mem::take(cx.default_global::<crate::agent::confirm::Waiting>());
+                    let added = waiting.push(sheet, cx.default_global::<crate::agent::confirm::Denials>());
+                    cx.set_global(waiting);
+                    if added {
                         cx.global_mut::<crate::notifications::State>().service.agent_waiting();
                     }
                     None
@@ -535,7 +538,7 @@ impl MainWindow {
             match event {
                 #[cfg(unix)]
                 Event::AgentConfirm(sheet) => {
-                    if self.agent_sheets.push(sheet) {
+                    if self.agent_sheets.push(sheet, cx.default_global::<crate::agent::confirm::Denials>()) {
                         if !window.is_window_active() && cx.try_global::<crate::notifications::State>().is_some() {
                             cx.global_mut::<crate::notifications::State>().service.agent_waiting();
                         }
@@ -846,7 +849,7 @@ impl MainWindow {
         window.activate_window();
         #[cfg(unix)]
         if target.account == crate::settings::agents::AGENTS && target.message.is_none() {
-            if self.agent_sheets.0.is_empty(){self.open_agents(window,cx);} else {self.agent_deny.focus(window);}
+            if self.agent_sheets.sheets.is_empty(){self.open_agents(window,cx);} else {self.agent_deny.focus(window);}
             return;
         }
         let Some(live) = &mut self.live else { return };
@@ -4385,24 +4388,42 @@ mod tests {
         server.set_nonblocking(true).unwrap();
         let server=Arc::new(server);
         let req:Request=serde_json::from_value(serde_json::json!({"v":1,"cmd":"draft.send","args":{}})).unwrap();
-        let agent=AgentRow{id:"a".into(),name:"Writer".into(),kind:"fixture".into(),remote:false,host:"here".into(),active:true};
+        let store = view.read_with(cx, |v,_| v.live.as_ref().unwrap().store.clone());
+        let id = store.create_agent("fixture","Writer","here",false).unwrap();
+        let token = store.issue_token(&id, lagom_core::agent::token::TokenScope::Local).unwrap();
         cx.deactivate_window();
-        for key in ["escape","secondary-enter"] {
-            let (lifetime,done)=tokio::sync::oneshot::channel();
+        for action in ["deny", "busy", "approve", "revoke"] {
+            let agent = AgentRow { id:if matches!(action,"deny"|"busy") { "other".into() } else { id.clone() },
+                name:"Writer".into(), kind:"fixture".into(), remote:false, host:"here".into(),active:true };
+            let (_lifetime,done)=tokio::sync::oneshot::channel();
             let mut answer=view.update_in(cx,|v,w,cx|{
                 let account=v.live.as_ref().unwrap().account().unwrap();
-                let (sheet,answer)=Sheet::new(agent.clone(),account,&req,&Snapshot::Mail("rev".into(),Default::default()),done,Arc::downgrade(&server));
+                let (sheet,answer)=Sheet::new(agent,account,&req,&Snapshot::Mail("rev".into(),Default::default()),done,Arc::downgrade(&server)).unwrap();
                 v.on_events(vec![Event::AgentConfirm(sheet)],w,cx);
-                assert!(v.agent_deny.is_focused(w));
+                if action != "busy" { assert!(v.agent_deny.is_focused(w)); }
                 answer
             });
             cx.run_until_parked();
-            cx.simulate_keystrokes("enter space");
-            assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
-            cx.simulate_keystrokes(key);
-            assert_eq!(answer.try_recv().unwrap(),if key=="escape"{Err(Code::Denied)}else{Ok(())});
-            drop(lifetime);
+            if action == "busy" { assert_eq!(answer.try_recv().unwrap(), Err(Code::Busy)); continue; }
+            if action == "deny" {
+                cx.simulate_keystrokes("enter space secondary-enter");
+                assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+                cx.simulate_keystrokes("escape");
+            } else {
+                view.update_in(cx, |_, w, _| w.activate_window());
+                cx.run_until_parked();
+                let label = if action == "approve" { "Send" } else { "Deny and revoke" };
+                let at = cx.debug_bounds(label).unwrap().center();
+                if action == "approve" {
+                    cx.simulate_click(at, Default::default());
+                    assert!(matches!(answer.try_recv(),Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+                    view.update(cx,|v,_| v.agent_sheets.front_since.as_mut().unwrap().1 -= std::time::Duration::from_secs(1));
+                }
+                cx.simulate_click(at, Default::default());
+            }
+            assert_eq!(answer.try_recv().unwrap(), if action == "approve" { Ok(()) } else { Err(Code::Denied) });
         }
+        assert!(store.authenticate(Some(&token),None).is_err());
         view.update(cx,|_,cx|assert!(cx.global::<crate::notifications::State>().service.posted_count()>0));
         drop(client);
     }

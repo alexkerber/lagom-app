@@ -149,6 +149,7 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
     let (mut enabled, _) = watch::channel(());
     let (policy, _) = watch::channel(settings.agent_policy_generation().ok());
     let mut bind_error = None;
+    let mut recovered = false;
     loop {
         tokio::select! {
             biased;
@@ -163,7 +164,14 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                 }
                 if let Some(generation)=generation.filter(|_|socket.is_none()) {
                     match Socket::bind(&socket_path,generation) {
-                        Ok(bound) => { socket=Some(bound); bind_error=None; }
+                        Ok(bound) => {
+                            if !recovered {
+                                if settings.recover_agent_writes().is_err() { continue; }
+                                recovered = true;
+                            }
+                            socket=Some(bound);
+                            bind_error=None;
+                        }
                         Err(e) if bind_error!=Some(e.kind()) => {
                             eprintln!("Could not open agent socket: {e}");
                             bind_error=Some(e.kind());
@@ -219,6 +227,7 @@ struct Audit {
     account: Option<String>,
     target: Option<AuditTarget>,
     dispatched: bool,
+    worker_audit: bool,
     recipients: Vec<Address>,
 }
 
@@ -294,6 +303,7 @@ async fn call(
         } else {
             ANSWER
         };
+    let writing = parsed.as_ref().is_ok_and(|r| write::handles(&r.cmd));
     let peer = if confirming {
         stream
             .as_fd()
@@ -318,7 +328,7 @@ async fn call(
             let _ = job.await;
             return;
         },
-        _ = stream.read(&mut extra), if confirming => {
+        _ = stream.read(&mut extra), if writing => {
             drop(cancel);
             let _=job.await;
             return;
@@ -412,7 +422,6 @@ fn process(
             return Err(Code::Unsupported.into());
         }
         let value = if write::handles(&req.cmd) {
-            audit.dispatched = true;
             write::dispatch(
                 &store,
                 identity,
@@ -444,6 +453,7 @@ fn process(
         bytes.push(b'\n');
         Ok(bytes)
     })();
+    if audit.worker_audit { return result.unwrap_or_else(|e| line(Response::Failure(e.into()))); }
     let audited = Store::agent_writer(path).and_then(|store| {
         store.agent_audit_transaction(|| {
             if let Some(grant) = access.get() {

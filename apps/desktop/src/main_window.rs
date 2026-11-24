@@ -554,7 +554,11 @@ impl MainWindow {
             popouts: Vec::new(),
             rich_shown: Vec::new(),
             _appearance: appearance,
-            _activation: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            _activation: cx.observe_window_activation(window, |this, _, cx| {
+                #[cfg(unix)]
+                { this.agent_sheets.front_since = None; this.agent_sheets.pressed = None; }
+                cx.notify();
+            }),
             _bounds: cx.observe_window_bounds(window, |this, window, cx| {
                 // macOS reports the frame relative to its display, so the display goes with it.
                 // X11 gives every display the nil id; that falls back to the primary display.
@@ -2666,8 +2670,11 @@ impl Render for MainWindow {
         let t = self.theme;
         #[cfg(unix)]
         {
-            self.agent_sheets.0.retain(|s|!s.answer.is_closed());
-            if !self.agent_sheets.0.is_empty() {
+            self.agent_sheets.sheets.retain(|s|!s.answer.is_closed());
+            if let Some(sheet) = self.agent_sheets.sheets.front() {
+                if self.agent_sheets.front_since.is_none_or(|(id, _)| id != sheet.serial) {
+                    self.agent_sheets.front_since = Some((sheet.serial, std::time::Instant::now()));
+                }
                 self.web.hide();
                 return self.agent_sheet(window,cx).into_any_element();
             }

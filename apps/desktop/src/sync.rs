@@ -607,7 +607,7 @@ impl Worker {
     /// README: a session that saw an error may hold a half-read response; never reuse it.
     fn give<T>(&mut self, account: &str, mut session: ImapSync, result: &lagom_core::Result<T>) {
         if let Some(error) = session.take_refresh_error() {
-            self.emit(Event::Sync(account.into(), SyncState::Failed(format!("Mail moved; refresh failed: {error}"))));
+            self.emit(Event::Sync(account.into(), SyncState::Failed(format!("Mail refresh failed: {error}"))));
         } else if result.is_ok() {
             self.sessions.insert(account.into(), session);
         }
@@ -1092,10 +1092,10 @@ impl Worker {
 
     async fn forward_attachments(&mut self, id: i64) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
         let id = self.resolve(id).await?;
-        self.forward_parts(id).await
+        self.forward_parts(id, usize::MAX).await
     }
 
-    async fn forward_parts(&mut self, id: i64) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
+    async fn forward_parts(&mut self, id: i64, mut remaining: usize) -> lagom_core::Result<Vec<lagom_core::smtp::OutgoingAttachment>> {
         if !self.store.attachment_metadata_loaded(id)? {
             let m = self.store.message_summary(id)?;
             let account = self.account(&m.account)?;
@@ -1105,7 +1105,8 @@ impl Worker {
         }
         let mut parts = Vec::new();
         for part in self.store.attachments(id)? {
-            let data = self.attachment_bytes(id, &part.section, usize::MAX).await?;
+            let data = self.attachment_bytes(id, &part.section, remaining).await?;
+            remaining -= data.len();
             parts.push(lagom_core::smtp::OutgoingAttachment { filename: part.filename, mime_type: part.mime_type, data });
         }
         Ok(parts)

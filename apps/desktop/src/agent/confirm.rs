@@ -16,10 +16,52 @@ pub(crate) struct Sheet {
     pub agent: String,
     pub heading: String,
     pub approve_label: &'static str,
-    pub details: String,
+    pub rows: Vec<(&'static str, String)>,
+    pub previous_description: Option<String>,
     pub body: String,
     pub expanded: bool,
     pub answer: oneshot::Sender<Result<(), Code>>,
+}
+
+fn line(value: &str) -> String {
+    super::read::clean(value).replace('\n', "\\n")
+}
+
+fn address(value: &str) -> Result<String, Code> {
+    let mailbox = value
+        .parse::<lettre::message::Mailbox>()
+        .map_err(|_| Code::InvalidRequest)?;
+    let domain = mailbox.email.domain();
+    let ascii = idna::domain_to_ascii(domain).map_err(|_| Code::InvalidRequest)?;
+    let warn = !domain.is_ascii()
+        || ascii
+            .split('.')
+            .any(|s| s.to_ascii_lowercase().starts_with("xn--"));
+    let mut result = format!(
+        "{}@{}{}",
+        mailbox.email.user(),
+        ascii,
+        if warn { " ⚠" } else { "" }
+    );
+    if let Some(name) = &mailbox.name {
+        let mut short: String = name.chars().take(64).collect();
+        if short.len() < name.len() {
+            short.pop();
+            short.push('…');
+        }
+        result.push_str(&format!(" ({short})"));
+    }
+    Ok(result)
+}
+
+fn local_time(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|_| format!("{value} (all day)"))
 }
 
 impl Sheet {
@@ -32,7 +74,9 @@ impl Sheet {
                 .peer
                 .upgrade()
                 .is_some_and(|s| matches!((&*s).read(&mut [0]),Err(e) if e.kind()==ErrorKind::WouldBlock));
-        let _ = self.answer.send(if connected { Ok(()) } else { Err(Code::Denied) });
+        let _ = self
+            .answer
+            .send(if connected { Ok(()) } else { Err(Code::Denied) });
     }
 
     pub fn new(
@@ -42,70 +86,76 @@ impl Sheet {
         snapshot: &Snapshot,
         closed: oneshot::Receiver<()>,
         peer: std::sync::Weak<std::os::unix::net::UnixStream>,
-    ) -> (Self, oneshot::Receiver<Result<(), Code>>) {
+    ) -> Result<(Self, oneshot::Receiver<Result<(), Code>>), Code> {
         let (answer, rx) = oneshot::channel();
-        let mut details = format!("Account  {}\n", account.email);
-        let mut body = String::new();
+        let mut rows = Vec::new();
+        let mut row = |label, value: &str| rows.push((label, line(value)));
+        row("Agent", &format!("{} ({})", agent.name, agent.host));
+        row("Account", &address(&account.email)?);
+        let mut previous_description = None;
+        let body;
         match snapshot {
             Snapshot::Mail(_, m) => {
-                details += &format!(
-                    "To  {}\nCc  {}\nBcc  {}\nSubject  {}\n",
-                    m.to.join(", "),
-                    m.cc.join(", "),
-                    m.bcc.join(", "),
-                    m.subject
-                );
-                body = m.text.clone();
-                if let Some(quote) = &m.quoted {
-                    body.push_str("\n\n");
-                    body.push_str(&quote.text);
-                    for part in lagom_core::html::sanitize_parts(&quote.html).1 {
-                        details += &format!("Inline image  {} ({} bytes)\n", part.mime_type, part.data.len());
+                for (label, group) in [("To", &m.to), ("Cc", &m.cc), ("Bcc", &m.bcc)] {
+                    for value in group {
+                        row(label, &address(value)?);
                     }
                 }
+                row("Subject", &m.subject);
                 for p in &m.attachments {
-                    details += &format!("Attachment  {} ({} bytes)\n", p.filename, p.data.len());
+                    row("Attachment", &format!("{} ({} bytes)", p.filename, p.data.len()));
                 }
+                body = m.text.clone();
             }
-            Snapshot::Event { calendar, old, new } => {
-                details += &format!("Calendar  {calendar}\n");
+            Snapshot::Event { name, old, new, .. } => {
                 if let Some(s) = old {
-                    details += &format!("Current location  {}\n", s.event.location.as_deref().unwrap_or(""));
-                    details += &format!(
-                        "Current event  {}\n{} – {}\n{}\nGuests  {}\nMeet  {}\n",
-                        s.event.title,
-                        s.event.start,
-                        s.event.end,
-                        s.description.as_deref().unwrap_or(""),
-                        s.attendees.join(", "),
-                        s.event.join_url.as_deref().unwrap_or("None")
-                    );
+                    for guest in &s.attendees {
+                        row("Current guest", &address(guest)?);
+                    }
                 }
                 if let Some(e) = new {
-                    details += &format!(
-                        "Location  {}\n",
+                    let guests = if e.attendees.is_empty() {
+                        old.as_ref().map(|s| &s.attendees).unwrap_or(&e.attendees)
+                    } else {
+                        &e.attendees
+                    };
+                    for guest in guests {
+                        row("Guest", &address(guest)?);
+                    }
+                }
+                if let Some(s) = old {
+                    row("Current title", &s.event.title);
+                }
+                if let Some(e) = new {
+                    row("Title", &e.title);
+                }
+                row("Calendar", name);
+                if let Some(s) = old {
+                    row("Current start", &local_time(&s.event.start));
+                    row("Current end", &local_time(&s.event.end));
+                    row("Current location", s.event.location.as_deref().unwrap_or(""));
+                    row("Current Meet", s.event.join_url.as_deref().unwrap_or("None"));
+                    previous_description = s.description.as_deref().map(super::read::clean);
+                }
+                body = if let Some(e) = new {
+                    row("Start", &local_time(&e.start));
+                    row("End", &local_time(&e.end));
+                    row(
+                        "Location",
                         e.location
                             .as_deref()
-                            .or(old.as_ref().and_then(|s| s.event.location.as_deref()))
-                            .unwrap_or("")
-                    );
-                    details += &format!(
-                        "Proposed event  {}\n{} – {}\n{}\nGuests  {}\nCreate Meet link  {}",
-                        e.title,
-                        e.start,
-                        e.end,
-                        e.description
-                            .as_deref()
-                            .or(old.as_ref().and_then(|o| o.description.as_deref()))
+                            .or_else(|| old.as_ref()?.event.location.as_deref())
                             .unwrap_or(""),
-                        if e.attendees.is_empty() {
-                            old.as_ref().map(|o| o.attendees.join(", ")).unwrap_or_default()
-                        } else {
-                            e.attendees.join(", ")
-                        },
-                        e.meet
                     );
-                }
+                    row("Create Meet link", if e.meet { "Yes" } else { "No" });
+                    e.description
+                        .as_deref()
+                        .or_else(|| old.as_ref()?.description.as_deref())
+                        .unwrap_or("")
+                        .to_owned()
+                } else {
+                    String::new()
+                };
             }
             Snapshot::None => unreachable!(),
         }
@@ -117,40 +167,114 @@ impl Sheet {
             _ => unreachable!(),
         };
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        (
+        Ok((
             Self {
                 peer,
                 expires: tokio::time::Instant::now() + std::time::Duration::from_secs(120),
                 serial: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 closed: Some(closed),
                 agent: agent.id,
-                heading: super::read::clean(&format!("{} ({}) wants to {purpose}", agent.name, agent.host)),
+                heading: format!("Request to {purpose}"),
                 approve_label,
-                details: super::read::clean(&details),
+                rows,
+                previous_description,
                 body: super::read::clean(&body),
                 expanded: false,
                 answer,
             },
             rx,
-        )
+        ))
     }
 }
 
 #[derive(Default)]
-pub(crate) struct Waiting(pub std::collections::VecDeque<Sheet>);
+pub(crate) struct Waiting {
+    pub sheets: std::collections::VecDeque<Sheet>,
+    pub pressed: Option<usize>,
+    pub front_since: Option<(usize, std::time::Instant)>,
+}
+
+#[derive(Default)]
+pub(crate) struct Denials(std::collections::HashMap<String, std::time::Instant>);
+impl gpui::Global for Denials {}
+impl Denials {
+    pub fn deny(&mut self, agent: String) {
+        self.0.insert(agent, std::time::Instant::now());
+    }
+    fn cooling_down(&mut self, agent: &str) -> bool {
+        self.0
+            .retain(|_, at| at.elapsed() < std::time::Duration::from_secs(30));
+        self.0.contains_key(agent)
+    }
+}
 impl gpui::Global for Waiting {}
 
 impl Waiting {
-    pub fn push(&mut self, sheet: Sheet) -> bool {
-        self.0.retain(|s| !s.answer.is_closed());
+    pub fn armed(&self, serial: usize, keyboard: bool, activating: bool, active: bool) -> bool {
+        !keyboard
+            && !activating
+            && active
+            && self
+                .front_since
+                .is_some_and(|(id, at)| id == serial && at.elapsed() >= std::time::Duration::from_millis(700))
+    }
+    pub fn push(&mut self, sheet: Sheet, denials: &mut Denials) -> bool {
+        self.sheets.retain(|s| !s.answer.is_closed());
         if sheet.answer.is_closed() {
             return false;
         }
-        if self.0.len() >= 3 || self.0.iter().any(|s| s.agent == sheet.agent) {
+        if denials.cooling_down(&sheet.agent)
+            || self.sheets.len() >= 3
+            || self.sheets.iter().any(|s| s.agent == sheet.agent)
+        {
             let _ = sheet.answer.send(Err(Code::Busy));
             return false;
         }
-        self.0.push_back(sheet);
+        self.sheets.push_back(sheet);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_fields_escape_invisible_text_and_show_ascii_domain_first() {
+        assert_eq!(
+            line("a\n\t\u{200b}\u{200c}\u{200d}\u{2060}\u{feff}\u{2028}\u{2029}\u{202e}"),
+            r"a\n\t\u{200b}\u{200c}\u{200d}\u{2060}\u{feff}\u{2028}\u{2029}\u{202e}"
+        );
+        let name = "a".repeat(70);
+        assert_eq!(
+            address(&format!("{name} <me@bücher.example>")).unwrap(),
+            format!("me@xn--bcher-kva.example ⚠ ({}…)", "a".repeat(63))
+        );
+    }
+
+    #[test]
+    fn arming_belongs_to_the_front_sheet_and_active_mouse_click() {
+        use std::time::{Duration, Instant};
+        let mut waiting = Waiting::default();
+        waiting.front_since = Some((1, Instant::now()));
+        assert!(!waiting.armed(1, false, false, true));
+        waiting.front_since = Some((1, Instant::now() - Duration::from_millis(701)));
+        assert!(waiting.armed(1, false, false, true));
+        for (id, key, first, active) in [
+            (2, false, false, true),
+            (1, true, false, true),
+            (1, false, true, true),
+            (1, false, false, false),
+        ] {
+            assert!(!waiting.armed(id, key, first, active));
+        }
+        let mut denials = Denials::default();
+        denials.deny("agent".into());
+        assert!(denials.cooling_down("agent"));
+        assert!(!denials.cooling_down("another"));
+        denials
+            .0
+            .insert("agent".into(), Instant::now() - Duration::from_secs(30));
+        assert!(!denials.cooling_down("agent"));
     }
 }

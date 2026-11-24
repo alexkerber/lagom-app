@@ -209,8 +209,8 @@ impl MainWindow {
 #[cfg(unix)]
 impl MainWindow {
     pub(super) fn watch_agent_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.agent_sheets.0.retain(|s| !s.answer.is_closed());
-        for sheet in &mut self.agent_sheets.0 {
+        self.agent_sheets.sheets.retain(|s| !s.answer.is_closed());
+        for sheet in &mut self.agent_sheets.sheets {
             if let Some(done) = sheet.closed.take() {
                 cx.spawn(async move |this, cx| {
                     let _ = done.await;
@@ -219,19 +219,20 @@ impl MainWindow {
                 .detach();
             }
         }
-        if !self.agent_sheets.0.is_empty() {
+        if !self.agent_sheets.sheets.is_empty() {
             self.agent_deny.focus(window);
         }
     }
 
     fn answer_agent(&mut self, serial: usize, approve: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.agent_sheets.0.front().is_none_or(|s| s.serial != serial) {
+        if self.agent_sheets.sheets.front().is_none_or(|s| s.serial != serial) {
             return;
         }
-        if let Some(sheet) = self.agent_sheets.0.pop_front() {
+        if let Some(sheet) = self.agent_sheets.sheets.pop_front() {
+            if !approve { cx.default_global::<crate::agent::confirm::Denials>().deny(sheet.agent.clone()); }
             sheet.decide(approve);
         }
-        if self.agent_sheets.0.is_empty() {
+        if self.agent_sheets.sheets.is_empty() {
             self.focus.focus(window);
         } else {
             self.agent_deny.focus(window);
@@ -240,10 +241,10 @@ impl MainWindow {
     }
 
     pub(super) fn agent_sheet(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sheet = &self.agent_sheets.0[0];
+        let sheet = &self.agent_sheets.sheets[0];
         let serial = sheet.serial;
         let t = self.theme;
-        let truncated = !sheet.expanded && sheet.body.chars().nth(2000).is_some();
+        let truncated = !sheet.expanded && (!sheet.body.is_empty() || sheet.previous_description.is_some());
         let body = if truncated {
             sheet.body.chars().take(2000).collect()
         } else {
@@ -260,9 +261,6 @@ impl MainWindow {
                 let k = &e.keystroke;
                 if k.key == "escape" {
                     this.answer_agent(serial, false, window, cx);
-                }
-                if crate::shortcuts::submit().matches(k) && !e.is_held {
-                    this.answer_agent(serial, true, window, cx);
                 }
                 cx.stop_propagation();
             }))
@@ -283,11 +281,17 @@ impl MainWindow {
                             .id("agent-preview")
                             .overflow_y_scroll()
                             .flex_col()
-                            .child(sheet.details.clone())
-                            .child(body)
+                            .flex()
+                            .children(sheet.rows.iter().map(|(label, value)| div().flex().gap_2()
+                                .child(div().w(px(120.)).flex_shrink_0().child(*label))
+                                .child(div().flex_1().when(matches!(*label, "Title" | "Current title" | "Subject"), |d| d.truncate()).child(value.clone()))))
+                            .when_some(sheet.previous_description.clone(), |d, description| d.child("Current description")
+                                .child(div().id("current-description").max_h(px(if sheet.expanded { 320. } else { 120. })).overflow_y_scroll().child(description)))
+                            .child(if sheet.approve_label == "Send" { "Body" } else { "Description" })
+                            .child(div().id("confirmation-body").max_h(px(if sheet.expanded { 320. } else { 180. })).overflow_y_scroll().child(body))
                             .when(truncated, |d| {
                                 d.child(button(&t, "Show all", None).on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(s) = this.agent_sheets.0.front_mut() {
+                                    if let Some(s) = this.agent_sheets.sheets.front_mut() {
                                         s.expanded = true;
                                     }
                                     cx.notify();
@@ -308,14 +312,30 @@ impl MainWindow {
                                     ),
                             )
                             .child(
+                                button(&t, "Deny and revoke", None).on_click(cx.listener(move |this, _, w, cx| {
+                                    if let Some(sheet) = this.agent_sheets.sheets.front().filter(|s| s.serial == serial) {
+                                        let agent = sheet.agent.clone();
+                                        this.answer_agent(serial, false, w, cx);
+                                        this.agent_change(AgentChange::Disconnect(agent), cx);
+                                    }
+                                })),
+                            )
+                            .child(
                                 button(
                                     &t,
                                     sheet.approve_label,
                                     Some(t.accent),
                                 )
                                 .id(("approve-agent", serial))
+                                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, w, _| {
+                                    this.agent_sheets.pressed = this.agent_sheets.armed(serial, false, event.first_mouse, w.is_window_active()).then_some(serial);
+                                }))
                                 .on_click(
-                                    cx.listener(move |this, _, w, cx| this.answer_agent(serial, true, w, cx)),
+                                    cx.listener(move |this, event: &gpui::ClickEvent, w, cx| {
+                                        if this.agent_sheets.pressed.take() == Some(serial) && this.agent_sheets.armed(serial, event.is_keyboard(), event.first_focus(), w.is_window_active()) {
+                                            this.answer_agent(serial, true, w, cx);
+                                        }
+                                    }),
                                 ),
                             ),
                     ),

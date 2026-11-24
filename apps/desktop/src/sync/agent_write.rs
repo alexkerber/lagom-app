@@ -28,7 +28,7 @@ impl Worker {
                     None,
                     lagom_core::agent::policy::Level::Read,
                 )?;
-                Some((resolved.row, self.forward_parts(resolved.row).await.map_err(error)?))
+                Some((resolved.row, self.forward_parts(resolved.row, crate::agent::read::ATTACHMENT_LIMIT).await.map_err(error)?))
             } else {
                 None
             };
@@ -38,6 +38,7 @@ impl Worker {
                     let key = ObjectId::decode(value["id"].as_str().ok_or(Code::Internal)?)?;
                     *target = Some(self.store.agent_object_target(&key)?);
                 }
+                self.store.finish_agent_write(job.audit_id, &Ok(()), target.as_ref())?;
                 Ok(value)
             })?;
             if let Snapshot::Mail(_, mail) = &job.snapshot {
@@ -53,7 +54,7 @@ impl Worker {
             }
             return Ok(value);
         }
-        if let Snapshot::Event { calendar, old, new } = &job.snapshot {
+        if let Snapshot::Event { calendar, old, new, .. } = &job.snapshot {
             if !job.approved {
                 return Err(Code::Denied.into());
             }
@@ -63,7 +64,7 @@ impl Worker {
             let refusal = std::cell::Cell::new(None);
             let check = || {
                 job.check(store)
-                    .and_then(|_| calendar_allowed(store, &account, calendar))
+                    .and_then(|_| calendar_allowed(store, &account, calendar).map(|_| ()))
                     .map_err(|e| {
                         refusal.set(Some(e));
                         Error::Cancelled
@@ -104,9 +105,7 @@ impl Worker {
                 }
                 _ => return Err(Code::Internal.into()),
             };
-            if let Some(failure) = refusal.take() {
-                return Err(failure);
-            }
+            if let (Err(_), Some(failure)) = (&result, refusal.take()) { return Err(failure); }
             if matches!(result, Err(Error::CalendarConsent)) {
                 self.store.drop_calendar_scopes(&account.id).map_err(error)?;
             }
@@ -138,6 +137,7 @@ impl Worker {
             return self.store.agent_change(|| {
                 job.check(&self.store)?;
                 self.store.snooze(job.message(&self.store)?.row, until).map_err(error)?;
+                self.store.finish_agent_write(job.audit_id, &Ok(()), None)?;
                 Ok(json!({}))
             });
         }
@@ -147,15 +147,14 @@ impl Worker {
                 .get("folder")
                 .and_then(Value::as_str)
                 .ok_or(Code::InvalidRequest)?;
-            Some(
-                self.store
+            let folders = self.store
                     .folders(&account.id, now())
-                    .map_err(error)?
-                    .iter()
+                    .map_err(error)?;
+            let target = folders.iter()
                     .find(|f| f.name == name)
-                    .ok_or(Code::NotFound)?
-                    .id,
-            )
+                    .ok_or(Code::NotFound)?;
+            if matches!(target.role, FolderRole::Drafts | FolderRole::Sent) { return Err(Code::Forbidden.into()); }
+            Some(target.id)
         } else {
             None
         };
@@ -173,6 +172,10 @@ impl Worker {
         let check = |store: &Store| {
             job.check(store)
                 .and_then(|_| {
+                    if let Some(id) = folder {
+                        let destination = store.folder(id).map_err(error)?;
+                        if matches!(destination.role, FolderRole::Drafts | FolderRole::Sent) { return Err(Code::Forbidden.into()); }
+                    }
                     if job.message(store)?.row != row {
                         return Err(Code::Conflict.into());
                     }
@@ -205,6 +208,7 @@ impl Worker {
             _ => return Err(Code::InvalidRequest.into()),
         };
         self.give(&account.id, session, &result);
+        if matches!(result, Err(Error::Uncertain)) { return Err(Code::Uncertain.into()); }
         if let Some(failure) = refusal.take() {
             return Err(failure);
         }
