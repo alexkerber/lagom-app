@@ -190,21 +190,24 @@ pub fn clear_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>) -> std::io::Result<()> {
+    let mut failed = None;
     for entry in std::fs::read_dir(dir)?.flatten() {
         let filename = entry.file_name();
-        let Some(key) = filename.to_str().and_then(|s| s.strip_prefix("message-"))
-            .and_then(|s| s.strip_suffix(".eml")) else { continue };
-        // Older versions published tempfile's six-character alphanumeric names.
-        let owned = (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
-            || (key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric()));
+        let Some(name) = filename.to_str() else { continue };
+        let random = |key: &str| key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric());
+        // An interrupted download leaves tempfile's `.tmp` name. Older versions published its six-character names.
+        let owned = name.strip_prefix(".tmp").is_some_and(random)
+            || name.strip_prefix("message-").and_then(|s| s.strip_suffix(".eml"))
+                .is_some_and(|key| random(key) || (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())));
         if !owned { continue; }
         let Ok(meta) = entry.metadata() else { continue };
         let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
         if meta.is_file() && max_age.is_none_or(|max| age.is_some_and(|age| age > max)) {
-            let _ = std::fs::remove_file(entry.path());
+            if let Err(error) = std::fs::remove_file(entry.path()) { failed.get_or_insert(error); }
         }
     }
-    Ok(())
+    // Pruning rides on saving another original and must not fail it; a clear reports what it left behind.
+    match failed { Some(error) if max_age.is_none() => Err(error), _ => Ok(()) }
 }
 
 impl ImapSync {

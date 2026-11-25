@@ -61,7 +61,7 @@ async fn large_body_streams_to_eml() {
     let id = message(&store, &imap.account.id, folder, 1);
     let dir = temp.path().join("cache");
     std::fs::create_dir_all(&dir).unwrap();
-    for name in ["message-aB34z6.eml", "personal.eml"] {
+    for name in ["message-aB34z6.eml", ".tmpaB34z6", "personal.eml"] {
         let old = std::fs::File::create(dir.join(name)).unwrap();
         old.set_modified(std::time::SystemTime::now() - Duration::from_secs(8 * 86400)).unwrap();
     }
@@ -78,9 +78,11 @@ async fn large_body_streams_to_eml() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), first + tail);
     assert_eq!(imap.save_eml(&store, id, &dir).await.unwrap(), path);
     assert_eq!(dir.read_dir().unwrap().count(), 2);
-    // Account removal clears every cached original, also a new one, and no file that is not lagom's.
+    // Account removal clears every cached original, also a new one or a part of one, and no file that is not lagom's.
+    std::fs::write(dir.join(".tmpZ9y8X7"), "Subject: Interrupted").unwrap();
     crate::imap_sync::clear_cached_emls(&dir).unwrap();
-    assert!(!path.exists() && dir.join("personal.eml").exists());
+    assert_eq!(dir.read_dir().unwrap().count(), 1);
+    assert!(dir.join("personal.eml").exists());
     crate::imap_sync::clear_cached_emls(&dir.join("missing")).unwrap();
     server.await.unwrap();
 }
