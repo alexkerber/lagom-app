@@ -44,7 +44,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 binaries=()
 for target in "${targets[@]}"; do binaries+=("target/$target/release/lagom"); done
 lipo -create -output "$app/Contents/MacOS/lagom" "${binaries[@]}"
-[[ -n ${LAGOM_MAC_TARGETS:-} ]] || lipo "$app/Contents/MacOS/lagom" -verify_arch arm64 x86_64
+# One arch per check: Xcode 27 lipo reads a second arch as an input file.
+[[ -n ${LAGOM_MAC_TARGETS:-} ]] || for arch in arm64 x86_64; do lipo "$app/Contents/MacOS/lagom" -verify_arch "$arch"; done
 cp brand/app-icon/export/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 # Assets.car carries the dark and tinted icons for macOS 26 (CFBundleIconName); older macOS uses the .icns.
 icons=$(mktemp -d)
