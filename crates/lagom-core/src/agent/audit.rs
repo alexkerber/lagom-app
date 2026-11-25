@@ -142,7 +142,7 @@ impl Store {
     pub fn prune_agent_audit(&self, now: i64) -> rusqlite::Result<()> {
         let keep_since = now.saturating_sub(90 * 86400);
         self.db
-            .execute("DELETE FROM agent_audit WHERE at<?", [keep_since])?;
+            .execute("DELETE FROM agent_audit WHERE at<? OR (account IS NOT NULL AND account NOT IN (SELECT id FROM accounts))", [keep_since])?;
         Ok(())
     }
 
@@ -178,6 +178,13 @@ impl Store {
             return self.agent_audit_transaction(|| self.insert_agent_audit(row, now, pending));
         }
         let tx = &self.db;
+        if let Some(account) = row.account {
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
+                [account.to_string()], |r| r.get(0))?;
+            if !exists {
+                return if pending { Err(Code::NotFound) } else { Ok(None) };
+            }
+        }
         let command = match row.command {
             "accounts" | "folders" | "emails" | "search" | "thread" | "attachment" | "contacts"
             | "events" | "availability" | "draft.list" | "draft.show" | "draft.create"
