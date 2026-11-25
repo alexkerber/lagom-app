@@ -14,7 +14,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
     time::timeout,
 };
 
@@ -373,7 +372,7 @@ impl Client {
             return Err(Code::TooLarge);
         }
         let mut stream = timeout(Duration::from_secs(5), async {
-            let mut stream = UnixStream::connect(crate::agent::socket_path(&self.dir)?)
+            let mut stream = crate::agent::connect(&crate::agent::socket_path(&self.dir)?)
                 .await
                 .map_err(|_| Code::AppUnreachable)?;
             if stream.peer_cred().map_err(|_| Code::Unauthorized)?.uid()
