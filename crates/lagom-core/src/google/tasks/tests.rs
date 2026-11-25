@@ -714,14 +714,15 @@ async fn mail_subject_only_reaches_a_list_owned_by_its_account() {
 async fn pull_preserves_foreign_mail_link_and_clears_removed_own_link() {
     let (_dir, mut store, account, list) = setup(true);
     let task = linked_task(&store, list);
-    store.db.execute("UPDATE tasks SET mail_account='other-account',mail_message_id='<private@example.test>',mail_subject='Private subject' WHERE id=?1", [task.id]).unwrap();
+    let other = second_account(&store);
+    store.db.execute("UPDATE tasks SET mail_account=?2,mail_message_id='<private@example.test>',mail_subject='Private subject' WHERE id=?1", params![task.id, other]).unwrap();
     let page = r#"{"items":[{"id":"task","title":"Remote title","notes":"Remote notes","updated":"2026-11-09T10:00:00Z"}]}"#;
     let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", page)]).await;
     sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
     handle.await.unwrap();
     let saved = store.tasks(list, true).unwrap().remove(0);
     assert_eq!((saved.title.as_str(), saved.notes.as_str(), saved.mail_account.as_deref(), saved.mail_message_id.as_deref(), saved.mail_subject.as_deref()),
-        ("Remote title", "Remote notes", Some("other-account"), Some("<private@example.test>"), Some("Private subject")));
+        ("Remote title", "Remote notes", Some(other.as_str()), Some("<private@example.test>"), Some("Private subject")));
     // A link this account does upload is still removed when Google's notes no longer have it.
     store.db.execute("UPDATE tasks SET mail_account=?1 WHERE id=?2", params![account.id, task.id]).unwrap();
     let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", page)]).await;
@@ -778,4 +779,24 @@ fn own_mail_task_before_tasks_consent_keeps_the_list_syncable() {
     store.set_account_scopes(&account.id, oauth::GOOGLE_TASKS_SCOPE).unwrap();
     store.link_google_lists(&account.id, &[]).unwrap();
     assert_eq!(store.task_lists().unwrap().iter().find(|l| l.id == list).unwrap().account.as_deref(), Some(account.id.as_str()));
+}
+
+#[tokio::test]
+async fn removed_link_from_another_install_stays_removed() {
+    let (_dir, mut store, account, list) = setup(true);
+    let task = linked_task(&store, list);
+    store.db.execute("UPDATE tasks SET mail_account='another-install',mail_message_id='<own@example.test>' WHERE id=?1", [task.id]).unwrap();
+    // Google now has the task without its link: the person removed it there.
+    let page = r#"{"items":[{"id":"task","title":"Local title","notes":"Local notes","status":"needsAction","updated":"2026-11-09T09:00:00.000Z"}]}"#;
+    let (url, _handle) = server(vec![("200 OK", LIST), ("200 OK", page)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    assert!(store.tasks(list, true).unwrap()[0].mail_message_id.is_none());
+}
+
+#[test]
+fn a_pending_deletion_alone_does_not_count_as_live_work() {
+    let (_dir, store, account, list) = setup(true);
+    let task = linked_task(&store, list);
+    store.delete_task(task.id).unwrap();
+    assert!(store.pending_google_tasks(list, &account.id).unwrap().iter().all(|t| t.0.deleted));
 }

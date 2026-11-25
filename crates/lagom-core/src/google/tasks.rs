@@ -204,7 +204,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             store.db.execute("DELETE FROM task_lists WHERE id=?1 AND revision=?2 AND deleted=1", params![list.id, list.revision])?;
             continue;
         }
-        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && store.pending_google_tasks(list.id, account)?.iter().any(|t| !t.3)) {
+        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && store.pending_google_tasks(list.id, account)?.iter().any(|t| !t.3 && !t.0.deleted)) {
             let body = json!({"title": list.name});
             let response = if let Some(id) = &list.remote {
                 client.request(Method::PATCH, client.url(&["users", "@me", "lists", id])?, Some(body.clone())).await
@@ -247,7 +247,9 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             let value = match response {
                 // An older build's copy of another account's mail is gone from Google: do not put it back.
                 Err(Error::NotFound) if foreign => {
-                    store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1", [task.id])?;
+                    // Only the mapping this PATCH used: a move during the request may have made a new one.
+                    store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1 AND list=?2 AND remote_id IS ?3",
+                        params![task.id, list.id, task.remote_id])?;
                     continue;
                 }
                 Err(Error::NotFound) => client.request(Method::POST, client.url(&["lists", remote_list, "tasks"])?, Some(body)).await?,
@@ -314,7 +316,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
                 tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8 WHERE id=?1 AND dirty=0",
                     params![id, task.title, notes, task.due, done, task.deleted, task.etag, task.updated])?;
                 // The push leaves out a link to another account's mail, so its absence here does not remove it.
-                tx.execute("UPDATE tasks SET mail_account=coalesce(?2,mail_account),mail_message_id=?3,mail_subject=?4 WHERE id=?1 AND dirty=0 AND (?2 IS NOT NULL OR (mail_account IS ?5 AND mail_message_id IS NOT NULL))",
+                tx.execute("UPDATE tasks SET mail_account=coalesce(?2,mail_account),mail_message_id=?3,mail_subject=?4 WHERE id=?1 AND dirty=0 AND (?2 IS NOT NULL OR (mail_message_id IS NOT NULL AND coalesce(mail_account=?5 OR mail_account NOT IN (SELECT id FROM accounts),0)))",
                     params![id, mail.as_ref().map(|m| &m.0), mail.as_ref().map(|m| &m.1), mail.as_ref().and_then(|m| m.2.as_ref()), account])?;
             } else if !task.deleted {
                 tx.execute("INSERT INTO tasks(list,remote_id,remote_list_id,title,notes,due,done_at,position,updated,created,etag,remote_updated,mail_account,mail_message_id,mail_subject)

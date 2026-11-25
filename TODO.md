@@ -26,6 +26,7 @@
 - [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
 - [ ] Google Tasks with two Tasks accounts: no UI picks the account for a local list, so new lists stay local. Add a picker.
 - [ ] Google Tasks: remove previously uploaded cross-account mail links from Google notes.
+- [ ] Google Tasks: a task pulled from one Google account and moved by the person into another account's list uploads its subject and link there. The link names the first install's account, so lagom cannot tell it from the person's own task without an owner column.
 - [ ] Google Tasks: a task from a removed account's mail counts as the person's own once that account is gone. If the person moved it into another account's list, its subject then uploads there.
 - [ ] Check that Google's Limited Use policy allows a user-directed transfer to an AI agent the user connects.
 
