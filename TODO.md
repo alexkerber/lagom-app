@@ -9,11 +9,21 @@
 
 - [x] The site says "No AI features" (`site/privacy.html:94`, `site/index.html:199`), but Settings > AI Agents ships. Replace the claims, and say that a connected agent sends what it reads to its own provider.
 - [x] The Google section of `site/privacy.html:106-107` says the data goes only between the device and Google. This is false when an agent has access to a Google account. Disclose it, or keep Google accounts at None.
-- [x] Google Tasks: `crates/lagom-core/src/google/tasks.rs:65` gives every unassigned local list to the first Google account that syncs. The task notes carry the account UUID, Message-ID and subject of the source mail. Keep lists local until the user picks an account.
+- [x] Mail-derived tasks use their source account’s list or stay in a local-only list.
+  Google Tasks skips titles containing another account’s source subject.
+  Unassigned lists found with multiple Tasks accounts stay local after access changes.
 - [x] The agent settings do not say where an agent sends the data (`apps/desktop/src/settings/agents.rs:263`). `docs/ai-agents.md:5` still says "No code for it exists yet".
-- [x] Account removal leaves the `.eml` cache and `agent_audit` rows (with Bcc recipients) for 90 days. Purge both on removal.
-- [x] Sync errors print account addresses and folder names to stderr (`crates/lagom-ffi/src/lib.rs:574`, `apps/desktop/src/sync.rs:205`).
+- [x] Account removal clears cached originals and audit rows. Late confirmations cannot restore recipients or targets.
+  Opening the store prunes orphaned audit rows. The GreenMail worker test clears its own temporary cache.
+- [x] CLI, desktop and mobile sync logs redact mailbox names and account addresses.
+- [x] CLI agent access commits after the owner-only token file is written. A failed write preserves prior access.
+  Non-Unix builds refuse token creation before provisioning.
 - [x] The planned update check in `docs/release.md:406` is on by default. Make it opt-in and list it on the privacy page in the same PR.
+- [x] PR #253 review fixes are on `wip/privacy-claims`. Core, CLI, desktop and FFI tests passed on macOS.
+  Loopback Google Tasks and local GreenMail tests passed. Live Google and non-Unix token refusal remain unverified.
+- [ ] Older builds assigned some lists to the wrong account. Add recovery so new tasks stop uploading there.
+- [ ] SQLite deletes leave data in free pages. Review enabling `secure_delete`.
+- [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
 - [ ] Google Tasks with two Tasks accounts: no UI picks the account for a local list, so new lists stay local. Add a picker.
 - [ ] Google Tasks: tasks pushed before the fix keep a link to another account's mail in Google notes until edited. A one-time migration (mark them dirty) would clear it.
 - [ ] Check that Google's Limited Use policy allows a user-directed transfer to an AI agent the user connects.
