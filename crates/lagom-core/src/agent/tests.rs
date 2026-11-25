@@ -417,7 +417,10 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
 
 #[test]
 fn audit_append_after_account_removal_keeps_no_account_data() {
-    let (_dir, s, a, _) = setup();
+    let (_dir, s, mut a, _) = setup();
+    // The store accepts any nonempty account ID, so the check must not depend on its form.
+    a.id = "imported account".into();
+    s.save_account(&a).unwrap();
     let agent = s.create_agent("test", "writer", "local", false).unwrap();
     let token = s.issue_token(&agent, TokenScope::Local).unwrap();
     let identity = s.authenticate(Some(&token), None).unwrap();
@@ -425,7 +428,7 @@ fn audit_append_after_account_removal_keeps_no_account_data() {
     let target = s.agent_object_target(&ObjectId::Draft(a.id.clone(), "d".into())).unwrap();
     let recipients = ["bcc@example.org".parse().unwrap()];
     let append = || s.record_agent_audit(AuditRow {
-        identity: Some(&identity), account: Some(a.id.parse().unwrap()), command: "draft.send", target: Some(&target),
+        identity: Some(&identity), account: Some(&a.id), command: "draft.send", target: Some(&target),
         outcome: Ok(()), source_ip: None, recipients: &recipients,
     }).unwrap();
     let rows = || s.db.prepare("SELECT account,target,detail FROM agent_audit WHERE command='draft.send'").unwrap()

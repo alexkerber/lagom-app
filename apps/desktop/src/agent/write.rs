@@ -468,7 +468,7 @@ pub(super) fn dispatch(
     }
     let writer = Store::agent_writer(store.path())?;
     let audit_id = writer.begin_agent_write(lagom_core::agent::audit::AuditRow {
-        identity: Some(who), account: id.parse().ok(), command: &req.cmd, target: audit.target.as_ref(),
+        identity: Some(who), account: Some(&id), command: &req.cmd, target: audit.target.as_ref(),
         outcome: Ok(()), source_ip: req.source_ip.as_ref().and_then(|s| s.parse().ok()), recipients: &audit.recipients,
     })?;
     audit.worker_audit = true;

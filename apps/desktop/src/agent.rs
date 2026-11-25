@@ -252,7 +252,7 @@ impl Audit {
     ) -> Result<(), Code> {
         store.record_agent_audit(AuditRow {
             identity: who,
-            account: self.account.as_deref().and_then(|s| s.parse().ok()),
+            account: self.account.as_deref(),
             command: req.filter(|_| self.dispatched).map_or("", |r| &r.cmd),
             target: self.target.as_ref(),
             outcome,

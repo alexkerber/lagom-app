@@ -72,7 +72,8 @@ pub use lettre::Address;
 
 pub struct AuditRow<'a> {
     pub identity: Option<&'a Identity>,
-    pub account: Option<uuid::Uuid>,
+    /// The stored account ID, unchanged: the append checks that it still exists.
+    pub account: Option<&'a str>,
     pub command: &'a str,
     pub target: Option<&'a AuditTarget>,
     pub outcome: Result<(), Failure>,
@@ -228,8 +229,8 @@ impl Store {
         if !aggregate {
             // Removal deleted the account's rows. A request that was already running, such as a send that waited
             // for its confirmation, must not bring the account ID, the target or the recipients back.
-            let account = match row.account.map(|id| id.to_string()) {
-                Some(id) if tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)", [&id], |r| r.get(0))? => Some(id),
+            let account = match row.account {
+                Some(id) if tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)", [id], |r| r.get(0))? => Some(id),
                 _ => None,
             };
             let removed = row.account.is_some() && account.is_none();
