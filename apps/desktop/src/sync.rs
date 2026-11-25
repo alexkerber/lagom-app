@@ -200,9 +200,9 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
     (Bridge(cmd_tx), ev_rx)
 }
 
-/// The text the window shows for `error`; the log keeps the technical detail.
+/// The text the window shows for `error`; the log keeps the technical detail, without addresses and mailbox names.
 fn shown(error: &Error) -> String {
-    eprintln!("lagom: {error:?}");
+    eprintln!("lagom: {}", error.log());
     error.to_string()
 }
 
