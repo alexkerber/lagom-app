@@ -31,7 +31,10 @@
 - [ ] Google Tasks: remove previously uploaded cross-account mail links from Google notes.
 - [ ] Google Tasks: a task pulled from one Google account and moved by the person into another account's list uploads its subject and link there. The link names the first install's account, so lagom cannot tell it from the person's own task without an owner column.
 - [ ] Google Tasks: a task from a removed account's mail counts as the person's own once that account is gone. If the person moved it into another account's list, its subject then uploads there.
-- [ ] Check that Google's Limited Use policy allows a user-directed transfer to an AI agent the user connects.
+- [x] Google Limited Use and AI agents: checked against the Workspace API User Data and Developer Policy (updated 2026-09-03). A transfer is allowed for a user-facing feature that is visible and prominent, with the user's consent. Agent access is a Settings page, off until the user turns it on, with the disclosure next to the switch. The privacy page now has the Workspace Limited Use statement (branch `docs/limited-use`).
+- [ ] Google verification: ask the review team to confirm that a user-connected local agent counts as a user-directed transfer. The policy does not name this case.
+- [ ] Google verification: the policy asks for prompt injection protection on restricted scopes ("Model Armor or other"). Document lagom's levels, confirmation sheet and untrusted-data rule as that protection in the verification answers.
+- [ ] Google verification: the policy says a disclosure must immediately precede the consent request. Consider a one-time sheet with the disclosure the first time agent access is turned on.
 
 ## Brand and site
 
