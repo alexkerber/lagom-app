@@ -113,9 +113,14 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     }
 
     async fn request(&mut self, method: Method, url: Url, body: Option<Value>) -> Result<Value> {
+        self.request_if_match(method, url, body, None).await
+    }
+
+    async fn request_if_match(&mut self, method: Method, url: Url, body: Option<Value>, etag: Option<&str>) -> Result<Value> {
         let mut access = (self.token)(None).await?;
         for attempt in 0..2 {
             let mut request = self.http.request(method.clone(), url.clone()).bearer_auth(access.as_str());
+            if let Some(etag) = etag { request = request.header("If-Match", etag); }
             if let Some(body) = &body { request = request.header("Content-Type", "application/json").body(body.to_string()); }
             let response = request.send().await.map_err(|_| Error::Network("Google Tasks unavailable"))?;
             let status = response.status();
@@ -300,7 +305,30 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
         let mut url = client.url(&["lists", remote_id, "tasks"])?;
         url.query_pairs_mut().extend_pairs([("showCompleted", "true"), ("showHidden", "true"), ("showDeleted", "true"), ("maxResults", "100")]);
         if let Some(cursor) = &list.cursor { url.query_pairs_mut().append_pair("updatedMin", cursor); }
-        let tasks: Vec<RemoteTask> = client.pages(url).await?;
+        let mut tasks: Vec<RemoteTask> = client.pages(url).await?;
+        let mut foreign_notes = HashSet::new();
+        for task in tasks.iter_mut().filter(|t| !t.deleted && t.notes.contains("lagom://mail?")) {
+            let local = store.db.query_row("SELECT id,mail_account,mail_message_id,mail_subject FROM tasks
+                WHERE list=?1 AND remote_id=?2 AND dirty=0 AND deleted=0 AND mail_message_id IS NOT NULL
+                AND mail_account<>?3 AND mail_account IN (SELECT id FROM accounts)", params![list.id, task.id, account],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))).optional()?;
+            let Some((id, owner, message, subject)) = local else { continue };
+            if pushed_tasks.contains(&id) { continue; }
+            // Other links in the notes are user text. Keep the local mail association.
+            foreign_notes.insert(task.id.clone());
+            let link = mail_link(&owner, &message, subject.as_deref());
+            let mut lines: Vec<_> = task.notes.split('\n').collect();
+            if let Some(i) = lines.iter().rposition(|line| line.strip_suffix('\r').unwrap_or(line) == link.as_str()) {
+                if i > 0 && i == lines.len() - 1 {
+                    lines[i - 1] = lines[i - 1].strip_suffix('\r').unwrap_or(lines[i - 1]);
+                }
+                lines.remove(i);
+                let notes = lines.join("\n");
+                client.request_if_match(Method::PATCH, client.url(&["lists", remote_id, "tasks", &task.id])?,
+                    Some(json!({"notes": notes})), task.etag.as_deref()).await?;
+                task.notes = notes;
+            }
+        }
         let tx = store.db.unchecked_transaction()?;
         let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND account=?2 AND deleted=0)", params![list.id, account], |r| r.get(0))?;
         if !active { continue; }
@@ -310,7 +338,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             if let Some(updated) = task.updated.as_deref().and_then(timestamp) { through = Some(through.map_or(updated, |old| old.max(updated))); }
             let existing: Option<(i64, bool, bool)> = tx.query_row("SELECT id,dirty,deleted FROM tasks WHERE list=?1 AND remote_id=?2", params![list.id, task.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
             if existing.is_some_and(|(id, dirty, deleted)| dirty || deleted || pushed_tasks.contains(&id)) { continue; }
-            let (notes, mail) = split_notes(&task.notes);
+            let (notes, mail) = if foreign_notes.contains(&task.id) { (task.notes, None) } else { split_notes(&task.notes) };
             let done = if task.status == "completed" { Some(task.completed.as_deref().and_then(timestamp).unwrap_or(0)) } else { None };
             if let Some((id, _, _)) = existing {
                 tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8 WHERE id=?1 AND dirty=0",
@@ -338,17 +366,21 @@ fn task_body(task: &Task, foreign: bool) -> Result<Value> {
     let mut notes = task.notes.clone();
     // A link to another account's mail would give this Google account that mail's Message-ID and subject.
     if let (Some(account), Some(message), false) = (&task.mail_account, &task.mail_message_id, foreign) {
-        let mut link = Url::parse("lagom://mail").unwrap();
-        link.query_pairs_mut().append_pair("account", account).append_pair("message-id", message);
-        if let Some(subject) = &task.mail_subject { link.query_pairs_mut().append_pair("subject", subject); }
         if !notes.is_empty() { notes.push('\n'); }
-        notes.push_str(link.as_str());
+        notes.push_str(mail_link(account, message, task.mail_subject.as_deref()).as_str());
     }
     let due = task.due.as_ref().map(|due| if due.len() == 10 { format!("{due}T00:00:00Z") } else { due.clone() });
     if due.as_deref().is_some_and(|due| timestamp(due).is_none()) { return Err(Error::Invalid("invalid task due date")); }
     Ok(json!({"title": task.title, "notes": notes, "due": due,
         "status": if task.done_at.is_some() { "completed" } else { "needsAction" },
         "completed": task.done_at.map(|done| mail_parser::DateTime::from_timestamp(done).to_rfc3339())}))
+}
+
+fn mail_link(account: &str, message: &str, subject: Option<&str>) -> Url {
+    let mut link = Url::parse("lagom://mail").unwrap();
+    link.query_pairs_mut().append_pair("account", account).append_pair("message-id", message);
+    if let Some(subject) = subject { link.query_pairs_mut().append_pair("subject", subject); }
+    link
 }
 
 type MailLink = (String, String, Option<String>);

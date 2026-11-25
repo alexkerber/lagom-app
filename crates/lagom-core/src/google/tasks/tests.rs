@@ -267,7 +267,7 @@ fn v10_migration_keeps_local_data_and_marks_lists_for_sync() {
     assert_eq!((task.title.as_str(), task.notes.as_str(), task.updated, task.created), ("Keep", "Notes", 42, 41));
     assert_eq!(store.task_lists().unwrap().len(), 2);
     assert_eq!(store.db.query_row("SELECT count(*) FROM task_lists WHERE dirty=1 AND deleted=0", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 23);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 24);
     assert_eq!(store.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none(), true);
 }
 
@@ -730,6 +730,59 @@ async fn pull_preserves_foreign_mail_link_and_clears_removed_own_link() {
     handle.await.unwrap();
     let saved = store.tasks(list, true).unwrap().remove(0);
     assert_eq!((saved.mail_account, saved.mail_message_id, saved.mail_subject), (Some(account.id), None, None));
+}
+
+#[tokio::test]
+async fn upgrade_cleans_only_the_foreign_mail_line_once() {
+    let (dir, store, account, list) = setup(true);
+    let task = linked_task(&store, list);
+    let other = second_account(&store);
+    store.set_account_scopes(&other, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+    store.db.execute("UPDATE tasks SET mail_account=?1,mail_message_id='<one+two>',mail_subject='Private subject' WHERE id=?2",
+        params![other, task.id]).unwrap();
+    store.db.execute("UPDATE task_lists SET pulled_through='2026-11-10T00:00:00Z' WHERE id=?1", [list]).unwrap();
+    store.db.pragma_update(None, "user_version", 23).unwrap();
+    drop(store);
+    let mut store = Store::open(dir.path().join("fixture.db")).unwrap();
+
+    let before = "Edited remotely\n";
+    let after = "lagom://mail?account=other&message-id=keep\n ";
+    let link = format!("lagom://mail?account={other}&message-id=%3Cone%2Btwo%3E&subject=Private+subject");
+    let clean = format!("{before}\n{after}");
+    let page = |notes: String| json!({"items": [{"id": "task", "title": "Mail", "notes": notes,
+        "updated": "2026-11-09T00:00:00Z", "etag": "\"v1\""}]}).to_string();
+    let old = page(format!("{before}\n{link}\n{after}"));
+    let cleaned = page(clean.clone());
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", &old), ("200 OK", TASK),
+        ("200 OK", LIST), ("200 OK", &cleaned)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(!requests[1].contains("updatedMin="));
+    assert!(requests[2].starts_with("PATCH /lists/work/tasks/task "));
+    assert!(requests[2].to_lowercase().contains("if-match: \"v1\""));
+    let (_, body) = requests[2].split_once("\r\n\r\n").unwrap();
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), json!({"notes": clean}));
+    assert!(requests[4].contains("updatedMin="));
+    let saved = store.tasks(list, true).unwrap().remove(0);
+    assert_eq!((saved.notes, saved.mail_account), (clean, Some(other)));
+    assert_eq!(store.task_lists().unwrap()[0].account.as_ref(), Some(&account.id));
+}
+
+#[tokio::test]
+async fn a_foreign_mail_task_does_not_disown_a_google_list() {
+    let (_dir, mut store, account, list) = setup(true);
+    let other = second_account(&store);
+    store.set_account_scopes(&other, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+    let task = linked_task(&store, list);
+    store.db.execute("UPDATE tasks SET mail_account=?2,mail_message_id='foreign' WHERE id=?1",
+        params![task.id, other]).unwrap();
+    store.add_task(list, "New task", "", None).unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", r#"{"id":"new"}"#), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(requests[1].starts_with("POST /lists/work/tasks ") && requests[1].contains("New task"));
+    assert_eq!(store.task_lists().unwrap()[0].account.as_ref(), Some(&account.id));
 }
 
 #[tokio::test]
