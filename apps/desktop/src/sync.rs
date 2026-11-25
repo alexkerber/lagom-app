@@ -236,7 +236,6 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
             return;
         }
     };
-    clear_eml_cache(eml_cache(&store));
     if let Err(error) = store.recover_outbox().and_then(|_| store.recover_moves()) {
         let _ = events.send(Event::Sync(String::new(), SyncState::Failed(shown(&error))));
         return;
@@ -1293,24 +1292,6 @@ fn find(store: &Store, place: &Place) -> lagom_core::Result<Option<i64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn worker_clears_cached_originals_on_each_start() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = dir.path().join("eml-cache");
-        std::fs::create_dir(&cache).unwrap();
-        let original = cache.join("message-abc123.eml");
-        for _ in 0..2 {
-            std::fs::write(&original, b"cached mail").unwrap();
-            let (me, rx) = unbounded_channel();
-            let (events, mut out) = unbounded_channel();
-            tokio::select! {
-                _ = run(dir.path().join("mail.db"), rx, me, events) => panic!("worker stopped"),
-                event = out.recv() => assert!(matches!(event, Some(Event::Changed))),
-            }
-            assert!(!original.exists());
-        }
-    }
 
     #[tokio::test]
     async fn review_followup_read_rejection_preserves_flags_and_reports_failure() {
