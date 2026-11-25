@@ -84,6 +84,20 @@ async fn large_body_streams_to_eml() {
     assert_eq!(dir.read_dir().unwrap().count(), 1);
     assert!(dir.join("personal.eml").exists());
     crate::imap_sync::clear_cached_emls(&dir.join("missing")).unwrap();
+    // A clear that cannot delete says so and keeps going; the next one, at the next start, finishes it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let names = [format!("message-{}.eml", "a".repeat(64)), format!("message-{}.eml", "b".repeat(64))];
+        for name in &names { std::fs::write(dir.join(name), "Subject: Left").unwrap(); }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let failed = crate::imap_sync::clear_cached_emls(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(failed.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(names.iter().all(|name| dir.join(name).exists()));
+        crate::imap_sync::clear_cached_emls(&dir).unwrap();
+        assert_eq!(dir.read_dir().unwrap().count(), 1);
+    }
     server.await.unwrap();
 }
 

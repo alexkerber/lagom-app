@@ -180,8 +180,9 @@ pub fn eml_cache_dir() -> Result<std::path::PathBuf> {
     Ok(dirs::cache_dir().ok_or(Error::Invalid("cache directory unavailable"))?.join("lagom"))
 }
 
-/// Account removal: a cached original's name is a hash that does not say whose mail it is, so all of them go.
-/// An original downloads again when it is opened.
+/// A cached original's name is a hash that does not say whose mail it is, so account removal deletes them all.
+/// The desktop also calls this at each start: that finishes a clear that failed or that a crash cut short.
+/// An original downloads again when it is opened. The first error is returned after every file was tried.
 pub fn clear_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
     match prune_cached_emls(dir, None) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -191,7 +192,8 @@ pub fn clear_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
 
 fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>) -> std::io::Result<()> {
     let mut failed = None;
-    for entry in std::fs::read_dir(dir)?.flatten() {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = match entry { Ok(entry) => entry, Err(error) => { failed.get_or_insert(error); continue } };
         let filename = entry.file_name();
         let Some(name) = filename.to_str() else { continue };
         let random = |key: &str| key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric());
@@ -200,13 +202,13 @@ fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>) -> std::i
             || name.strip_prefix("message-").and_then(|s| s.strip_suffix(".eml"))
                 .is_some_and(|key| random(key) || (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())));
         if !owned { continue; }
-        let Ok(meta) = entry.metadata() else { continue };
+        let meta = match entry.metadata() { Ok(meta) => meta, Err(error) => { failed.get_or_insert(error); continue } };
         let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
         if meta.is_file() && max_age.is_none_or(|max| age.is_some_and(|age| age > max)) {
             if let Err(error) = std::fs::remove_file(entry.path()) { failed.get_or_insert(error); }
         }
     }
-    // Pruning rides on saving another original and must not fail it; a clear reports what it left behind.
+    // Pruning rides on saving another original and must not fail it; a clear reports what it could not read or delete.
     match failed { Some(error) if max_age.is_none() => Err(error), _ => Ok(()) }
 }
 

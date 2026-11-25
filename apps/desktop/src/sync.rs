@@ -200,6 +200,14 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
     (Bridge(cmd_tx), ev_rx)
 }
 
+/// Deletes the cached originals. It never fails its caller: account removal and startup go on, the log has the
+/// error kind, and the next start tries again.
+pub(crate) fn clear_eml_cache(dir: Option<&std::path::Path>) {
+    if let Some(Err(error)) = dir.map(lagom_core::imap_sync::clear_cached_emls) {
+        eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
+    }
+}
+
 /// The text the window shows for `error`; the log keeps the technical detail, without addresses and mailbox names.
 fn shown(error: &Error) -> String {
     eprintln!("lagom: {}", error.log());
@@ -682,10 +690,7 @@ impl Worker {
             return;
         }
         self.reauth_required.remove(id);
-        // The account is already removed, so a failure here is logged and not shown.
-        if let Some(Err(error)) = eml_cache.map(lagom_core::imap_sync::clear_cached_emls) {
-            eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
-        }
+        clear_eml_cache(eml_cache);
         self.emit(Event::Changed);
     }
 
