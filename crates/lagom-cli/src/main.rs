@@ -285,21 +285,21 @@ async fn sign_in(provider: Provider) -> Result<oauth::SignedIn> {
     // A browser launched with the URL as an argument would show its state and PKCE challenge to other local users in `ps`.
     Ok(oauth::sign_in(provider, |url| eprintln!("Open this URL in your browser to sign in:\n{url}")).await?)
 }
-// shortcut: no ACL change on Windows; the per-user data directory is the only protection there.
-fn write_owner_only(path: &std::path::Path, contents: &str) -> Result<()> {
+#[cfg(unix)]
+fn write_owner_only(path: PathBuf, contents: &str) -> Result<tempfile::TempPath> {
     let mut dir = std::fs::DirBuilder::new();
     dir.recursive(true);
     let mut file = std::fs::OpenOptions::new();
     file.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        dir.mode(0o700);
-        file.mode(0o600);
-    }
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    dir.mode(0o700);
+    file.mode(0o600);
     dir.create(path.parent().context("missing token directory")?)?;
-    file.open(path)?.write_all(contents.as_bytes())?;
-    Ok(())
+    let mut file = file.open(&path)?;
+    // Remove a partial file or a token whose database transaction fails to commit.
+    let path = tempfile::TempPath::try_from_path(path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(path)
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -314,15 +314,18 @@ async fn main() -> Result<()> {
             if off {
                 store.disable_agents().map_err(|e| anyhow::anyhow!(e.message()))?;
             } else {
-                let account = selected(&store,args.account.as_deref())?;
-                let token = store.provision_read_agent(&account.id).map_err(|e| anyhow::anyhow!(e.message()))?;
-                let agent = store.authenticate(Some(token.as_str()), None)
-                    .map_err(|e| anyhow::anyhow!(lagom_core::agent::protocol::Code::from(e).message()))?;
-                // Printed, the token stays in scrollback and logs. The file is where the app keeps its own: `lagom --agent <id>` reads it.
-                let path = store.path().with_file_name("agents").join(format!("{}.token", agent.agent_id()));
-                // Without its file the token is of no use to the developer and must not stay valid.
-                write_owner_only(&path, token.as_str()).inspect_err(|_| { let _ = store.revoke_agent_tokens(agent.agent_id()); })?;
-                println!("{}", path.display());
+                #[cfg(not(unix))]
+                bail!("Cannot create an owner-only agent token file on this platform.");
+                #[cfg(unix)]
+                {
+                    let account = selected(&store, args.account.as_deref())?;
+                    let mut path = store.provision_read_agent_with(&account.id, |agent, token| -> Result<_> {
+                        let path = store.path().with_file_name("agents").join(format!("{agent}.token"));
+                        write_owner_only(path, &token).context("Could not write the owner-only agent token file")
+                    })?;
+                    path.disable_cleanup(true);
+                    println!("{}", path.display());
+                }
             }
         }
         Command::Tasks { command } => match command {

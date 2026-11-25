@@ -283,34 +283,41 @@ impl Store {
     }
 
     pub fn provision_read_agent(&self, account: &str) -> Result<Zeroizing<String>, Code> {
-        let tx = self.write_transaction()?;
+        self.provision_read_agent_with(account, |_, token| Ok(token))
+    }
+
+    pub fn provision_read_agent_with<T, E: From<Code>>(
+        &self, account: &str, save: impl FnOnce(&str, Zeroizing<String>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let tx = self.write_transaction().map_err(Code::from)?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
             [account],
             |r| r.get(0),
-        )?;
+        ).map_err(Code::from)?;
         if !exists {
-            return Err(Code::NotFound);
+            return Err(Code::NotFound.into());
         }
         let agent = self.insert_agent("developer", "Manual test", "local", false)?;
-        tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&agent])?;
+        tx.execute("UPDATE agent_access SET level=0 WHERE agent=?", [&agent]).map_err(Code::from)?;
         for kind in ["mail", "calendar"] {
             if self.matrix("", kind, account)? < Level::Read {
-                return Err(Code::Forbidden);
+                return Err(Code::Forbidden.into());
             }
             tx.execute(
                 "INSERT INTO agent_access VALUES(?,?,?,1)",
                 params![agent, kind, account],
-            )?;
+            ).map_err(Code::from)?;
         }
         let token = self.issue_token_inner(&agent, TokenScope::Local)?;
         tx.execute(
             "UPDATE agent_settings SET value='1' WHERE key='enabled'",
             [],
-        )?;
-        tx.commit()?;
+        ).map_err(Code::from)?;
+        let result = save(&agent, token)?;
+        tx.commit().map_err(Code::from)?;
         self.cleanup_revoked_queue();
-        Ok(token)
+        Ok(result)
     }
 
     pub fn revoke_agent_tokens(&self, agent: &str) -> Result<(), Code> {

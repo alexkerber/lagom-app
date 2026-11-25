@@ -164,6 +164,7 @@ fn tasks_reject_missing_ambiguous_and_invalid_inputs() {
     assert_eq!(store.tasks(1, false).unwrap().len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn developer_agent_enables_only_the_selected_account() {
     use lagom_core::agent::policy::{Level, Resource};
@@ -199,7 +200,7 @@ fn developer_agent_enables_only_the_selected_account() {
     }
     run(&path, &["agent", "--off"]);
     assert!(!store.agent_enabled().unwrap());
-    // A token that could not be saved is revoked, not left valid with no file.
+    // A file failure rolls back provisioning and leaves the old listener disabled.
     std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(file.parent().unwrap(), "").unwrap();
     let before = store.agents().unwrap().len();
@@ -207,8 +208,26 @@ fn developer_agent_enables_only_the_selected_account() {
         .arg("--database").arg(&path).args(["agent", "--account", "a@gmail.com"]).output().unwrap();
     assert!(!output.status.success() && output.stdout.is_empty());
     let agents = store.agents().unwrap();
-    assert_eq!(agents.len(), before + 1);
+    assert!(!store.agent_enabled().unwrap());
+    let account = store.accounts().unwrap().into_iter().find(|a| a.email == "a@gmail.com").unwrap();
+    assert_eq!(store.effective(Some(&raw), None, Resource::Mail, &account.id).unwrap(), Level::None);
+    assert_eq!(agents.len(), before);
     assert_eq!(agents.iter().filter(|a| a.active).count(), 1, "only the first agent keeps a token");
+}
+
+#[cfg(not(unix))]
+#[test]
+fn developer_agent_requires_owner_only_files_before_provisioning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cli.db");
+    let store = Store::open(&path).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&path).arg("agent").output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("owner-only"));
+    assert!(store.agents().unwrap().is_empty());
+    assert!(!store.agent_enabled().unwrap());
+    assert!(!dir.path().join("agents").exists());
 }
 
 #[test]

@@ -14,7 +14,8 @@ pub struct Request {
     pub source_ip: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{}", self.message())]
 #[serde(rename_all = "snake_case")]
 pub enum Code {
     Unauthorized,
