@@ -87,7 +87,7 @@ pub(crate) async fn connect(path: &Path) -> io::Result<UnixStream> {
     let mut retries = 5;
     loop {
         match UnixStream::connect(path).await {
-            Err(e) if e.kind() == io::ErrorKind::NotFound && retries > 0 => {
+            Err(e) if retries > 0 && matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
                 retries -= 1;
                 tokio::time::sleep(SETTINGS_POLL).await;
             }

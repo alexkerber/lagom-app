@@ -518,7 +518,21 @@ async fn client_connects_when_agent_socket_appears() {
 }
 
 #[tokio::test]
-async fn socket_ownership_framing_deadlines_and_limits() {
+async fn client_connects_when_bound_agent_socket_starts_listening() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("agent.sock");
+    let socket = tokio::net::UnixSocket::new_stream().unwrap();
+    socket.bind(&path).unwrap();
+    let (stream, _listener) = tokio::join!(
+        biased;
+        crate::agent::connect(&path),
+        async { socket.listen(1).unwrap() },
+    );
+    stream.unwrap();
+}
+
+#[test]
+fn socket_ownership_framing_deadlines_and_limits() {
     let config = ServerConfig {
         host: "localhost".into(),
         port: 143,
@@ -597,7 +611,7 @@ async fn socket_ownership_framing_deadlines_and_limits() {
     store.disable_agents().unwrap();
     let _replacement = store.provision_read_agent(&account.id).unwrap();
     assert_eq!(old.read(&mut [0]).unwrap(), 0);
-    drop(crate::agent::connect(&sock).await.unwrap());
+    wait(|| UnixStream::connect(&sock).is_ok());
     let req = request(1);
     let wrong_source = format!(
         "{}\n",
