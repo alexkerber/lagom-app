@@ -199,6 +199,16 @@ fn developer_agent_enables_only_the_selected_account() {
     }
     run(&path, &["agent", "--off"]);
     assert!(!store.agent_enabled().unwrap());
+    // A token that could not be saved is revoked, not left valid with no file.
+    std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file.parent().unwrap(), "").unwrap();
+    let before = store.agents().unwrap().len();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&path).args(["agent", "--account", "a@gmail.com"]).output().unwrap();
+    assert!(!output.status.success() && output.stdout.is_empty());
+    let agents = store.agents().unwrap();
+    assert_eq!(agents.len(), before + 1);
+    assert_eq!(agents.iter().filter(|a| a.active).count(), 1, "only the first agent keeps a token");
 }
 
 #[test]

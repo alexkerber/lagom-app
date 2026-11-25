@@ -320,7 +320,8 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!(lagom_core::agent::protocol::Code::from(e).message()))?;
                 // Printed, the token stays in scrollback and logs. The file is where the app keeps its own: `lagom --agent <id>` reads it.
                 let path = store.path().with_file_name("agents").join(format!("{}.token", agent.agent_id()));
-                write_owner_only(&path, token.as_str())?;
+                // Without its file the token is of no use to the developer and must not stay valid.
+                write_owner_only(&path, token.as_str()).inspect_err(|_| { let _ = store.revoke_agent_tokens(agent.agent_id()); })?;
                 println!("{}", path.display());
             }
         }
