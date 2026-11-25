@@ -638,6 +638,11 @@ impl MainWindow {
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
+            // HTML mail that is one tall inline image, with attachments under it.
+            "html-tall" => {
+                mail::demo_tall(&mut this.inbox.mail[INBOX_LEN - 1]);
+                this.inbox.select(INBOX_LEN - 1);
+            }
             // A message window over the main window: plain text, or the HTML newsletter.
             "popout" | "popout-html" => {
                 if screen == "popout-html" {
@@ -2435,7 +2440,7 @@ impl MainWindow {
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
-            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, &self.web, toast_room(toasts), self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
     }
 
     /// Mail that left the screen drops its decoded images (up to 128 MiB each): checked only
@@ -2572,15 +2577,22 @@ fn attachment_size(bytes: u32) -> String {
     }
 }
 
+/// Room at the bottom of the reading pane that the web view leaves for `toasts`: the toast
+/// layer's offset (see `render`) and 40 px toasts 8 px apart.
+fn toast_room(toasts: usize) -> Pixels {
+    px(if toasts == 0 { 0. } else { 20. + 36. + 12. + 48. * toasts as f32 - 8. })
+}
+
 /// One message below its toolbar: the trusted header in GPUI, the body as text (`text`) or the
-/// web view's `slot`, the attachment and the reply field. The reading pane and message windows
-/// both show this. `toasts`: room the web view leaves for toasts above the reply field.
+/// web view at its document's height, the attachment and the reply field. The reading pane and
+/// message windows both show this; the whole view scrolls, never the body alone. `toasts`: room
+/// the web view leaves for toasts above the reply field.
 fn reading_view(
     t: &Theme,
     (id, m): (usize, &Mail),
     text: bool,
-    slot: impl IntoElement,
-    toasts: usize,
+    web_view: &html::Web,
+    toasts: Pixels,
     menu: impl IntoElement,
     on_download: impl Fn(Cmd, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -2614,15 +2626,14 @@ fn reading_view(
     }).collect::<Vec<_>>();
     // The text is still being read (the body then holds only `live::LOADING`).
     let loading = m.text.as_ref().is_some_and(|t| t.borrow().is_none());
-    div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().max_w(px(760.))
+    div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&web_view.scroll).max_w(px(760.))
         .flex().flex_col().gap(px(16.)).p(px(24.))
         .child(div().flex_shrink_0().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD)
             .debug_selector(|| "reading-subject".into()).child(m.subject.clone()))
         .child(div().flex().flex_col().gap(px(20.)).p(px(20.))
             .bg(t.raised).rounded(px(radius::CARD))
             .debug_selector(|| "message-card".into())
-            .when(web, |d| d.flex_1().min_h(px(180.)))
-            .when(!web, |d| d.flex_shrink_0())
+            .flex_shrink_0()
             .child(div().flex().items_center().gap(px(12.)).flex_shrink_0()
                 .child(div().size(px(32.)).flex_shrink_0().rounded_full().flex().items_center().justify_center()
                     .bg(t.subtle).border_1().border_color(t.line).text_size(px(size::SMALL))
@@ -2652,10 +2663,9 @@ fn reading_view(
                     Some(rich) => d.children(rich.view(m, t)),
                     None => d.children(m.body.iter().map(|p| div().child(p.clone()))),
                 })
-                .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
-                    div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
+                .when(web && !text, |d| d.child(web_view.body(toasts))))
             .children(attachment()))
-        .when(!web, |d| d.child(div().flex_1()))
+        .child(div().flex_1())
         .child(pressable(div().id("reply-box"), t, false).debug_selector(|| "reply-box".into())
             .flex().flex_shrink_0().items_center().gap(px(8.)).w_full().h(px(36.)).px(px(12.))
             .rounded(px(radius::CONTROL)).bg(t.subtle).text_color(t.ink2)

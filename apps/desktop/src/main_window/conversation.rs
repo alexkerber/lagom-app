@@ -23,6 +23,10 @@ impl html::WebHost for MessageBody {
         self.main.update(cx, |main, cx| main.task_from_mail(id, cx)).ok();
     }
     fn web(&mut self) -> &mut html::Web { &mut self.web }
+    /// The conversation scrolls; each body is as tall as its message.
+    fn wheel(&mut self, step: html::Step, window: &mut Window, cx: &mut Context<Self>) {
+        self.main.update(cx, |main, cx| { html::scroll_by(&main.reading_scroll, step, window); cx.notify(); }).ok();
+    }
     fn keys(&self) -> FocusHandle { self.focus.clone() }
 }
 
@@ -55,14 +59,14 @@ impl Render for MessageBody {
             main.update(cx, |main, cx| main.message_action(id, *action, window, cx)).ok();
         });
         let remote = self.web.has_remote && !self.mail.remote;
-        // shortcut: expanded bodies have their own scroll area; use measured HTML heights when continuous body scrolling is needed.
-        div().h(px(480.)).flex_shrink_0().flex().flex_col()
+        // As tall as the message: the conversation scrolls, never one body.
+        div().flex_shrink_0().flex().flex_col()
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .when(remote, |d| d.child(button(&theme, "Load remote images", None).on_click(cx.listener(|this, _, _, cx| {
                 this.mail.remote = true;
                 cx.notify();
             }))))
-            .child(reading_view(&theme, (id, &self.mail), overlay && self.web.cover().is_none() || !html::supported() || self.mail.html.is_none() || self.web.failed, self.web.surface(), 0, menu,
+            .child(reading_view(&theme, (id, &self.mail), overlay && self.web.cover().is_none() || !html::supported() || self.mail.html.is_none() || self.web.failed, &self.web, px(0.), menu,
                 move |command, _, cx| { download.update(cx, |main, cx| main.download(command, cx)).ok(); },
                 move |_, window, cx| { reply.update(cx, |main, cx| main.compose_for(Some(id), window, cx)).ok(); }, None))
     }
