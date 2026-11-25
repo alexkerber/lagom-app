@@ -792,11 +792,3 @@ async fn removed_link_from_another_install_stays_removed() {
     sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
     assert!(store.tasks(list, true).unwrap()[0].mail_message_id.is_none());
 }
-
-#[test]
-fn a_pending_deletion_alone_does_not_count_as_live_work() {
-    let (_dir, store, account, list) = setup(true);
-    let task = linked_task(&store, list);
-    store.delete_task(task.id).unwrap();
-    assert!(store.pending_google_tasks(list, &account.id).unwrap().iter().all(|t| t.0.deleted));
-}

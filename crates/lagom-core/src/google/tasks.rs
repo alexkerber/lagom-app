@@ -204,7 +204,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             store.db.execute("DELETE FROM task_lists WHERE id=?1 AND revision=?2 AND deleted=1", params![list.id, list.revision])?;
             continue;
         }
-        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && store.pending_google_tasks(list.id, account)?.iter().any(|t| !t.3 && !t.0.deleted)) {
+        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && store.pending_google_tasks(list.id, account)?.iter().any(|t| !t.3)) {
             let body = json!({"title": list.name});
             let response = if let Some(id) = &list.remote {
                 client.request(Method::PATCH, client.url(&["users", "@me", "lists", id])?, Some(body.clone())).await
