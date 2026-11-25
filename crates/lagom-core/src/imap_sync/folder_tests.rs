@@ -78,6 +78,10 @@ async fn large_body_streams_to_eml() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), first + tail);
     assert_eq!(imap.save_eml(&store, id, &dir).await.unwrap(), path);
     assert_eq!(dir.read_dir().unwrap().count(), 2);
+    // Account removal clears every cached original, also a new one, and no file that is not lagom's.
+    crate::imap_sync::clear_cached_emls(&dir).unwrap();
+    assert!(!path.exists() && dir.join("personal.eml").exists());
+    crate::imap_sync::clear_cached_emls(&dir.join("missing")).unwrap();
     server.await.unwrap();
 }
 
