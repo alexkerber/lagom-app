@@ -281,7 +281,7 @@ Noor, you are welcome too. Bring the card game.\n\n"
         }
         _ => return None,
     };
-    let agent = AgentRow { id: "3f9a1c0b77de".into(), kind: "ClaudeCode".into(), name: "Claude Code".into(), host: "studio".into(), remote: false, active: true, expires: None };
+    let agent = AgentRow { id: "3f9a1c0b77de".into(), kind: "ClaudeCode".into(), name: "Claude Code".into(), host: "studio".into(), remote: false, active: true, expires: None, last_used: None };
     let req = Request { v: 1, token: None, cmd: cmd.into(), args: Default::default(), source_ip: None };
     let (done, closed) = oneshot::channel();
     let account = &crate::mail::demo_accounts()[0];

@@ -367,16 +367,16 @@ remote agent needs a person at the app for calendar changes and for mail sends w
 
 Every request that reaches the app is logged, refused ones too. Table `agent_audit`:
 
-| Column           | Content                                                                                                                           |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `at`             | Unix seconds                                                                                                                      |
-| `agent`, `token` | Verified agent ID and public token ID, including expiry and source refusals. Empty until the digest matches.                      |
-| `account`        | The account the command touched                                                                                                   |
-| `command`        | For example `emails`, `draft.send`                                                                                                |
-| `target`         | Canonical ID from an in-scope store lookup. NULL for unresolved or out-of-scope targets.                                          |
-| `result`         | `ok` or the error code, with the real reason for `unauthorized` and `not_found`                                                   |
-| `source_ip`      | As stated by the client                                                                                                           |
-| `detail`         | Recipients of a send or an event. Nothing else.                                                                                   |
+| Column           | Content                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ |
+| `at`             | Unix seconds                                                                                                 |
+| `agent`, `token` | Verified agent ID and public token ID, including expiry and source refusals. Empty until the digest matches. |
+| `account`        | The account the command touched                                                                              |
+| `command`        | For example `emails`, `draft.send`                                                                           |
+| `target`         | Canonical ID from an in-scope store lookup. NULL for unresolved or out-of-scope targets.                     |
+| `result`         | `ok` or the error code, with the real reason for `unauthorized` and `not_found`                              |
+| `source_ip`      | As stated by the client                                                                                      |
+| `detail`         | Recipients of a send or an event. Nothing else.                                                              |
 
 - A dispatched write reserves a durable `pending` row. A local change and its final audit result commit together.
   Remote writes finalize the reserved row even after a client disconnect. A lost mutation reply gives `uncertain`.
@@ -463,8 +463,17 @@ Detection reads the file system only: a known binary on `PATH` or a known config
 | OpenClaw    | `openclaw`, `~/.openclaw/`             | its skills directory              | none; uses the skill          |
 | Other       | added by hand                          | a directory the person picks      | a snippet to copy             |
 
-Each row shows the agent, its host (this machine's name, or the label of a remote host) and
-Connect or Active. The binaries and directories above were seen on one development machine. The
+Each row shows the agent's mark (sources in `apps/desktop/assets/logos/README.md`) or a
+monogram, its name and one line under it:
+
+- Not connected: "Installed" and a Connect button.
+- Connected: an Active pill, what it may do on any account under both matrices (for example
+  "Triage mail · Read calendar") and its last use, with Disconnect.
+- Connected while agent access is off: a Paused pill and "Agent access is off". Every request
+  fails in this state.
+- Remote: the host label, "Remote over SSH", the expiry date and Revoke or Remove.
+
+The binaries and directories above were seen on one development machine. The
 skill directories of Cursor and OpenClaw and the exact arguments of each `mcp add` are not
 verified; check them in the pull request.
 
