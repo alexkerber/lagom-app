@@ -163,7 +163,7 @@ async fn mail_link_round_trips_in_plain_notes_with_escaping_and_preserves_notes(
     let task = store.task_from_mail(list, &crate::store::MessageSummary { account: account.id.clone(), message_id: "<one+two@example.test>".into(), subject: "A & B\nsecond line".into(), ..Default::default() }).unwrap();
     store.update_task(task.id, "Mail", "Keep\nnotes\n", Some("2026-11-10".into())).unwrap();
     let task = store.tasks(list, true).unwrap().remove(0);
-    let body = task_body(&task).unwrap();
+    let body = task_body(&task, &account.id).unwrap();
     assert_eq!(body["due"], "2026-11-10T00:00:00Z");
     assert!(body.get("links").is_none());
     let notes = body["notes"].as_str().unwrap();
@@ -581,4 +581,55 @@ async fn default_change_between_recovery_check_and_move_cannot_leak_tasks() {
     assert!(requests[1].starts_with("POST /lists/work/tasks "));
     assert!(requests[1].contains("Private work notes") && requests[1].contains(&work.id));
     assert_eq!(store.default_task_list().unwrap(), personal_list);
+}
+
+#[tokio::test]
+async fn unassigned_lists_stay_local_while_two_accounts_have_tasks_access() {
+    let (_dir, mut store, work, list) = setup(false);
+    let task = store.add_task(list, "Private", "Private notes", None).unwrap();
+    let (imap, smtp) = crate::presets::servers("other@gmail.com").unwrap();
+    let personal = Account::new("other@gmail.com".into(), imap, smtp).unwrap();
+    store.save_authorized_account(&personal, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+    // The remote list has the local list's name: neither the name nor the first sync may claim it.
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+    let lists = store.task_lists().unwrap();
+    let local = lists.iter().find(|l| l.id == list).unwrap();
+    assert!(local.account.is_none() && local.remote_id.is_none());
+    assert_eq!(lists.iter().find(|l| l.id != list).unwrap().remote_id.as_deref(), Some("work"));
+    assert!(store.tasks(list, true).unwrap()[0].remote_id.is_none());
+    // Once the other account has no Tasks access, the question of whose list it is has one answer.
+    store.set_account_scopes(&personal.id, "https://mail.google.com/").unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", r#"{"id":"claimed","title":"Work"}"#), ("200 OK", TASK), ("200 OK", EMPTY), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap()[2].starts_with("POST /lists/claimed/tasks "));
+    assert_eq!(store.task_lists().unwrap().iter().find(|l| l.id == list).unwrap().account.as_deref(), Some(work.id.as_str()));
+    assert_eq!(store.tasks(list, true).unwrap()[0].id, task.id);
+}
+
+#[tokio::test]
+async fn link_to_another_accounts_mail_stays_out_of_google_and_survives_pull() {
+    let (_dir, mut store, account, list) = setup(true);
+    let task = linked_task(&store, list);
+    store.db.execute("UPDATE tasks SET mail_account='other-account',mail_message_id='<private@example.test>',mail_subject='Private subject',dirty=1 WHERE id=?1", [task.id]).unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", TASK), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(requests[1].starts_with("PATCH /lists/work/tasks/task ") && requests[1].contains("Local notes"));
+    assert!(requests.iter().all(|r| !r.contains("lagom://mail") && !r.contains("other-account") && !r.contains("private@example.test") && !r.contains("Private subject")));
+    let page = r#"{"items":[{"id":"task","title":"Remote title","notes":"Remote notes","updated":"2026-11-09T10:00:00Z"}]}"#;
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", page)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    handle.await.unwrap();
+    let saved = store.tasks(list, true).unwrap().remove(0);
+    assert_eq!((saved.title.as_str(), saved.notes.as_str(), saved.mail_account.as_deref(), saved.mail_message_id.as_deref(), saved.mail_subject.as_deref()),
+        ("Remote title", "Remote notes", Some("other-account"), Some("<private@example.test>"), Some("Private subject")));
+    // A link this account does upload is still removed when Google's notes no longer have it.
+    store.db.execute("UPDATE tasks SET mail_account=?1 WHERE id=?2", params![account.id, task.id]).unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", page)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    handle.await.unwrap();
+    let saved = store.tasks(list, true).unwrap().remove(0);
+    assert_eq!((saved.mail_account, saved.mail_message_id, saved.mail_subject), (None, None, None));
 }

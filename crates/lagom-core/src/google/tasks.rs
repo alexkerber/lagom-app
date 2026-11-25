@@ -49,19 +49,22 @@ impl Store {
 
     fn link_google_lists(&self, account: &str, remote: &[RemoteList]) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
+        // With two Google Tasks accounts nothing says whose an unassigned list is, so it stays local.
+        let sole = !tx.prepare("SELECT scopes FROM accounts WHERE id<>?1")?.query_map([account], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|scopes| oauth::tasks_allowed(scopes));
         // Claim each local list once, even when two account jobs discover lists concurrently.
         for list in remote {
             if list.id.is_empty() { return Err(Error::Network("Google task list ID missing")); }
             let existing: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE account=?1 AND remote_id=?2", params![account, list.id], |r| r.get(0)).optional()?;
             if existing.is_some() { continue; }
-            let local: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE ((account IS NULL AND detached=0) OR account=?1) AND remote_id IS NULL AND deleted=0 AND name=?2 ORDER BY id LIMIT 1", params![account, list.title], |r| r.get(0)).optional()?;
+            let local: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE ((account IS NULL AND detached=0 AND ?3) OR account=?1) AND remote_id IS NULL AND deleted=0 AND name=?2 ORDER BY id LIMIT 1", params![account, list.title, sole], |r| r.get(0)).optional()?;
             if let Some(id) = local {
                 tx.execute("UPDATE task_lists SET account=?2,remote_id=?3,etag=?4,remote_updated=?5 WHERE id=?1", params![id, account, list.id, list.etag, list.updated])?;
             } else {
                 tx.execute("INSERT INTO task_lists(account,remote_id,name,position,dirty,etag,remote_updated) SELECT ?1,?2,?3,COALESCE(MAX(position),-1)+1,0,?4,?5 FROM task_lists", params![account, list.id, list.title, list.etag, list.updated])?;
             }
         }
-        tx.execute("UPDATE task_lists SET account=?1 WHERE account IS NULL AND detached=0 AND deleted=0", [account])?;
+        if sole { tx.execute("UPDATE task_lists SET account=?1 WHERE account IS NULL AND detached=0 AND deleted=0", [account])?; }
         tx.commit()?;
         Ok(())
     }
@@ -216,7 +219,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
                 }
                 store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1", [task.id])?;
             }
-            let body = task_body(&task)?;
+            let body = task_body(&task, account)?;
             let response = if let Some(id) = task.remote_id.as_ref().filter(|_| !moved) {
                 client.request(Method::PATCH, client.url(&["lists", remote_list, "tasks", id])?, Some(body.clone())).await
             } else { Err(Error::NotFound) };
@@ -283,8 +286,11 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             let (notes, mail) = split_notes(&task.notes);
             let done = if task.status == "completed" { Some(task.completed.as_deref().and_then(timestamp).unwrap_or(0)) } else { None };
             if let Some((id, _, _)) = existing {
-                tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8,mail_account=?9,mail_message_id=?10,mail_subject=?11 WHERE id=?1 AND dirty=0",
-                    params![id, task.title, notes, task.due, done, task.deleted, task.etag, task.updated, mail.as_ref().map(|m| &m.0), mail.as_ref().map(|m| &m.1), mail.as_ref().and_then(|m| m.2.as_ref())])?;
+                tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8 WHERE id=?1 AND dirty=0",
+                    params![id, task.title, notes, task.due, done, task.deleted, task.etag, task.updated])?;
+                // The push leaves out a link to another account's mail, so its absence here does not remove it.
+                tx.execute("UPDATE tasks SET mail_account=?2,mail_message_id=?3,mail_subject=?4 WHERE id=?1 AND dirty=0 AND (?2 IS NOT NULL OR mail_account IS ?5)",
+                    params![id, mail.as_ref().map(|m| &m.0), mail.as_ref().map(|m| &m.1), mail.as_ref().and_then(|m| m.2.as_ref()), account])?;
             } else if !task.deleted {
                 tx.execute("INSERT INTO tasks(list,remote_id,remote_list_id,title,notes,due,done_at,position,updated,created,etag,remote_updated,mail_account,mail_message_id,mail_subject)
                     VALUES(?1,?2,?3,?4,?5,?6,?7,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1),unixepoch(),unixepoch(),?8,?9,?10,?11,?12)",
@@ -301,9 +307,10 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
 
 fn timestamp(value: &str) -> Option<i64> { mail_parser::DateTime::parse_rfc3339(value).filter(|d| d.is_valid()).map(|d| d.to_timestamp()) }
 
-fn task_body(task: &Task) -> Result<Value> {
+fn task_body(task: &Task, account: &str) -> Result<Value> {
     let mut notes = task.notes.clone();
-    if let (Some(account), Some(message)) = (&task.mail_account, &task.mail_message_id) {
+    // A link to another account's mail would give this Google account that mail's Message-ID and subject.
+    if let (Some(account), Some(message)) = (task.mail_account.as_ref().filter(|mail| *mail == account), &task.mail_message_id) {
         let mut link = Url::parse("lagom://mail").unwrap();
         link.query_pairs_mut().append_pair("account", account).append_pair("message-id", message);
         if let Some(subject) = &task.mail_subject { link.query_pairs_mut().append_pair("subject", subject); }
