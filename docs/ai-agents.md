@@ -75,8 +75,8 @@ ssh   ──> lagom remote        ──┘
 - Windows uses a local byte-mode named pipe keyed by the user SID and the data directory.
   Its protected ACL grants access only to that SID. The listener rejects remote clients,
   requires the first pipe instance at startup, and keeps an instance open between calls.
-  The client checks the connected pipe's owner and ACL before writing credentials. A conflicting
-  owner can prevent startup but cannot receive a token. Both transports share framing, deadlines,
+  The client checks ownership, the protected ACL and integrity before writing credentials.
+  Settings reports a bind failure if another process owns the name. Both transports share framing, deadlines,
   admission limits, cancellation, policy checks and audit handling.
 - The app never listens on the network. Remote means SSH to the machine that runs the app.
 - Reads use a separate store connection with `PRAGMA query_only=ON`.
@@ -104,8 +104,10 @@ Every request carries a token. No token means refused. A token belongs to one ag
   configs end up in dotfile repositories. Local tokens do not expire. Connecting again replaces
   the token.
 - Windows creates the token file with a protected ACL before writing any secret. The client
-  checks the open handle for the current user's owner SID and a single allow entry for that SID.
-  It rejects reparse points, non-files and files over 256 bytes.
+  requires the current user as owner and one explicit allow entry for that SID in a protected ACL.
+  Pipes and tokens carry a medium label blocking reads and writes from lower integrity. The client
+  rejects lower labels and treats an absent label as medium. Token files must be regular files
+  of at most 256 bytes and cannot be reparse points.
 - Remote agent: Settings creates the token with accounts, a level, an expiry (required, 30 days
   by default, 365 at most) and a required list of source IP addresses or CIDR ranges. The app writes its token file
   too, for the forced command below, and offers Show token during setup.

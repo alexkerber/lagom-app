@@ -271,8 +271,12 @@ impl Plan {
     }
 
     #[cfg(windows)]
-    fn lock(&self) -> Result<super::windows::SetupLock> {
-        Ok(super::windows::SetupLock::acquire()?)
+    fn lock(&self) -> Result<fs::File> {
+        let data = self.token.parent().and_then(Path::parent).context("Missing data directory")?;
+        let lock = fs::File::options().read(true).write(true).create(true).truncate(false)
+            .open(data.join("agent-setup.lock"))?;
+        lock.try_lock().map_err(std::io::Error::from)?;
+        Ok(lock)
     }
 
     /// The caller supplies the newly issued local credential and revokes it if installation fails.
@@ -421,7 +425,7 @@ fn atomic_write(
     #[cfg(unix)]
     let mut tmp = NamedTempFile::new_in(dir)?;
     #[cfg(windows)]
-    let mut tmp = if mode.is_some() {
+    let mut tmp = if mode.is_some() || previous.is_some() {
         tempfile::Builder::new().make_in(dir, super::windows::private_file)?
     } else {
         NamedTempFile::new_in(dir)?
@@ -528,7 +532,7 @@ impl Plan {
 
     fn skill(&self) -> String {
         #[cfg(windows)]
-        let quoted = format!("& '{}'", self.binary.display().to_string().replace('\'', "''"));
+        let quoted = format!(r#""{}""#, self.binary.display());
         #[cfg(unix)]
         let quoted = format!("'{}'", self.binary.to_str().unwrap().replace('\'', "'\\''"));
         include_str!("../../assets/skill/SKILL.md")
@@ -1072,6 +1076,17 @@ fn remove_json(current: &str, edit: &ConfigEdit) -> Result<(String, bool)> {
     let mut text = current.to_owned();
     text.replace_range(start..end, "");
     Ok((text, remove_group && root.len() == 1))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn replacing_config_keeps_the_new_file_private() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    fs::write(&path, "{}").unwrap();
+    atomic_write(&path, "updated", Some("{}"), None).unwrap();
+    super::windows::open_token(&path).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "updated");
 }
 
 #[cfg(all(test, unix))]

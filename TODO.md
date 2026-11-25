@@ -254,9 +254,11 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
     The write policy below resolves mail and calendar actions.
-  - [x] Windows agents use a private named pipe and user-only token files on `feat/agents-windows`.
-    Connect uses the installed executable. The installer manages the user PATH. CLI and MCP preserve redirected streams.
-    Desktop agent, CLI and MCP tests passed on macOS. The Windows build, ACLs, console and installer remain unverified.
+  - [x] Windows agent pipes and tokens require private ACLs and at least medium integrity on `feat/agents-windows`.
+    Connect protects replacement configs and locks setup in the user’s data directory. Settings reports pipe startup failures.
+    The installer recognizes expanded PATH entries and removes only its recorded spelling. macOS agent, CLI and MCP tests passed.
+    The Windows build, security checks, console and installer remain unverified.
+    Interactive cmd and PowerShell can show the prompt before GUI-subsystem lagom.exe prints output. Agents and MCP redirect stdout and are unaffected.
   - [ ] Agent task changes are deferred.
 - [x] Local and SSH agents can triage mail, edit drafts and change calendars on `feat/agents-write`.
   Both paths enforce token limits, audit refusals and check approved sends against the original policy.

@@ -20,7 +20,12 @@ use windows_sys::Win32::{
     Security::{Authorization::*, *},
     Storage::FileSystem::*,
     System::{
-        Console::*, Pipes::PeekNamedPipe, SystemServices::ACCESS_ALLOWED_ACE_TYPE, Threading::*,
+        Console::*,
+        Pipes::PeekNamedPipe,
+        SystemServices::{
+            ACCESS_ALLOWED_ACE_TYPE, SECURITY_MANDATORY_MEDIUM_RID, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+        },
+        Threading::*,
         IO::CancelIoEx,
     },
 };
@@ -83,7 +88,7 @@ fn user_sid() -> io::Result<String> {
 
 fn private_descriptor() -> io::Result<Local> {
     let sid = user_sid()?;
-    let sddl: Vec<_> = format!("O:{sid}D:P(A;;FA;;;{sid})\0")
+    let sddl: Vec<_> = format!("O:{sid}D:P(A;;FA;;;{sid})S:(ML;;NWNR;;;ME)\0")
         .encode_utf16()
         .collect();
     let mut descriptor = null_mut();
@@ -109,17 +114,18 @@ impl Local {
 }
 
 // Inspect the open handle so replacing a path cannot change what we authenticate.
-fn verify_private(handle: HANDLE) -> io::Result<()> {
+fn verify_private(handle: HANDLE, object: SE_OBJECT_TYPE) -> io::Result<()> {
     with_user(|sid| unsafe {
-        let (mut owner, mut acl, mut descriptor) = (null_mut(), null_mut(), null_mut());
+        let (mut owner, mut acl, mut labels, mut descriptor) =
+            (null_mut(), null_mut(), null_mut(), null_mut());
         let status = GetSecurityInfo(
             handle,
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            object,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
             &mut owner,
             null_mut(),
             &mut acl,
-            null_mut(),
+            &mut labels,
             &mut descriptor,
         );
         if status != ERROR_SUCCESS {
@@ -127,10 +133,38 @@ fn verify_private(handle: HANDLE) -> io::Result<()> {
         }
         let _allocation = Local(descriptor);
         let mut ace = null_mut();
+        let (mut control, mut revision) = (0, 0);
+        check(GetSecurityDescriptorControl(
+            descriptor,
+            &mut control,
+            &mut revision,
+        ))?;
+        if control & SE_DACL_PROTECTED == 0 {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        // Windows treats an unlabeled object as medium integrity.
+        if !labels.is_null() {
+            for i in 0..(*labels).AceCount {
+                check(GetAce(labels, i.into(), &mut ace))?;
+                let label = ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>();
+                if (*label).Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE as u8 {
+                    let level = (&raw mut (*label).SidStart).cast();
+                    if IsValidSid(level) == 0
+                        || *GetSidSubAuthorityCount(level) != 1
+                        || (*GetSidIdentifierAuthority(level)).Value
+                            != SECURITY_MANDATORY_LABEL_AUTHORITY.Value
+                        || *GetSidSubAuthority(level, 0) < SECURITY_MANDATORY_MEDIUM_RID as u32
+                    {
+                        return Err(io::ErrorKind::PermissionDenied.into());
+                    }
+                }
+            }
+        }
         if !owner.is_null() && EqualSid(sid, owner) != 0 && !acl.is_null() && (*acl).AceCount == 1 {
             check(GetAce(acl, 0, &mut ace))?;
             let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
             if (*ace).Header.AceType == ACCESS_ALLOWED_ACE_TYPE as u8
+                && (*ace).Header.AceFlags & INHERITED_ACE as u8 == 0
                 && EqualSid(sid, (&raw mut (*ace).SidStart).cast()) != 0
             {
                 return Ok(());
@@ -158,7 +192,7 @@ pub(super) fn private_file(path: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     let file = unsafe { File::from_raw_handle(handle) };
-    verify_private(handle)?;
+    verify_private(handle, SE_FILE_OBJECT)?;
     Ok(file)
 }
 
@@ -175,7 +209,7 @@ pub(crate) fn open_token(path: &Path) -> io::Result<File> {
     {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    verify_private(file.as_raw_handle())?;
+    verify_private(file.as_raw_handle(), SE_FILE_OBJECT)?;
     Ok(file)
 }
 
@@ -234,7 +268,8 @@ pub(crate) async fn connect(dir: &Path) -> Result<NamedPipeClient, Code> {
             .open(&path)
         {
             Ok(pipe) => {
-                verify_private(pipe.as_raw_handle()).map_err(|_| Code::Unauthorized)?;
+                verify_private(pipe.as_raw_handle(), SE_KERNEL_OBJECT)
+                    .map_err(|_| Code::Unauthorized)?;
                 return Ok(pipe);
             }
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
@@ -323,37 +358,6 @@ pub(crate) fn attach_console() {
                     SetStdHandle(id, handle);
                 }
             }
-        }
-    }
-}
-
-pub(super) struct SetupLock(OwnedHandle);
-
-impl SetupLock {
-    pub fn acquire() -> io::Result<Self> {
-        let name: Vec<_> = format!("Global\\lagom-agent-setup-{}\0", user_sid()?)
-            .encode_utf16()
-            .collect();
-        let descriptor = private_descriptor()?;
-        unsafe {
-            let mutex = CreateMutexW(&descriptor.attributes(), 0, name.as_ptr());
-            if mutex.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let handle = OwnedHandle::from_raw_handle(mutex);
-            match WaitForSingleObject(mutex, 0) {
-                WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self(handle)),
-                WAIT_TIMEOUT => Err(io::ErrorKind::WouldBlock.into()),
-                _ => Err(io::Error::last_os_error()),
-            }
-        }
-    }
-}
-
-impl Drop for SetupLock {
-    fn drop(&mut self) {
-        unsafe {
-            ReleaseMutex(self.0.as_raw_handle());
         }
     }
 }

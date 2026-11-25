@@ -86,10 +86,30 @@ begin
   Result := not (HasWebView2(HKLM32) or HasWebView2(HKCU));
 end;
 
-// Remember which entry setup added so uninstall preserves an existing user PATH.
-function FindPathEntry(Value, Dir: String; var Start, Count: Integer): Boolean;
+function ExpandEnvironmentStrings(Source, Dest: String; Size: Cardinal): Cardinal;
+  external 'ExpandEnvironmentStringsW@kernel32.dll stdcall';
+
+function ExpandedEntry(Entry: String): String;
+var
+  Size, Written: Cardinal;
+begin
+  if Entry = '' then begin
+    Result := '';
+    Exit;
+  end;
+  Size := ExpandEnvironmentStrings(Entry, '', 0);
+  if Size = 0 then RaiseException('Could not expand the user PATH.');
+  SetLength(Result, Size);
+  Written := ExpandEnvironmentStrings(Entry, Result, Size);
+  if (Written = 0) or (Written > Size) then RaiseException('Could not expand the user PATH.');
+  SetLength(Result, Written - 1);
+  Result := RemoveBackslash(RemoveQuotes(Trim(Result)));
+end;
+
+function FindPathEntry(Value, Dir: String; Exact: Boolean; var Start, Count: Integer): Boolean;
 var
   Finish: Integer;
+  Entry: String;
   Quoted: Boolean;
 begin
   Start := 1;
@@ -102,10 +122,10 @@ begin
       Finish := Finish + 1;
     end;
     Count := Finish - Start;
-    if CompareText(RemoveBackslash(RemoveQuotes(Trim(Copy(Value, Start, Count)))), Dir) = 0 then begin
-      Result := True;
-      Exit;
-    end;
+    Entry := Copy(Value, Start, Count);
+    if Exact then Result := Entry = Dir
+    else Result := CompareText(ExpandedEntry(Entry), Dir) = 0;
+    if Result then Exit;
     Start := Finish + 1;
   end;
   Result := False;
@@ -119,7 +139,7 @@ begin
       RaiseException('Could not read the user PATH.');
 end;
 
-function RegGetValue(Root: HKEY; Subkey, Name: String; Flags: Cardinal;
+function RegGetValue(Root: Integer; Subkey, Name: String; Flags: Cardinal;
   var Kind: Cardinal; Data, Size: LongWord): Longint;
   external 'RegGetValueW@advapi32.dll stdcall';
 
@@ -144,8 +164,10 @@ var
   Start, Count: Integer;
 begin
   if not RegQueryStringValue(HKCU, PathReceipt, 'PathEntry', Dir) then Exit;
+  // Older receipts omitted the quotes around directories containing semicolons.
+  if (Pos(';', Dir) > 0) and (Copy(Dir, 1, 1) <> '"') then Dir := '"' + Dir + '"';
   Value := UserPath;
-  if FindPathEntry(Value, Dir, Start, Count) then begin
+  if FindPathEntry(Value, Dir, True, Start, Count) then begin
     if Start > 1 then begin
       Start := Start - 1;
       Count := Count + 1;
@@ -165,14 +187,19 @@ begin
   if Step <> ssPostInstall then Exit;
   Dir := ExpandConstant('{app}');
   if RegQueryStringValue(HKCU, PathReceipt, 'PathEntry', Previous) then
-    if CompareText(Previous, Dir) <> 0 then RemoveInstalledPath;
+    if CompareText(RemoveQuotes(Previous), Dir) <> 0 then RemoveInstalledPath;
   Value := UserPath;
-  if FindPathEntry(Value, Dir, Start, Count) then Exit;
+  if FindPathEntry(Value, Dir, False, Start, Count) then Exit;
   if Value <> '' then Value := Value + ';';
+  if Pos(';', Dir) > 0 then Dir := '"' + Dir + '"';
   if not RegWriteStringValue(HKCU, PathReceipt, 'PathEntry', Dir) then
     RaiseException('Could not record the user PATH entry.');
-  if Pos(';', Dir) > 0 then Dir := '"' + Dir + '"';
-  SavePath(Value + Dir);
+  try
+    SavePath(Value + Dir);
+  except
+    RegDeleteValue(HKCU, PathReceipt, 'PathEntry');
+    RaiseException(GetExceptionMessage);
+  end;
 end;
 
 procedure CurUninstallStepChanged(Step: TUninstallStep);

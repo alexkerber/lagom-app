@@ -16,9 +16,9 @@ use lagom_core::{
 #[cfg(windows)]
 pub(crate) mod windows;
 #[cfg(windows)]
-use self::windows::{clone_peer, peer_connected, socket_path, Socket};
+use self::windows::{clone_peer, peer_connected, Socket};
 #[cfg(windows)]
-pub(crate) use self::windows::write_frame;
+pub(crate) use self::windows::{socket_path, write_frame};
 #[cfg(windows)]
 type Stream = tokio::net::windows::named_pipe::NamedPipeServer;
 #[cfg(windows)]
@@ -66,6 +66,8 @@ struct TokenLimit {
 type Rates = Arc<Mutex<HashMap<String, TokenLimit>>>;
 
 pub(crate) struct Server {
+    #[cfg(windows)]
+    pub bind_failed: watch::Receiver<bool>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -74,15 +76,23 @@ impl Server {
     pub fn start(path: &Path, bridge: Bridge) -> Self {
         let path = path.to_owned();
         let (stop, rx) = oneshot::channel();
+        #[cfg(windows)]
+        let (status, bind_failed) = watch::channel(false);
         let thread = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("agent runtime");
-            rt.block_on(serve(path, bridge, rx));
+            rt.block_on(serve(
+                path, bridge, rx,
+                #[cfg(windows)]
+                status,
+            ));
             rt.shutdown_timeout(Duration::ZERO);
         });
         Self {
+            #[cfg(windows)]
+            bind_failed,
             stop: Some(stop),
             thread: Some(thread),
         }
@@ -158,7 +168,10 @@ impl Drop for Socket {
     }
 }
 
-async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
+async fn serve(
+    path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>,
+    #[cfg(windows)] status: watch::Sender<bool>,
+) {
     let Ok(settings) = Store::agent_writer(&path) else {
         return;
     };
@@ -223,6 +236,11 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                         }
                         Err(_) => {}
                     }
+                }
+                #[cfg(windows)]
+                {
+                    let failed = generation.is_some() && bind_error.is_some();
+                    if *status.borrow() != failed { status.send_replace(failed); }
                 }
             }
             Some(_) = calls.join_next(), if !calls.is_empty() => {}
