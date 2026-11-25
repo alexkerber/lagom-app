@@ -24,11 +24,15 @@
 - [x] On `fix/privacy-followup`, the cached mail cleanup ignores vanished files and reports scan or deletion errors. A failed cleanup is not retried at start, because a second lagom process may be using the cache; the 7-day prune removes what stays.
   The agent log checks stored account IDs, including imported IDs. Regression tests covered both changes on macOS.
   GreenMail verified account removal. Live providers and non-Unix platforms remain unverified.
-- [ ] Older builds assigned some lists to the wrong account. Add recovery so new tasks stop uploading there.
+- [x] On `fix/tasks-cross-account`, history confirmed that the first syncing account could claim unassigned lists.
+  Stored mappings cannot identify those claims. Existing lists keep their owners.
+  A fake-server test verified that foreign mail alone leaves ownership intact. Historical user intent remains unknown.
 - [ ] SQLite deletes leave data in free pages. Review enabling `secure_delete`.
 - [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
 - [ ] Google Tasks with two Tasks accounts: no UI picks the account for a local list, so new lists stay local. Add a picker.
-- [ ] Google Tasks: remove previously uploaded cross-account mail links from Google notes.
+- [x] On `fix/tasks-cross-account`, the upgrade removes the last matching cross-account mail link once, using the task’s ETag.
+  Fake-server tests verified cursor progress after a conflict, skipped cleanup without an ETag, and saved PATCH metadata.
+  Tests also verified preserved note text and mail associations on later pulls. Live Google Tasks remains unverified.
 - [ ] Google Tasks: a task pulled from one Google account and moved by the person into another account's list uploads its subject and link there. The link names the first install's account, so lagom cannot tell it from the person's own task without an owner column.
 - [ ] Google Tasks: a task from a removed account's mail counts as the person's own once that account is gone. If the person moved it into another account's list, its subject then uploads there.
 - [x] Google Limited Use and AI agents: checked against the Workspace API User Data and Developer Policy (updated 2026-09-03). A transfer is allowed for a user-facing feature that is visible and prominent, with the user's consent. Agent access is a Settings page, off until the user turns it on, with the disclosure next to the switch. The privacy page now has the Workspace Limited Use statement (branch `docs/limited-use`).
