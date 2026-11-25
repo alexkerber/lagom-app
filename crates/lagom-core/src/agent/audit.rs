@@ -211,8 +211,8 @@ impl Store {
         if bucket {
             aggregate = tx.execute(
                 "UPDATE agent_audit SET refusals=refusals+1
-                WHERE agent=? AND at=? AND refusals>0",
-                params![agent, minute],
+                WHERE agent=? AND at=? AND command=? AND result=? AND refusals>0",
+                params![agent, minute, command, result],
             )? > 0;
         } else if agent.is_none() {
             let count: i64 = tx.query_row(

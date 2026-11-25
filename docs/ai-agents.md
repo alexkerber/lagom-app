@@ -155,6 +155,8 @@ effective(resource) = min( global level,   # the account's row, else the group d
 ## 5. Commands and levels
 
 `--json` works on every command. `--account <id or email>` narrows a command.
+The `emails` and `search` tables show date, from, subject, message ID and thread ID.
+Use the `thread` column with `lagom thread <id>`.
 
 | Command                                                                     | Resource | Level                                                | Confirm |
 | --------------------------------------------------------------------------- | -------- | ---------------------------------------------------- | ------- |
@@ -390,7 +392,7 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
 - Each append keeps the latest 50 000 non-write rows per agent. Anonymous refusals have their own bucket.
   Draft changes, sends, mail actions and event changes expire only by age.
 - Refusals without a verified digest are limited to 60 rows a minute, then counted in one row.
-- Verified refusals before worker dispatch and busy replies share one counter per agent per minute. The first refusal records its reason.
+- Verified refusals before worker dispatch and busy replies are counted per agent, minute, command and result.
 - Socket admission failures are counted off the listener thread. Settings shows the newest 50 rows for each agent.
 - Rows have no foreign keys: they outlive the agent and the token. Removing an account deletes its rows.
 - Settings shows the log by agent, newest first, with Revoke on each agent.
