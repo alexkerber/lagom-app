@@ -24,7 +24,7 @@ use crate::sync::{Act, Bridge, Cmd, Delivery, Event, SyncState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{font, radius, size, Theme, DEFAULT_ACCENT, LEADING, READING_LEADING};
 
-actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, CloseWindow, NewMessage, OpenSettings, ToggleSidebar, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo, ShowShortcuts]);
+actions!(main_window, [SelectNext, SelectPrev, ExtendNext, ExtendPrev, ToggleRead, Done, Later, DeleteMessage, Undo, OpenPalette, OpenMovePalette, Reply, ReplyAll, Forward, Cancel, CloseWindow, NewMessage, OpenSettings, ToggleSidebar, ToggleRail, OpenInWindow, NewTask, ShowHome, ShowMail, ShowCalendar, ShowTodo, ShowShortcuts]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("secondary-w", CloseWindow, None)]);
@@ -71,6 +71,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, ctx),
         KeyBinding::new("secondary-/", ShowShortcuts, ctx),
         KeyBinding::new("alt-secondary-s", ToggleSidebar, ctx),
+        KeyBinding::new("shift-alt-secondary-s", ToggleRail, ctx),
         KeyBinding::new("escape", Cancel, keys),
         KeyBinding::new("tab", crate::text_input::FocusNext, Some("Settings && !TextInput")),
         KeyBinding::new("shift-tab", crate::text_input::FocusPrev, Some("Settings && !TextInput")),
@@ -129,7 +130,8 @@ mod glass;
 mod polish;
 pub(crate) use polish::action_icon;
 mod panes;
-use panes::{default_list, Panes, StartPage, SIDEBAR_DEFAULT};
+use panes::{default_list, Panes, StartPage, RAIL_W, SIDEBAR_DEFAULT};
+mod rail;
 
 /// The main window's frame from last time and its display, if that display is still connected
 /// and holds most of the frame.
@@ -217,6 +219,9 @@ pub use live::Live;
 pub(crate) use live::notify_without_window;
 use live::Then;
 use popout::MessageWindow;
+
+/// The section rows' tooltips: the label and its key.
+const SECTION_TIPS: [&str; 4] = ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "To-do · ⌘4"];
 
 const SECTIONS: [(&str, &str); 4] = [
     ("Today", "icons/home.svg"),
@@ -382,8 +387,11 @@ pub struct MainWindow {
     sidebar_scroll: ScrollHandle,
     sidebar_mail: bool,
     sidebar_fade: Option<Instant>,
-    /// When the sidebar started to slide in or out; it slides as an AppKit split view collapses.
-    sidebar_slide: Option<Instant>,
+    /// When the sidebar started to slide in, out or between full and rail, and its drawn width then.
+    /// It slides as an AppKit split view collapses.
+    sidebar_slide: Option<(Instant, f32)>,
+    /// The rail's popover of mailboxes, folders and accounts is open.
+    mailbox_popover: bool,
     /// The sidebar's drawn width this frame; it narrows while the sidebar slides.
     sidebar_shown_w: f32,
     scroll: ScrollHandle,
@@ -532,6 +540,7 @@ impl MainWindow {
             sidebar_mail: false,
             sidebar_fade: None,
             sidebar_slide: None,
+            mailbox_popover: false,
             sidebar_shown_w: 0.,
             scroll: ScrollHandle::new(),
             scroll_hold: (Pixels::ZERO, false),
@@ -608,6 +617,12 @@ impl MainWindow {
                 this.new_event_default(window, cx);
             }
             "todo" => this.show_section(3, window, cx),
+            // The compact sidebar, its mailbox popover, and no sidebar.
+            "rail" | "rail-mailboxes" => {
+                this.panes.sidebar_rail = true;
+                this.mailbox_popover = screen == "rail-mailboxes";
+            }
+            "sidebar-hidden" => this.panes.sidebar_hidden = true,
             "palette" => this.open_palette("done", window, cx),
             // Three adjacent rows and one apart: the joined selection block and a separate one.
             "multi" => {
@@ -1312,7 +1327,7 @@ impl MainWindow {
         // A drag that locks vertical, or a swipe carried onto the sidebar, picks the message up for a folder.
         // shortcut: GPUI starts its drag on the move after this one, so a release on the very move that
         // crosses onto the sidebar lands nowhere; fine while the sidebar's padding sits before its folders.
-        let over_sidebar = f32::from(e.position.x) < self.sidebar_shown_w;
+        let over_sidebar = f32::from(e.position.x) < self.sidebar_shown_w && self.panes.full_sidebar();
         let picked = match (before, self.swipe) {
             (Swipe::Undecided { id, .. }, Swipe::Scroll) => Some(id),
             (_, Swipe::Row { id, dx }) if over_sidebar => {
@@ -1322,7 +1337,8 @@ impl MainWindow {
             }
             _ => None,
         };
-        if let Some(id) = picked.filter(|_| !self.panes.sidebar_hidden) {
+        // Only the full sidebar shows folders to drop on.
+        if let Some(id) = picked.filter(|_| self.panes.full_sidebar()) {
             self.folder_drag = Some(id);
             // The drop moves the selection; an unselected row becomes it, as in Finder and Mail.
             if !self.inbox.is_selected(id) {
@@ -1717,6 +1733,7 @@ impl MainWindow {
                         Divider::Sidebar => {
                             this.panes.sidebar = SIDEBAR_DEFAULT;
                             this.panes.sidebar_hidden = false;
+                            this.panes.sidebar_rail = false;
                         }
                         Divider::List => this.panes.list = default_list(viewport, this.sidebar_w),
                     }
@@ -1764,7 +1781,8 @@ impl MainWindow {
         }).absolute().size(px(0.))
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+    /// Mailboxes, folders and accounts: the full sidebar's Mail part, and the rail's popover.
+    fn mail_nav(&self, cx: &mut Context<Self>) -> Div {
         let t = &self.theme;
         let heading = |label: &'static str| {
             div()
@@ -1777,7 +1795,6 @@ impl MainWindow {
                 .text_color(t.ink2)
                 .child(div().flex_1().child(label))
         };
-        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
         let nav = |path, label, count, active| sidebar_nav(t, path, label, count, active, self.window_active, false);
         let account = |ix: usize, name: SharedString, address: SharedString, active: bool| {
             pressable(div().id(("account", ix)), t, false)
@@ -1809,10 +1826,6 @@ impl MainWindow {
             Some(live) => live.accounts.iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == live.current)).collect(),
             None => mail::demo_accounts().iter().enumerate().map(|(i, a)| (live::short_name(a).into(), a.email.clone().into(), i == 0)).collect(),
         };
-        let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
-        let fade = self.sidebar_fade.map(|at| ease_out_quint()((at.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.))).unwrap_or(1.);
-        let show_mail = on_mail || self.sidebar_fade.is_some();
-        let unread = if self.live.is_none() { self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count() } else { self.today.unread };
         let open_kind = |kind| matches!(self.page, Page::Mail) && self.inbox.open.is_some() && self.inbox.open == self.inbox.find_kind(kind);
         let mut account_rows = div().flex().flex_col().flex_shrink_0().gap(px(2.)).child(heading("Accounts"));
         for (i, (name, address, active)) in accounts.into_iter().enumerate() {
@@ -1820,9 +1833,39 @@ impl MainWindow {
                 .child(account(i, name, address, active).on_click(cx.listener(move |this, _, _, cx| this.switch_account(i, cx))))
                 .children(self.reauth_control(i, "account-reauth", cx)));
         }
-        // With its own sidebar row, AI Agents lights that row instead of Settings.
+        div().flex().flex_col().gap(px(2.))
+            .child(self.mailbox_row(0, cx))
+            .child(nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
+                .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Later, cx); })))
+            .child(self.mailbox_row(2, cx))
+            .child(self.mailbox_row(1, cx))
+            .child(nav("icons/edit-draft.svg", "Drafts", Some(self.draft_rows.len()), matches!(self.page, Page::Drafts))
+                .debug_selector(|| "nav-Drafts".into())
+                .on_click(cx.listener(|this, _, window, cx| this.show_drafts(window, cx))))
+            .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Trash, cx); })))
+            .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(FOLDERS_MAX)))
+            .child(account_rows.mt(px(18.)))
+    }
+
+    /// The Mail section's count: unread in the inbox.
+    fn mail_unread(&self) -> usize {
+        if self.live.is_none() { self.inbox.items.iter().filter(|&&id| self.inbox.mail[id].unread).count() } else { self.today.unread }
+    }
+
+    /// Which footer row is lit: (AI Agents, Settings). With its own row, AI Agents lights that row instead of Settings.
+    fn footer_active(&self) -> (bool, bool) {
         let in_agents = self.agents.sidebar && matches!(&self.page, Page::Settings(Some(id)) if id == crate::settings::agents::AGENTS);
-        let in_settings = matches!(self.page, Page::Settings(_)) && !in_agents;
+        (in_agents, matches!(self.page, Page::Settings(_)) && !in_agents)
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let t = &self.theme;
+        let active_icon = if self.window_active { t.sel_icon } else { t.ink2 };
+        let on_mail = matches!(self.page, Page::Mail | Page::Drafts);
+        let fade = self.sidebar_fade.map(|at| ease_out_quint()((at.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.))).unwrap_or(1.);
+        let show_mail = on_mail || self.sidebar_fade.is_some();
+        let unread = self.mail_unread();
+        let (in_agents, in_settings) = self.footer_active();
         let footer = |id: &'static str, path: &'static str, label: &'static str, active: bool| {
             pressable(div().id(id).group(id), t, active)
                 .flex()
@@ -1841,8 +1884,6 @@ impl MainWindow {
 
         div()
             .debug_selector(|| "sidebar".into())
-            .relative()
-            .child(self.glass.background(if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) }))
             .w(px(self.sidebar_w))
             .h_full()
             .flex_shrink_0()
@@ -1851,12 +1892,14 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // The title-bar row, y 11..39: the traffic lights on the left (macOS), search on the right.
+            // The title-bar row, y 11..39: the traffic lights on the left (macOS), collapse and search on the right.
             // Elsewhere the same row tops the sidebar. A logo would go in at the left.
             .pt(px(if cfg!(target_os = "macos") { 11. } else { 12. }))
             // No tab stop: Tab would leave Compose's field cycle. ⌘K and the menu are the keyboard route.
-            .child(div().flex().flex_shrink_0().justify_end().child(
-                icon_button(t, "search", "icons/search.svg", if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" })
+            .child(div().flex().flex_shrink_0().justify_end().gap(px(4.))
+                .child(icon_button(t, "sidebar-collapse", "icons/sidebar.svg", rail::COLLAPSE_TIP)
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleRail), cx)))
+                .child(icon_button(t, "search", "icons/search.svg", if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" })
                     // The same action as ⌘K and the menu, so all three open it on the same pages.
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx))))
             .child(div().id("sidebar-content").flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&self.sidebar_scroll).flex().flex_col().gap(px(20.))
@@ -1873,24 +1916,13 @@ impl MainWindow {
                             // A quiet number, as on every other row; no filled pill.
                             .when(ix == 1 && unread > 0, |d| d.child(roll(
                                 mono(unread.to_string(), t.ink2).debug_selector(|| "mail-unread-badge".into()), format!("mail-{unread}"))))
-                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, ["Today · ⌘1", "Mail · ⌘2", "Calendar · ⌘3", "To-do · ⌘4"][ix].into())).into())
+                            .tooltip(move |_, cx| cx.new(|_| Tip(theme, SECTION_TIPS[ix].into())).into())
                             .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
                     })))
-                .when(show_mail, |d| d.child(div().id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
-                    .flex().flex_col().gap(px(2.)).opacity(if on_mail { fade } else { 1. - fade })
+                .when(show_mail, |d| d.child(self.mail_nav(cx).id("mail-sidebar").debug_selector(|| "mail-sidebar".into())
+                    .opacity(if on_mail { fade } else { 1. - fade })
                     .capture_any_mouse_down(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } }))
-                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } }))
-                    .child(self.mailbox_row(0, cx))
-                    .child(nav("icons/later.svg", "Later", Some(self.inbox.later), open_kind(Kind::Later))
-                        .on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Later, cx); })))
-                    .child(self.mailbox_row(2, cx))
-                    .child(self.mailbox_row(1, cx))
-                    .child(nav("icons/edit-draft.svg", "Drafts", Some(self.draft_rows.len()), matches!(self.page, Page::Drafts))
-                        .debug_selector(|| "nav-Drafts".into())
-                        .on_click(cx.listener(|this, _, window, cx| this.show_drafts(window, cx))))
-                    .child(nav("icons/trash.svg", "Trash", None, open_kind(Kind::Trash)).on_click(cx.listener(|this, _, _, cx| if matches!(this.page, Page::Mail | Page::Drafts) { this.open_kind(Kind::Trash, cx); })))
-                .child(self.folder_group(heading("Folders"), cx).mt(px(18.)).flex_shrink_0().max_h(px(FOLDERS_MAX)))
-                .child(account_rows.mt(px(18.))))))
+                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| { if !matches!(this.page, Page::Mail | Page::Drafts) { cx.stop_propagation(); } })))))
             .child(div().flex().flex_col().flex_shrink_0().gap(px(2.))
                 .when(self.agents.sidebar, |d| d.child(footer("ai-agents", "icons/connect.svg", "AI Agents", in_agents)
                     // A quiet number of connected agents, as on the mailbox rows.
@@ -1934,15 +1966,17 @@ impl MainWindow {
             polish::mailbox_style(div().id(id), t, active).flex().flex_shrink_0().items_center().gap(px(8.)).h(px(SIDEBAR_ROW)).px(px(10.)).rounded(px(radius::CONTROL))
         };
         // The 28 px button's glyph ends where the row counts and chevrons end.
+        // Folder controls stop their click, so the rail's popover stays open around them.
         let add = icon_button(t, "add-folder", "icons/new-folder.svg", "New folder").mr(px(-6.))
-            .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
+            .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.new_folder(window, cx) }));
         #[cfg(test)]
         let add = add.debug_selector(|| "add-folder".into());
         let group = div().flex().flex_col().min_h(px(0.)).gap(px(2.)).child(heading.flex_shrink_0().child(add))
-            .children(self.folder_name.as_ref().map(|input| div().flex_shrink_0().px(px(10.)).child(input.clone())));
+            .children(self.folder_name.as_ref().map(|input| div().flex_shrink_0().px(px(10.)).child(input.clone())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())));
         if !all.iter().any(Folder::listed) {
             let new = row("new-folder".into(), false).text_color(t.ink2).child(icon("icons/new-folder.svg", t.ink2, 16.)).child("New folder")
-                .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx)));
+                .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.new_folder(window, cx) }));
             #[cfg(test)]
             let new = new.debug_selector(|| "new-folder".into());
             return group.when(self.folder_name.is_none(), |group| group.child(new));
@@ -1995,6 +2029,7 @@ impl MainWindow {
                     .child(icon("icons/chevron.svg", t.ink2, 16.))
                     .child(format!("{} more", rows.len() - shown))
                     .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
                         this.all_folders = true;
                         cx.notify();
                     })),
@@ -2704,17 +2739,31 @@ impl Render for MainWindow {
         }
         self.list_focused = self.window_active && self.focus.is_focused(window);
         // A definite pixel width keeps ellipses intact during row motion and live resizing.
-        // How much of the sidebar shows, 0 to 1, while it slides.
-        let slide = self.sidebar_slide.map(|at| at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).filter(|t| *t < 1.).map(|t| ease_out_quint()(t));
+        // The sidebar's drawn width eases from where it was to its state's width: none, the rail or full.
+        let viewport = f32::from(window.viewport_size().width);
+        let target = self.panes.fit(viewport).0;
+        let slide = self.sidebar_slide.and_then(|(at, from)| {
+            let t = at.elapsed().as_secs_f32() / SLIDE.as_secs_f32();
+            (t < 1.).then(|| (ease_out_quint()(t), from))
+        });
         if slide.is_some() { window.request_animation_frame(); } else { self.sidebar_slide = None; }
-        let shown = match (slide, self.panes.sidebar_hidden) { (Some(p), hidden) => if hidden { 1. - p } else { p }, (None, hidden) => if hidden { 0. } else { 1. } };
-        // A sliding sidebar keeps its full width; only its clip narrows.
-        (self.sidebar_w, self.list_w) = Panes { sidebar_hidden: shown == 0., ..self.panes }.fit(f32::from(window.viewport_size().width));
+        let from = slide.map_or(target, |s| s.1);
+        let drawn = slide.map_or(target, |(p, from)| from + (target - from) * p);
+        // A sliding sidebar keeps its wider end's width; only its clip narrows. Full shows at either end: `wide`.
+        let wide = from.max(target) > RAIL_W + 0.5;
+        let layout = if slide.is_some() { Panes { sidebar_hidden: false, sidebar_rail: !wide, ..self.panes } } else { self.panes };
+        (self.sidebar_w, self.list_w) = layout.fit(viewport);
+        let content_w = if wide { self.sidebar_w } else { RAIL_W };
+        // To or from nothing, the sidebar slides; between full and rail it stays put and cross-fades.
+        let hiding = target == 0. || from < 0.5;
+        let shown = if hiding { drawn / content_w } else { 1. };
+        let rail_at_rest = slide.is_none() && self.panes.sidebar_rail && !self.panes.sidebar_hidden;
+        if self.mailbox_popover && !(rail_at_rest && matches!(self.page, Page::Mail | Page::Drafts)) { self.mailbox_popover = false; }
         self.web_frame(window, cx);
         self.forget_hidden_images(cx);
         crate::rich::release(window, cx);
         let welcome = self.welcome();
-        self.sidebar_shown_w = if welcome { 0. } else { self.sidebar_w * shown };
+        self.sidebar_shown_w = if welcome { 0. } else { drawn };
         // macOS: with the sidebar gone, the panel clears the traffic lights.
         let panel_top = if welcome { 36. } else if cfg!(target_os = "macos") { 8. + 28. * (1. - shown) } else { 8. };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
@@ -2788,7 +2837,8 @@ impl Render for MainWindow {
                 false => layer(24.),
             }
         });
-        if welcome || (self.panes.sidebar_hidden && self.sidebar_slide.is_none()) { self.glass.hide(); }
+        if welcome || drawn == 0. { self.glass.hide(); }
+        let viewport_h = f32::from(window.viewport_size().height);
         div()
             .key_context(match self.page { Page::Home | Page::Todo => "MainWindow Tasks", Page::Calendar => "MainWindow Calendar", Page::Settings(_) => "MainWindow Settings", _ => "MainWindow" })
             .map(|d| Self::week_keys(d, cx))
@@ -2848,19 +2898,16 @@ impl Render for MainWindow {
             .on_action(cx.listener(|this, _: &OpenInWindow, window, cx| if !this.overlay_open(cx) { this.open_popout(window, cx) }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| if this.palette.is_none() && this.compose.is_none() { this.open_settings(window, cx) }))
             .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| if this.palette.is_none() && this.compose.is_none() { this.show_shortcuts(window, cx) }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.finish_resize(cx);
-                this.panes.sidebar_hidden = !this.panes.sidebar_hidden;
-                // A toggle mid-slide reverses from where the sidebar is: the eased position p maps
-                // back to the time where the reverse slide shows the same width (ease is 1 - (1 - t)^5).
-                let done = this.sidebar_slide.map(|at| (at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).min(1.)).unwrap_or(1.);
-                let p = 1. - (1. - done).powi(5);
-                let from = 1. - p.powf(0.2);
-                this.sidebar_slide = (!crate::motion::reduced()).then(|| Instant::now() - SLIDE.mul_f32(from));
-                this.save_panes(cx);
-                cx.notify();
+            // Show or hide, keeping full or rail. The rail toggle goes between the two and shows a hidden sidebar as the rail.
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.set_sidebar(!this.panes.sidebar_hidden, this.panes.sidebar_rail, cx)))
+            .on_action(cx.listener(|this, _: &ToggleRail, _, cx| {
+                let rail = this.panes.sidebar_hidden || !this.panes.sidebar_rail;
+                this.set_sidebar(false, rail, cx);
             }))
-            .on_action(cx.listener(|this, _: &Cancel, window, cx| if matches!(this.page, Page::Settings(Some(_))) && this.palette.is_none() {
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| if this.mailbox_popover {
+                this.mailbox_popover = false;
+                cx.notify();
+            } else if matches!(this.page, Page::Settings(Some(_))) && this.palette.is_none() {
                 // Esc on an account's Settings page goes back to the list.
                 this.close_account_settings(window, cx);
             } else if !this.overlay_open(cx) {
@@ -2879,12 +2926,20 @@ impl Render for MainWindow {
             .font_family(font::ui())
             .text_size(px(size::BASE))
             .line_height(relative(LEADING))
-            .when(!welcome && shown > 0., |d| d.child(match shown < 1. {
+            .when(!welcome && drawn > 0., |d| {
                 // The sidebar keeps its width and slides under a clip, so no row reflows.
-                true => div().w(px(self.sidebar_w * shown)).h_full().flex_shrink_0().flex().overflow_hidden()
-                    .child(self.sidebar(cx).ml(px(self.sidebar_w * (shown - 1.)))),
-                false => self.sidebar(cx),
-            }))
+                let frost = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
+                let clip = div().relative().w(px(drawn)).h_full().flex_shrink_0().flex().overflow_hidden().child(self.glass.background(frost));
+                d.child(if hiding {
+                    let content = if wide { self.sidebar(cx) } else { self.rail(viewport_h, cx) };
+                    clip.child(content.ml(px(drawn - content_w)))
+                } else {
+                    // 0 at full width, 1 at the rail's.
+                    let rail = if wide { ((self.sidebar_w - drawn) / (self.sidebar_w - RAIL_W)).clamp(0., 1.) } else { 1. };
+                    clip.when(rail < 1., |d| d.child(self.sidebar(cx).opacity(1. - rail)))
+                        .when(rail > 0., |d| d.child(div().absolute().top_0().left_0().h_full().opacity(rail).child(self.rail(viewport_h, cx))))
+                })
+            })
             .child(
                 // The content meets the sidebar at a straight edge: no inset panel, so no stray corner.
                 div().flex_1().min_w(px(0.)).h_full().flex().bg(t.bg).child(div()
@@ -2903,7 +2958,10 @@ impl Render for MainWindow {
                     // The list divider waits for a slide to end, so a drag never moves under the pointer.
                     .when(matches!(self.page, Page::Mail) && !empty && self.sidebar_slide.is_none(), |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
             )
-            .when(!welcome && shown == 1., |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
+            .when(!welcome && slide.is_none() && drawn > 0., |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
+            // A click anywhere outside the rail's popover closes it, and does nothing else.
+            .when(self.mailbox_popover, |d| d.child(div().id("mailbox-popover-backdrop").absolute().inset_0().occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.mailbox_popover = false; cx.notify(); }))))
             .child(self.resize_events(cx))
             .children(self.palette.clone())
             .children(self.sending.clone())
@@ -4700,14 +4758,28 @@ mod dispatch {
         cx.simulate_event(MouseDownEvent { position: at(300.), click_count: 2, ..Default::default() });
         assert_eq!(widths(cx).0, 220.);
         cx.simulate_mouse_down(at(220.), MouseButton::Left, Default::default());
+        // Narrow, the sidebar snaps to the rail; narrower than half the rail, it hides.
         cx.simulate_mouse_move(at(100.), MouseButton::Left, Default::default());
+        assert_eq!(widths(cx).0, RAIL_W);
+        cx.simulate_mouse_move(at(20.), MouseButton::Left, Default::default());
         assert_eq!(widths(cx).0, 0.);
-        cx.simulate_mouse_up(at(100.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(at(20.), MouseButton::Left, Default::default());
         cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(widths(cx).0, 220.);
+        // The divider waits for the slide to end.
+        view.update(cx, |v, cx| { v.sidebar_slide = None; cx.notify(); });
+        cx.simulate_mouse_down(at(220.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(100.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(at(100.), MouseButton::Left, Default::default());
+        assert_eq!(widths(cx).0, RAIL_W);
+        // The rail's own edge drags it back to full.
+        cx.simulate_mouse_down(at(RAIL_W), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(at(250.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(at(250.), MouseButton::Left, Default::default());
+        assert_eq!(widths(cx).0, 250.);
         cx.simulate_keystrokes("alt-secondary-s");
         // The sidebar keeps its width while it slides out.
-        assert_eq!(widths(cx).0, if crate::motion::reduced() { 0. } else { 220. });
+        assert_eq!(widths(cx).0, if crate::motion::reduced() { 0. } else { 250. });
         view.update(cx, |v, cx| { v.sidebar_slide = None; cx.notify(); });
         assert_eq!(widths(cx).0, 0.);
         assert!(view.read_with(cx, |v, _| v.preferences_path.is_none()));
@@ -4724,7 +4796,9 @@ mod dispatch {
         cx.simulate_mouse_move(at(140.), MouseButton::Left, Default::default());
         assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 180.);
         cx.simulate_mouse_move(at(119.), MouseButton::Left, Default::default());
-        cx.simulate_mouse_up(at(119.), MouseButton::Left, Default::default());
+        assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), RAIL_W);
+        cx.simulate_mouse_move(at(20.), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(at(20.), MouseButton::Left, Default::default());
         cx.simulate_keystrokes("alt-secondary-s");
         assert_eq!(view.read_with(cx, |v, _| v.sidebar_w), 300.);
     }
@@ -4733,7 +4807,7 @@ mod dispatch {
     fn divider_clicks_preserve_preferences_in_a_narrow_window(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         let path = std::env::temp_dir().join(format!("lagom-divider-click-{}.json", std::process::id()));
-        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, group_conversations: true, notifications: true, start_page: StartPage::Mail, window: None };
+        let panes = Panes { sidebar: 320., list: 560., sidebar_hidden: false, sidebar_rail: false, group_conversations: true, notifications: true, start_page: StartPage::Mail, window: None };
         // Valid JSON with trailing whitespace also detects an unnecessary save.
         let bytes = format!("{}\n", serde_json::to_string(&panes).unwrap());
         std::fs::write(&path, &bytes).unwrap();

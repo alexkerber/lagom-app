@@ -99,6 +99,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("To-do", crate::main_window::ShowTodo),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", crate::main_window::ToggleSidebar),
+                MenuItem::action("Compact Sidebar", crate::main_window::ToggleRail),
                 MenuItem::separator(),
                 MenuItem::action("Enter Full Screen", ToggleFullScreen),
             ],

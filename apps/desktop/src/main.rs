@@ -150,6 +150,7 @@ impl AssetSource for Assets {
             "icons/sent.svg" => include_bytes!("../assets/icons/sent.svg"),
             "icons/done.svg" => include_bytes!("../assets/icons/done.svg"),
             "icons/search.svg" => include_bytes!("../assets/icons/search.svg"),
+            "icons/sidebar.svg" => include_bytes!("../assets/icons/sidebar.svg"),
             "icons/chevron.svg" => include_bytes!("../assets/icons/chevron.svg"),
             "icons/chevron-right.svg" => include_bytes!("../assets/icons/chevron-right.svg"),
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),

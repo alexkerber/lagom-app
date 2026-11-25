@@ -64,7 +64,10 @@ impl Writes {
 pub(super) const SIDEBAR_DEFAULT: f32 = 220.;
 pub(super) const SIDEBAR_MIN: f32 = 180.;
 const SIDEBAR_MAX: f32 = 320.;
+// Dragged narrower than this, the sidebar becomes the rail; narrower than half the rail, it hides.
 const COLLAPSE_AT: f32 = 120.;
+/// The compact sidebar: icons only. macOS also fits the traffic lights, which span x 18..78.
+pub(super) const RAIL_W: f32 = if cfg!(target_os = "macos") { 88. } else { 64. };
 pub(super) const LIST_MIN: f32 = 280.;
 const LIST_MAX: f32 = 560.;
 pub(super) const READING_MIN: f32 = 440.;
@@ -86,6 +89,9 @@ pub(super) struct Panes {
     pub sidebar: f32,
     pub list: f32,
     pub sidebar_hidden: bool,
+    /// Shown, the sidebar is the icon rail instead of the full list.
+    #[serde(default)]
+    pub sidebar_rail: bool,
     #[serde(default = "group_default")]
     pub group_conversations: bool,
     #[serde(default = "notifications_default")]
@@ -141,12 +147,16 @@ impl Panes {
             sidebar: SIDEBAR_DEFAULT,
             list: default_list(viewport, SIDEBAR_DEFAULT),
             sidebar_hidden: false,
+            sidebar_rail: false,
             group_conversations: true,
             notifications: true,
             start_page: StartPage::Mail,
             window: None,
         }
     }
+
+    /// The full sidebar, as opposed to the rail or none.
+    pub fn full_sidebar(self) -> bool { !self.sidebar_hidden && !self.sidebar_rail }
 
     /// Keep the preferred widths on window resize, giving spare space to the reading pane.
     pub fn fit(self, viewport: f32) -> (f32, f32) {
@@ -155,6 +165,8 @@ impl Panes {
         // sidebar width. Temporarily narrow the sidebar too, restoring it when space returns.
         let sidebar = if self.sidebar_hidden {
             0.
+        } else if self.sidebar_rail {
+            RAIL_W
         } else {
             bounded(self.sidebar, SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX)
                 .min((available - LIST_MIN).max(SIDEBAR_MIN))
@@ -166,8 +178,10 @@ impl Panes {
 
     pub fn resize_sidebar(&mut self, width: f32, viewport: f32) {
         let (_, list) = self.fit(viewport);
-        self.sidebar_hidden = width < COLLAPSE_AT;
-        if !self.sidebar_hidden {
+        self.sidebar_hidden = width < RAIL_W / 2.;
+        // Hidden keeps full or rail, for when it shows again.
+        if !self.sidebar_hidden { self.sidebar_rail = width < COLLAPSE_AT; }
+        if self.full_sidebar() {
             self.sidebar = width
                 .clamp(SIDEBAR_MIN, SIDEBAR_MAX)
                 .min((viewport - PANEL_INSET - READING_MIN - LIST_MIN).max(SIDEBAR_MIN));
@@ -262,7 +276,7 @@ mod tests {
     #[test]
     fn old_preferences_group_by_default_and_off_roundtrips() {
         let mut panes: Panes = serde_json::from_str(r#"{"sidebar":220,"list":420,"sidebar_hidden":false}"#).unwrap();
-        assert!(panes.group_conversations);
+        assert!(panes.group_conversations && !panes.sidebar_rail);
         panes.group_conversations = false;
         let restored: Panes = serde_json::from_str(&serde_json::to_string(&panes).unwrap()).unwrap();
         assert!(!restored.group_conversations);
@@ -316,6 +330,7 @@ mod tests {
             sidebar: 320.,
             list: 560.,
             sidebar_hidden: false,
+            sidebar_rail: false,
             group_conversations: true,
             notifications: true,
             start_page: StartPage::Mail,
@@ -353,13 +368,18 @@ mod tests {
     #[test]
     fn collapse_and_show_preserve_sidebar_width() {
         let mut panes = Panes::new(1440.);
+        // Dragged narrow, the sidebar becomes the rail; narrower still, it hides.
         panes.resize_sidebar(119., 1440.);
-        assert_eq!(panes.fit(1440.), (0., 420.));
+        assert_eq!((panes.fit(1440.), panes.sidebar_rail, panes.sidebar_hidden), ((RAIL_W, 420.), true, false));
+        panes.resize_sidebar(RAIL_W / 2. - 1., 1440.);
+        assert_eq!((panes.fit(1440.), panes.sidebar_hidden), ((0., 420.), true));
         assert_eq!(panes.sidebar, 220.);
         panes.sidebar_hidden = false;
+        panes.sidebar_rail = false;
         assert_eq!(panes.fit(1440.), (220., 420.));
         panes.resize_sidebar(120., 1440.);
         assert_eq!(panes.fit(1440.), (180., 420.));
+        assert!(panes.full_sidebar());
     }
 
     #[test]
@@ -367,18 +387,20 @@ mod tests {
         for viewport in [970., 1000., 1100., 1440., 2000.] {
             for sidebar in [180., 220., 320., f32::NAN, f32::INFINITY] {
                 for list in [280., 420., 560., f32::NAN, -100.] {
-                    for sidebar_hidden in [false, true] {
+                    for (sidebar_hidden, sidebar_rail) in [(false, false), (false, true), (true, false), (true, true)] {
                         let panes = Panes {
                             sidebar,
                             list,
                             sidebar_hidden,
+                            sidebar_rail,
                             group_conversations: true,
                             notifications: true,
                             start_page: StartPage::Mail,
                             window: None,
                         };
                         let (sidebar, list) = panes.fit(viewport);
-                        assert!(sidebar == 0. || (180. ..=320.).contains(&sidebar));
+                        assert!(sidebar == 0. || sidebar == RAIL_W || (180. ..=320.).contains(&sidebar));
+                        assert_eq!(sidebar == RAIL_W, sidebar_rail && !sidebar_hidden);
                         assert!((280. ..=560.).contains(&list));
                         assert!(viewport - PANEL_INSET - sidebar - list >= READING_MIN);
                     }
@@ -398,7 +420,7 @@ mod tests {
             for i in 0..8 {
                 let path = &path;
                 scope.spawn(move || {
-                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, group_conversations: true, notifications: true, start_page: StartPage::Mail, window: None };
+                    let panes = Panes { sidebar: 180. + i as f32, list: 560., sidebar_hidden: i % 2 == 0, sidebar_rail: false, group_conversations: true, notifications: true, start_page: StartPage::Mail, window: None };
                     for _ in 0..100 {
                         panes.save(path).unwrap();
                         let saved = Panes::load(path, 1440.).unwrap();
@@ -423,6 +445,7 @@ mod tests {
         panes.resize_sidebar(300., 1440.);
         panes.resize_list(500., 1440.);
         panes.sidebar_hidden = true;
+        panes.sidebar_rail = true;
         panes.notifications = false;
         panes.save(&path).unwrap();
         assert_eq!(Panes::load(&path, 970.).unwrap(), panes);
