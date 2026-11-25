@@ -185,7 +185,7 @@ impl Bridge {
     }
 }
 
-pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
+pub fn start(path: PathBuf, ready: tokio::sync::oneshot::Sender<Option<std::fs::File>>) -> (Bridge, UnboundedReceiver<Event>) {
     let (cmd_tx, cmd_rx) = unbounded_channel();
     let (ev_tx, ev_rx) = unbounded_channel();
     let me = cmd_tx.clone();
@@ -194,7 +194,7 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("mail runtime");
             oauth::configure_refresh_store(&path);
-            rt.block_on(run(path, cmd_rx, me, ev_tx));
+            rt.block_on(run(path, cmd_rx, me, ev_tx, ready));
         })
         .expect("mail thread");
     (Bridge(cmd_tx), ev_rx)
@@ -228,7 +228,7 @@ fn clear_eml_cache(dir: lagom_core::Result<PathBuf>) {
     }
 }
 
-async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>, events: UnboundedSender<Event>) {
+async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>, events: UnboundedSender<Event>, ready: tokio::sync::oneshot::Sender<Option<std::fs::File>>) {
     let store = match Store::open(&path) {
         Ok(store) => store,
         Err(e) => {
@@ -236,6 +236,10 @@ async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>
             return;
         }
     };
+    let session = store.desktop_session().inspect_err(|error| {
+        eprintln!("lagom: store cleanup deferred until next start: {}", error.log());
+    });
+    let _ = ready.send(session.ok());
     if let Err(error) = store.recover_outbox().and_then(|_| store.recover_moves()) {
         let _ = events.send(Event::Sync(String::new(), SyncState::Failed(shown(&error))));
         return;
@@ -2248,7 +2252,8 @@ mod greenmail {
         let email = format!("worker-{}@lagom.test", uuid());
         let config = |port| ServerConfig { host: "127.0.0.1".into(), port, security: Security::Plain, username: email.clone() };
         let account = Account::new(email.clone(), config(3143), config(3025)).unwrap();
-        let (bridge, mut events) = start(path.clone());
+        let (ready, _session) = tokio::sync::oneshot::channel();
+        let (bridge, mut events) = start(path.clone(), ready);
 
         let _ = bridge.send(Cmd::AddAccount(Box::new(account.clone()), Zeroizing::new("test".into())));
         let Event::Added(added) = next(&mut events, |e| matches!(e, Event::Added(_))).await else { unreachable!() };

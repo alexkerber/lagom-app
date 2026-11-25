@@ -3,7 +3,7 @@ use crate::{
     Error, Result,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use std::path::Path;
+use std::{fs::File, io, path::Path};
 
 /// A safe FTS5 expression for what the user typed: every word quoted, the last one as a prefix.
 pub fn fts_query(q: &str) -> Option<String> {
@@ -194,14 +194,44 @@ impl Store {
         Ok(store)
     }
 
-    /// Called once at app startup, before workers can write to the store.
-    pub fn vacuum_if_pending(&self) -> Result<()> {
+    /// Keep the shared lock for the desktop session, including when cleanup is deferred.
+    pub fn desktop_session(&self) -> Result<File> {
+        let open = |name| File::options().read(true).write(true).create(true).truncate(false).open(self.path().with_file_name(name));
+        let cleanup = open("vacuum.lock")?;
+        let session = open("desktop.lock")?;
+        // Keep the cleanup lock across the switch from exclusive to shared ownership.
+        match cleanup.try_lock().and_then(|_| session.try_lock()) {
+            Ok(()) => {
+                if let Err(error) = self.vacuum_if_pending() {
+                    eprintln!("lagom: store cleanup deferred until next start: {}", error.log());
+                }
+                session.unlock()?;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        session.lock_shared()?;
+        Ok(session)
+    }
+
+    fn vacuum_space_required(&self) -> Result<u64> {
+        let pages: u64 = self.db.pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let page_size: u64 = self.db.pragma_query_value(None, "page_size", |r| r.get(0))?;
+        let mut wal = self.path().as_os_str().to_owned();
+        wal.push("-wal");
+        let wal_size = match std::fs::metadata(wal) {
+            Ok(meta) => meta.len(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        Ok((pages * page_size).saturating_add(wal_size).saturating_mul(2).saturating_add(100 * 1024 * 1024))
+    }
+
+    fn vacuum_if_pending(&self) -> Result<()> {
         if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_vacuum)", [], |r| r.get::<_, bool>(0))? {
             return Ok(());
         }
-        let path = self.path();
-        let size = std::fs::metadata(path)?.len();
-        if fs2::available_space(path)? < size.saturating_mul(2).saturating_add(100 * 1024 * 1024) {
+        if fs2::available_space(self.path())? < self.vacuum_space_required()? {
             return Err(Error::Invalid("not enough free disk space to clean up deleted mail"));
         }
         self.db.execute_batch("VACUUM")?;
@@ -598,6 +628,33 @@ mod tests {
         assert_eq!(store.db.query_row("SELECT count(*) FROM pending_vacuum", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
         assert_eq!(store.db.pragma_query_value(None, "secure_delete", |r| r.get::<_, u32>(0)).unwrap(), 1);
     }
+    #[test]
+    fn desktop_cleanup_defers_for_other_instances_and_counts_uncheckpointed_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mail.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint=0;
+            INSERT INTO pending_vacuum VALUES (1);
+            CREATE TABLE padding(data BLOB); INSERT INTO padding VALUES (zeroblob(131072))").unwrap();
+        let logical: u64 = store.db.query_row("SELECT page_count * page_size FROM pragma_page_count, pragma_page_size", [], |r| r.get(0)).unwrap();
+        assert!(logical > path.metadata().unwrap().len());
+        let wal = temp.path().join("mail.db-wal").metadata().unwrap().len();
+        assert_eq!(store.vacuum_space_required().unwrap(), 2 * (logical + wal) + 100 * 1024 * 1024);
+
+        let other_cleanup = File::create(temp.path().join("vacuum.lock")).unwrap();
+        other_cleanup.try_lock().unwrap();
+        let first = store.desktop_session().unwrap();
+        drop(other_cleanup);
+        let second = store.desktop_session().unwrap();
+        drop(first);
+        let third = store.desktop_session().unwrap();
+        let pending = || store.db.query_row("SELECT count(*) FROM pending_vacuum", [], |r| r.get::<_, u32>(0)).unwrap();
+        assert_eq!(pending(), 1);
+        drop((second, third));
+        let _only_session = store.desktop_session().unwrap();
+        assert_eq!(pending(), 0);
+    }
+
     #[test]
     fn startup_vacuum_removes_deleted_draft_from_partly_used_page() {
         let temp = tempfile::tempdir().unwrap();
