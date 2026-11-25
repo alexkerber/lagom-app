@@ -52,12 +52,15 @@ impl Store {
         // With two Google Tasks accounts nothing says whose an unassigned list is, so it stays local.
         let sole = !tx.prepare("SELECT scopes FROM accounts WHERE id<>?1")?.query_map([account], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|scopes| oauth::tasks_allowed(scopes));
+        if !sole {
+            tx.execute("UPDATE task_lists SET detached=1 WHERE account IS NULL AND detached=0 AND deleted=0", [])?;
+        }
         // Claim each local list once, even when two account jobs discover lists concurrently.
         for list in remote {
             if list.id.is_empty() { return Err(Error::Network("Google task list ID missing")); }
             let existing: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE account=?1 AND remote_id=?2", params![account, list.id], |r| r.get(0)).optional()?;
             if existing.is_some() { continue; }
-            let local: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE ((account IS NULL AND detached=0 AND ?3) OR account=?1) AND remote_id IS NULL AND deleted=0 AND name=?2 ORDER BY id LIMIT 1", params![account, list.title, sole], |r| r.get(0)).optional()?;
+            let local: Option<i64> = tx.query_row("SELECT id FROM task_lists WHERE ((account IS NULL AND detached=0) OR account=?1) AND remote_id IS NULL AND deleted=0 AND name=?2 ORDER BY id LIMIT 1", params![account, list.title], |r| r.get(0)).optional()?;
             if let Some(id) = local {
                 tx.execute("UPDATE task_lists SET account=?2,remote_id=?3,etag=?4,remote_updated=?5 WHERE id=?1", params![id, account, list.id, list.etag, list.updated])?;
             } else {
@@ -219,6 +222,11 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
                 }
                 store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1", [task.id])?;
             }
+            // A move or list deletion can leave a mail-derived title in another account's list.
+            if task.mail_account.as_deref().is_some_and(|owner| owner != account)
+                && task.mail_subject.as_deref().is_none_or(|subject| task.title.contains(subject.trim())) {
+                continue;
+            }
             let body = task_body(&task, account)?;
             let response = if let Some(id) = task.remote_id.as_ref().filter(|_| !moved) {
                 client.request(Method::PATCH, client.url(&["lists", remote_list, "tasks", id])?, Some(body.clone())).await
@@ -289,7 +297,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
                 tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8 WHERE id=?1 AND dirty=0",
                     params![id, task.title, notes, task.due, done, task.deleted, task.etag, task.updated])?;
                 // The push leaves out a link to another account's mail, so its absence here does not remove it.
-                tx.execute("UPDATE tasks SET mail_account=?2,mail_message_id=?3,mail_subject=?4 WHERE id=?1 AND dirty=0 AND (?2 IS NOT NULL OR mail_account IS ?5)",
+                tx.execute("UPDATE tasks SET mail_account=coalesce(?2,mail_account),mail_message_id=?3,mail_subject=?4 WHERE id=?1 AND dirty=0 AND (?2 IS NOT NULL OR (mail_account IS ?5 AND mail_message_id IS NOT NULL))",
                     params![id, mail.as_ref().map(|m| &m.0), mail.as_ref().map(|m| &m.1), mail.as_ref().and_then(|m| m.2.as_ref()), account])?;
             } else if !task.deleted {
                 tx.execute("INSERT INTO tasks(list,remote_id,remote_list_id,title,notes,due,done_at,position,updated,created,etag,remote_updated,mail_account,mail_message_id,mail_subject)

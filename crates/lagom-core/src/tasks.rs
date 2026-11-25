@@ -160,7 +160,7 @@ impl Store {
     ) -> Result<Task> {
         Ok(self.db.query_row(&format!("INSERT INTO tasks(list,title,notes,due,position,mail_account,mail_message_id,mail_subject,updated,dirty,created)
             SELECT ?1,?2,?3,?4,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1 AND deleted=0),?5,?6,?7,unixepoch(),1,unixepoch() WHERE EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND deleted=0) RETURNING {TASK_COLUMNS}"),
-            params![list, title(name)?, notes, due, mail.map(|m| &m.account), mail.map(|m| &m.message_id), mail.map(|m| &m.subject)], task_row)?)
+            params![list, title(name)?, notes, due, mail.map(|m| &m.account), mail.filter(|m| !m.message_id.is_empty()).map(|m| &m.message_id), mail.map(|m| &m.subject)], task_row)?)
     }
     pub fn rename_task(&self, id: i64, name: &str) -> Result<()> {
         changed(self.db.execute("UPDATE tasks SET title=?2,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?])?)
@@ -195,23 +195,29 @@ impl Store {
             [id],
         )?)
     }
-    pub fn task_from_mail(&self, list: i64, mail: &MessageSummary) -> Result<Task> {
+    pub fn task_from_mail(&self, preferred: i64, mail: &MessageSummary) -> Result<Task> {
+        let tx = self.write_transaction()?;
+        let list = tx.query_row(
+            "SELECT id FROM task_lists WHERE deleted=0 AND (account=?1 OR account IS NULL)
+             ORDER BY (account IS NOT NULL) DESC,(id=?2) DESC,detached DESC,position,id LIMIT 1",
+            params![mail.account, preferred], |r| r.get::<_, i64>(0),
+        ).optional()?;
+        let list = match list {
+            Some(id) => {
+                tx.execute("UPDATE task_lists SET detached=1 WHERE id=?1 AND account IS NULL AND detached=0", [id])?;
+                id
+            }
+            None => tx.query_row("INSERT INTO task_lists(name,position,detached)
+                SELECT 'Local',COALESCE(MAX(position),-1)+1,1 FROM task_lists RETURNING id", [], |r| r.get(0))?,
+        };
         let name = if mail.subject.trim().is_empty() {
             "(no subject)"
         } else {
             &mail.subject
         };
-        self.insert_task(
-            list,
-            name,
-            "",
-            None,
-            if mail.message_id.is_empty() {
-                None
-            } else {
-                Some(mail)
-            },
-        )
+        let task = self.insert_task(list, name, "", None, Some(mail))?;
+        tx.commit()?;
+        Ok(task)
     }
     pub fn tasks_for_mail(&self, account: &str, message_id: &str) -> Result<Vec<Task>> {
         let mut stmt = self.db.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks WHERE mail_account=?1 AND mail_message_id=?2 AND deleted=0 ORDER BY done_at IS NOT NULL,position,id"))?;
@@ -636,9 +642,8 @@ mod tests {
         let task = s.task_from_mail(list, &mail).unwrap();
         assert_eq!(task.title, "(no subject)");
         assert!(
-            task.mail_account.is_none()
+            task.mail_account.as_deref() == Some(mail.account.as_str())
                 && task.mail_message_id.is_none()
-                && task.mail_subject.is_none()
         );
         assert!(s.tasks_for_mail("account", "").unwrap().is_empty());
         mail.message_id = "<id@test>".into();

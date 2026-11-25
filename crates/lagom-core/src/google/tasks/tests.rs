@@ -599,13 +599,42 @@ async fn unassigned_lists_stay_local_while_two_accounts_have_tasks_access() {
     assert!(local.account.is_none() && local.remote_id.is_none());
     assert_eq!(lists.iter().find(|l| l.id != list).unwrap().remote_id.as_deref(), Some("work"));
     assert!(store.tasks(list, true).unwrap()[0].remote_id.is_none());
-    // Once the other account has no Tasks access, the question of whose list it is has one answer.
+    // Losing the other grant does not establish ownership of the earlier list.
     store.set_account_scopes(&personal.id, "https://mail.google.com/").unwrap();
-    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", r#"{"id":"claimed","title":"Work"}"#), ("200 OK", TASK), ("200 OK", EMPTY), ("200 OK", EMPTY)]).await;
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
     sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
-    assert!(handle.await.unwrap()[2].starts_with("POST /lists/claimed/tasks "));
-    assert_eq!(store.task_lists().unwrap().iter().find(|l| l.id == list).unwrap().account.as_deref(), Some(work.id.as_str()));
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+    assert!(store.task_lists().unwrap().iter().find(|l| l.id == list).unwrap().account.is_none());
     assert_eq!(store.tasks(list, true).unwrap()[0].id, task.id);
+}
+
+#[tokio::test]
+async fn mail_subject_only_reaches_a_list_owned_by_its_account() {
+    let (_dir, mut store, personal, default) = setup(true);
+    let (imap, smtp) = crate::presets::servers("work@gmail.com").unwrap();
+    let work = Account::new("work@gmail.com".into(), imap, smtp).unwrap();
+    store.save_account(&work).unwrap();
+    let mut mail = crate::store::MessageSummary { account: work.id.clone(), subject: "Private subject".into(), ..Default::default() };
+    let local = store.task_from_mail(default, &mail).unwrap();
+    let (url, requests) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &personal.id, &url, token).await.unwrap();
+    assert!(requests.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+    assert!(store.task_lists().unwrap().iter().find(|l| l.id == local.list).unwrap().account.is_none());
+
+    store.move_task(local.id, default, 0).unwrap();
+    let (url, requests) = server(vec![("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &personal.id, &url, token).await.unwrap();
+    assert!(requests.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+
+    store.set_account_scopes(&work.id, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+    store.link_google_lists(&work.id, &serde_json::from_str::<Page<RemoteList>>(LIST).unwrap().items).unwrap();
+    mail.message_id = "<private@example.test>".into();
+    let owned = store.task_from_mail(default, &mail).unwrap();
+    assert_eq!(store.task_lists().unwrap().iter().find(|l| l.id == owned.list).unwrap().account.as_deref(), Some(work.id.as_str()));
+    let (url, requests) = server(vec![("200 OK", LIST), ("200 OK", TASK), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &work.id, &url, token).await.unwrap();
+    let requests = requests.await.unwrap();
+    assert!(requests[1].starts_with("POST /lists/work/tasks ") && requests[1].contains("Private subject"));
 }
 
 #[tokio::test]
@@ -631,5 +660,5 @@ async fn link_to_another_accounts_mail_stays_out_of_google_and_survives_pull() {
     sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
     handle.await.unwrap();
     let saved = store.tasks(list, true).unwrap().remove(0);
-    assert_eq!((saved.mail_account, saved.mail_message_id, saved.mail_subject), (None, None, None));
+    assert_eq!((saved.mail_account, saved.mail_message_id, saved.mail_subject), (Some(account.id), None, None));
 }
