@@ -98,8 +98,9 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub fn add_task_list(&self, name: &str) -> Result<TaskList> {
-        let tx = self.db.unchecked_transaction()?;
-        let list = tx.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position,google_default", [title(name)?], list_row)?;
+        let tx = self.write_transaction()?;
+        let detached = self.google_tasks_accounts()?.len() > 1;
+        let list = tx.query_row("INSERT INTO task_lists(name,detached,position) SELECT ?1,?2,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position,google_default", params![title(name)?, detached], list_row)?;
         tx.execute("INSERT INTO task_settings(id,list) VALUES(1,?1) ON CONFLICT(id) DO NOTHING", [list.id])?;
         tx.commit()?;
         Ok(list)
@@ -160,7 +161,7 @@ impl Store {
     ) -> Result<Task> {
         Ok(self.db.query_row(&format!("INSERT INTO tasks(list,title,notes,due,position,mail_account,mail_message_id,mail_subject,updated,dirty,created)
             SELECT ?1,?2,?3,?4,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1 AND deleted=0),?5,?6,?7,unixepoch(),1,unixepoch() WHERE EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND deleted=0) RETURNING {TASK_COLUMNS}"),
-            params![list, title(name)?, notes, due, mail.map(|m| &m.account), mail.map(|m| &m.message_id), mail.map(|m| &m.subject)], task_row)?)
+            params![list, title(name)?, notes, due, mail.map(|m| &m.account), mail.filter(|m| !m.message_id.is_empty()).map(|m| &m.message_id), mail.map(|m| &m.subject)], task_row)?)
     }
     pub fn rename_task(&self, id: i64, name: &str) -> Result<()> {
         changed(self.db.execute("UPDATE tasks SET title=?2,updated=unixepoch(),dirty=1 WHERE id=?1 AND deleted=0", params![id, title(name)?])?)
@@ -195,23 +196,31 @@ impl Store {
             [id],
         )?)
     }
-    pub fn task_from_mail(&self, list: i64, mail: &MessageSummary) -> Result<Task> {
+    pub fn task_from_mail(&self, preferred: i64, mail: &MessageSummary) -> Result<Task> {
+        let tx = self.write_transaction()?;
+        let list = tx.query_row(
+            "SELECT id FROM task_lists WHERE deleted=0 AND (account=?1 OR account IS NULL)
+             ORDER BY (id=?2) DESC,(account IS NOT NULL) DESC,detached DESC,position,id LIMIT 1",
+            params![mail.account, preferred], |r| r.get::<_, i64>(0),
+        ).optional()?;
+        // An existing list is not detached: the push filter keeps another account's mail tasks out of it.
+        // A list made only for this task stays local unless the mail's account is the one Tasks account.
+        let list = match list {
+            Some(id) => id,
+            None => {
+                let detach = self.google_tasks_accounts()?.as_slice() != [mail.account.as_str()];
+                tx.query_row("INSERT INTO task_lists(name,position,detached)
+                    SELECT 'Local',COALESCE(MAX(position),-1)+1,?1 FROM task_lists RETURNING id", [detach], |r| r.get(0))?
+            }
+        };
         let name = if mail.subject.trim().is_empty() {
             "(no subject)"
         } else {
             &mail.subject
         };
-        self.insert_task(
-            list,
-            name,
-            "",
-            None,
-            if mail.message_id.is_empty() {
-                None
-            } else {
-                Some(mail)
-            },
-        )
+        let task = self.insert_task(list, name, "", None, Some(mail))?;
+        tx.commit()?;
+        Ok(task)
     }
     pub fn tasks_for_mail(&self, account: &str, message_id: &str) -> Result<Vec<Task>> {
         let mut stmt = self.db.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks WHERE mail_account=?1 AND mail_message_id=?2 AND deleted=0 ORDER BY done_at IS NOT NULL,position,id"))?;
@@ -354,7 +363,7 @@ mod tests {
     #[test]
     fn first_list_becomes_default_in_an_empty_store() {
         let store = Store { db: rusqlite::Connection::open_in_memory().unwrap() };
-        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql"), include_str!("schema_v13.sql"), include_str!("schema_v14.sql")] {
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql"), include_str!("schema_v13.sql"), include_str!("schema_v14.sql")] {
             let empty = schema.lines().filter(|line| !line.starts_with("INSERT INTO task_lists")).collect::<Vec<_>>().join("\n");
             store.db.execute_batch(&empty).unwrap();
         }
@@ -636,9 +645,8 @@ mod tests {
         let task = s.task_from_mail(list, &mail).unwrap();
         assert_eq!(task.title, "(no subject)");
         assert!(
-            task.mail_account.is_none()
+            task.mail_account.as_deref() == Some(mail.account.as_str())
                 && task.mail_message_id.is_none()
-                && task.mail_subject.is_none()
         );
         assert!(s.tasks_for_mail("account", "").unwrap().is_empty());
         mail.message_id = "<id@test>".into();

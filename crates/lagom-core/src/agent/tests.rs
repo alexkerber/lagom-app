@@ -416,6 +416,30 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
 }
 
 #[test]
+fn removed_account_cannot_regain_audit_details_after_confirmation() {
+    let (_dir, mut store, account, inbox) = setup();
+    store.reset_uidvalidity(inbox, 1).unwrap();
+    let id = store.save_message(&mail(&account, inbox, 1)).unwrap();
+    let target = store.agent_message_row(&account.id, id).unwrap().2.target;
+    let agent = store.create_agent("test", "sender", "local", false).unwrap();
+    let token = store.issue_token(&agent, TokenScope::Local).unwrap();
+    let who = store.authenticate(Some(&token), None).unwrap();
+    let writer = crate::store::Store::agent_writer(store.path()).unwrap();
+    store.delete_account(&account.id).unwrap();
+    let recipients = ["bcc@example.test".parse().unwrap()];
+    let row = || AuditRow { identity: Some(&who), account: Some(account.id.parse().unwrap()), command: "draft.send",
+        target: Some(&target), outcome: Ok(()), source_ip: None, recipients: &recipients };
+    assert_eq!(writer.begin_agent_write(row()), Err(Code::NotFound));
+    writer.record_agent_audit(row()).unwrap();
+    assert!(store.agent_audit(10).unwrap().is_empty());
+
+    store.db.execute("INSERT INTO agent_audit(at,account,command,target,result,detail)
+        VALUES(unixepoch(),?1,'draft.send','old target','ok','old recipients')", [&account.id]).unwrap();
+    let reopened = crate::store::Store::open(store.path()).unwrap();
+    assert!(reopened.agent_audit(10).unwrap().is_empty());
+}
+
+#[test]
 fn audit_limits_anonymous_refusals() {
     let (_dir, s, _, _) = setup();
     let now = chrono::Utc::now().timestamp();

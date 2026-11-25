@@ -200,9 +200,9 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
     (Bridge(cmd_tx), ev_rx)
 }
 
-/// The text the window shows for `error`; the log keeps the technical detail.
+/// The text the window shows for `error`; the log keeps the technical detail, without addresses and mailbox names.
 fn shown(error: &Error) -> String {
-    eprintln!("lagom: {error:?}");
+    eprintln!("lagom: {}", error.log());
     error.to_string()
 }
 
@@ -664,10 +664,14 @@ impl Worker {
     }
 
     fn remove(&mut self, id: &str) {
-        self.remove_with(id, Account::delete_password);
+        #[cfg(not(test))]
+        let cache = lagom_core::imap_sync::eml_cache_dir().ok();
+        #[cfg(test)]
+        let cache = Some(self.store.path().with_file_name("eml-cache"));
+        self.remove_with(id, Account::delete_password, cache.as_deref());
     }
 
-    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>) {
+    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, eml_cache: Option<&std::path::Path>) {
         self.cancel_calendar(id);
         if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         if self.reauth.as_deref() == Some(id) { self.cancel_sign_in(); }
@@ -682,6 +686,10 @@ impl Worker {
             return;
         }
         self.reauth_required.remove(id);
+        // The account is already removed, so a failure here is logged and not shown.
+        if let Some(Err(error)) = eml_cache.map(lagom_core::imap_sync::clear_cached_emls) {
+            eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
+        }
         self.emit(Event::Changed);
     }
 
@@ -1477,7 +1485,7 @@ mod tests {
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(vec![])));
         let stale = worker.calendars.join_next_with_id().await.unwrap();
         worker.store.delete_account(&account.id).unwrap();
-        worker.remove(&account.id);
+        worker.remove_with(&account.id, Account::delete_password, None);
         worker.calendar_finished(stale);
         assert!(worker.store.accounts().unwrap().is_empty());
         drop(worker);
@@ -2281,15 +2289,20 @@ mod greenmail {
         op_ok(&mut events, 15).await;
         assert_eq!(server(&account).await["Archive"], ["Archive me"]);
 
+        let cache = dir.join("eml-cache");
+        std::fs::create_dir(&cache).unwrap();
+        let original = cache.join("message-abc123.eml");
+        std::fs::write(&original, b"cached mail").unwrap();
         let _ = bridge.send(Cmd::RemoveAccount(account.id.clone()));
         // Earlier Changed events may still be queued: wait for the store itself.
         for _ in 0..100 {
-            if store.accounts().unwrap().is_empty() {
+            if store.accounts().unwrap().is_empty() && !original.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(store.accounts().unwrap().is_empty());
+        assert!(!original.exists());
         assert!(account.password().is_err(), "keychain entry removed");
         let _ = std::fs::remove_dir_all(dir);
     }

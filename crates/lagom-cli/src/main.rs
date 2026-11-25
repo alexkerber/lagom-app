@@ -64,7 +64,7 @@ impl From<SignInProvider> for Provider {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Enable local Read access for the selected account and print a test token, or disable access.
+    /// Enable local Read access for the selected account and print the path of its test token file, or disable access.
     Agent { #[arg(long)] off: bool },
     Tasks {
         #[command(subcommand)]
@@ -277,13 +277,32 @@ fn print_messages(messages: Vec<MessageSummary>) {
         );
     }
 }
-async fn connection(account: &Account) -> Result<ImapSync> {
+async fn connection(account: &Account) -> lagom_core::Result<ImapSync> {
     let password = account.password()?;
-    Ok(ImapSync::login(account, &password).await?)
+    ImapSync::login(account, &password).await
+}
+fn sync_log(error: lagom_core::Error) -> anyhow::Error {
+    anyhow::Error::msg(error.log())
 }
 async fn sign_in(provider: Provider) -> Result<oauth::SignedIn> {
     // A browser launched with the URL as an argument would show its state and PKCE challenge to other local users in `ps`.
     Ok(oauth::sign_in(provider, |url| eprintln!("Open this URL in your browser to sign in:\n{url}")).await?)
+}
+#[cfg(unix)]
+fn write_owner_only(path: PathBuf, contents: &str) -> Result<tempfile::TempPath> {
+    let mut dir = std::fs::DirBuilder::new();
+    dir.recursive(true);
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create_new(true);
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    dir.mode(0o700);
+    file.mode(0o600);
+    dir.create(path.parent().context("missing token directory")?)?;
+    let mut file = file.open(&path)?;
+    // Remove a partial file or a token whose database transaction fails to commit.
+    let path = tempfile::TempPath::try_from_path(path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(path)
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -298,9 +317,18 @@ async fn main() -> Result<()> {
             if off {
                 store.disable_agents().map_err(|e| anyhow::anyhow!(e.message()))?;
             } else {
-                let account = selected(&store,args.account.as_deref())?;
-                let token = store.provision_read_agent(&account.id).map_err(|e| anyhow::anyhow!(e.message()))?;
-                println!("{}", token.as_str());
+                #[cfg(not(unix))]
+                bail!("Cannot create an owner-only agent token file on this platform.");
+                #[cfg(unix)]
+                {
+                    let account = selected(&store, args.account.as_deref())?;
+                    let mut path = store.provision_read_agent_with(&account.id, |agent, token| -> Result<_> {
+                        let path = store.path().with_file_name("agents").join(format!("{agent}.token"));
+                        write_owner_only(path, &token).context("Could not write the owner-only agent token file")
+                    })?;
+                    path.disable_cleanup(true);
+                    println!("{}", path.display());
+                }
             }
         }
         Command::Tasks { command } => match command {
@@ -413,9 +441,9 @@ async fn main() -> Result<()> {
                 bail!("No accounts; use add-account first");
             }
             for account in accounts {
-                let mut imap = connection(&account).await?;
-                imap.sync(&mut store, DEFAULT_LIMIT).await?;
-                imap.logout().await?;
+                let mut imap = connection(&account).await.map_err(sync_log)?;
+                imap.sync(&mut store, DEFAULT_LIMIT).await.map_err(sync_log)?;
+                imap.logout().await.map_err(sync_log)?;
                 println!("Synced {}", account.email);
             }
         }
@@ -518,6 +546,14 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sync_stderr_omits_mailbox_and_address() {
+        use lagom_core::Error;
+        let error = Error::Folder { folder: "Private projects".into(),
+            source: Box::new(Error::GoogleAccountMismatch("private@example.test".into())) };
+        assert_eq!(format!("{:?}", sync_log(error)), "Folder(GoogleAccountMismatch)");
+    }
+
     #[test]
     fn configuration_and_plain_guard() {
         assert!(config("a@gmail.com", None, None, None, None).is_ok());

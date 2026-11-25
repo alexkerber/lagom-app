@@ -164,6 +164,7 @@ fn tasks_reject_missing_ambiguous_and_invalid_inputs() {
     assert_eq!(store.tasks(1, false).unwrap().len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn developer_agent_enables_only_the_selected_account() {
     use lagom_core::agent::policy::{Level, Resource};
@@ -179,15 +180,54 @@ fn developer_agent_enables_only_the_selected_account() {
             resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
         }).unwrap();
     }
-    let raw = run(&path, &["agent", "--account", "a@gmail.com"]);
+    let printed = run(&path, &["agent", "--account", "a@gmail.com"]);
+    assert!(!printed.contains("lgm_"), "the token must not reach stdout");
+    let file = std::path::Path::new(printed.trim());
+    assert_eq!(file.parent().unwrap().file_name().unwrap(), "agents");
+    assert!(store.agents().unwrap().iter().any(|a| file.file_name().unwrap().to_str() == Some(&format!("{}.token", a.id))));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    let raw = std::fs::read_to_string(file).unwrap();
     for a in store.accounts().unwrap() {
         for resource in [Resource::Mail, Resource::Calendar] {
-            assert_eq!(store.effective(Some(raw.trim()), None, resource, &a.id).unwrap(),
+            assert_eq!(store.effective(Some(&raw), None, resource, &a.id).unwrap(),
                 if a.email == "a@gmail.com" { Level::Read } else { Level::None });
         }
     }
     run(&path, &["agent", "--off"]);
     assert!(!store.agent_enabled().unwrap());
+    // A file failure rolls back provisioning and leaves the old listener disabled.
+    std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file.parent().unwrap(), "").unwrap();
+    let before = store.agents().unwrap().len();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&path).args(["agent", "--account", "a@gmail.com"]).output().unwrap();
+    assert!(!output.status.success() && output.stdout.is_empty());
+    let agents = store.agents().unwrap();
+    assert!(!store.agent_enabled().unwrap());
+    let account = store.accounts().unwrap().into_iter().find(|a| a.email == "a@gmail.com").unwrap();
+    assert_eq!(store.effective(Some(&raw), None, Resource::Mail, &account.id).unwrap(), Level::None);
+    assert_eq!(agents.len(), before);
+    assert_eq!(agents.iter().filter(|a| a.active).count(), 1, "only the first agent keeps a token");
+}
+
+#[cfg(not(unix))]
+#[test]
+fn developer_agent_requires_owner_only_files_before_provisioning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cli.db");
+    let store = Store::open(&path).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&path).arg("agent").output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("owner-only"));
+    assert!(store.agents().unwrap().is_empty());
+    assert!(!store.agent_enabled().unwrap());
+    assert!(!dir.path().join("agents").exists());
 }
 
 #[test]

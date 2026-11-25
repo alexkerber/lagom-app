@@ -47,8 +47,25 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    pub(crate) fn google_tasks_accounts(&self) -> Result<Vec<String>> {
+        let mut stmt = self.db.prepare("SELECT id,scopes FROM accounts")?;
+        let mut rows = stmt.query([])?;
+        let mut accounts = Vec::new();
+        while let Some(row) = rows.next()? {
+            if oauth::tasks_allowed(&row.get::<_, String>(1)?) {
+                accounts.push(row.get(0)?);
+            }
+        }
+        Ok(accounts)
+    }
+
     fn link_google_lists(&self, account: &str, remote: &[RemoteList]) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
+        // With two Google Tasks accounts nothing says whose an unassigned list is, so it stays local.
+        let sole = self.google_tasks_accounts()?.iter().all(|id| id == account);
+        if !sole {
+            tx.execute("UPDATE task_lists SET detached=1 WHERE account IS NULL AND detached=0 AND deleted=0", [])?;
+        }
         // Claim each local list once, even when two account jobs discover lists concurrently.
         for list in remote {
             if list.id.is_empty() { return Err(Error::Network("Google task list ID missing")); }
@@ -61,14 +78,20 @@ impl Store {
                 tx.execute("INSERT INTO task_lists(account,remote_id,name,position,dirty,etag,remote_updated) SELECT ?1,?2,?3,COALESCE(MAX(position),-1)+1,0,?4,?5 FROM task_lists", params![account, list.id, list.title, list.etag, list.updated])?;
             }
         }
-        tx.execute("UPDATE task_lists SET account=?1 WHERE account IS NULL AND detached=0 AND deleted=0", [account])?;
+        if sole { tx.execute("UPDATE task_lists SET account=?1 WHERE account IS NULL AND detached=0 AND deleted=0", [account])?; }
         tx.commit()?;
         Ok(())
     }
 
-    fn pending_google_tasks(&self, list: i64) -> Result<Vec<(Task, i64, Option<String>)>> {
-        let mut stmt = self.db.prepare(&format!("SELECT {},revision,remote_list_id FROM tasks WHERE list=?1 AND (dirty=1 OR (remote_id IS NULL AND deleted=0)) ORDER BY position,id", crate::tasks::TASK_COLUMNS))?;
-        let rows = stmt.query_map([list], |r| Ok((crate::tasks::task_row(r)?, r.get(15)?, r.get(16)?)))?;
+    /// The last value is true for mail of another local account. A pulled link names its account by
+    /// another install's UUID, which is no local account, so those tasks stay the person's own.
+    /// A foreign task that already has a remote_id is in this Google list from an older build; its
+    /// edits still go up, without the link.
+    fn pending_google_tasks(&self, list: i64, account: &str) -> Result<Vec<(Task, i64, Option<String>, bool)>> {
+        let foreign = "coalesce(mail_account<>?2 AND mail_account IN (SELECT id FROM accounts),0)";
+        let mut stmt = self.db.prepare(&format!("SELECT {},revision,remote_list_id,{foreign} FROM tasks WHERE list=?1 AND (deleted=1 OR remote_id IS NOT NULL OR NOT {foreign})
+            AND (dirty=1 OR (remote_id IS NULL AND deleted=0)) ORDER BY position,id", crate::tasks::TASK_COLUMNS))?;
+        let rows = stmt.query_map(params![list, account], |r| Ok((crate::tasks::task_row(r)?, r.get(15)?, r.get(16)?, r.get(17)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 }
@@ -181,7 +204,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             store.db.execute("DELETE FROM task_lists WHERE id=?1 AND revision=?2 AND deleted=1", params![list.id, list.revision])?;
             continue;
         }
-        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && !store.pending_google_tasks(list.id)?.is_empty()) {
+        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && store.pending_google_tasks(list.id, account)?.iter().any(|t| !t.3)) {
             let body = json!({"title": list.name});
             let response = if let Some(id) = &list.remote {
                 client.request(Method::PATCH, client.url(&["users", "@me", "lists", id])?, Some(body.clone())).await
@@ -203,7 +226,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     // shortcut: ordering and subtasks stay local, add tasks.move when syncing provider ordering.
     for list in store.google_lists(account)?.into_iter().filter(|l| !l.deleted) {
         let Some(remote_list) = &list.remote else { continue };
-        for (task, revision, old_list) in store.pending_google_tasks(list.id)? {
+        for (task, revision, old_list, foreign) in store.pending_google_tasks(list.id, account)? {
             let moved = old_list.as_ref().is_some_and(|old| old != remote_list);
             if task.deleted || moved {
                 if let Some(id) = &task.remote_id {
@@ -216,12 +239,19 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
                 }
                 store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1", [task.id])?;
             }
-            let body = task_body(&task)?;
+            let body = task_body(&task, foreign)?;
             let response = if let Some(id) = task.remote_id.as_ref().filter(|_| !moved) {
                 client.request(Method::PATCH, client.url(&["lists", remote_list, "tasks", id])?, Some(body.clone())).await
             } else { Err(Error::NotFound) };
             // shortcut: retry after a lost POST response can duplicate a task, add reconciliation before promising exactly-once inserts.
             let value = match response {
+                // An older build's copy of another account's mail is gone from Google: do not put it back.
+                Err(Error::NotFound) if foreign => {
+                    // Only the mapping this PATCH used: a move during the request may have made a new one.
+                    store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1 AND list=?2 AND remote_id IS ?3",
+                        params![task.id, list.id, task.remote_id])?;
+                    continue;
+                }
                 Err(Error::NotFound) => client.request(Method::POST, client.url(&["lists", remote_list, "tasks"])?, Some(body)).await?,
                 value => value?,
             };
@@ -283,8 +313,11 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             let (notes, mail) = split_notes(&task.notes);
             let done = if task.status == "completed" { Some(task.completed.as_deref().and_then(timestamp).unwrap_or(0)) } else { None };
             if let Some((id, _, _)) = existing {
-                tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8,mail_account=?9,mail_message_id=?10,mail_subject=?11 WHERE id=?1 AND dirty=0",
-                    params![id, task.title, notes, task.due, done, task.deleted, task.etag, task.updated, mail.as_ref().map(|m| &m.0), mail.as_ref().map(|m| &m.1), mail.as_ref().and_then(|m| m.2.as_ref())])?;
+                tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8 WHERE id=?1 AND dirty=0",
+                    params![id, task.title, notes, task.due, done, task.deleted, task.etag, task.updated])?;
+                // The push leaves out a link to another account's mail, so its absence here does not remove it.
+                tx.execute("UPDATE tasks SET mail_account=coalesce(?2,mail_account),mail_message_id=?3,mail_subject=?4 WHERE id=?1 AND dirty=0 AND (?2 IS NOT NULL OR (mail_message_id IS NOT NULL AND coalesce(mail_account=?5 OR mail_account NOT IN (SELECT id FROM accounts),0)))",
+                    params![id, mail.as_ref().map(|m| &m.0), mail.as_ref().map(|m| &m.1), mail.as_ref().and_then(|m| m.2.as_ref()), account])?;
             } else if !task.deleted {
                 tx.execute("INSERT INTO tasks(list,remote_id,remote_list_id,title,notes,due,done_at,position,updated,created,etag,remote_updated,mail_account,mail_message_id,mail_subject)
                     VALUES(?1,?2,?3,?4,?5,?6,?7,(SELECT COALESCE(MAX(position),-1)+1 FROM tasks WHERE list=?1),unixepoch(),unixepoch(),?8,?9,?10,?11,?12)",
@@ -301,9 +334,10 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
 
 fn timestamp(value: &str) -> Option<i64> { mail_parser::DateTime::parse_rfc3339(value).filter(|d| d.is_valid()).map(|d| d.to_timestamp()) }
 
-fn task_body(task: &Task) -> Result<Value> {
+fn task_body(task: &Task, foreign: bool) -> Result<Value> {
     let mut notes = task.notes.clone();
-    if let (Some(account), Some(message)) = (&task.mail_account, &task.mail_message_id) {
+    // A link to another account's mail would give this Google account that mail's Message-ID and subject.
+    if let (Some(account), Some(message), false) = (&task.mail_account, &task.mail_message_id, foreign) {
         let mut link = Url::parse("lagom://mail").unwrap();
         link.query_pairs_mut().append_pair("account", account).append_pair("message-id", message);
         if let Some(subject) = &task.mail_subject { link.query_pairs_mut().append_pair("subject", subject); }

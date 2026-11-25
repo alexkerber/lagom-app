@@ -2,8 +2,8 @@
 
 Coding agents read and act on mail and calendar through the running desktop app. Security is the
 main requirement. This page is the decision that the "acting tools" line in `TODO.md` waits for.
-It states the threat model, the rules, the protocol and the pull requests that build it. No code
-for it exists yet.
+It states the threat model, the rules, the protocol and the pull requests that build it. The
+desktop app ships it under Settings > AI Agents, off by default.
 
 Scope: the desktop app on macOS and Linux. Windows follows in its own step. The mobile apps expose
 nothing.
@@ -392,7 +392,7 @@ Every request that reaches the app is logged, refused ones too. Table `agent_aud
 - Refusals without a verified digest are limited to 60 rows a minute, then counted in one row.
 - Verified refusals before worker dispatch and busy replies share one counter per agent per minute. The first refusal records its reason.
 - Socket admission failures are counted off the listener thread. Settings shows the newest 50 rows for each agent.
-- Rows have no foreign keys: they outlive the agent, the token and the account.
+- Rows have no foreign keys: they outlive the agent and the token. Removing an account deletes its rows.
 - Settings shows the log by agent, newest first, with Revoke on each agent.
 
 ## 11. Store

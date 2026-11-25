@@ -260,7 +260,7 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
                 .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx))))
             .child(div().flex().flex_col().gap(px(6.)).pb(px(8.))
                 .when_some(a.socket_error, |row, code| row.child(div().text_color(t.danger).child(code.message())))
-                .child(note(t, "Connected agents can read and act on your mail and calendar, within the levels below."))
+                .child(note(t, "Connected agents can read and act on your mail and calendar, within the levels below. lagom never gives them your password. An agent can send what it reads to the AI service it uses."))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4))
                     .child("Connect only agents you trust, on a computer you control. A mail can hold instructions written for the agent."))));
 

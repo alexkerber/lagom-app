@@ -373,9 +373,13 @@ impl Store {
         }
         Ok(())
     }
-    /// Removes the account and, by cascade, its folders, messages and search rows.
+    /// Removes the account and, by cascade, its folders, messages and search rows. The agent log has no
+    /// foreign keys, so its rows for the account (targets and recipients, Bcc too) are deleted here.
     pub fn delete_account(&self, id: &str) -> Result<()> {
+        let tx = self.db.is_autocommit().then(|| self.write_transaction()).transpose()?;
+        self.db.execute("DELETE FROM agent_audit WHERE account=?1", [id])?;
         self.db.execute("DELETE FROM accounts WHERE id=?1", [id])?;
+        if let Some(tx) = tx { tx.commit()?; }
         Ok(())
     }
     /// The removal confirmation's words, the same on every platform. Removing the account also deletes its drafts
@@ -1743,6 +1747,17 @@ pub(crate) mod mail_tests {
         assert!(s.message(id).is_err());
         assert!(s.folder(f).is_err());
         assert!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap().is_empty());
+    }
+    #[test]
+    fn delete_account_removes_its_agent_audit_rows() {
+        let (_t, s, a, _) = setup();
+        for account in [a.id.as_str(), "other"] {
+            s.db.execute("INSERT INTO agent_audit(at,account,command,target,result,detail) VALUES(1,?1,'draft.send','target','ok','[\"bcc@example.test\"]')", [account]).unwrap();
+        }
+        s.delete_account(&a.id).unwrap();
+        let left: Vec<String> = s.db.prepare("SELECT account FROM agent_audit").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+        assert_eq!(left, ["other"]);
     }
     #[test]
     fn agent_filter_scopes_every_alternative_before_paging() {

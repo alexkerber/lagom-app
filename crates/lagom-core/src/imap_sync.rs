@@ -175,23 +175,39 @@ pub struct ImapSync {
     /// Kept to reconnect after a message whose response left the session unusable.
     password: zeroize::Zeroizing<String>,
 }
-fn prune_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
-    let max_age = Duration::from_secs(7 * 24 * 60 * 60);
+/// The desktop cache of original messages.
+pub fn eml_cache_dir() -> Result<std::path::PathBuf> {
+    Ok(dirs::cache_dir().ok_or(Error::Invalid("cache directory unavailable"))?.join("lagom"))
+}
+
+/// Account removal: a cached original's name is a hash that does not say whose mail it is, so all of them go.
+/// An original downloads again when it is opened.
+pub fn clear_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
+    match prune_cached_emls(dir, None) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>) -> std::io::Result<()> {
+    let mut failed = None;
     for entry in std::fs::read_dir(dir)?.flatten() {
         let filename = entry.file_name();
-        let Some(key) = filename.to_str().and_then(|s| s.strip_prefix("message-"))
-            .and_then(|s| s.strip_suffix(".eml")) else { continue };
-        // Older versions published tempfile's six-character alphanumeric names.
-        let owned = (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
-            || (key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric()));
+        let Some(name) = filename.to_str() else { continue };
+        let random = |key: &str| key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric());
+        // An interrupted download leaves tempfile's `.tmp` name. Older versions published its six-character names.
+        let owned = name.strip_prefix(".tmp").is_some_and(random)
+            || name.strip_prefix("message-").and_then(|s| s.strip_suffix(".eml"))
+                .is_some_and(|key| random(key) || (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())));
         if !owned { continue; }
         let Ok(meta) = entry.metadata() else { continue };
         let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
-        if meta.is_file() && age.is_some_and(|age| age > max_age) {
-            let _ = std::fs::remove_file(entry.path());
+        if meta.is_file() && max_age.is_none_or(|max| age.is_some_and(|age| age > max)) {
+            if let Err(error) = std::fs::remove_file(entry.path()) { failed.get_or_insert(error); }
         }
     }
-    Ok(())
+    // Pruning rides on saving another original and must not fail it; a clear reports what it left behind.
+    match failed { Some(error) if max_age.is_none() => Err(error), _ => Ok(()) }
 }
 
 impl ImapSync {
@@ -609,8 +625,7 @@ impl ImapSync {
     }
     /// Save the original message in the desktop cache without buffering the full literal.
     pub async fn cache_eml(&mut self, store: &Store, id: i64) -> Result<std::path::PathBuf> {
-        let dir = dirs::cache_dir().ok_or(Error::Invalid("cache directory unavailable"))?.join("lagom");
-        self.save_eml(store, id, &dir).await
+        self.save_eml(store, id, &eml_cache_dir()?).await
     }
 
     async fn save_eml(&mut self, store: &Store, id: i64, dir: &std::path::Path) -> Result<std::path::PathBuf> {
@@ -631,7 +646,7 @@ impl ImapSync {
             return Ok(path);
         }
         std::fs::create_dir_all(dir)?;
-        prune_cached_emls(dir)?;
+        prune_cached_emls(dir, Some(Duration::from_secs(7 * 24 * 60 * 60)))?;
         let mut file = tempfile::NamedTempFile::new_in(dir)?;
         let limit = u64::from(message.size) * 2 + 16 * 1024 * 1024;
         let mut offset = 0u32;

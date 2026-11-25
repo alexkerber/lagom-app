@@ -24,8 +24,8 @@ pub enum MailError {
 }
 impl From<lagom_core::Error> for MailError {
     fn from(error: lagom_core::Error) -> Self {
-        // The person reads Display; the log keeps the technical detail.
-        match error { lagom_core::Error::NotFound => Self::NotFound, error => { eprintln!("lagom: {error:?}"); failure(error.to_string()) } }
+        // The person reads Display; the log keeps the technical detail, without addresses and mailbox names.
+        match error { lagom_core::Error::NotFound => Self::NotFound, error => { eprintln!("lagom: {}", error.log()); failure(error.to_string()) } }
     }
 }
 fn failure(message: impl Into<String>) -> MailError { MailError::Failed { reason: message.into() } }
@@ -428,10 +428,10 @@ fn sync_google(stores: &Stores, id: &str) -> lagom_core::Result<()> {
     planner::cache_unsaved(stores, &store, id);
     let calendar = lagom_core::oauth::calendar_allowed(&scopes).then(||
         network(lagom_core::google::sync_calendar(&store, &a, now()))
-            .inspect_err(|e| eprintln!("lagom: Google Calendar sync failed: {e:?}")));
+            .inspect_err(|e| eprintln!("lagom: Google Calendar sync failed: {}", e.log())));
     let tasks = lagom_core::oauth::tasks_allowed(&scopes).then(||
         network(lagom_core::google::sync_tasks(&mut store, &a))
-            .inspect_err(|e| eprintln!("lagom: Google Tasks sync failed: {e:?}")));
+            .inspect_err(|e| eprintln!("lagom: Google Tasks sync failed: {}", e.log())));
     match (calendar, tasks) {
         (Some(calendar), Some(tasks)) => calendar.and(tasks),
         (Some(result), None) | (None, Some(result)) => result,
