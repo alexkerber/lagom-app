@@ -203,16 +203,15 @@ impl Store {
              ORDER BY (id=?2) DESC,(account IS NOT NULL) DESC,detached DESC,position,id LIMIT 1",
             params![mail.account, preferred], |r| r.get::<_, i64>(0),
         ).optional()?;
-        let detach = self.google_tasks_accounts()?.as_slice() != [mail.account.as_str()];
+        // An existing list is not detached: the push filter keeps another account's mail tasks out of it.
+        // A list made only for this task stays local unless the mail's account is the one Tasks account.
         let list = match list {
-            Some(id) => {
-                if detach {
-                    tx.execute("UPDATE task_lists SET detached=1 WHERE id=?1 AND account IS NULL AND detached=0", [id])?;
-                }
-                id
+            Some(id) => id,
+            None => {
+                let detach = self.google_tasks_accounts()?.as_slice() != [mail.account.as_str()];
+                tx.query_row("INSERT INTO task_lists(name,position,detached)
+                    SELECT 'Local',COALESCE(MAX(position),-1)+1,?1 FROM task_lists RETURNING id", [detach], |r| r.get(0))?
             }
-            None => tx.query_row("INSERT INTO task_lists(name,position,detached)
-                SELECT 'Local',COALESCE(MAX(position),-1)+1,?1 FROM task_lists RETURNING id", [detach], |r| r.get(0))?,
         };
         let name = if mail.subject.trim().is_empty() {
             "(no subject)"
