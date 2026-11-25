@@ -98,8 +98,9 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
     pub fn add_task_list(&self, name: &str) -> Result<TaskList> {
-        let tx = self.db.unchecked_transaction()?;
-        let list = tx.query_row("INSERT INTO task_lists(name,position) SELECT ?1,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position,google_default", [title(name)?], list_row)?;
+        let tx = self.write_transaction()?;
+        let detached = self.google_tasks_accounts()?.len() > 1;
+        let list = tx.query_row("INSERT INTO task_lists(name,detached,position) SELECT ?1,?2,COALESCE(MAX(position),-1)+1 FROM task_lists RETURNING id,account,remote_id,name,position,google_default", params![title(name)?, detached], list_row)?;
         tx.execute("INSERT INTO task_settings(id,list) VALUES(1,?1) ON CONFLICT(id) DO NOTHING", [list.id])?;
         tx.commit()?;
         Ok(list)
@@ -199,16 +200,19 @@ impl Store {
         let tx = self.write_transaction()?;
         let list = tx.query_row(
             "SELECT id FROM task_lists WHERE deleted=0 AND (account=?1 OR account IS NULL)
-             ORDER BY (account IS NOT NULL) DESC,(id=?2) DESC,detached DESC,position,id LIMIT 1",
+             ORDER BY (id=?2) DESC,(account IS NOT NULL) DESC,detached DESC,position,id LIMIT 1",
             params![mail.account, preferred], |r| r.get::<_, i64>(0),
         ).optional()?;
+        let detach = self.google_tasks_accounts()?.as_slice() != [mail.account.as_str()];
         let list = match list {
             Some(id) => {
-                tx.execute("UPDATE task_lists SET detached=1 WHERE id=?1 AND account IS NULL AND detached=0", [id])?;
+                if detach {
+                    tx.execute("UPDATE task_lists SET detached=1 WHERE id=?1 AND account IS NULL AND detached=0", [id])?;
+                }
                 id
             }
             None => tx.query_row("INSERT INTO task_lists(name,position,detached)
-                SELECT 'Local',COALESCE(MAX(position),-1)+1,1 FROM task_lists RETURNING id", [], |r| r.get(0))?,
+                SELECT 'Local',COALESCE(MAX(position),-1)+1,?1 FROM task_lists RETURNING id", [detach], |r| r.get(0))?,
         };
         let name = if mail.subject.trim().is_empty() {
             "(no subject)"
@@ -360,7 +364,7 @@ mod tests {
     #[test]
     fn first_list_becomes_default_in_an_empty_store() {
         let store = Store { db: rusqlite::Connection::open_in_memory().unwrap() };
-        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql"), include_str!("schema_v13.sql"), include_str!("schema_v14.sql")] {
+        for schema in [include_str!("schema_v1.sql"), include_str!("schema_v4.sql"), include_str!("schema_v9.sql"), include_str!("schema_v10.sql"), include_str!("schema_v13.sql"), include_str!("schema_v14.sql")] {
             let empty = schema.lines().filter(|line| !line.starts_with("INSERT INTO task_lists")).collect::<Vec<_>>().join("\n");
             store.db.execute_batch(&empty).unwrap();
         }

@@ -9,9 +9,9 @@
 
 - [x] The site says "No AI features" (`site/privacy.html:94`, `site/index.html:199`), but Settings > AI Agents ships. Replace the claims, and say that a connected agent sends what it reads to its own provider.
 - [x] The Google section of `site/privacy.html:106-107` says the data goes only between the device and Google. This is false when an agent has access to a Google account. Disclose it, or keep Google accounts at None.
-- [x] Mail-derived tasks use their source account’s list or stay in a local-only list.
-  Google Tasks skips titles containing another account’s source subject.
-  Unassigned lists found with multiple Tasks accounts stay local after access changes.
+- [x] On `wip/privacy-claims`, mail tasks use the preferred local or same-account list. One Tasks account can still claim its list.
+  Renaming a task cannot send it to another account. Skipped tasks do not recreate deleted Google lists.
+  Lists created with multiple Tasks accounts stay local. Loopback sync was tested. Live Google sync was not tested.
 - [x] The agent settings do not say where an agent sends the data (`apps/desktop/src/settings/agents.rs:263`). `docs/ai-agents.md:5` still says "No code for it exists yet".
 - [x] Account removal clears cached originals and audit rows. Late confirmations cannot restore recipients or targets.
   Opening the store prunes orphaned audit rows. The GreenMail worker test clears its own temporary cache.
@@ -25,7 +25,7 @@
 - [ ] SQLite deletes leave data in free pages. Review enabling `secure_delete`.
 - [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
 - [ ] Google Tasks with two Tasks accounts: no UI picks the account for a local list, so new lists stay local. Add a picker.
-- [ ] Google Tasks: tasks pushed before the fix keep a link to another account's mail in Google notes until edited. A one-time migration (mark them dirty) would clear it.
+- [ ] Google Tasks: remove previously uploaded cross-account mail links from Google notes.
 - [ ] Check that Google's Limited Use policy allows a user-directed transfer to an AI agent the user connects.
 
 ## Brand and site

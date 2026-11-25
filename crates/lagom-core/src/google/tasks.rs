@@ -47,11 +47,22 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    pub(crate) fn google_tasks_accounts(&self) -> Result<Vec<String>> {
+        let mut stmt = self.db.prepare("SELECT id,scopes FROM accounts")?;
+        let mut rows = stmt.query([])?;
+        let mut accounts = Vec::new();
+        while let Some(row) = rows.next()? {
+            if oauth::tasks_allowed(&row.get::<_, String>(1)?) {
+                accounts.push(row.get(0)?);
+            }
+        }
+        Ok(accounts)
+    }
+
     fn link_google_lists(&self, account: &str, remote: &[RemoteList]) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         // With two Google Tasks accounts nothing says whose an unassigned list is, so it stays local.
-        let sole = !tx.prepare("SELECT scopes FROM accounts WHERE id<>?1")?.query_map([account], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|scopes| oauth::tasks_allowed(scopes));
+        let sole = self.google_tasks_accounts()?.iter().all(|id| id == account);
         if !sole {
             tx.execute("UPDATE task_lists SET detached=1 WHERE account IS NULL AND detached=0 AND deleted=0", [])?;
         }
@@ -72,9 +83,10 @@ impl Store {
         Ok(())
     }
 
-    fn pending_google_tasks(&self, list: i64) -> Result<Vec<(Task, i64, Option<String>)>> {
-        let mut stmt = self.db.prepare(&format!("SELECT {},revision,remote_list_id FROM tasks WHERE list=?1 AND (dirty=1 OR (remote_id IS NULL AND deleted=0)) ORDER BY position,id", crate::tasks::TASK_COLUMNS))?;
-        let rows = stmt.query_map([list], |r| Ok((crate::tasks::task_row(r)?, r.get(15)?, r.get(16)?)))?;
+    fn pending_google_tasks(&self, list: i64, account: &str) -> Result<Vec<(Task, i64, Option<String>)>> {
+        let mut stmt = self.db.prepare(&format!("SELECT {},revision,remote_list_id FROM tasks WHERE list=?1 AND (deleted=1 OR mail_account IS NULL OR mail_account=?2)
+            AND (dirty=1 OR (remote_id IS NULL AND deleted=0)) ORDER BY position,id", crate::tasks::TASK_COLUMNS))?;
+        let rows = stmt.query_map(params![list, account], |r| Ok((crate::tasks::task_row(r)?, r.get(15)?, r.get(16)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 }
@@ -187,7 +199,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             store.db.execute("DELETE FROM task_lists WHERE id=?1 AND revision=?2 AND deleted=1", params![list.id, list.revision])?;
             continue;
         }
-        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && !store.pending_google_tasks(list.id)?.is_empty()) {
+        if list.dirty || list.remote.is_none() || (!remote.iter().any(|r| Some(&r.id) == list.remote.as_ref()) && !store.pending_google_tasks(list.id, account)?.is_empty()) {
             let body = json!({"title": list.name});
             let response = if let Some(id) = &list.remote {
                 client.request(Method::PATCH, client.url(&["users", "@me", "lists", id])?, Some(body.clone())).await
@@ -209,7 +221,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
     // shortcut: ordering and subtasks stay local, add tasks.move when syncing provider ordering.
     for list in store.google_lists(account)?.into_iter().filter(|l| !l.deleted) {
         let Some(remote_list) = &list.remote else { continue };
-        for (task, revision, old_list) in store.pending_google_tasks(list.id)? {
+        for (task, revision, old_list) in store.pending_google_tasks(list.id, account)? {
             let moved = old_list.as_ref().is_some_and(|old| old != remote_list);
             if task.deleted || moved {
                 if let Some(id) = &task.remote_id {
@@ -221,11 +233,6 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
                     continue;
                 }
                 store.db.execute("UPDATE tasks SET remote_id=NULL,remote_list_id=NULL,etag=NULL,remote_updated=NULL WHERE id=?1", [task.id])?;
-            }
-            // A move or list deletion can leave a mail-derived title in another account's list.
-            if task.mail_account.as_deref().is_some_and(|owner| owner != account)
-                && task.mail_subject.as_deref().is_none_or(|subject| task.title.contains(subject.trim())) {
-                continue;
             }
             let body = task_body(&task, account)?;
             let response = if let Some(id) = task.remote_id.as_ref().filter(|_| !moved) {
