@@ -664,7 +664,11 @@ impl Worker {
     }
 
     fn remove(&mut self, id: &str) {
-        self.remove_with(id, Account::delete_password, lagom_core::imap_sync::eml_cache_dir().ok().as_deref());
+        #[cfg(not(test))]
+        let cache = lagom_core::imap_sync::eml_cache_dir().ok();
+        #[cfg(test)]
+        let cache = Some(self.store.path().with_file_name("eml-cache"));
+        self.remove_with(id, Account::delete_password, cache.as_deref());
     }
 
     fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, eml_cache: Option<&std::path::Path>) {
@@ -2285,15 +2289,20 @@ mod greenmail {
         op_ok(&mut events, 15).await;
         assert_eq!(server(&account).await["Archive"], ["Archive me"]);
 
+        let cache = dir.join("eml-cache");
+        std::fs::create_dir(&cache).unwrap();
+        let original = cache.join("message-abc123.eml");
+        std::fs::write(&original, b"cached mail").unwrap();
         let _ = bridge.send(Cmd::RemoveAccount(account.id.clone()));
         // Earlier Changed events may still be queued: wait for the store itself.
         for _ in 0..100 {
-            if store.accounts().unwrap().is_empty() {
+            if store.accounts().unwrap().is_empty() && !original.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(store.accounts().unwrap().is_empty());
+        assert!(!original.exists());
         assert!(account.password().is_err(), "keychain entry removed");
         let _ = std::fs::remove_dir_all(dir);
     }
