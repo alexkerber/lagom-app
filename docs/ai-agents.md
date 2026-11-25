@@ -5,20 +5,20 @@ main requirement. This page is the decision that the "acting tools" line in `TOD
 It states the threat model, the rules, the protocol and the pull requests that build it. The
 desktop app ships it under Settings > AI Agents, off by default.
 
-Scope: the desktop app on macOS and Linux. Windows follows in its own step. The mobile apps expose
+Scope: the desktop app on macOS, Linux and Windows. The mobile apps expose
 nothing.
 
 ## 1. Threat model
 
 | Actor                                                                     | Can do without this feature                                                                                                                          | Defence                                                                                                         |
 | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Another OS user on the machine                                            | Nothing: the data directory is 0700 and the store is 0600.                                                                                           | The socket is 0600 inside the 0700 directory. The app also checks the peer's user ID.                           |
+| Another OS user on the machine                                            | Unix protects the data directory (0700) and store (0600). Windows uses the user profile.                                                                                           | Unix checks peer credentials on the 0600 socket. The Windows pipe grants access only to the current user SID.                           |
 | A malicious process of the same user                                      | Read `lagom.sqlite3` (all cached mail). Write it, which includes queueing mail: the app sends due `outbox` rows. Read token files and agent configs. | **None. Not a boundary.** The socket gives it nothing it lacks.                                                 |
 | A local agent that follows instructions hidden in mail (prompt injection) | Whatever its own tools allow.                                                                                                                        | **The main case.** Levels are enforced in the app. Send needs a person. See below.                              |
 | A remote agent behind an SSH forced command                               | Nothing on this machine.                                                                                                                             | **A real boundary.** It can only run `lagom remote`. Its token limits accounts, level, time and source address. |
 | A stolen remote token                                                     | Nothing: the socket is not on the network.                                                                                                           | Using it needs code that runs as the user on this machine, which is row 2.                                      |
 
-What the socket permissions do. 0600 keeps other users of the machine out. It does not separate
+Unix socket permissions and the Windows pipe ACL keep other users of the machine out. It does not separate
 processes of the same user, and neither does anything else in this design. Per-agent rights
 between local agents are guardrails against mistakes and prompt injection. They are not a
 boundary against a hostile local process.
@@ -60,7 +60,7 @@ Limits that stay:
 
 ```
 agent ──> lagom <subcommand>  ──┐
-agent ──> lagom mcp (stdio)   ──┼──> unix socket ──> app: token, policy, confirm, audit ──> store / mail worker
+agent ──> lagom mcp (stdio)   ──┼──> local IPC ──> app: token, policy, confirm, audit ──> store / mail worker
 ssh   ──> lagom remote        ──┘
 ```
 
@@ -72,6 +72,12 @@ ssh   ──> lagom remote        ──┘
   0600, and removes it when access goes off or the app quits. A stale file is replaced; a live
   one means another instance serves, so the second instance does not bind. A path over the
   platform limit (104 bytes on macOS) fails with a message in Settings.
+- Windows uses a local byte-mode named pipe keyed by the user SID and the data directory.
+  Its protected ACL grants access only to that SID. The listener rejects remote clients,
+  requires the first pipe instance at startup, and keeps an instance open between calls.
+  The client checks ownership, the protected ACL and integrity before writing credentials.
+  Settings reports a bind failure if another process owns the name. Both transports share framing, deadlines,
+  admission limits, cancellation, policy checks and audit handling.
 - The app never listens on the network. Remote means SSH to the machine that runs the app.
 - Reads use a separate store connection with `PRAGMA query_only=ON`.
 - Mail actions go to the mail worker (`apps/desktop/src/sync.rs`) as the `Act`s a click sends, so
@@ -93,10 +99,15 @@ Every request carries a token. No token means refused. A token belongs to one ag
   where the token file is readable by the same user.
 - An agent has a random ID of 12 hex characters. It is never reused. It is the only agent text
   that appears in file names and generated commands.
-- Local agent: Connect creates the token and writes it to `agents/<agent id>.token` (0600) in the
+- Local agent: Connect creates the token and writes it to `agents/<agent id>.token` (0600 on Unix) in the
   data directory. The agent's config holds `--agent <agent id>`, never the token, because those
   configs end up in dotfile repositories. Local tokens do not expire. Connecting again replaces
   the token.
+- Windows creates the token file with a protected ACL before writing any secret. The client
+  requires the current user as owner and one explicit allow entry for that SID in a protected ACL.
+  Pipes and tokens carry a medium label blocking reads and writes from lower integrity. The client
+  rejects lower labels and treats an absent label as medium. Token files must be regular files
+  of at most 256 bytes and cannot be reparse points.
 - Remote agent: Settings creates the token with accounts, a level, an expiry (required, 30 days
   by default, 365 at most) and a required list of source IP addresses or CIDR ranges. The app writes its token file
   too, for the forced command below, and offers Show token during setup.
@@ -435,8 +446,9 @@ Compose leaves both fields empty, including when the person sends an agent-creat
   replaces only a link it made itself, and says so when that directory is not on `PATH`. No link
   is made unless the app runs from an Applications folder.
 - Linux: the package installs `/usr/bin/lagom`, so the command exists already.
-- Windows: later (plan, step g). The release binary has no console and the transport is a named
-  pipe for the current user.
+- On Windows the installer adds its directory to the user PATH for new terminals.
+  Uninstall removes the entry setup added. Connect reads the installed executable's absolute path.
+  CLI commands attach to the parent console and keep redirected handles for MCP stdio.
 - `lagom mcp` is an MCP server over stdio. Each tool call becomes one socket request with the
   caller's token, so the rights are the same. `tools/list` shows a tool when the token reaches
   its level on at least one resource; the app still checks every call. Tools: `list_accounts`,
@@ -495,7 +507,7 @@ it is unchanged. Disconnect in the header does this for every agent and switches
 - Header: title, a link to this page on the site, Disconnect.
 - "Enable agent access", off by default, with the warning: use trusted agents in an environment
   you control; an agent can be misled by the mail it reads.
-- Agent list (section 13) and "Add remote agent".
+- Agent list (section 13). The SSH setup form is available on Unix.
 - Access: one block per group with its default level, then a row per account. A mail row has
   four segments (None, Read, Triage, Send); a calendar row has three (None, Read, Send). Opening
   an agent shows the same matrix for that agent. A segment above the global level is disabled.
@@ -520,7 +532,7 @@ that writes the rows (step b).
 | d2  | Event commands; Google read with guests and ETag, update and delete in the core (only create exists) | `crates/lagom-core/src/google/create.rs`, `calendar.rs`, `apps/desktop/src/agent/write.rs`, `sync.rs`                                                                                                                                |
 | e   | Settings page, sidebar row, detection, Connect and Disconnect, audit view; remove `lagom-cli mcp`    | `apps/desktop/src/settings.rs`, `settings/agents.rs`, `agent/detect.rs`, `main_window.rs` (sidebar), `crates/lagom-cli/src/{main,mcp}.rs`, `README.md`                                                                               |
 | f   | Remote tokens in Settings, `lagom remote`, SSH guide                                                 | `apps/desktop/src/cli/remote.rs`, `settings/agents.rs`, `docs/agents-ssh.md`                                                                                                                                                         |
-| g   | Windows: named pipe, console output, `PATH` in the installer                                         | `apps/desktop/src/agent.rs`, `cli.rs`, `scripts/package-windows.iss`                                                                                                                                                                 |
+| g   | Windows private pipe, token ACLs, console and installer PATH (implemented)                            | `apps/desktop/src/agent/windows.rs`, `cli.rs`, `agent/detect.rs`, `scripts/package-windows.iss` |
 
 Order: a, b, c, d, d2, e, f, g. Step e can start after b. Step c reports `binary.size` against
 `docs/performance-budgets.toml`, because the client adds an argument parser to the app binary.
@@ -555,7 +567,7 @@ Decided, and left out of this version:
 
 - `draft schedule` returns `unsupported`. The app has no list of scheduled mail, so a person
   could not see or cancel what an agent scheduled. It follows that list.
-- Tasks, shared inboxes, files from disk in agent drafts, Windows.
+- Tasks, shared inboxes, files from disk in agent drafts.
 
 To verify during the work, not decisions:
 

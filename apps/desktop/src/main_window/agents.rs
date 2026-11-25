@@ -1,7 +1,6 @@
 use super::*;
 use crate::settings::agents::{Agents, AGENTS};
 use lagom_core::agent::{policy::{Access, Setting}, protocol::Code};
-#[cfg(unix)]
 use crate::agent::confirm::Tag;
 use lagom_core::store::Store;
 
@@ -28,6 +27,10 @@ fn core<T>(result: Result<T, Code>) -> anyhow::Result<T> {
 }
 
 /// This computer's name, as agents list it. Read when the page opens.
+#[cfg(windows)]
+fn host() -> String { std::env::var("COMPUTERNAME").unwrap_or_else(|_| "This computer".into()) }
+
+#[cfg(unix)]
 fn host() -> String {
     std::process::Command::new("hostname").arg("-s").output().ok()
         .filter(|o| o.status.success())
@@ -37,7 +40,6 @@ fn host() -> String {
         .unwrap_or_else(|| "This computer".into())
 }
 
-#[cfg(unix)]
 mod files {
     use super::*;
     use crate::agent::detect::{detect, Agent, Connection, Plan};
@@ -58,7 +60,11 @@ mod files {
             Some(store) => store.path().parent().ok_or_else(|| anyhow::anyhow!("Missing store directory"))?.to_owned(),
             None => Store::data_dir()?,
         };
-        Plan::in_dir(client, id, &a.home, &a.path, &std::env::current_exe()?, &data)
+        #[cfg(windows)]
+        let binary = crate::agent::windows::installed_binary()?;
+        #[cfg(unix)]
+        let binary = std::env::current_exe()?;
+        Plan::in_dir(client, id, &a.home, &a.path, &binary, &data)
     }
 
     /// The paths Connect will write, with the home directory as ~.
@@ -95,6 +101,7 @@ mod files {
             .join("agents").join(format!("{id}.token")))
     }
 
+    #[cfg(unix)]
     pub(super) fn create_remote(store: &Store, fields: [&str; 4], accounts: &[String], level: lagom_core::agent::policy::Level)
         -> anyhow::Result<(zeroize::Zeroizing<String>, String)> {
         use anyhow::{ensure, Context as _};
@@ -160,16 +167,6 @@ mod files {
         }
         Ok(())
     }
-}
-
-// shortcut: Windows has no detection or Connect yet (plan step g); the page revokes in the store only.
-#[cfg(not(unix))]
-mod files {
-    use super::*;
-    pub fn detected(_: &Agents) -> Vec<(String, &'static str)> { Vec::new() }
-    pub fn preview(_: &Agents, _: Option<&Store>, _: &str) -> anyhow::Result<Vec<String>> { anyhow::bail!("Not supported on this system") }
-    pub fn connect(_: &Store, _: &Agents, _: &str) -> anyhow::Result<String> { anyhow::bail!("Not supported on this system") }
-    pub fn remove(_: &Store, _: &str, _: bool) -> anyhow::Result<()> { Ok(()) }
 }
 
 impl AgentChange {
@@ -299,7 +296,6 @@ impl MainWindow {
     }
 }
 
-#[cfg(unix)]
 impl MainWindow {
     pub(super) fn watch_agent_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.agent_sheets.prune(cx.default_global::<crate::agent::confirm::Denials>());

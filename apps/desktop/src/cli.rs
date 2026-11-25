@@ -8,12 +8,11 @@ use serde_json::{Map, Value};
 use std::{
     env,
     io::{self, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::PathBuf,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     time::timeout,
 };
 
@@ -331,19 +330,27 @@ impl Client {
                 {
                     return Err(Code::Unauthorized);
                 }
-                let file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                    .open(self.dir.join("agents").join(format!("{v}.token")))
-                    .map_err(|_| Code::Unauthorized)?;
-                let meta = file.metadata().map_err(|_| Code::Unauthorized)?;
-                if !meta.is_file()
-                    || meta.uid() != unsafe { libc::geteuid() }
-                    || meta.mode() & 0o077 != 0
-                    || meta.len() > 256
-                {
-                    return Err(Code::Unauthorized);
-                }
+                let path = self.dir.join("agents").join(format!("{v}.token"));
+                #[cfg(unix)]
+                let file = {
+                    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                        .open(&path)
+                        .map_err(|_| Code::Unauthorized)?;
+                    let meta = file.metadata().map_err(|_| Code::Unauthorized)?;
+                    if !meta.is_file()
+                        || meta.uid() != unsafe { libc::geteuid() }
+                        || meta.mode() & 0o077 != 0
+                        || meta.len() > 256
+                    {
+                        return Err(Code::Unauthorized);
+                    }
+                    file
+                };
+                #[cfg(windows)]
+                let file = crate::agent::windows::open_token(&path).map_err(|_| Code::Unauthorized)?;
                 let mut text = zeroize::Zeroizing::new(String::new());
                 io::Read::read_to_string(&mut io::Read::take(file, 256), &mut text)
                     .map_err(|_| Code::Unauthorized)?;
@@ -372,15 +379,19 @@ impl Client {
             return Err(Code::TooLarge);
         }
         let mut stream = timeout(Duration::from_secs(5), async {
+            #[cfg(unix)]
             let mut stream = crate::agent::connect(&crate::agent::socket_path(&self.dir)?)
                 .await
                 .map_err(|_| Code::AppUnreachable)?;
+            #[cfg(unix)]
             if stream.peer_cred().map_err(|_| Code::Unauthorized)?.uid()
                 != unsafe { libc::geteuid() }
             {
                 return Err(Code::Unauthorized);
             }
-            stream.write_all(&bytes).await.map_err(|_| Code::Unavailable)?;
+            #[cfg(windows)]
+            let mut stream = crate::agent::windows::connect(&self.dir).await?;
+            crate::agent::write_frame(&mut stream, &bytes).await.map_err(|_| Code::Unavailable)?;
             Ok::<_, Code>(stream)
         })
         .await
@@ -662,6 +673,8 @@ pub fn dispatch() -> Option<i32> {
     {
         return None;
     }
+    #[cfg(windows)]
+    crate::agent::windows::attach_console();
     let words: Vec<String> = match env::args_os().skip(1).map(|w| w.into_string()).collect() {
         Ok(v) => v,
         Err(_) => {

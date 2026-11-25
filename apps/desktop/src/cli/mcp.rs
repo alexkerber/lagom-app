@@ -179,7 +179,10 @@ mod tests {
 
     #[tokio::test]
     async fn read_tools_and_client_share_the_running_servers_scope() {
+        #[cfg(unix)]
         let dir = tempfile::tempdir_in("/tmp").unwrap();
+        #[cfg(windows)]
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lagom.sqlite3");
         let store = Store::open(&path).unwrap();
         let config = ServerConfig {
@@ -219,10 +222,10 @@ mod tests {
             Client { source_ip: None, dir: dir.path().into(), identity: Some(("token".into(), token.to_string())) };
         let (bridge, _) = Bridge::detached();
         let _server = Server::start(&path, bridge);
-        let socket = dir.path().join("agent.sock");
+        let reachable = async || !matches!(client.request("accounts", Args::new()).await, Err(Code::AppUnreachable));
         let wait = async |exists| {
             timeout(Duration::from_secs(5), async {
-                while socket.exists() != exists {
+                while reachable().await != exists {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })

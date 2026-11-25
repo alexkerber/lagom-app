@@ -10,7 +10,7 @@ use lagom_core::{
 use tokio::sync::oneshot;
 
 pub(crate) struct Sheet {
-    peer: std::sync::Weak<std::os::unix::net::UnixStream>,
+    peer: std::sync::Weak<super::Peer>,
     pub withdrawn_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>>,
     pub expires: tokio::time::Instant,
     pub serial: usize,
@@ -124,14 +124,13 @@ impl Sheet {
     }
 
     pub fn decide(self, approve: bool) -> bool {
-        use std::io::{ErrorKind, Read};
         // Check the socket at the click even if the listener has not handled EOF yet.
         let connected = approve
             && tokio::time::Instant::now() < self.expires
             && self
                 .peer
                 .upgrade()
-                .is_some_and(|s| matches!((&*s).read(&mut [0]),Err(e) if e.kind()==ErrorKind::WouldBlock));
+                .is_some_and(|s| super::peer_connected(&s));
         self.answer.send(if connected { Ok(()) } else { Err(Code::Denied) }).is_ok() && connected
     }
 
@@ -141,7 +140,7 @@ impl Sheet {
         req: &Request,
         snapshot: &Snapshot,
         closed: oneshot::Receiver<()>,
-        peer: std::sync::Weak<std::os::unix::net::UnixStream>,
+        peer: std::sync::Weak<super::Peer>,
     ) -> Result<(Self, oneshot::Receiver<Result<(), Code>>), Code> {
         let (answer, rx) = oneshot::channel();
         let mut rows = Vec::new();

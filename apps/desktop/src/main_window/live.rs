@@ -130,13 +130,25 @@ impl Mail {
         let task = cx.spawn(async move |cx| {
             let mut session = session.await.ok().flatten();
             cx.update(|cx| {
-                #[cfg(unix)]
-                let mut server = {
+                let server = {
                     let mail = cx.global::<Self>();
-                    Some(crate::agent::Server::start(mail.store.path(), mail.bridge.clone()))
+                    crate::agent::Server::start(mail.store.path(), mail.bridge.clone())
                 };
+                #[cfg(windows)]
+                {
+                    let mut status = server.bind_failed.clone();
+                    cx.spawn(async move |cx| {
+                        while status.changed().await.is_ok() {
+                            let failed = *status.borrow_and_update();
+                            if cx.update(|cx| {
+                                cx.set_global(crate::settings::agents::PipeBindFailed(failed));
+                                cx.refresh_windows();
+                            }).is_err() { break; }
+                        }
+                    }).detach();
+                }
+                let mut server = Some(server);
                 cx.on_app_quit(move |_| {
-                    #[cfg(unix)]
                     server.take();
                     session.take();
                     async {}
@@ -161,7 +173,6 @@ impl Mail {
             handle.update(cx, |this, window, cx| this.on_events(events, window, cx)).ok();
         } else {
             let messages = events.into_iter().filter_map(|event| match event {
-                #[cfg(unix)]
                 Event::AgentConfirm(sheet) => {
                     let mut waiting = std::mem::take(cx.default_global::<crate::agent::confirm::Waiting>());
                     let added = waiting.push(sheet, cx.default_global::<crate::agent::confirm::Denials>());
@@ -546,7 +557,6 @@ impl MainWindow {
         let mut new_mail = Vec::new();
         for event in events {
             match event {
-                #[cfg(unix)]
                 Event::AgentConfirm(sheet) => {
                     if self.agent_sheets.push(sheet, cx.default_global::<crate::agent::confirm::Denials>()) {
                         if !window.is_window_active() && cx.try_global::<crate::notifications::State>().is_some() {
@@ -555,7 +565,6 @@ impl MainWindow {
                         self.watch_agent_sheets(window,cx);
                     }
                 }
-                #[cfg(unix)]
                 Event::AgentQueued(id) => {
                     self.agent_sends.push(id.clone());
                     cx.spawn(async move |this,cx| {
@@ -857,7 +866,6 @@ impl MainWindow {
     pub(super) fn open_notification(&mut self, target: crate::notifications::Target, window: &mut Window, cx: &mut Context<Self>) {
         cx.activate(true);
         window.activate_window();
-        #[cfg(unix)]
         if target.account == crate::settings::agents::AGENTS && target.message.is_none() {
             if self.agent_sheets.sheets.is_empty(){self.open_agents(window,cx);} else {self.agent_deny.focus(window);}
             return;
