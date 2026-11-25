@@ -385,7 +385,7 @@ pub(super) fn dispatch(
     generation: i64,
     audit: &mut super::Audit,
     mut off: watch::Receiver<()>,
-    peer: Option<&std::sync::Arc<std::os::unix::net::UnixStream>>,
+    peer: Option<&std::sync::Arc<super::Peer>>,
 ) -> Result<Value> {
     let policy_generation = store.agent_policy_generation()?;
     let id = scope(store, who, req)?;

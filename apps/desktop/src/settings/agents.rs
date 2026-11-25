@@ -58,10 +58,18 @@ pub struct Agents {
     pub path: OsString,
 }
 
+#[cfg(windows)]
+pub(crate) struct PipeBindFailed(pub bool);
+#[cfg(windows)]
+impl gpui::Global for PipeBindFailed {}
+
 impl Agents {
     pub fn new() -> Self {
         Self {
+            #[cfg(unix)]
             home: std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+            #[cfg(windows)]
+            home: dirs::home_dir().unwrap_or_default(),
             path: std::env::var_os("PATH").unwrap_or_default(),
             ..Default::default()
         }
@@ -69,11 +77,8 @@ impl Agents {
 
     pub fn load(&mut self, store: &Store) -> Result<(), Code> {
         self.enabled = store.agent_setting(Setting::Enabled)?;
-        #[cfg(unix)]
-        {
-            self.socket_error = store.path().parent().filter(|_| self.enabled)
-                .and_then(|dir| crate::agent::socket_path(dir).err());
-        }
+        self.socket_error = store.path().parent().filter(|_| self.enabled)
+            .and_then(|dir| crate::agent::socket_path(dir).err());
         self.confirm = store.agent_setting(Setting::Confirm)?;
         self.sidebar = store.agent_setting(Setting::Sidebar)?;
         self.agents = store.agents()?;
@@ -325,6 +330,10 @@ fn matrix(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut
 /// Every Settings page for AI Agents.
 pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut Context<MainWindow>) -> Div {
     let (enabled, confirm, sidebar) = (a.enabled, a.confirm, a.sidebar);
+    let socket_error = a.socket_error.map(Code::message);
+    #[cfg(windows)]
+    let socket_error = socket_error.or_else(|| (enabled && cx.try_global::<PipeBindFailed>().is_some_and(|s| s.0))
+        .then_some("Agent access could not start. lagom could not open its named pipe."));
     let header = div().flex().items_center().gap(px(8.))
         .child(page_title("AI Agents").flex_1())
         .child(stop(t, button(t, "Guide", None))
@@ -336,7 +345,7 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
             .child(stop(t, toggle_row(t, "Enable agent access", a.enabled))
                 .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx))))
             .child(div().flex().flex_col().gap(px(6.)).pb(px(8.))
-                .when_some(a.socket_error, |row, code| row.child(div().text_color(t.danger).child(code.message())))
+                .when_some(socket_error, |row, message| row.child(div().text_color(t.danger).child(message)))
                 .child(note(t, "Connected agents can read and act on your mail and calendar, within the levels below. lagom never gives them your password. An agent can send what it reads to the AI service it uses."))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4))
                     .child("Connect only agents you trust, on a computer you control. A mail can hold instructions written for the agent."))));

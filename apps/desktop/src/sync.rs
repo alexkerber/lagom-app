@@ -28,7 +28,6 @@ use lagom_core::{
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use zeroize::Zeroizing;
 
-#[cfg(unix)]
 mod agent_write;
 mod tasks;
 use tasks::{TaskCmd, TaskWorker};
@@ -81,11 +80,8 @@ pub enum Cmd {
     Inline(i64),
     ForwardAttachments { draft: String, id: i64 },
     OpenMessage(i64),
-    #[cfg(unix)]
     AgentConfirm(crate::agent::confirm::Sheet),
-    #[cfg(unix)]
     AgentWrite(Box<crate::agent::write::Job>),
-    #[cfg(unix)]
     AgentAttachment(crate::agent::read::Attachment),
     Download { id: i64, section: String },
     /// The message is already durable, including its Undo deadline.
@@ -127,9 +123,7 @@ pub enum Delivery {
 }
 
 pub enum Event {
-    #[cfg(unix)]
     AgentConfirm(crate::agent::confirm::Sheet),
-    #[cfg(unix)]
     AgentQueued(String),
     /// Forward to GPUI cx.open_url; never log this URL.
     OpenUrl(String),
@@ -479,16 +473,13 @@ impl Worker {
                 let result = self.cache_eml(id).await.map_err(|e| shown(&e));
                 self.emit(Event::MessageFile(result));
             }
-            #[cfg(unix)]
             Cmd::AgentConfirm(sheet) => self.emit(Event::AgentConfirm(sheet)),
-            #[cfg(unix)]
             Cmd::AgentWrite(job) => {
                 let mut created = None;
                 let result = self.agent_write(&job, &mut created).await;
                 if result.is_ok() { self.emit(Event::Changed); }
                 let _ = job.reply.send(result.map(|value| (value, created)));
             }
-            #[cfg(unix)]
             Cmd::AgentAttachment(mut request) => {
                 if !request.reply.is_closed() {
                     let result = match Store::agent_reader(self.store.path(), || false).and_then(|reader| request.resolve(&reader)) {

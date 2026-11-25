@@ -7,10 +7,13 @@ use std::{
     ffi::OsStr,
     fs,
     io::{ErrorKind, Write},
-    os::unix::fs::{symlink, DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 use tempfile::NamedTempFile;
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, DirBuilderExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Agent {
@@ -82,11 +85,21 @@ pub struct Detected {
     config_dir: Option<PathBuf>,
 }
 
+fn is_executable(file: &Path) -> bool {
+    #[cfg(unix)]
+    { fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0) }
+    #[cfg(windows)]
+    { file.is_file() && file.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("cmd")) }
+}
+
 fn executable(home: &Path, path: &OsStr, command: &str) -> Option<PathBuf> {
     env::split_paths(path)
         .map(|dir| home.join(dir).join(command))
-        .find(|file| {
-            fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .find_map(|file| {
+            #[cfg(windows)]
+            { ["exe", "cmd"].map(|ext| file.with_extension(ext)).into_iter().find(|p| is_executable(p)) }
+            #[cfg(unix)]
+            { is_executable(&file).then_some(file) }
         })
 }
 
@@ -120,7 +133,9 @@ pub fn detect(home: &Path, path: &OsStr) -> Vec<Detected> {
             a.probe(
                 home,
                 path,
-                a.config_env().and_then(env::var_os).map(PathBuf::from),
+                a.config_env().and_then(env::var_os).map(PathBuf::from).or_else(|| {
+                    (cfg!(windows) && a == Agent::ClaudeDesktop).then(|| dirs::config_dir().map(|d| d.join("Claude"))).flatten()
+                }),
             )
         })
         .collect()
@@ -247,11 +262,21 @@ impl Plan {
         })
     }
 
-    // Serialize app operations without creating a lock file in the home directory.
+    // Serialize config edits across app instances.
+    #[cfg(unix)]
     fn lock(&self) -> Result<fs::File> {
         let dir = fs::File::open(&self.home)?;
         dir.lock()?;
         Ok(dir)
+    }
+
+    #[cfg(windows)]
+    fn lock(&self) -> Result<fs::File> {
+        let data = self.token.parent().and_then(Path::parent).context("Missing data directory")?;
+        let lock = fs::File::options().read(true).write(true).create(true).truncate(false)
+            .open(data.join("agent-setup.lock"))?;
+        lock.try_lock().map_err(std::io::Error::from)?;
+        Ok(lock)
     }
 
     /// The caller supplies the newly issued local credential and revokes it if installation fails.
@@ -287,7 +312,7 @@ impl Plan {
         if self.config.is_some() {
             ensure!(
                 installed(&self.home, &self.binary) || debug_binary(&self.binary),
-                "Move lagom to Applications first"
+                if cfg!(windows) { "Run the installed lagom.exe first" } else { "Move lagom to Applications first" }
             );
         }
         let previous = previous.filter(|c| c.plan.agent == self.agent && c.plan.home == self.home);
@@ -307,6 +332,12 @@ fn valid_id(id: &str) -> bool {
     id.len() == 12 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+#[cfg(windows)]
+fn installed(_: &Path, binary: &Path) -> bool {
+    binary.is_file() && binary.file_name().is_some_and(|name| name.eq_ignore_ascii_case("lagom.exe"))
+}
+
+#[cfg(unix)]
 fn installed(home: &Path, binary: &Path) -> bool {
     let Ok(real) = binary.canonicalize() else {
         return false;
@@ -363,7 +394,10 @@ fn read(path: &Path) -> Result<Option<String>> {
 fn parents(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.is_dir() {
         parents(dir.parent().context("missing parent")?, created)?;
-        match fs::DirBuilder::new().mode(0o700).create(dir) {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        builder.mode(0o700);
+        match builder.create(dir) {
             Ok(()) => created.push(dir.into()),
             Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => (),
             Err(e) => return Err(e.into()),
@@ -387,7 +421,15 @@ fn atomic_write(
     previous: Option<&str>,
     mode: Option<u32>,
 ) -> Result<()> {
-    let mut tmp = NamedTempFile::new_in(path.parent().unwrap())?;
+    let dir = path.parent().unwrap();
+    #[cfg(unix)]
+    let mut tmp = NamedTempFile::new_in(dir)?;
+    #[cfg(windows)]
+    let mut tmp = if mode.is_some() || previous.is_some() {
+        tempfile::Builder::new().make_in(dir, super::windows::private_file)?
+    } else {
+        NamedTempFile::new_in(dir)?
+    };
     tmp.write_all(contents.as_bytes())?;
     if let Some(previous) = previous {
         ensure!(
@@ -396,9 +438,11 @@ fn atomic_write(
             path.display()
         );
     }
+    #[cfg(unix)]
     if let Some(mode) = mode {
         tmp.as_file().set_permissions(fs::Permissions::from_mode(mode))?;
-    } else if previous.is_some() {
+    }
+    if mode.is_none() && previous.is_some() {
         tmp.as_file().set_permissions(fs::metadata(path)?.permissions())?;
     }
     tmp.as_file().sync_all()?;
@@ -487,6 +531,9 @@ impl Plan {
     }
 
     fn skill(&self) -> String {
+        #[cfg(windows)]
+        let quoted = format!(r#""{}""#, self.binary.display());
+        #[cfg(unix)]
         let quoted = format!("'{}'", self.binary.to_str().unwrap().replace('\'', "'\\''"));
         include_str!("../../assets/skill/SKILL.md")
             .replace("{{agent_id}}", &self.id)
@@ -625,8 +672,7 @@ impl Connection {
         if cli {
             ensure!(
                 plan.cli.as_ref().is_some_and(|p| p.is_absolute()
-                    && fs::metadata(p)
-                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)),
+                    && is_executable(p)),
                 "agent CLI missing; detect the agent again"
             );
         } else if current.as_ref() != Some(&desired) {
@@ -1032,7 +1078,18 @@ fn remove_json(current: &str, edit: &ConfigEdit) -> Result<(String, bool)> {
     Ok((text, remove_group && root.len() == 1))
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+#[test]
+fn replacing_config_keeps_the_new_file_private() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    fs::write(&path, "{}").unwrap();
+    atomic_write(&path, "updated", Some("{}"), None).unwrap();
+    super::windows::open_token(&path).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "updated");
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use Agent::*;
