@@ -660,3 +660,13 @@ fn provisioning_cannot_raise_either_global_level() {
     assert_eq!(store.agent_access("").unwrap().len(), 1);
     assert!(!store.agent_enabled().unwrap());
 }
+
+#[test]
+fn agent_rows_carry_the_latest_token_use() {
+    let (_dir, store, _, _) = setup();
+    let agent = store.create_agent("test", "used", "local", false).unwrap();
+    store.issue_token(&agent, TokenScope::Local).unwrap();
+    assert_eq!(store.agents().unwrap()[0].last_used, None);
+    store.db.execute("UPDATE agent_tokens SET last_used=42", []).unwrap();
+    assert_eq!(store.agents().unwrap()[0].last_used, Some(42));
+}

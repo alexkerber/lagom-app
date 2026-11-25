@@ -61,6 +61,8 @@ pub struct AgentRow {
     pub remote: bool,
     pub active: bool,
     pub expires: Option<i64>,
+    /// The latest request with any of its tokens, as Unix seconds.
+    pub last_used: Option<i64>,
 }
 
 // The outbox is local. Socket authentication also checks the caller's source address.
@@ -105,7 +107,8 @@ impl Store {
         let mut rows = self.db.prepare(
             "SELECT id,kind,name,host,remote,EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent=a.id
              AND (t.expires IS NULL OR t.expires>unixepoch())),
-             (SELECT max(expires) FROM agent_tokens t WHERE t.agent=a.id)
+             (SELECT max(expires) FROM agent_tokens t WHERE t.agent=a.id),
+             (SELECT max(last_used) FROM agent_tokens t WHERE t.agent=a.id)
              FROM agents a ORDER BY created,id",
         )?;
         let rows = rows.query_map([], |r| {
@@ -117,6 +120,7 @@ impl Store {
                 remote: r.get(4)?,
                 active: r.get(5)?,
                 expires: r.get(6)?,
+                last_used: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
