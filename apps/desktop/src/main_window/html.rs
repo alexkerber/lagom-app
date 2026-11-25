@@ -293,7 +293,7 @@ impl MainWindow {
     pub(crate) fn web_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let empty = self.inbox.list().is_empty() && self.inbox.open.is_none();
         let want = self.inbox.single().filter(|_| matches!(self.page, Page::Mail) && !empty && (!self.inbox.group || self.reading_members.len() <= 1)).map(|id| (id, &self.inbox.mail[id]));
-        let overlay = self.message_menu.is_some() || self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
+        let overlay = self.message_menu.is_some() || self.mailbox_popover || self.palette.is_some() || self.compose.is_some() || !self.sending.is_empty();
         #[cfg(target_os = "windows")]
         let text_fallback = !supported() && want.is_some_and(|(_, m)| m.html.is_some());
         self.web.frame(want, &self.theme, overlay, window, cx);

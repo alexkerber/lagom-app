@@ -57,6 +57,7 @@ pub(crate) const LIST: &[Group] = &[
         ("Commands and search", &["secondary-k"]),
         ("Today, Mail, Calendar, To-do", &["secondary-1", "secondary-2", "secondary-3", "secondary-4"]),
         ("Show or hide the sidebar", &["alt-secondary-s"]),
+        ("Full or compact sidebar", &["shift-alt-secondary-s"]),
         ("Settings", &["secondary-,"]),
         ("Keyboard shortcuts", &["secondary-/"]),
     ]),
