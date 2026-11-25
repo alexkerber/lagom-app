@@ -453,10 +453,16 @@ impl LagomCore {
         if let Some(stores) = open.get(&dir).and_then(std::sync::Weak::upgrade) { return Ok(Arc::new(Self { stores, background_cancel: Arc::default() })); }
         let path = dir.join("lagom.sqlite3");
         let store = Store::open(&path)?;
+        let entry = open.entry(dir).or_insert_with(|| {
+            if let Err(error) = store.vacuum_if_pending() {
+                eprintln!("lagom: store cleanup deferred until next start: {}", error.log());
+            }
+            std::sync::Weak::new()
+        });
         store.recover_outbox()?;
         let local = Store::open(&path)?;
         let core = Arc::new(Self { stores: Arc::new(Stores { path, local: Mutex::new(local), network: tokio::sync::Mutex::new(store), sync: Mutex::new(()), removal: Default::default(), read_flags: Default::default(), marking: Mutex::new(()), pending_reads: Default::default(), calls: Default::default(), contacts: Mutex::new(HashMap::new()), sign_in: Mutex::new(None), calendar: Mutex::new(()), unsaved_events: Default::default() }), background_cancel: Arc::default() });
-        open.insert(dir, Arc::downgrade(&core.stores));
+        *entry = Arc::downgrade(&core.stores);
         Ok(core)
     }
     pub async fn accounts(&self) -> Result<Vec<MailAccount>> {

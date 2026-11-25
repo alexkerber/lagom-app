@@ -250,7 +250,7 @@ pub struct FilterReader {
 
 impl FilterReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let db = crate::store::open_connection(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.pragma_update(None, "query_only", true)?;
         // A lock wait cannot be interrupted by the progress handler.
         db.busy_timeout(Duration::ZERO)?;

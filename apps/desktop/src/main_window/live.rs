@@ -125,6 +125,9 @@ impl gpui::Global for Mail {}
 
 impl Mail {
     fn start(store: Store, cx: &mut App) {
+        if let Err(error) = store.vacuum_if_pending() {
+            eprintln!("lagom: store cleanup deferred until next start: {}", error.log());
+        }
         let (bridge, mut events) = crate::sync::start(store.path().to_path_buf());
         let task = cx.spawn(async move |cx| {
             while let Some(event) = events.recv().await {
