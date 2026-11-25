@@ -1,37 +1,44 @@
 # Todo
 
 - [x] Google sign-in requests mail, Calendar and Tasks together. Accounts missing Calendar access keep the consent button.
-      After consent, mobile refreshes that account’s planner before starting mail sync. Branch `fix/google-one-consent`.
-      OAuth, FFI, desktop Calendar and sign-in tests passed. iOS built for testing. Android debug assembly and JVM tests passed.
-      Live Google consent and device timing remain unverified.
+  After consent, mobile refreshes that account’s planner before starting mail sync. Branch `fix/google-one-consent`.
+  OAuth, FFI, desktop Calendar and sign-in tests passed. iOS built for testing. Android debug assembly and JVM tests passed.
+  Live Google consent and device timing remain unverified.
 
 ## Privacy (audit 2026-11-25, after the T3 Code telemetry case)
 
 - [x] The site says "No AI features" (`site/privacy.html:94`, `site/index.html:199`), but Settings > AI Agents ships. Replace the claims, and say that a connected agent sends what it reads to its own provider.
 - [x] The Google section of `site/privacy.html:106-107` says the data goes only between the device and Google. This is false when an agent has access to a Google account. Disclose it, or keep Google accounts at None.
 - [x] On `wip/privacy-claims`, mail tasks use the preferred local or same-account list. One Tasks account can still claim its list.
-      Renaming a task cannot send it to another account. Skipped tasks do not recreate deleted Google lists.
-      Lists created with multiple Tasks accounts stay local. Loopback sync was tested. Live Google sync was not tested.
+  Renaming a task cannot send it to another account. Skipped tasks do not recreate deleted Google lists.
+  Lists created with multiple Tasks accounts stay local. Loopback sync was tested. Live Google sync was not tested.
 - [x] The agent settings do not say where an agent sends the data (`apps/desktop/src/settings/agents.rs:263`). `docs/ai-agents.md:5` still says "No code for it exists yet".
 - [x] Account removal clears cached originals and audit rows. Late confirmations cannot restore recipients or targets.
-      Opening the store prunes orphaned audit rows. The GreenMail worker test clears its own temporary cache.
+  Opening the store prunes orphaned audit rows. The GreenMail worker test clears its own temporary cache.
 - [x] CLI, desktop and mobile sync logs redact mailbox names and account addresses.
 - [x] CLI agent access commits after the owner-only token file is written. A failed write preserves prior access.
-      Non-Unix builds refuse token creation before provisioning.
+  Non-Unix builds refuse token creation before provisioning.
 - [x] The planned update check in `docs/release.md:406` is on by default. Make it opt-in and list it on the privacy page in the same PR.
 - [x] PR #253 review fixes are on `wip/privacy-claims`. Core, CLI, desktop and FFI tests passed on macOS.
-      Loopback Google Tasks and local GreenMail tests passed. Live Google and non-Unix token refusal remain unverified.
+  Loopback Google Tasks and local GreenMail tests passed. Live Google and non-Unix token refusal remain unverified.
 - [x] On `fix/privacy-followup`, the cached mail cleanup ignores vanished files and reports scan or deletion errors. A failed cleanup is not retried at start, because a second lagom process may be using the cache; the 7-day prune removes what stays.
-      The agent log checks stored account IDs, including imported IDs. Regression tests covered both changes on macOS.
-      GreenMail verified account removal. Live providers and non-Unix platforms remain unverified.
-- [ ] Older builds assigned some lists to the wrong account. Add recovery so new tasks stop uploading there.
+  The agent log checks stored account IDs, including imported IDs. Regression tests covered both changes on macOS.
+  GreenMail verified account removal. Live providers and non-Unix platforms remain unverified.
+- [x] On `fix/tasks-cross-account`, history confirmed that the first syncing account could claim unassigned lists.
+  Stored mappings cannot identify those claims. Existing lists keep their owners.
+  A fake-server test verified that foreign mail alone leaves ownership intact. Historical user intent remains unknown.
 - [ ] SQLite deletes leave data in free pages. Review enabling `secure_delete`.
 - [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
 - [ ] Google Tasks with two Tasks accounts: no UI picks the account for a local list, so new lists stay local. Add a picker.
-- [ ] Google Tasks: remove previously uploaded cross-account mail links from Google notes.
+- [x] On `fix/tasks-cross-account`, the upgrade removes the last matching cross-account mail link once, using the task’s ETag.
+  Fake-server tests verified cursor progress after a conflict, skipped cleanup without an ETag, and saved PATCH metadata.
+  Tests also verified preserved note text and mail associations on later pulls. Live Google Tasks remains unverified.
 - [ ] Google Tasks: a task pulled from one Google account and moved by the person into another account's list uploads its subject and link there. The link names the first install's account, so lagom cannot tell it from the person's own task without an owner column.
 - [ ] Google Tasks: a task from a removed account's mail counts as the person's own once that account is gone. If the person moved it into another account's list, its subject then uploads there.
-- [ ] Check that Google's Limited Use policy allows a user-directed transfer to an AI agent the user connects.
+- [x] Google Limited Use and AI agents: checked against the Workspace API User Data and Developer Policy (updated 2026-09-03). A transfer is allowed for a user-facing feature that is visible and prominent, with the user's consent. Agent access is a Settings page, off until the user turns it on, with the disclosure next to the switch. The privacy page now has the Workspace Limited Use statement (branch `docs/limited-use`).
+- [ ] Google verification: ask the review team to confirm that a user-connected local agent counts as a user-directed transfer. The policy does not name this case.
+- [ ] Google verification: the policy asks for prompt injection protection on restricted scopes ("Model Armor or other"). Document lagom's levels, confirmation sheet and untrusted-data rule as that protection in the verification answers.
+- [ ] Google verification: the policy says a disclosure must immediately precede the consent request. Consider a one-time sheet with the disclosure the first time agent access is turned on.
 
 ## Brand and site
 
@@ -73,7 +80,7 @@
 - [x] iOS parity slice: Today/Mail/Calendar/Todo as tabs on phones and the desktop sidebar (pages, mailboxes with per-account Inbox and colour dots, Trash, Accounts) on regular layouts, restoring the last page. Desktop-style mail list (date groups, account bars, All/Unread, "N left"), calm Today, local Todo lists and a read-only cached agenda with a Google-account empty state. FFI delegates tasks, events, Today and counts to core; DEBUG `-LagomDemo` opens a seeded fixture store. Rust fixtures and hostless XCTests cover the new boundary and presentation; native gestures and VoiceOver on hardware remain unverified.
 - [x] iPad Calendar: the desktop week grid (hour grid, all-day row, overlap lanes, now line, week navigation, event details in a popover); iPhone keeps the day list. Hostless XCTest covers lanes and the week's Monday; days beyond the synced window show empty, without desktop's "Not synced this far".
 - [x] Calendar offers Google sign-in for Google-hosted password accounts. Branch `fix/signin-upgrades-password-account`.
-      The selected account keeps its mail and settings after Google confirms its identity.
+  The selected account keeps its mail and settings after Google confirms its identity.
 - [ ] Make iOS keychain token rotation atomic. The current backend deletes the existing item before adding its replacement.
 - [ ] Accounts from older builds have no stored provider subject until their next sign-in, which binds by email address. A desktop calendar event created during re-authentication appears locally at the next sync.
 - [ ] A send that is refreshing its token when a Calendar grant replaces the credential records `ReauthRequired`, and the follow-up sync skips the failed row. Requeue the send when the credential changed during the attempt (before SMTP submission).
@@ -145,7 +152,6 @@
 - [ ] Feel: try hover, press, glide, scrolling and swipe-versus-scroll by hand. Only tests and still screenshots cover them.
 - [x] Selection contrast raised; sidebar native glass and opaque fallback are covered by the Liquid Glass item above.
 - [x] Sidebar selection levels: filled section row, accent-only mailbox/account/folder selection, subtle hover. Native light/dark contrast acceptance remains unverified.
-- [x] Compact sidebar (branch `ui/sidebar-rail`): three states, full, rail and hidden, saved in `window.json` (`sidebar_rail`). The rail is 56 px of icons: Search, Today, Mail with a small unread badge, Calendar and To-do, the active one an accent square. On Mail pages it adds a button for a popover with the full sidebar's mailboxes, folders and accounts. AI Agents and Settings sit at the foot. One sidebar button sits after the traffic lights (macOS) or at the top left, in the same place in every state. It switches full and rail, and brings a hidden sidebar back. Rail and hidden keep a title row on top for it, and the rail starts below that row. ⌥⌘S still shows or hides and keeps full or rail. ⇧⌥⌘S and View > Compact Sidebar switch full and rail. Dragging the divider below 120 px snaps to the rail, below half the rail hides, and dragging the rail's edge out goes back to full. Full and rail cross-fade in place. Hide and show slide as before, also when reversed mid-slide. `Panes::fit` counts the rail's width. Folder drops need the full sidebar; Move (M) covers the rail. While the popover is open, mail keys, ⌘W and the HTML view wait for it. Verified: `cargo build -p lagom`, `cargo test -p lagom` (537 passed, with new rail, popover, divider and pane tests), a Codex review (four findings fixed, one declined: the list keeps its width during a slide, as before), and macOS demo captures of full, rail, the rail popover and hidden in light and dark (`LAGOM_SCREEN=rail`, `rail-mailboxes`, `sidebar-hidden`, now in `scripts/smoke.sh`). Not verified: Windows and Linux rendering, the slide and cross-fade by hand, and native screen-reader labels (GPUI exposes no accessibility tree; every rail item has a tooltip with its name and key).
 - [x] Typeface: the system font (SF Pro on macOS) is the UI default. Replaced 2026-11-20 by Hauora ("One UI typeface on every platform"); `LAGOM_UI_FONT=system` compares.
 - [x] Message list: visible rows plus two-row overscan, with animated-height spacers; integrated with persisted drafts, outbox and non-blocking quit.
 - [x] Message list: Shift-arrow/Shift-click ranges, Cmd-click toggles, Cmd+A and Escape, stable selection across sync, conversation-aware batch Done/Later/Delete/Move/read status with one Undo, and a selection summary. All/Unread filters the loaded rows. Fixture and headless tests cover selection, filtering, batch undo and worker read flags. Review fixes bind rollback to worker operations, retain selected mail past page boundaries, reveal search targets, clear the hidden Trash filter, keep the sole selection readable after Cmd-click, share thread read state between labels and actions, reject failed IMAP read-status commands, retain Undo selection across replaced store rows, link HTML tasks to the sole selection, and reveal filtered popout targets before actions.
@@ -233,86 +239,90 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
 - [ ] MCP server on lagom-core, so AI models can read and act on mail, calendar and todos from outside the app.
   - [x] read-only slice: `lagom-cli mcp` over stdio with list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos (2026-11-17). Protocol tests and a stdio smoke; not tried in a real MCP client.
   - [x] Closed the agent read security review on `feat/agents-socket`. Settings provisions authenticated MCP access.
-        Pending reads recheck permissions. Search uses one snapshot. Contacts, attachments and audit refusals have limits.
-        Long identifiers resolve within their account. Settings shows the latest 50 activity rows per agent.
-        Core, desktop and developer CLI tests passed. The macOS desktop build passed.
-        Live providers, external MCP clients and Linux remain unverified.
+    Pending reads recheck permissions. Search uses one snapshot. Contacts, attachments and audit refusals have limits.
+    Long identifiers resolve within their account. Settings shows the latest 50 activity rows per agent.
+    Core, desktop and developer CLI tests passed. The macOS desktop build passed.
+    Live providers, external MCP clients and Linux remain unverified.
   - [x] Agent security review on `feat/agents-core`. Audit targets require a store lookup. Read limits protect each agent’s history.
-        Verified token refusals retain their IDs. Source checks distinguish local and remote tokens. Undo restores draft ownership.
-        Core and FFI tests passed. The desktop app built. Live agent connections were not tested.
+    Verified token refusals retain their IDs. Source checks distinguish local and remote tokens. Undo restores draft ownership.
+    Core and FFI tests passed. The desktop app built. Live agent connections were not tested.
   - [x] Desktop agents read permitted mail and calendars through a private socket on `feat/agents-socket`.
-        The developer CLI grants test access to one account. Disabling access closes open requests.
-        macOS socket tests verified account isolation, read purity, limits, audit records and revocation.
-        Linux, live providers and access from another OS user remain unverified.
+    The developer CLI grants test access to one account. Disabling access closes open requests.
+    macOS socket tests verified account isolation, read purity, limits, audit records and revocation.
+    Linux, live providers and access from another OS user remain unverified.
+  - [x] On `fix/agent-socket-flaky`, clients retry missing sockets and refused connections up to five times before writing.
+    Retries are 100 ms apart. The socket test waits for a connection to the replacement listener.
+    Both client tests and six CLI tests passed on macOS. The socket test passed 50 consecutive runs.
+    Linux remains unverified.
   - [x] The desktop CLI and MCP forward agent commands on `feat/agents-client`. The CLI also installs the bundled skill.
-        A fake socket verified framing, identity, output, errors and MCP calls.
-        The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
-        The live service and Linux remain untested.
+    A fake socket verified framing, identity, output, errors and MCP calls.
+    The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
+    The live service and Linux remain untested.
   - [x] The read-only `lagom-cli mcp` client passed protocol and stdio smoke tests on 2026-11-17. It supports list_accounts, list_mail, search_mail, read_message, read_conversation, today and list_todos.
   - [x] Desktop detects six local agents on `feat/agents-detect`. Claude Code and Codex register through their detected CLIs. Disconnect preserves edited files and reports what remains. Temporary-home tests and the macOS desktop build passed. CLI registration was checked in isolated profiles. Live agent sessions and other platforms remain unverified.
   - [ ] acting tools (Done, Later, move, tasks, send): needs a decision on what an outside model may do without a person confirming.
-        The write policy below resolves mail and calendar actions.
+    The write policy below resolves mail and calendar actions.
   - [ ] Agent task changes are deferred.
 - [x] Local and SSH agents can triage mail, edit drafts and change calendars on `feat/agents-write`.
-      Both paths enforce token limits, audit refusals and check approved sends against the original policy.
-      Core, desktop and FFI tests passed on macOS. The desktop app built.
-      Live SSH, provider accounts and manual confirmation clicks remain unverified. See `docs/ai-agents.md`.
+  Both paths enforce token limits, audit refusals and check approved sends against the original policy.
+  Core, desktop and FFI tests passed on macOS. The desktop app built.
+  Live SSH, provider accounts and manual confirmation clicks remain unverified. See `docs/ai-agents.md`.
   - [x] On `fix/agent-cli-audit`, email and search tables show thread IDs beside message IDs.
-        Verified refusals are counted by agent, minute, command and result. Unresolved thread requests are logged as `thread`.
-        Core and desktop tests covered table output, refusal counts and audit limits on macOS.
-        The installed app smoke test was not repeated.
+    Verified refusals are counted by agent, minute, command and result. Unresolved thread requests are logged as `thread`.
+    Core and desktop tests covered table output, refusal counts and audit limits on macOS.
+    The installed app smoke test was not repeated.
   - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
-        Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
-        Settings and the client explain when the socket path is too long.
-        Core and desktop tests passed on macOS. The desktop app built. Live Gmail and visual Settings checks remain unverified.
+    Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
+    Settings and the client explain when the socket path is too long.
+    Core and desktop tests passed on macOS. The desktop app built. Live Gmail and visual Settings checks remain unverified.
   - [x] Desktop agents can triage mail, manage their own drafts and change calendar events on `feat/agents-write`.
-        The worker checks access again before writing. Every calendar change requires approval.
-        Socket tests covered revocation, expiry, draft conflicts, disconnects, the two-minute timeout and Undo.
-        Scripted providers verified safe moves, guest previews, ETag conflicts, lost replies and cancellation of stale calendar syncs.
-        Core, desktop and FFI tests passed. The macOS desktop build passed.
-        Live providers, native notification delivery and Linux remain unverified.
+    The worker checks access again before writing. Every calendar change requires approval.
+    Socket tests covered revocation, expiry, draft conflicts, disconnects, the two-minute timeout and Undo.
+    Scripted providers verified safe moves, guest previews, ETag conflicts, lost replies and cancellation of stale calendar syncs.
+    Core, desktop and FFI tests passed. The macOS desktop build passed.
+    Live providers, native notification delivery and Linux remain unverified.
   - [x] Closed the agent write review on `feat/agents-write`.
-        Approval shows individual fields and requires an armed click. Mail uses the reviewed plain text.
-        Writes reserve an audit row. Revoked sends return to the agent’s drafts.
-        Socket and scripted provider tests covered lost replies, partial moves, limits and audit contention.
-        GPUI tests covered keyboard input, click arming, denial and revocation.
-        Core, desktop and FFI tests passed. The macOS desktop build passed.
-        Live providers, native window activation and Linux remain unverified.
+    Approval shows individual fields and requires an armed click. Mail uses the reviewed plain text.
+    Writes reserve an audit row. Revoked sends return to the agent’s drafts.
+    Socket and scripted provider tests covered lost replies, partial moves, limits and audit contention.
+    GPUI tests covered keyboard input, click arming, denial and revocation.
+    Core, desktop and FFI tests passed. The macOS desktop build passed.
+    Live providers, native window activation and Linux remain unverified.
   - [x] Completed the second agent write review on `feat/agents-write`.
-        Revocation restores queued drafts. Agent sends require their original token. Compose sends use the person's authority.
-        Confirmation shows full bodies and matching recipients. Withdrawals delay replacement requests and both destructive buttons require an armed click.
-        Draft reads hide other owners' revisions. Forwarding counts decoded bytes. IMAP reports uncertain writes and checks recovery authorization.
-        Socket, provider fixture and GPUI tests passed. Core, desktop and FFI tests passed. The macOS desktop app built.
-        Live providers, native window activation and Linux remain unverified.
+    Revocation restores queued drafts. Agent sends require their original token. Compose sends use the person's authority.
+    Confirmation shows full bodies and matching recipients. Withdrawals delay replacement requests and both destructive buttons require an armed click.
+    Draft reads hide other owners' revisions. Forwarding counts decoded bytes. IMAP reports uncertain writes and checks recovery authorization.
+    Socket, provider fixture and GPUI tests passed. Core, desktop and FFI tests passed. The macOS desktop app built.
+    Live providers, native window activation and Linux remain unverified.
   - [x] Completed the third agent write review on `feat/agents-write`.
-        Revocation commits before cleanup and preserves newer Compose drafts. Queued sends require the original token and policy generation.
-        Confirmation marks overflowing rows, distinguishes literal escapes and times withdrawals from disconnect.
-        Draft lists keep creation order. Agent reads preserve text shaping. Base64 fetches check wire and decoded sizes.
-        Core, desktop and FFI tests passed on macOS. The desktop build passed.
-        Live providers, native window activation and Linux remain unverified.
+    Revocation commits before cleanup and preserves newer Compose drafts. Queued sends require the original token and policy generation.
+    Confirmation marks overflowing rows, distinguishes literal escapes and times withdrawals from disconnect.
+    Draft lists keep creation order. Agent reads preserve text shaping. Base64 fetches check wire and decoded sizes.
+    Core, desktop and FFI tests passed on macOS. The desktop build passed.
+    Live providers, native window activation and Linux remain unverified.
   - [x] Completed the final agent write review on `feat/agents-write`.
-        Approved sends retain their policy generation. SMTP checks access after login on the connection that sends the message.
-        Authority changes take the write lock first. Cleanup restores stale sends individually, including failed sends and released claims.
-        Undo preserves newer drafts. Compose sends replace queued agent sends. Pre-v22 drafts sort by ID.
-        Regression tests covered all eight fixes. Core, desktop and FFI tests passed on macOS. The desktop build passed.
-        Live providers and Linux remain unverified.
+    Approved sends retain their policy generation. SMTP checks access after login on the connection that sends the message.
+    Authority changes take the write lock first. Cleanup restores stale sends individually, including failed sends and released claims.
+    Undo preserves newer drafts. Compose sends replace queued agent sends. Pre-v22 drafts sort by ID.
+    Regression tests covered all eight fixes. Core, desktop and FFI tests passed on macOS. The desktop build passed.
+    Live providers and Linux remain unverified.
   - [x] Integrated desktop agent reads, CLI, MCP, detection and Settings on `feat/agents-socket`.
-        Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
-        Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
-        Connect records cleanup instructions before writing files. Tokens live beside the open store.
-        A temporary socket verified CLI and MCP reads, account isolation and access off.
-        Tests verified cancellation, EOF, credential checks and interrupted setup.
-        The macOS release measured 19.60 MB against the 30 MB budget.
-        Live providers, external agent sessions and Linux remain untested.
+    Access starts off. Settings controls account and agent levels, confirmations, sidebar visibility and revocation.
+    Remote tokens limit accounts, permissions, source addresses and expiry. The app audits requests.
+    Connect records cleanup instructions before writing files. Tokens live beside the open store.
+    A temporary socket verified CLI and MCP reads, account isolation and access off.
+    Tests verified cancellation, EOF, credential checks and interrupted setup.
+    The macOS release measured 19.60 MB against the 30 MB budget.
+    Live providers, external agent sessions and Linux remain untested.
   - [x] Hardened remote SSH agents on `feat/agents-remote`.
-        Remote tokens require source ranges. Settings previews canonical ranges and rejects broad networks.
-        Verified refusals count toward the token’s rate limit. Each token can hold four requests.
-        The audit log names remote refusals only after the server handles them. Earlier rejections use “unknown”.
-        SSH keys use restrict, source and expiry limits, and a checked executable path.
-        Settings hides the token until requested. macOS marks copied tokens as concealed.
-        Socket tests verified refusal logging and permission checks while attachments were pending.
-        Core and desktop tests passed. The macOS desktop build passed.
-        Live SSH login, manual Settings checks and Linux remain unverified.
+    Remote tokens require source ranges. Settings previews canonical ranges and rejects broad networks.
+    Verified refusals count toward the token’s rate limit. Each token can hold four requests.
+    The audit log names remote refusals only after the server handles them. Earlier rejections use “unknown”.
+    SSH keys use restrict, source and expiry limits, and a checked executable path.
+    Settings hides the token until requested. macOS marks copied tokens as concealed.
+    Socket tests verified refusal logging and permission checks while attachments were pending.
+    Core and desktop tests passed. The macOS desktop build passed.
+    Live SSH login, manual Settings checks and Linux remain unverified.
 
 ## Calendar
 
@@ -329,10 +339,10 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] Calendar polish: month/year heading; Day/Week/Month navigation with a 6×7 month grid, three event titles and overflow; accented today, quiet weekends, dashed day separators, raised minute labels, a gold current-time line and initial scroll. All-day events use dot/title rows. A session-remembered side panel defaults on above 1200 px, with a navigable mini month and local contact autocomplete for the next event's guests. Toolbar and N share the existing New event/Meet sheet; named contacts normalize to validated attendee addresses. Demo includes all-day/overflow examples and `calendar-month`. Shared action buttons, palette items, mail/task/calendar status and empty states use embedded stroke icons and action tooltips. Both button helpers put colour and hover on the SVG itself; headless paint regressions check non-transparent normal, hover and filled ink in both themes. Fixture/headless regressions cover dates, navigation, geometry, panel state, contacts, guest transfer and narrow toolbars; native visual acceptance remains unverified. Guest availability remains unavailable until provider free/busy is implemented. Review follow-up: merged main's mail polish and icon names; shared full-width calendar titles cover the all-day strip, month cells, panel and details, with laid-out text assertions at wide and narrow widths. New event dates display weekday/day/month (year only when needed), accept ISO, English month names and numeric local formats, and keep midnight nudging. Opening a date range starts near its earliest timed event or 08:00, moving to the current-time line only when it would be below the viewport; manual scrolling survives redraws. Date/scroll regressions failed before the fix; the original three-character title capture was not reproduced with the headless font, so native title acceptance remains unverified.
 - [x] Calendar event panel, desktop (2026-11-18, Spark pattern): clicking an event opens it in the right panel instead of a popover, showing a hidden panel; X, Esc and the panel button close it and restore the panel as it was. Header with close, account dot, calendar name and Open in Google Calendar; Hauora title; "14:00–16:00 Sun, 22 Nov" time line; location and Join sections when the event has them. The selected event is a solid accent block. Demo launch screen `calendar-event`. Headless tests and light/dark demo screenshots; the tooltip position and the Google link were not checked by eye (demo events have no link).
 - [x] Google Calendar checks only event identity, status, recurrence and ETag before updates and deletes on `feat/agents-calendar-core`.
-      A stale ETag stops the write. A 404 or 410 removes the cached event even if the response cuts off.
-      An incomplete create response returns `Uncertain` because Google may have sent invitations.
-      Updates clear obsolete time fields. Confirmed writes survive cache failures.
-      Mock Google tests and the core suite passed. The desktop app built. Live Google Calendar behavior remains unverified.
+  A stale ETag stops the write. A 404 or 410 removes the cached event even if the response cuts off.
+  An incomplete create response returns `Uncertain` because Google may have sent invitations.
+  Updates clear obsolete time fields. Confirmed writes survive cache failures.
+  Mock Google tests and the core suite passed. The desktop app built. Live Google Calendar behavior remains unverified.
 - [ ] Calendar event panel: edit the event in the panel; show attendees and description once sync stores them.
 - [x] Mobile calendar: New event on iPhone, iPad and Android with the Mac's form; one plain "13:00" hour label on Mac, iOS and Android; Calendar page edges on the system layout margin on the Duo cover and iPad. Branch `ui/calendar-mobile`. Measured in demo: Duo cover 20/20 pt, iPad 20/20 pt from the sidebar and the right edge, Android 16 dp; no margin change was needed past #207. Not verified: a real Google save and its next sync, the Meet link that follows, Android tablet and TalkBack/VoiceOver, the Duo unfolded. Mobile does not enforce the Mac's 15-minute steps.
 - [ ] Create Microsoft meetings with Teams attached. Zoom is outside v1.
@@ -357,9 +367,9 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 
 - [x] Accounts, OS keychain app passwords and configurable provider presets.
 - [x] Migrated the SQLite/WAL store and added FTS5 search, paging and local snooze queries.
-      On `feat/agents-filter`, agent searches use a read-only connection, a two-second deadline and a 10,000-row offset cap.
-      Filters match Unicode text and provider folder roles. Default searches exclude Trash and Junk.
-      Core tests cover parsing, account isolation, folder visibility, paging and timeout recovery. The agent socket was not tested.
+  On `feat/agents-filter`, agent searches use a read-only connection, a two-second deadline and a 10,000-row offset cap.
+  Filters match Unicode text and provider folder roles. Default searches exclude Trash and Junk.
+  Core tests cover parsing, account isolation, folder visibility, paging and timeout recovery. The agent socket was not tested.
 - [x] IMAP folder discovery, bounded initial and incremental sync, flags, expunges, IDLE and mail operations.
 - [x] IMAP BODYSTRUCTURE nesting: skip text branches beyond depth 32 as attachments; reject structured responses above 40 nested lists and independently cap parser recursion at 40 (including unsolicited and fragmented FETCH, message bodies and extensions). Local imap-proto patch prevents quoted unknown attributes from bypassing the wire scanner; remove the patch when upstream bounds recursion.
 - [x] SMTP submission and Sent APPEND; Gmail saves its own Sent copy.
@@ -424,11 +434,12 @@ Spec: `docs/calendar-tasks.md` (2026-11-08). Open decisions are in its last sect
 - [x] `cargo audit` advisories: rusqlite 0.41 (libsqlite3-sys 0.39.1) and hickory-resolver 0.26.
 - [x] iOS account setup asks the system resolver for MX records using only the domain (`fix/ios-mx-lookup`). Discovery tests passed. Both iOS libraries built, and the unsigned device app linked. Live DNS on an iPhone or iPad remains unverified.
 - [x] Dependency audit on `deps/audit`. Updated `cookie` to 0.18.3 for RUSTSEC-2026-0594.
-      Dropped GPUI’s unused Git test helpers, removing both `git2` advisories (RUSTSEC-2026-0183 and RUSTSEC-2026-0184).
-      Updated GPUI’s SVG renderer and `stacksafe`, removing three unmaintained warnings.
-      `cargo audit` reports zero vulnerabilities, zero unsound warnings and 16 unmaintained warnings without ignores.
-      The macOS workspace build passed. Core, FFI and desktop tests passed (836 total, ten ignored).
-      Linux, Windows, mobile builds and release size budgets remain unverified.
+- [x] Compact sidebar (branch `ui/sidebar-rail`): three states, full, rail and hidden, saved in `window.json` (`sidebar_rail`). The rail is 56 px of icons: Search, Today, Mail with a small unread badge, Calendar and To-do, the active one an accent square. On Mail pages it adds a button for a popover with the full sidebar's mailboxes, folders and accounts. AI Agents and Settings sit at the foot. One sidebar button sits after the traffic lights (macOS) or at the top left, in the same place in every state. It switches full and rail, and brings a hidden sidebar back. Rail and hidden keep a title row on top for it, and the rail starts below that row. ⌥⌘S still shows or hides and keeps full or rail. ⇧⌥⌘S and View > Compact Sidebar switch full and rail. Dragging the divider below 120 px snaps to the rail, below half the rail hides, and dragging the rail's edge out goes back to full. Full and rail cross-fade in place. Hide and show slide as before, also when reversed mid-slide. `Panes::fit` counts the rail's width. Folder drops need the full sidebar; Move (M) covers the rail. While the popover is open, mail keys, ⌘W and the HTML view wait for it. Verified: `cargo build -p lagom`, `cargo test -p lagom` (537 passed, with new rail, popover, divider and pane tests), a Codex review (four findings fixed, one declined: the list keeps its width during a slide, as before), and macOS demo captures of full, rail, the rail popover and hidden in light and dark (`LAGOM_SCREEN=rail`, `rail-mailboxes`, `sidebar-hidden`, now in `scripts/smoke.sh`). Not verified: Windows and Linux rendering, the slide and cross-fade by hand, and native screen-reader labels (GPUI exposes no accessibility tree; every rail item has a tooltip with its name and key).
+  Dropped GPUI’s unused Git test helpers, removing both `git2` advisories (RUSTSEC-2026-0183 and RUSTSEC-2026-0184).
+  Updated GPUI’s SVG renderer and `stacksafe`, removing three unmaintained warnings.
+  `cargo audit` reports zero vulnerabilities, zero unsound warnings and 16 unmaintained warnings without ignores.
+  The macOS workspace build passed. Core, FFI and desktop tests passed (836 total, ten ignored).
+  Linux, Windows, mobile builds and release size budgets remain unverified.
   - Zed’s tar fork requires `async-std`. Both `async-std` and `async-imap` require `pin-utils`.
   - GPUI’s utilities require `futures-lite` 1, which pulls in `instant`. Its Metal backend still requires `paste`.
   - Zed’s HTTP fork requires `rustls-pemfile`. UniFFI’s Askama templates still pull in `basic-toml`.

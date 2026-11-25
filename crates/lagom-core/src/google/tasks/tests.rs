@@ -176,7 +176,7 @@ async fn mail_link_round_trips_in_plain_notes_with_escaping_and_preserves_notes(
     let notes = body["notes"].as_str().unwrap();
     assert!(notes.contains("\nlagom://mail?account="));
     let appended = format!("{notes}\nAdded in Google");
-    let (text, link) = split_notes(&appended);
+    let (text, link) = split_notes(&appended, |_| true);
     assert_eq!(text, "Keep\nnotes\n\nAdded in Google");
     assert_eq!(link.unwrap().1, "<one+two@example.test>");
     let mut remote = body;
@@ -188,7 +188,7 @@ async fn mail_link_round_trips_in_plain_notes_with_escaping_and_preserves_notes(
     let saved = store.tasks(list, true).unwrap().remove(0);
     assert_eq!((saved.notes, saved.mail_account, saved.mail_message_id, saved.mail_subject), (task.notes, task.mail_account, task.mail_message_id, task.mail_subject));
     handle.await.unwrap();
-    assert_eq!(split_notes("ordinary lagom://mail?not-a-link").0, "ordinary lagom://mail?not-a-link");
+    assert_eq!(split_notes("ordinary lagom://mail?not-a-link", |_| true).0, "ordinary lagom://mail?not-a-link");
 }
 
 #[tokio::test]
@@ -267,7 +267,7 @@ fn v10_migration_keeps_local_data_and_marks_lists_for_sync() {
     assert_eq!((task.title.as_str(), task.notes.as_str(), task.updated, task.created), ("Keep", "Notes", 42, 41));
     assert_eq!(store.task_lists().unwrap().len(), 2);
     assert_eq!(store.db.query_row("SELECT count(*) FROM task_lists WHERE dirty=1 AND deleted=0", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 23);
+    assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 24);
     assert_eq!(store.db.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none(), true);
 }
 
@@ -730,6 +730,129 @@ async fn pull_preserves_foreign_mail_link_and_clears_removed_own_link() {
     handle.await.unwrap();
     let saved = store.tasks(list, true).unwrap().remove(0);
     assert_eq!((saved.mail_account, saved.mail_message_id, saved.mail_subject), (Some(account.id), None, None));
+}
+
+fn legacy_task() -> (tempfile::TempDir, Store, Account, i64, String) {
+    let (dir, store, account, list) = setup(true);
+    let task = linked_task(&store, list);
+    let other = second_account(&store);
+    store.set_account_scopes(&other, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+    store.db.execute("UPDATE tasks SET mail_account=?1,mail_message_id='<one+two>',mail_subject='Private subject' WHERE id=?2",
+        params![other, task.id]).unwrap();
+    store.db.execute("UPDATE task_lists SET pulled_through='2026-11-10T00:00:00Z' WHERE id=?1", [list]).unwrap();
+    store.db.pragma_update(None, "user_version", 23).unwrap();
+    drop(store);
+    let store = Store::open(dir.path().join("fixture.db")).unwrap();
+
+    (dir, store, account, list, other)
+}
+
+fn legacy_page(notes: &str, etag: Option<&str>) -> String {
+    json!({"items": [{"id": "task", "title": "Mail", "notes": notes,
+        "updated": "2026-11-09T00:00:00Z", "etag": etag}]}).to_string()
+}
+
+#[tokio::test]
+async fn cleanup_conflict_preserves_both_list_cursors() {
+    let (_dir, mut store, account, list, other) = legacy_task();
+    let link = mail_link(&other, "<one+two>", Some("Private subject"));
+    let mut page: Value = serde_json::from_str(&legacy_page(link.as_str(), Some("v1"))).unwrap();
+    page["items"].as_array_mut().unwrap().push(json!({"id": "next", "updated": "2026-11-09T01:00:00Z"}));
+    let lists = r#"{"items":[{"id":"work","title":"Work"},{"id":"later","title":"Later"}]}"#;
+    let later = r#"{"items":[{"id":"last","updated":"2026-11-09T02:00:00Z"}]}"#;
+    let (url, handle) = server(vec![("200 OK", lists), ("200 OK", &page.to_string()),
+        ("412 Precondition Failed", "{}"), ("200 OK", later)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    assert!(handle.await.unwrap()[2].starts_with("PATCH "));
+    assert_eq!(store.tasks(list, true).unwrap().len(), 2);
+    let lists = store.google_lists(&account.id).unwrap();
+    for (list, hour) in lists.iter().zip([1, 2]) {
+        assert_eq!(list.cursor.as_deref().and_then(timestamp), timestamp(&format!("2026-11-09T0{hour}:00:00Z")));
+    }
+    assert_eq!(lists.len(), 2);
+}
+
+#[tokio::test]
+async fn cleanup_requires_an_etag() {
+    let (_dir, mut store, account, list, other) = legacy_task();
+    let link = mail_link(&other, "<one+two>", Some("Private subject"));
+    let page = legacy_page(link.as_str(), None);
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", &page),
+        ("200 OK", LIST), ("200 OK", &page)]).await;
+    for _ in 0..2 { sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap(); }
+    assert!(handle.await.unwrap().iter().all(|r| r.starts_with("GET ")));
+    assert_eq!(store.tasks(list, true).unwrap()[0].notes, link.as_str());
+}
+
+#[tokio::test]
+async fn cleanup_leaves_an_identical_user_link_on_a_later_pull() {
+    let (_dir, mut store, account, list, other) = legacy_task();
+    let link = mail_link(&other, "<one+two>", Some("Private subject"));
+    let page = legacy_page(link.as_str(), Some("v1"));
+    let later = legacy_page(link.as_str(), Some("v3"));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", &page), ("200 OK", TASK),
+        ("200 OK", LIST), ("200 OK", &later), ("200 OK", LIST), ("200 OK", EMPTY)]).await;
+    for _ in 0..3 { sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap(); }
+    assert_eq!(handle.await.unwrap().iter().filter(|r| r.starts_with("PATCH ")).count(), 1);
+    assert_eq!(store.tasks(list, true).unwrap()[0].notes, link.as_str());
+}
+
+#[tokio::test]
+async fn cleanup_preserves_trailing_carriage_return_and_saves_patch_version() {
+    let (_dir, mut store, account, list, other) = legacy_task();
+    let link = mail_link(&other, "<one+two>", Some("Private subject"));
+    let page = legacy_page(&format!("memo\r\n{link}"), Some("v1"));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", &page), ("200 OK", TASK)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    let (_, body) = requests[2].split_once("\r\n\r\n").unwrap();
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), json!({"notes": "memo\r"}));
+    assert_eq!(store.tasks(list, true).unwrap()[0].notes, "memo\r");
+    assert_eq!(store.google_lists(&account.id).unwrap()[0].cursor.as_deref().and_then(timestamp), timestamp("2026-11-09T00:00:00Z"));
+    let version = store.db.query_row("SELECT etag,remote_updated FROM tasks WHERE remote_id='task'", [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap();
+    assert_eq!(version, ("t2".into(), "2026-11-09T09:00:00Z".into()));
+}
+
+#[tokio::test]
+async fn cleanup_matches_parsed_fields_and_keeps_other_links_as_text() {
+    let (_dir, mut store, account, list, other) = legacy_task();
+    let before = format!("Edited remotely\nLAGOM://mail?account={other}&message-id=%3Cone%2Btwo%3E");
+    let after = "LAGOM://mail?account=other&message-id=keep\n ";
+    let link = format!("  LAGOM://mail?message-id=%3cone%2btwo%3e&subject=Older&account={other}  ");
+    let clean = format!("{before}\n{after}");
+    let old = legacy_page(&format!("{before}\n{link}\n{after}"), Some("\"v1\""));
+    let cleaned = legacy_page(&clean, Some("\"v2\""));
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", &old), ("200 OK", TASK),
+        ("200 OK", LIST), ("200 OK", &cleaned)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(!requests[1].contains("updatedMin="));
+    assert!(requests[2].starts_with("PATCH /lists/work/tasks/task "));
+    assert!(requests[2].to_lowercase().contains("if-match: \"v1\""));
+    let (_, body) = requests[2].split_once("\r\n\r\n").unwrap();
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), json!({"notes": clean}));
+    assert!(requests[4].contains("updatedMin="));
+    let saved = store.tasks(list, true).unwrap().remove(0);
+    assert_eq!((saved.notes, saved.mail_account, saved.mail_message_id), (clean, Some(other), Some("<one+two>".into())));
+    assert_eq!(store.task_lists().unwrap()[0].account.as_ref(), Some(&account.id));
+}
+
+#[tokio::test]
+async fn a_foreign_mail_task_does_not_disown_a_google_list() {
+    let (_dir, mut store, account, list) = setup(true);
+    let other = second_account(&store);
+    store.set_account_scopes(&other, oauth::GOOGLE_TASKS_SCOPE).unwrap();
+    let task = linked_task(&store, list);
+    store.db.execute("UPDATE tasks SET mail_account=?2,mail_message_id='foreign' WHERE id=?1",
+        params![task.id, other]).unwrap();
+    store.add_task(list, "New task", "", None).unwrap();
+    let (url, handle) = server(vec![("200 OK", LIST), ("200 OK", r#"{"id":"new"}"#), ("200 OK", EMPTY)]).await;
+    sync_tasks_with(&mut store, &account.id, &url, token).await.unwrap();
+    let requests = handle.await.unwrap();
+    assert!(requests[1].starts_with("POST /lists/work/tasks ") && requests[1].contains("New task"));
+    assert_eq!(store.task_lists().unwrap()[0].account.as_ref(), Some(&account.id));
 }
 
 #[tokio::test]
