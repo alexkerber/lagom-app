@@ -109,10 +109,10 @@ impl Agents {
     }
 
     /// The highest level an agent reaches on any account: the lower of its own row and the global one.
+    /// Without accounts it reaches nothing, as in the core.
     fn reach(&self, id: &str, resource: Resource, accounts: &[Account]) -> Level {
         let own = self.matrices.get(id).map_or(&[][..], Vec::as_slice);
-        let ids: Vec<&str> = if accounts.is_empty() { vec![""] } else { accounts.iter().map(|a| a.id.as_str()).collect() };
-        ids.into_iter().map(|account| stored(own, resource, account).min(stored(&self.global, resource, account))).max().unwrap_or(Level::None)
+        accounts.iter().map(|a| stored(own, resource, &a.id).min(stored(&self.global, resource, &a.id))).max().unwrap_or(Level::None)
     }
 
     /// What a connected agent may do, for example "Triage mail · Read calendar".
@@ -233,9 +233,6 @@ fn mark(t: &Theme, kind: &str, name: &str) -> Div {
         .rounded(px(radius::CONTROL)).bg(t.bg).border_1().border_color(t.line);
     let image = |path: &'static str, s: f32| gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded(path.into()))).size(px(s)).flex_shrink_0();
     match kind {
-        // Claude Code's mascot in Claude's brand colour, as code.claude.com shows it.
-        "ClaudeCode" => tile.child(icon("logos/claude-code.svg", gpui::rgb(0xD97757), 22.)),
-        "ClaudeDesktop" => tile.child(image("logos/claude.svg", 22.)),
         // Cursor's flat cube is single-colour: black on light, white on dark.
         "Cursor" => tile.child(icon("logos/cursor.svg", t.ink, 20.)),
         // The file keeps OpenAI's clear space around the Blossom, so it draws larger than the others.
@@ -345,7 +342,8 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
     }
     let now = chrono::Local::now();
     for (ix, (kind, name, row)) in rows.into_iter().enumerate() {
-        let active = row.is_some_and(|r| r.active);
+        // A remote token can expire while the page is open; its expiry note reads the clock too.
+        let active = row.is_some_and(|r| r.active && r.expires.is_none_or(|end| end > now.timestamp()));
         let pending = a.pending.as_ref().filter(|(k, _)| *k == kind && !active);
         let used = row.and_then(|r| r.last_used).map(|at| used(at, now));
         // Every request fails while agent access is off, so a connected agent is paused, not active.
@@ -536,6 +534,7 @@ mod tests {
         assert_eq!(a.may("8c21d0e4a913", &accounts), "Read mail · Read calendar");
         let none = Agents { global: Vec::new(), ..Agents::demo() };
         assert_eq!(none.may("3f9a1c0b77de", &accounts), "No access");
+        assert_eq!(a.may("3f9a1c0b77de", &[]), "No access");
     }
 
     #[test]
