@@ -90,7 +90,9 @@ impl Agents {
         Ok(())
     }
 
+    /// Agents that can work now: none while agent access is off, since every request then fails.
     pub fn active(&self) -> usize {
+        if !self.enabled { return 0; }
         self.agents.iter().filter(|a| a.active).count()
     }
 
@@ -233,6 +235,10 @@ fn mark(t: &Theme, kind: &str, name: &str) -> Div {
         .rounded(px(radius::CONTROL)).bg(t.bg).border_1().border_color(t.line);
     let image = |path: &'static str, s: f32| gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded(path.into()))).size(px(s)).flex_shrink_0();
     match kind {
+        // Claude Code's mascot in Claude's brand colour, as code.claude.com shows it.
+        "ClaudeCode" => tile.child(icon("logos/claude-code.svg", gpui::rgb(0xD97757), 22.)),
+        "ClaudeDesktop" => tile.child(image("logos/claude.svg", 22.)),
+        "Hermes" => tile.child(image(if t.dark { "logos/hermes-white.svg" } else { "logos/hermes-black.svg" }, 24.)),
         // Cursor's flat cube is single-colour: black on light, white on dark.
         "Cursor" => tile.child(icon("logos/cursor.svg", t.ink, 20.)),
         // The file keeps OpenAI's clear space around the Blossom, so it draws larger than the others.
@@ -535,6 +541,8 @@ mod tests {
         let none = Agents { global: Vec::new(), ..Agents::demo() };
         assert_eq!(none.may("3f9a1c0b77de", &accounts), "No access");
         assert_eq!(a.may("3f9a1c0b77de", &[]), "No access");
+        assert_eq!(a.active(), 2);
+        assert_eq!(Agents { enabled: false, ..Agents::demo() }.active(), 0);
     }
 
     #[test]
