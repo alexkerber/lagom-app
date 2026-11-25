@@ -417,7 +417,9 @@ Not implemented on this branch. Tracked as an open item below.
   - Compare `tag_name` with `LAGOM_VERSION` as numbers. Skip the check in development builds.
   - When the release is newer, show one quiet row: "lagom 1.2.4 is available" with a link to the
     release page. No download in the app.
-  - Settings get a "Check for updates" switch, on by default, saved with the other settings.
+  - Settings get a "Check for updates" switch, off by default, saved with the other settings. lagom sends
+    nothing until the person turns it on.
+  - Add the check to `site/privacy.html` ("What lagom sends") in the same pull request.
   - The same code serves macOS, Windows and Linux. The stores update iOS and Android.
 - Why it is not on this branch: it needs a settings switch and a row in the main window. Other
   branches change those files now. Do it after they merge.

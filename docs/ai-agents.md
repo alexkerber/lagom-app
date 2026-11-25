@@ -2,8 +2,8 @@
 
 Coding agents read and act on mail and calendar through the running desktop app. Security is the
 main requirement. This page is the decision that the "acting tools" line in `TODO.md` waits for.
-It states the threat model, the rules, the protocol and the pull requests that build it. No code
-for it exists yet.
+It states the threat model, the rules, the protocol and the pull requests that build it. The
+desktop app ships it under Settings > AI Agents, off by default.
 
 Scope: the desktop app on macOS and Linux. Windows follows in its own step. The mobile apps expose
 nothing.
