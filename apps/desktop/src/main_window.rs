@@ -625,6 +625,11 @@ impl MainWindow {
             "settings" => this.set_page(Page::Settings(None), cx),
             "settings-account" if demo => this.open_account_settings("personal".into(), window, cx),
             "settings-agents" => this.open_agents(window, cx),
+            // Agent access switched off: connected agents show as paused.
+            "settings-agents-off" if demo => {
+                this.open_agents(window, cx);
+                this.agents.enabled = false;
+            }
             // One agent's own matrix, scrolled to the activity log.
             "settings-agents-agent" if demo => {
                 this.open_agents(window, cx);
