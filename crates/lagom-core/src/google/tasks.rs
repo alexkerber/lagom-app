@@ -127,7 +127,7 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
             // A page can contain 100 notes of 8192 characters, including JSON escapes.
             let bytes = oauth::body_limit(response, 16 * 1024 * 1024).await?;
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                if attempt == 1 { return Err(Error::ReauthRequired); }
+                if attempt == 1 || etag.is_some() { return Err(Error::ReauthRequired); }
                 access = (self.token)(Some(access.to_string())).await?;
                 continue;
             }
@@ -304,41 +304,46 @@ where F: FnMut(Option<String>) -> Fut, Fut: Future<Output = Result<Zeroizing<Str
         }
         let mut url = client.url(&["lists", remote_id, "tasks"])?;
         url.query_pairs_mut().extend_pairs([("showCompleted", "true"), ("showHidden", "true"), ("showDeleted", "true"), ("maxResults", "100")]);
-        if let Some(cursor) = &list.cursor { url.query_pairs_mut().append_pair("updatedMin", cursor); }
+        if let Some(cursor) = list.cursor.as_deref().filter(|s| !s.is_empty()) { url.query_pairs_mut().append_pair("updatedMin", cursor); }
         let mut tasks: Vec<RemoteTask> = client.pages(url).await?;
-        let mut foreign_notes = HashSet::new();
-        for task in tasks.iter_mut().filter(|t| !t.deleted && t.notes.contains("lagom://mail?")) {
-            let local = store.db.query_row("SELECT id,mail_account,mail_message_id,mail_subject FROM tasks
-                WHERE list=?1 AND remote_id=?2 AND dirty=0 AND deleted=0 AND mail_message_id IS NOT NULL
-                AND mail_account<>?3 AND mail_account IN (SELECT id FROM accounts)", params![list.id, task.id, account],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))).optional()?;
-            let Some((id, owner, message, subject)) = local else { continue };
-            if pushed_tasks.contains(&id) { continue; }
-            // Other links in the notes are user text. Keep the local mail association.
-            foreign_notes.insert(task.id.clone());
-            let link = mail_link(&owner, &message, subject.as_deref());
-            let mut lines: Vec<_> = task.notes.split('\n').collect();
-            if let Some(i) = lines.iter().rposition(|line| line.strip_suffix('\r').unwrap_or(line) == link.as_str()) {
-                if i > 0 && i == lines.len() - 1 {
-                    lines[i - 1] = lines[i - 1].strip_suffix('\r').unwrap_or(lines[i - 1]);
+        // A cleanup write can be newer than edits missing from the GET snapshot.
+        let through = tasks.iter().filter_map(|t| t.updated.as_deref().and_then(timestamp))
+            .chain(list.cursor.as_deref().and_then(timestamp)).max();
+        // Claim the migration pull before PATCH so a restart cannot remove a second matching line.
+        if list.cursor.as_deref() == Some("") && store.db.execute(
+            "UPDATE task_lists SET pulled_through=NULL WHERE id=?1 AND pulled_through=''", [list.id])? == 1 {
+            for task in tasks.iter_mut().filter(|t| !t.deleted) {
+                let Some(etag) = task.etag.as_deref().filter(|e| !e.trim().is_empty() && e.trim() != "*") else { continue };
+                let local = store.db.query_row("SELECT id,mail_account,mail_message_id FROM tasks
+                    WHERE list=?1 AND remote_id=?2 AND dirty=0 AND deleted=0 AND mail_message_id IS NOT NULL
+                    AND mail_account<>?3 AND mail_account IN (SELECT id FROM accounts)", params![list.id, task.id, account],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).optional()?;
+                let Some((id, owner, message)) = local else { continue };
+                if pushed_tasks.contains(&id) { continue; }
+                let (notes, link) = split_notes(&task.notes, |m| m.0 == owner && m.1 == message);
+                if link.is_none() { continue; }
+                match client.request_if_match(Method::PATCH, client.url(&["lists", remote_id, "tasks", &task.id])?,
+                    Some(json!({"notes": notes})), Some(etag)).await {
+                    Ok(saved) => {
+                        task.notes = notes;
+                        task.etag = saved["etag"].as_str().map(str::to_owned);
+                        task.updated = saved["updated"].as_str().map(str::to_owned);
+                    }
+                    Err(_) => eprintln!("lagom: Google Tasks legacy mail link cleanup failed"),
                 }
-                lines.remove(i);
-                let notes = lines.join("\n");
-                client.request_if_match(Method::PATCH, client.url(&["lists", remote_id, "tasks", &task.id])?,
-                    Some(json!({"notes": notes})), task.etag.as_deref()).await?;
-                task.notes = notes;
             }
         }
         let tx = store.db.unchecked_transaction()?;
         let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND account=?2 AND deleted=0)", params![list.id, account], |r| r.get(0))?;
         if !active { continue; }
-        let mut through = list.cursor.as_deref().and_then(timestamp);
         for task in tasks {
             if task.id.is_empty() { return Err(Error::Network("Google task ID missing")); }
-            if let Some(updated) = task.updated.as_deref().and_then(timestamp) { through = Some(through.map_or(updated, |old| old.max(updated))); }
-            let existing: Option<(i64, bool, bool)> = tx.query_row("SELECT id,dirty,deleted FROM tasks WHERE list=?1 AND remote_id=?2", params![list.id, task.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-            if existing.is_some_and(|(id, dirty, deleted)| dirty || deleted || pushed_tasks.contains(&id)) { continue; }
-            let (notes, mail) = if foreign_notes.contains(&task.id) { (task.notes, None) } else { split_notes(&task.notes) };
+            let existing: Option<(i64, bool, bool)> = tx.query_row("SELECT id,dirty OR deleted,
+                coalesce(mail_message_id IS NOT NULL AND mail_account<>?3 AND mail_account IN (SELECT id FROM accounts),0)
+                FROM tasks WHERE list=?1 AND remote_id=?2", params![list.id, task.id, account],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            if existing.is_some_and(|(id, skip, _)| skip || pushed_tasks.contains(&id)) { continue; }
+            let (notes, mail) = if existing.is_some_and(|(_, _, foreign)| foreign) { (task.notes, None) } else { split_notes(&task.notes, |_| true) };
             let done = if task.status == "completed" { Some(task.completed.as_deref().and_then(timestamp).unwrap_or(0)) } else { None };
             if let Some((id, _, _)) = existing {
                 tx.execute("UPDATE tasks SET title=?2,notes=?3,due=?4,done_at=?5,deleted=?6,etag=?7,remote_updated=?8 WHERE id=?1 AND dirty=0",
@@ -384,15 +389,18 @@ fn mail_link(account: &str, message: &str, subject: Option<&str>) -> Url {
 }
 
 type MailLink = (String, String, Option<String>);
-fn split_notes(notes: &str) -> (String, Option<MailLink>) {
+fn split_notes(notes: &str, matches: impl Fn(&MailLink) -> bool) -> (String, Option<MailLink>) {
     let mut lines: Vec<_> = notes.split('\n').collect();
     for index in (0..lines.len()).rev() {
-        let Some(link) = Url::parse(lines[index]).ok().filter(|u| u.scheme() == "lagom" && u.host_str() == Some("mail") && u.path().is_empty()) else { continue };
+        let Some(link) = Url::parse(lines[index].trim()).ok().filter(|u| u.scheme() == "lagom" && u.host_str() == Some("mail") && u.path().is_empty()) else { continue };
         let pairs: std::collections::HashMap<_, _> = link.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
         if let (Some(account), Some(message)) = (pairs.get("account"), pairs.get("message-id")) {
             if !account.is_empty() && !message.is_empty() {
-                lines.remove(index);
-                return (lines.join("\n"), Some((account.clone(), message.clone(), pairs.get("subject").cloned())));
+                let mail = (account.clone(), message.clone(), pairs.get("subject").cloned());
+                if matches(&mail) {
+                    lines.remove(index);
+                    return (lines.join("\n"), Some(mail));
+                }
             }
         }
     }
