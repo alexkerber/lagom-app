@@ -226,10 +226,17 @@ impl Store {
         }
         let mut id = None;
         if !aggregate {
+            // Removal deleted the account's rows. A request that was already running, such as a send that waited
+            // for its confirmation, must not bring the account ID, the target or the recipients back.
+            let account = match row.account.map(|id| id.to_string()) {
+                Some(id) if tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)", [&id], |r| r.get(0))? => Some(id),
+                _ => None,
+            };
+            let removed = row.account.is_some() && account.is_none();
             let detail = if matches!(
                 command,
                 "draft.send" | "event.create" | "event.update" | "event.delete"
-            ) && !row.recipients.is_empty()
+            ) && !row.recipients.is_empty() && !removed
             {
                 Some(
                     serde_json::to_string(
@@ -250,11 +257,11 @@ impl Store {
                     | Failure::Unauthorized(_)
                     | Failure::VerifiedRefusal { .. },
                 ) => None,
-                _ if row.identity.is_some() => row.target.map(AuditTarget::audit_target),
+                _ if row.identity.is_some() && !removed => row.target.map(AuditTarget::audit_target),
                 _ => None,
             };
             tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail,refusals,dispatched_write) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                params![if bucket {minute} else {now},agent,token,row.account.map(|id| id.to_string()),command,
+                params![if bucket {minute} else {now},agent,token,account,command,
                     target,if pending { "pending" } else { &result },row.source_ip.map(|ip|ip.to_string()),detail,bucket,pending])?;
             id = Some(tx.last_insert_rowid());
         }

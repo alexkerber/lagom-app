@@ -416,6 +416,31 @@ fn resolution_checks_account_before_lookup_and_all_copies_before_write() {
 }
 
 #[test]
+fn audit_append_after_account_removal_keeps_no_account_data() {
+    let (_dir, s, a, _) = setup();
+    let agent = s.create_agent("test", "writer", "local", false).unwrap();
+    let token = s.issue_token(&agent, TokenScope::Local).unwrap();
+    let identity = s.authenticate(Some(&token), None).unwrap();
+    s.save_draft(&crate::outbox::Draft { id: "d".into(), account: a.id.clone(), ..Default::default() }).unwrap();
+    let target = s.agent_object_target(&ObjectId::Draft(a.id.clone(), "d".into())).unwrap();
+    let recipients = ["bcc@example.org".parse().unwrap()];
+    let append = || s.record_agent_audit(AuditRow {
+        identity: Some(&identity), account: Some(a.id.parse().unwrap()), command: "draft.send", target: Some(&target),
+        outcome: Ok(()), source_ip: None, recipients: &recipients,
+    }).unwrap();
+    let rows = || s.db.prepare("SELECT account,target,detail FROM agent_audit WHERE command='draft.send'").unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+        .collect::<rusqlite::Result<Vec<(Option<String>, Option<String>, Option<String>)>>>().unwrap();
+    append();
+    assert_eq!(rows(), [(Some(a.id.clone()), Some(ObjectId::Draft(a.id.clone(), "d".into()).encode()), Some(r#"["bcc@example.org"]"#.into()))]);
+    s.delete_account(&a.id).unwrap();
+    assert!(rows().is_empty());
+    // The send was waiting for its confirmation when the account was removed.
+    append();
+    assert_eq!(rows(), [(None, None, None)]);
+}
+
+#[test]
 fn audit_limits_anonymous_refusals() {
     let (_dir, s, _, _) = setup();
     let now = chrono::Utc::now().timestamp();
