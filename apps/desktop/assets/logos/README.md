@@ -18,6 +18,6 @@ lagom uses them only to identify that product and does not imply endorsement.
 Anthropic's trademark guidelines (https://www.anthropic.com/legal/trademark-guidelines) allow
 its marks only as Anthropic permits and in materials it approves beforehand. lagom has no such
 approval. The project owner accepts this risk for `claude-code.svg` and `claude.svg`. To remove
-the risk, drop both files; the list then shows a monogram tile.
+the risk, remove both files, their `include_bytes!` entries in `apps/desktop/src/main.rs` and the `ClaudeCode` and `ClaudeDesktop` arms of `mark` in `apps/desktop/src/settings/agents.rs`; the list then shows a monogram tile.
 
 Remote agents and test agents show a monogram tile. Do not draw or redraw marks by hand.
