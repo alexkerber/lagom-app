@@ -376,8 +376,10 @@ impl Store {
     /// Removes the account and, by cascade, its folders, messages and search rows. The agent log has no
     /// foreign keys, so its rows for the account (targets and recipients, Bcc too) are deleted here.
     pub fn delete_account(&self, id: &str) -> Result<()> {
+        let tx = self.db.is_autocommit().then(|| self.write_transaction()).transpose()?;
         self.db.execute("DELETE FROM agent_audit WHERE account=?1", [id])?;
         self.db.execute("DELETE FROM accounts WHERE id=?1", [id])?;
+        if let Some(tx) = tx { tx.commit()?; }
         Ok(())
     }
     /// The removal confirmation's words, the same on every platform. Removing the account also deletes its drafts
