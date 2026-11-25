@@ -35,8 +35,10 @@ impl MainWindow {
             (false, true, true) => "Full sidebar · ⇧⌥⌘S",
             (false, true, false) => "Full sidebar · Ctrl+Alt+Shift+S",
         };
+        // Occlude: a search button sliding or fading past must not take its click.
         icon_button(&self.theme, "sidebar-toggle", "icons/sidebar.svg", tip)
             .absolute()
+            .occlude()
             // macOS: 8 px after the traffic lights, which span x 18..78, on their centre line.
             .left(px(if mac { 86. } else { 12. }))
             .top(px(if mac { 11. } else { 12. }))
@@ -225,9 +227,15 @@ mod tests {
         view.read_with(cx, |v, _| assert!(!v.mailbox_popover && matches!(v.page, Page::Mail)));
         click(cx, "rail-mailboxes-idle");
         // While it is open, mail keys do not reach the message behind it.
-        let rows = view.read_with(cx, |v, _| v.inbox.list().len());
+        let (rows, tasks, toast) = view.read_with(cx, |v, _| (v.inbox.list().len(), v.today.tasks.len(), v.toast.as_ref().map(|t| t.0.clone())));
         cx.dispatch_action(DeleteMessage);
-        assert_eq!(view.read_with(cx, |v, _| v.inbox.list().len()), rows);
+        cx.dispatch_action(NewTask);
+        assert_eq!(view.read_with(cx, |v, _| (v.inbox.list().len(), v.today.tasks.len(), v.toast.as_ref().map(|t| t.0.clone()))), (rows, tasks, toast));
+        // The palette opens on top and closes the popover.
+        cx.dispatch_action(OpenPalette);
+        assert!(!view.read_with(cx, |v, _| v.mailbox_popover));
+        cx.dispatch_action(Cancel);
+        click(cx, "rail-mailboxes-idle");
         cx.dispatch_action(Cancel);
         assert!(!view.read_with(cx, |v, _| v.mailbox_popover));
     }

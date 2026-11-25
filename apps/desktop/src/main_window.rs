@@ -740,6 +740,7 @@ impl MainWindow {
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         if crate::command_palette::move_query(query).is_some() && !self.prepare_move(query, window, cx) { return; }
+        self.mailbox_popover = false;
         // The overlay swallows the gesture's Ended, so end a swipe now.
         self.release(false, cx);
         // The overlay takes ⌘Z, so the toast's Undo would not work while it is open.
@@ -995,8 +996,9 @@ impl MainWindow {
             return;
         }
         if matches!(self.page, Page::Home | Page::Todo) && self.close_task_overlay(window, cx) { return; }
-        if (matches!(self.page, Page::Calendar) && self.week.detail.take().is_some()) || self.folder_name.take().is_some()
-            || self.message_menu.take().is_some() || std::mem::take(&mut self.confirm_empty_trash) || std::mem::take(&mut self.mailbox_popover) {
+        // The rail's popover is on top of everything else here, so it goes first.
+        if std::mem::take(&mut self.mailbox_popover) || (matches!(self.page, Page::Calendar) && self.week.detail.take().is_some()) || self.folder_name.take().is_some()
+            || self.message_menu.take().is_some() || std::mem::take(&mut self.confirm_empty_trash) {
             window.focus(&self.focus);
             cx.notify();
             return;
@@ -2864,7 +2866,7 @@ impl Render for MainWindow {
             .when(self.mouse_swiping(), |d| d.cursor(CursorStyle::ClosedHand))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.web.unfocus()))
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.new_task(window, cx); }))
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| if this.palette.is_none() && !this.mailbox_popover && !this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) && matches!(this.page, Page::Mail | Page::Home | Page::Todo) { this.new_task(window, cx); }))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| if !this.overlay_open(cx) { this.select(Inbox::next, cx) }))
             .on_action(cx.listener(|this, _: &SelectPrev, _, cx| if !this.overlay_open(cx) { this.select(Inbox::prev, cx) }))
             .on_action(cx.listener(|this, _: &ExtendNext, _, cx| if !this.overlay_open(cx) { this.select(|inbox| inbox.extend(1), cx) }))
@@ -2879,7 +2881,7 @@ impl Render for MainWindow {
                 if this.palette.is_none() && this.compose.is_none() {
                     if let Some(id)=this.agent_sends.pop() {this.edit_failed(&id,window,cx);return;}
                 }
-                if this.palette.is_some() || this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) || matches!(this.page, Page::AddAccount(_) | Page::Settings(_)) {
+                if this.palette.is_some() || this.mailbox_popover || this.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) || matches!(this.page, Page::AddAccount(_) | Page::Settings(_)) {
                     cx.propagate();
                     return;
                 }
