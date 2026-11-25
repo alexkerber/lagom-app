@@ -25,7 +25,7 @@ pub mod threading;
 pub mod tasks;
 pub mod unsubscribe;
 
-/// `Display` is the text the person reads; `Debug` keeps the technical detail for logs.
+/// `Display` is the text the person reads; `Debug` keeps the technical detail, and `log` is its form for logs.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Google signed in as {0}, which is not this account.")]
@@ -74,6 +74,15 @@ impl Error {
     /// Errors that fail every folder alike, so a sync stops at the first one.
     pub fn is_account_wide(&self) -> bool {
         matches!(self, Error::ReauthRequired | Error::Authentication | Error::Secret | Error::Cancelled)
+    }
+
+    /// The technical detail for stderr, without the address or mailbox name that `Debug` and `Display` carry.
+    pub fn log(&self) -> String {
+        match self {
+            Error::Folder { source, .. } => format!("Folder({})", source.log()),
+            Error::GoogleAccountMismatch(_) => "GoogleAccountMismatch".into(),
+            error => format!("{error:?}"),
+        }
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
@@ -139,6 +148,18 @@ mod perf_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn log_form_has_the_error_kind_but_no_address_or_mailbox_name() {
+        use super::Error;
+        let inner = Error::Folder { folder: "Clients/Acme".into(), source: Box::new(Error::Network("IMAP connection lost")) };
+        let error = Error::Folder { folder: "alice@example.com".into(), source: Box::new(inner) };
+        assert_eq!(error.log(), r#"Folder(Folder(Network("IMAP connection lost")))"#);
+        assert_eq!(Error::GoogleAccountMismatch("bob@example.com".into()).log(), "GoogleAccountMismatch");
+        assert_eq!(Error::ReauthRequired.log(), "ReauthRequired");
+        // The person still reads which account and mailbox failed.
+        assert_eq!(error.to_string(), "alice@example.com: Clients/Acme: could not reach your mail provider");
+    }
+
     /// Every error text a person can read stays free of protocol and programmer words.
     #[test]
     fn error_text_is_plain() {

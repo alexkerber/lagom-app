@@ -200,9 +200,9 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
     (Bridge(cmd_tx), ev_rx)
 }
 
-/// The text the window shows for `error`; the log keeps the technical detail.
+/// The text the window shows for `error`; the log keeps the technical detail, without addresses and mailbox names.
 fn shown(error: &Error) -> String {
-    eprintln!("lagom: {error:?}");
+    eprintln!("lagom: {}", error.log());
     error.to_string()
 }
 
@@ -664,10 +664,10 @@ impl Worker {
     }
 
     fn remove(&mut self, id: &str) {
-        self.remove_with(id, Account::delete_password);
+        self.remove_with(id, Account::delete_password, lagom_core::imap_sync::eml_cache_dir().ok().as_deref());
     }
 
-    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>) {
+    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, eml_cache: Option<&std::path::Path>) {
         self.cancel_calendar(id);
         if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         if self.reauth.as_deref() == Some(id) { self.cancel_sign_in(); }
@@ -682,6 +682,10 @@ impl Worker {
             return;
         }
         self.reauth_required.remove(id);
+        // The account is already removed, so a failure here is logged and not shown.
+        if let Some(Err(error)) = eml_cache.map(lagom_core::imap_sync::clear_cached_emls) {
+            eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
+        }
         self.emit(Event::Changed);
     }
 
@@ -1477,7 +1481,7 @@ mod tests {
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(vec![])));
         let stale = worker.calendars.join_next_with_id().await.unwrap();
         worker.store.delete_account(&account.id).unwrap();
-        worker.remove(&account.id);
+        worker.remove_with(&account.id, Account::delete_password, None);
         worker.calendar_finished(stale);
         assert!(worker.store.accounts().unwrap().is_empty());
         drop(worker);

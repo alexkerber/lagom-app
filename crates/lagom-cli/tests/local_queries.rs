@@ -179,15 +179,36 @@ fn developer_agent_enables_only_the_selected_account() {
             resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
         }).unwrap();
     }
-    let raw = run(&path, &["agent", "--account", "a@gmail.com"]);
+    let printed = run(&path, &["agent", "--account", "a@gmail.com"]);
+    assert!(!printed.contains("lgm_"), "the token must not reach stdout");
+    let file = std::path::Path::new(printed.trim());
+    assert_eq!(file.parent().unwrap().file_name().unwrap(), "agents");
+    assert!(store.agents().unwrap().iter().any(|a| file.file_name().unwrap().to_str() == Some(&format!("{}.token", a.id))));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    let raw = std::fs::read_to_string(file).unwrap();
     for a in store.accounts().unwrap() {
         for resource in [Resource::Mail, Resource::Calendar] {
-            assert_eq!(store.effective(Some(raw.trim()), None, resource, &a.id).unwrap(),
+            assert_eq!(store.effective(Some(&raw), None, resource, &a.id).unwrap(),
                 if a.email == "a@gmail.com" { Level::Read } else { Level::None });
         }
     }
     run(&path, &["agent", "--off"]);
     assert!(!store.agent_enabled().unwrap());
+    // A token that could not be saved is revoked, not left valid with no file.
+    std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file.parent().unwrap(), "").unwrap();
+    let before = store.agents().unwrap().len();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lagom-cli"))
+        .arg("--database").arg(&path).args(["agent", "--account", "a@gmail.com"]).output().unwrap();
+    assert!(!output.status.success() && output.stdout.is_empty());
+    let agents = store.agents().unwrap();
+    assert_eq!(agents.len(), before + 1);
+    assert_eq!(agents.iter().filter(|a| a.active).count(), 1, "only the first agent keeps a token");
 }
 
 #[test]

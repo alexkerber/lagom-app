@@ -135,10 +135,14 @@ mod tests {
         tasks.endpoint = Some(format!("http://{}/", listener.local_addr().unwrap()));
         tasks.tick.tick().await;
         tasks.pause(&account.id);
+        let cache = tempfile::tempdir().unwrap();
+        let eml = cache.path().join(format!("message-{}.eml", "0".repeat(64)));
+        std::fs::write(&eml, "Subject: Cached\r\n\r\n").unwrap();
         worker.remove_with(&account.id, |removing| {
             assert_eq!(removing.id, account.id);
             Err(Error::Secret)
-        });
+        }, Some(cache.path()));
+        assert!(eml.exists(), "failed removal must keep the cache");
         while !task_rx.is_empty() { assert!(tasks.step(&mut task_rx).await); }
         assert_eq!(worker.store.accounts().unwrap(), [account.clone()]);
         assert!(matches!(out.try_recv().unwrap(), Event::Sync(id, SyncState::Failed(_)) if id == account.id));
@@ -146,9 +150,10 @@ mod tests {
         assert!(tasks.step(&mut task_rx).await);
         assert!(tasks.task_jobs.contains_key(&account.id), "failed removal must allow manual task sync to start again");
         tasks.pause(&account.id);
-        worker.remove_with(&account.id, |_| Ok(()));
+        worker.remove_with(&account.id, |_| Ok(()), Some(cache.path()));
         while !task_rx.is_empty() { assert!(tasks.step(&mut task_rx).await); }
         assert!(worker.store.accounts().unwrap().is_empty());
+        assert!(!eml.exists(), "removal must clear the cached originals");
         assert!(tasks.paused.contains(&account.id), "successful removal must stay paused");
         drop(tasks);
         drop(worker);
