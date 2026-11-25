@@ -13,20 +13,43 @@ use lagom_core::{
     },
     store::Store,
 };
-use std::os::fd::AsFd;
+#[cfg(windows)]
+pub(crate) mod windows;
+#[cfg(windows)]
+use self::windows::{clone_peer, peer_connected, socket_path, Socket};
+#[cfg(windows)]
+pub(crate) use self::windows::write_frame;
+#[cfg(windows)]
+type Stream = tokio::net::windows::named_pipe::NamedPipeServer;
+#[cfg(windows)]
+type Peer = std::os::windows::io::OwnedHandle;
+#[cfg(unix)]
+type Peer = std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream as Stream};
+#[cfg(unix)]
+use std::{fs::{self, File}, os::{fd::AsFd, unix::fs::{FileTypeExt, PermissionsExt}}};
+
+#[cfg(unix)]
+fn clone_peer(stream: &Stream) -> io::Result<Peer> {
+    Ok(stream.as_fd().try_clone_to_owned()?.into())
+}
+
+#[cfg(unix)]
+fn peer_connected(mut peer: &Peer) -> bool {
+    use std::io::Read;
+    matches!(peer.read(&mut [0]), Err(e) if e.kind() == io::ErrorKind::WouldBlock)
+}
 use std::{
     collections::{HashMap, VecDeque},
-    fs::{self, File},
     io,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     sync::{oneshot, watch, Semaphore},
     task::{self, JoinSet},
     time::{interval, timeout, timeout_at},
@@ -75,12 +98,14 @@ impl Drop for Server {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn socket_path(dir: &Path) -> Result<PathBuf, Code> {
     let path = dir.join("agent.sock");
     std::os::unix::net::SocketAddr::from_pathname(&path).map_err(|_| Code::SocketPathTooLong)?;
     Ok(path)
 }
 
+#[cfg(unix)]
 struct Socket {
     listener: UnixListener,
     path: PathBuf,
@@ -88,7 +113,14 @@ struct Socket {
     generation: i64,
 }
 
+#[cfg(unix)]
 impl Socket {
+    async fn accept(&mut self) -> io::Result<(Stream, bool)> {
+        let (stream, _) = self.listener.accept().await?;
+        let same_user = stream.peer_cred().is_ok_and(|peer| peer.uid() == unsafe { libc::geteuid() });
+        Ok((stream, same_user))
+    }
+
     fn clear_stale(path: &Path) -> io::Result<File> {
         let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
         let lock = File::open(dir)?;
@@ -119,6 +151,7 @@ impl Socket {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Socket {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
@@ -129,7 +162,8 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
     let Ok(settings) = Store::agent_writer(&path) else {
         return;
     };
-    let socket_path = path.with_file_name("agent.sock");
+    let Ok(socket_path) = socket_path(path.parent().unwrap()) else { return };
+    #[cfg(unix)]
     if socket_path.exists() && settings.agent_enabled() == Ok(false) {
         let _ = Socket::clear_stale(&socket_path);
     }
@@ -192,10 +226,8 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                 }
             }
             Some(_) = calls.join_next(), if !calls.is_empty() => {}
-            accepted = async { socket.as_ref().unwrap().listener.accept().await }, if socket.is_some() => {
-                let Ok((stream,_)) = accepted else { continue };
-                // SAFETY: geteuid has no arguments or preconditions.
-                let same_user = stream.peer_cred().is_ok_and(|p|p.uid()==unsafe {libc::geteuid()});
+            accepted = async { socket.as_mut().unwrap().accept().await }, if socket.is_some() => {
+                let Ok((stream,same_user)) = accepted else { continue };
                 let permit = permits.clone().try_acquire_owned();
                 let failure = if !same_user { Some(Code::Unauthorized) } else if permit.is_err() { Some(Code::Busy) } else { None };
                 if let Some(code) = failure {
@@ -203,7 +235,7 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
                     *pending.lock().unwrap().entry(minute).or_default() += 1;
                     let _ = wake.try_send(());
                     let mut stream=stream;
-                    let _ = timeout(Duration::from_millis(100),stream.write_all(&line(Response::Failure(code)))).await;
+                    let _ = timeout(Duration::from_millis(100),write_frame(&mut stream, &line(Response::Failure(code)))).await;
                 } else {
                     calls.spawn(call(stream,path.clone(),bridge.clone(),rates.clone(),enabled.subscribe(),socket.as_ref().unwrap().generation,policy.subscribe(),permit.unwrap()));
                 }
@@ -217,7 +249,12 @@ async fn serve(path: PathBuf, bridge: Bridge, mut stop: oneshot::Receiver<()>) {
     while calls.join_next().await.is_some() {}
 }
 
-async fn frame(stream: &mut UnixStream) -> Result<Request, Code> {
+#[cfg(unix)]
+pub(crate) async fn write_frame(stream: &mut Stream, bytes: &[u8]) -> io::Result<()> {
+    tokio::io::AsyncWriteExt::write_all(stream, bytes).await
+}
+
+async fn frame(stream: &mut Stream) -> Result<Request, Code> {
     let mut buf = zeroize::Zeroizing::new(Vec::new());
     let mut reader = BufReader::new(stream.take((MAX_REQUEST + 1) as u64));
     reader
@@ -301,7 +338,7 @@ fn line(response: Response) -> Vec<u8> {
 }
 
 async fn call(
-    mut stream: UnixStream,
+    mut stream: Stream,
     path: PathBuf,
     bridge: Bridge,
     rates: Rates,
@@ -326,12 +363,7 @@ async fn call(
         };
     let writing = parsed.as_ref().is_ok_and(|r| write::handles(&r.cmd));
     let peer = if confirming {
-        stream
-            .as_fd()
-            .try_clone_to_owned()
-            .ok()
-            .map(std::os::unix::net::UnixStream::from)
-            .map(Arc::new)
+        clone_peer(&stream).ok().map(Arc::new)
     } else {
         None
     };
@@ -368,7 +400,7 @@ async fn call(
     tokio::select! {
         biased;
         _ = off.changed() => {},
-        _ = timeout_at(deadline,stream.write_all(&bytes)) => {},
+        _ = timeout_at(deadline,write_frame(&mut stream, &bytes)) => {},
     }
 }
 
@@ -380,7 +412,7 @@ fn process(
     off: watch::Receiver<()>,
     deadline: tokio::time::Instant,
     generation: i64,
-    peer: Option<Arc<std::os::unix::net::UnixStream>>,
+    peer: Option<Arc<Peer>>,
     policy: watch::Receiver<Option<i64>>,
 ) -> (Vec<u8>, Option<tokio::sync::OwnedSemaphorePermit>) {
     let mut permit = None;

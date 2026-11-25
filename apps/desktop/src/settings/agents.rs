@@ -58,7 +58,7 @@ pub struct Agents {
 impl Agents {
     pub fn new() -> Self {
         Self {
-            home: std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+            home: dirs::home_dir().unwrap_or_default(),
             path: std::env::var_os("PATH").unwrap_or_default(),
             ..Default::default()
         }

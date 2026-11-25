@@ -138,7 +138,6 @@ impl Mail {
                 }
             }).ok();
         });
-        #[cfg(unix)]
         {
             let mut server = Some(crate::agent::Server::start(store.path(), bridge.clone()));
             cx.on_app_quit(move |_| { server.take(); async {} }).detach();
@@ -151,7 +150,6 @@ impl Mail {
             handle.update(cx, |this, window, cx| this.on_events(events, window, cx)).ok();
         } else {
             let messages = events.into_iter().filter_map(|event| match event {
-                #[cfg(unix)]
                 Event::AgentConfirm(sheet) => {
                     let mut waiting = std::mem::take(cx.default_global::<crate::agent::confirm::Waiting>());
                     let added = waiting.push(sheet, cx.default_global::<crate::agent::confirm::Denials>());
@@ -536,7 +534,6 @@ impl MainWindow {
         let mut new_mail = Vec::new();
         for event in events {
             match event {
-                #[cfg(unix)]
                 Event::AgentConfirm(sheet) => {
                     if self.agent_sheets.push(sheet, cx.default_global::<crate::agent::confirm::Denials>()) {
                         if !window.is_window_active() && cx.try_global::<crate::notifications::State>().is_some() {
@@ -545,7 +542,6 @@ impl MainWindow {
                         self.watch_agent_sheets(window,cx);
                     }
                 }
-                #[cfg(unix)]
                 Event::AgentQueued(id) => {
                     self.agent_sends.push(id.clone());
                     cx.spawn(async move |this,cx| {
@@ -847,7 +843,6 @@ impl MainWindow {
     pub(super) fn open_notification(&mut self, target: crate::notifications::Target, window: &mut Window, cx: &mut Context<Self>) {
         cx.activate(true);
         window.activate_window();
-        #[cfg(unix)]
         if target.account == crate::settings::agents::AGENTS && target.message.is_none() {
             if self.agent_sheets.sheets.is_empty(){self.open_agents(window,cx);} else {self.agent_deny.focus(window);}
             return;
