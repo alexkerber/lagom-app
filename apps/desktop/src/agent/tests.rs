@@ -364,10 +364,16 @@ fn account_scoped_reads_over_the_socket_are_pure_and_audited() {
     assert_eq!(copies["messages"][0]["folder"], "INBOX");
     db.execute("DELETE FROM agent_audit WHERE refusals>0", [])
         .unwrap();
+    assert_eq!(call("thread", json!({"id":"t1.unknown"})), fixed(Code::NotFound));
     let missing = call(
         "thread",
         json!({"id":ObjectId::Thread(a.id.clone(),"missing".into()).encode()}),
     );
+    let missing_count: usize = db.query_row(
+        "SELECT sum(refusals) FROM agent_audit WHERE command='thread' AND result='not_found'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(missing_count, 2);
     let foreign = match ObjectId::decode(thread_id).unwrap() {
         ObjectId::ThreadHash(_, hash) => ObjectId::ThreadHash(b.id.clone(), hash).encode(),
         id => panic!("expected compact thread ID, got {id:?}"),
@@ -592,16 +598,19 @@ fn socket_ownership_framing_deadlines_and_limits() {
     }
     assert_eq!(wire(&sock, req.as_bytes()), fixed(Code::Busy));
     assert_eq!(wire(&sock, wrong_source.as_bytes()), fixed(Code::Busy));
-    let (buckets, total): (usize, usize) = lock
-        .query_row(
-            "SELECT count(*),sum(refusals) FROM agent_audit
-        WHERE agent IS NOT NULL AND refusals>0",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert!(buckets <= 2); // The requests can cross a minute boundary.
-    assert_eq!(total, 302);
+    let mut query = lock.prepare(
+        "SELECT command,result,sum(refusals),count(*)=count(DISTINCT at) FROM agent_audit
+         WHERE agent IS NOT NULL AND refusals>0 GROUP BY command,result ORDER BY command,result"
+    ).unwrap();
+    let buckets = query.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, usize>(2)?, r.get::<_, bool>(3)?))
+    }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(buckets, [
+        ("accounts".into(), "busy".into(), 1, true),
+        ("draft.send".into(), "busy".into(), 1, true),
+        ("draft.send".into(), "unauthorized:source".into(), 299, true),
+        ("unknown".into(), "unsupported".into(), 1, true),
+    ]);
     drop(first);
     assert!(!sock.exists());
     drop(store);

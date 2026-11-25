@@ -250,10 +250,16 @@ impl Audit {
         who: Option<&Identity>,
         outcome: Result<(), Failure>,
     ) -> Result<(), Code> {
+        let verified_refusal = match &outcome {
+            Err(Failure::VerifiedRefusal { .. } | Failure::VerifiedBusy { .. }) => true,
+            Err(Failure::Error(Code::Busy | Code::NotFound) | Failure::OutsideScope) => who.is_some(),
+            _ => false,
+        };
         store.record_agent_audit(AuditRow {
             identity: who,
             account: self.account.as_deref(),
-            command: req.filter(|_| self.dispatched).map_or("", |r| &r.cmd),
+            command: req.filter(|r| self.dispatched || (verified_refusal && r.cmd != "remote.refused"))
+                .map_or("", |r| &r.cmd),
             target: self.target.as_ref(),
             outcome,
             source_ip: req.and_then(|r| r.source_ip.as_ref()?.parse().ok()),

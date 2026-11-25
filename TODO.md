@@ -256,6 +256,10 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
   Both paths enforce token limits, audit refusals and check approved sends against the original policy.
   Core, desktop and FFI tests passed on macOS. The desktop app built.
   Live SSH, provider accounts and manual confirmation clicks remain unverified. See `docs/ai-agents.md`.
+  - [x] On `fix/agent-cli-audit`, email and search tables show thread IDs beside message IDs.
+    Verified refusals are counted by agent, minute, command and result. Unresolved thread requests are logged as `thread`.
+    Core and desktop tests covered table output, refusal counts and audit limits on macOS.
+    The installed app smoke test was not repeated.
   - [x] Fixed Gmail smoke findings on `feat/agents-socket`. Mail pages count each message once per account and list its folders.
     Human tables use fixed columns and identify multiple accounts by email. Help lists the paging flags.
     Settings and the client explain when the socket path is too long.

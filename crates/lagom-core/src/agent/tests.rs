@@ -240,7 +240,7 @@ fn authenticate_checks_digest_expiry_revocation_and_source() {
     s.db.execute("UPDATE agent_tokens SET expires=unixepoch()", [])
         .unwrap();
     assert_eq!(auth(Some(&token), ip), Err(Code::Unauthorized));
-    check_refusal(ip, "source");
+    check_refusal(ip, "expired");
     assert_eq!(
         s.db.query_row("SELECT sum(refusals) FROM agent_audit", [], |r| r
             .get::<_, i64>(0))
@@ -437,6 +437,38 @@ fn removed_account_cannot_regain_audit_details_after_confirmation() {
         VALUES(unixepoch(),?1,'draft.send','old target','ok','old recipients')", [&account.id]).unwrap();
     let reopened = crate::store::Store::open(store.path()).unwrap();
     assert!(reopened.agent_audit(10).unwrap().is_empty());
+}
+
+#[test]
+fn audit_counts_verified_refusals_by_command_and_result() {
+    let (_dir, store, _, _) = setup();
+    let agent = store.create_agent("test", "audit", "local", false).unwrap();
+    let token = store.issue_token(&agent, TokenScope::Local).unwrap();
+    let identity = store.authenticate(Some(&token), None).unwrap();
+    let denied = Failure::Unauthorized(TokenFailure::InvalidScope);
+    for (command, failure) in [
+        ("thread", Code::NotFound.into()),
+        ("action.archive", denied.clone()),
+        ("thread", Code::NotFound.into()),
+        ("draft.create", denied),
+        ("thread", Failure::OutsideScope),
+    ] {
+        store.record_agent_audit_at(AuditRow {
+            identity: Some(&identity), account: None, command, target: None,
+            outcome: Err(failure), source_ip: None, recipients: &[],
+        }, 1_800_000_000).unwrap();
+    }
+    let mut query = store.db.prepare(
+        "SELECT command,result,refusals FROM agent_audit ORDER BY id"
+    ).unwrap();
+    let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(rows, [
+        ("thread".into(), "not_found".into(), 2),
+        ("action.archive".into(), "unauthorized:invalid_scope".into(), 1),
+        ("draft.create".into(), "unauthorized:invalid_scope".into(), 1),
+        ("thread".into(), "not_found:outside_scope".into(), 1),
+    ]);
 }
 
 #[test]

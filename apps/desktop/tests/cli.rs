@@ -36,8 +36,8 @@ fn cli_socket_and_mcp_round_trip() {
         ("file","thread",json!({"id":"t1.x"}),denied),
         ("environment","accounts",json!({}),"{\"v\":1,\"ok\":true,\"result\":{\"accounts\":[{\"mail\":\"read\",\"calendar\":\"none\"}]}}\n"),
         ("environment","emails",json!({"limit":1}),success),
-        ("environment","emails",json!({}),success),
-        ("environment","search",json!({"query":"hi"}),r#"{"v":1,"ok":true,"result":{"messages":[{"account":"a","date":"2025-02-01T01:15:00Z","from":"sender","subject":"Hi","id":"1"},{"account":"b","id":"2"}]}}
+        ("environment","emails",json!({}),"{\"v\":1,\"ok\":true,\"result\":{\"messages\":[{\"subject\":\"Hi\",\"id\":\"m1.x\",\"thread\":\"t1.x\"}]}}\n"),
+        ("environment","search",json!({"query":"hi"}),r#"{"v":1,"ok":true,"result":{"messages":[{"account":"a","date":"2025-02-01T01:15:00Z","from":"sender","subject":"Hi","id":"m1.a","thread":"t1.a"},{"account":"b","id":"2"}]}}
 "#),
         ("environment","accounts",json!({}),r#"{"v":1,"ok":true,"result":{"accounts":[{"id":"a","email":"one@example.com"},{"id":"b","email":"two@example.com"}]}}
 "#),
@@ -106,11 +106,11 @@ fn cli_socket_and_mcp_round_trip() {
     assert_eq!(replies[2]["result"]["isError"], false);
     assert_eq!(replies[2]["result"]["content"][0]["text"], r#"{"messages":[{"subject":"Hi"}]}"#);
     let out = run(&["emails"]).output().unwrap();
-    assert_eq!(out.stdout, b"date\tfrom\tsubject\tid\n\t\tHi\t\n");
+    assert_eq!(out.stdout, b"date\tfrom\tsubject\tid\tthread\n\t\tHi\tm1.x\tt1.x\n");
     let out = run(&["search", "hi"]).env("TZ", "America/New_York").output().unwrap();
     assert!(out.status.success());
     assert_eq!(String::from_utf8(out.stdout).unwrap(),
-        "date\tfrom\tsubject\tid\taccount\n2025-01-31 20:15\tsender\tHi\t1\tone@example.com\n\t\t\t2\ttwo@example.com\n");
+        "date\tfrom\tsubject\tid\tthread\taccount\n2025-01-31 20:15\tsender\tHi\tm1.a\tt1.a\tone@example.com\n\t\t\t2\t\ttwo@example.com\n");
     let out = run(&["contacts", "--help"]).output().unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8(out.stdout).unwrap().contains("lagom contacts [--account"));

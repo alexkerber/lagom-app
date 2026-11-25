@@ -486,7 +486,7 @@ fn table(out: &mut impl Write, value: &Value) -> io::Result<()> {
 fn list_table(out: &mut impl Write, cmd: &str, value: &Value, client: &Client,
               rt: &tokio::runtime::Runtime) -> Result<()> {
     let (key, columns): (_, &[&str]) = match cmd {
-        "emails" | "search" => ("messages", &["date", "from", "subject", "id"]),
+        "emails" | "search" => ("messages", &["date", "from", "subject", "id", "thread"]),
         "folders" => (cmd, &["name", "role", "unread"]),
         "accounts" => (cmd, &["email", "mail", "calendar", "id"]),
         "contacts" => (cmd, &["name", "address"]),
