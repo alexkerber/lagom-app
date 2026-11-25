@@ -387,9 +387,9 @@ pub struct MainWindow {
     sidebar_scroll: ScrollHandle,
     sidebar_mail: bool,
     sidebar_fade: Option<Instant>,
-    /// When the sidebar started to slide in, out or between full and rail, and its drawn width then.
-    /// It slides as an AppKit split view collapses.
-    sidebar_slide: Option<(Instant, f32)>,
+    /// When the sidebar started to slide in, out or between full and rail, its drawn width then, and
+    /// whether the slide goes to or from hidden. It slides as an AppKit split view collapses.
+    sidebar_slide: Option<(Instant, f32, bool)>,
     /// The rail's popover of mailboxes, folders and accounts is open.
     mailbox_popover: bool,
     /// The sidebar's drawn width this frame; it narrows while the sidebar slides.
@@ -716,7 +716,7 @@ impl MainWindow {
     // A sheet in its Undo window after Send is not an overlay: the inbox keys work, and ⌘Z still
     // reaches the sheet, which holds focus. Another page (add account, settings) takes no inbox keys.
     fn overlay_open(&self, cx: &mut Context<Self>) -> bool {
-        let open = self.palette.is_some() || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) || !matches!(self.page, Page::Mail);
+        let open = self.palette.is_some() || self.mailbox_popover || self.compose.as_ref().is_some_and(|c| c.read(cx).is_modal()) || !matches!(self.page, Page::Mail);
         if open {
             cx.propagate();
         }
@@ -996,7 +996,7 @@ impl MainWindow {
         }
         if matches!(self.page, Page::Home | Page::Todo) && self.close_task_overlay(window, cx) { return; }
         if (matches!(self.page, Page::Calendar) && self.week.detail.take().is_some()) || self.folder_name.take().is_some()
-            || self.message_menu.take().is_some() || std::mem::take(&mut self.confirm_empty_trash) {
+            || self.message_menu.take().is_some() || std::mem::take(&mut self.confirm_empty_trash) || std::mem::take(&mut self.mailbox_popover) {
             window.focus(&self.focus);
             cx.notify();
             return;
@@ -1892,13 +1892,11 @@ impl MainWindow {
             .gap(px(20.))
             .px(px(12.))
             .pb(px(14.))
-            // The title-bar row, y 11..39: the traffic lights on the left (macOS), collapse and search on the right.
-            // Elsewhere the same row tops the sidebar. A logo would go in at the left.
+            // The title-bar row, y 11..39: the traffic lights and the sidebar button on the left (macOS), search on the right.
+            // Elsewhere the same row tops the sidebar. The sidebar button floats above it (`sidebar_button`).
             .pt(px(if cfg!(target_os = "macos") { 11. } else { 12. }))
             // No tab stop: Tab would leave Compose's field cycle. ⌘K and the menu are the keyboard route.
-            .child(div().flex().flex_shrink_0().justify_end().gap(px(4.))
-                .child(icon_button(t, "sidebar-collapse", "icons/sidebar.svg", rail::COLLAPSE_TIP)
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleRail), cx)))
+            .child(div().flex().flex_shrink_0().justify_end()
                 .child(icon_button(t, "search", "icons/search.svg", if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" })
                     // The same action as ⌘K and the menu, so all three open it on the same pages.
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx))))
@@ -2742,21 +2740,28 @@ impl Render for MainWindow {
         // The sidebar's drawn width eases from where it was to its state's width: none, the rail or full.
         let viewport = f32::from(window.viewport_size().width);
         let target = self.panes.fit(viewport).0;
-        let slide = self.sidebar_slide.and_then(|(at, from)| {
+        let slide = self.sidebar_slide.and_then(|(at, from, hiding)| {
             let t = at.elapsed().as_secs_f32() / SLIDE.as_secs_f32();
-            (t < 1.).then(|| (ease_out_quint()(t), from))
+            (t < 1.).then(|| (ease_out_quint()(t), from, hiding))
         });
         if slide.is_some() { window.request_animation_frame(); } else { self.sidebar_slide = None; }
         let from = slide.map_or(target, |s| s.1);
-        let drawn = slide.map_or(target, |(p, from)| from + (target - from) * p);
+        let drawn = slide.map_or(target, |(p, from, _)| from + (target - from) * p);
         // A sliding sidebar keeps its wider end's width; only its clip narrows. Full shows at either end: `wide`.
         let wide = from.max(target) > RAIL_W + 0.5;
         let layout = if slide.is_some() { Panes { sidebar_hidden: false, sidebar_rail: !wide, ..self.panes } } else { self.panes };
         (self.sidebar_w, self.list_w) = layout.fit(viewport);
         let content_w = if wide { self.sidebar_w } else { RAIL_W };
         // To or from nothing, the sidebar slides; between full and rail it stays put and cross-fades.
-        let hiding = target == 0. || from < 0.5;
-        let shown = if hiding { drawn / content_w } else { 1. };
+        let hiding = slide.map_or(target == 0., |s| s.2);
+        // How much the rail shows against the full sidebar, 0 to 1: full and rail cross-fade by width.
+        let rail_part = match (hiding, wide) {
+            (true, wide) => if wide { 0. } else { 1. },
+            (false, true) => ((self.sidebar_w - drawn) / (self.sidebar_w - RAIL_W)).clamp(0., 1.),
+            (false, false) => 1.,
+        };
+        // How much the full sidebar shows. Rail and hidden keep a title row for the window controls and the sidebar button.
+        let full_part = (1. - rail_part) * if hiding { drawn / content_w } else { 1. };
         let rail_at_rest = slide.is_none() && self.panes.sidebar_rail && !self.panes.sidebar_hidden;
         if self.mailbox_popover && !(rail_at_rest && matches!(self.page, Page::Mail | Page::Drafts)) { self.mailbox_popover = false; }
         self.web_frame(window, cx);
@@ -2765,7 +2770,7 @@ impl Render for MainWindow {
         let welcome = self.welcome();
         self.sidebar_shown_w = if welcome { 0. } else { drawn };
         // macOS: with the sidebar gone, the panel clears the traffic lights.
-        let panel_top = if welcome { 36. } else if cfg!(target_os = "macos") { 8. + 28. * (1. - shown) } else { 8. };
+        let panel_top = if welcome { 36. } else { 8. + (rail::TITLE_ROW - 8.) * (1. - full_part) };
         let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
@@ -2929,16 +2934,18 @@ impl Render for MainWindow {
             .when(!welcome && drawn > 0., |d| {
                 // The sidebar keeps its width and slides under a clip, so no row reflows.
                 let frost = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
-                let clip = div().relative().w(px(drawn)).h_full().flex_shrink_0().flex().overflow_hidden().child(self.glass.background(frost));
-                d.child(if hiding {
+                // The rail starts below the title row, as the panel does.
+                let clip = div().relative().flex_1().min_h(px(0.)).flex().overflow_hidden().child(self.glass.background(frost));
+                let clip = if hiding {
                     let content = if wide { self.sidebar(cx) } else { self.rail(viewport_h, cx) };
                     clip.child(content.ml(px(drawn - content_w)))
                 } else {
-                    // 0 at full width, 1 at the rail's.
-                    let rail = if wide { ((self.sidebar_w - drawn) / (self.sidebar_w - RAIL_W)).clamp(0., 1.) } else { 1. };
-                    clip.when(rail < 1., |d| d.child(self.sidebar(cx).opacity(1. - rail)))
-                        .when(rail > 0., |d| d.child(div().absolute().top_0().left_0().h_full().opacity(rail).child(self.rail(viewport_h, cx))))
-                })
+                    clip.when(rail_part < 1., |d| d.child(self.sidebar(cx).opacity(1. - rail_part)))
+                        .when(rail_part > 0., |d| d.child(div().absolute().top_0().left_0().h_full().opacity(rail_part).child(self.rail(viewport_h, cx))))
+                };
+                d.child(div().w(px(drawn)).h_full().flex_shrink_0().flex().flex_col()
+                    // The title row above the rail is window background, as beside it; the window itself is transparent.
+                    .child(div().h(px(rail::TITLE_ROW * rail_part)).flex_shrink_0().bg(t.bg)).child(clip))
             })
             .child(
                 // The content meets the sidebar at a straight edge: no inset panel, so no stray corner.
@@ -2959,6 +2966,8 @@ impl Render for MainWindow {
                     .when(matches!(self.page, Page::Mail) && !empty && self.sidebar_slide.is_none(), |d| d.child(self.divider(Divider::List, self.list_w - 3., cx)))),
             )
             .when(!welcome && slide.is_none() && drawn > 0., |d| d.child(self.divider(Divider::Sidebar, self.sidebar_w - 3., cx)))
+            // One place in every state, so the way back never moves.
+            .when(!welcome, |d| d.child(self.sidebar_button()))
             // A click anywhere outside the rail's popover closes it, and does nothing else.
             .when(self.mailbox_popover, |d| d.child(div().id("mailbox-popover-backdrop").absolute().inset_0().occlude()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.mailbox_popover = false; cx.notify(); }))))

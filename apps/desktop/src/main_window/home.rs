@@ -511,14 +511,14 @@ mod tests {
             // The test window can report the previous frame's bounds, so draw twice.
             // Restart the slide before each draw so a slow machine still measures mid-slide.
             for _ in 0..2 {
-                view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE / 4, if hide { f32::from(full.size.width) } else { 0. })); cx.notify(); });
+                view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE / 4, if hide { f32::from(full.size.width) } else { 0. }, true)); cx.notify(); });
                 draw(cx);
             }
             // Mid-slide: same width, moved left, so no row reflows.
             let mid = cx.debug_bounds("sidebar").unwrap();
             assert_eq!(mid.size.width, full.size.width);
             assert!(mid.origin.x < full.origin.x);
-            view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE, 0.)); cx.notify(); });
+            view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE, 0., true)); cx.notify(); });
             cx.run_until_parked();
             // A test window keeps the last drawn bounds of a removed element, so check the state.
             assert_eq!(view.read_with(cx, |v, _| v.sidebar_w > 0.), !hide);

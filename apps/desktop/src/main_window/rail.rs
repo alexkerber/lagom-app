@@ -1,11 +1,12 @@
 //! The compact sidebar: one icon per section, the mailboxes in a popover, AI Agents and Settings at the foot.
+//! One sidebar button beside the window controls goes between full and rail, and brings a hidden sidebar back.
 
 use super::*;
 
-pub(super) const COLLAPSE_TIP: &str = if cfg!(target_os = "macos") { "Compact sidebar · ⇧⌥⌘S" } else { "Compact sidebar · Ctrl+Alt+Shift+S" };
-const EXPAND_TIP: &str = if cfg!(target_os = "macos") { "Full sidebar · ⇧⌥⌘S" } else { "Full sidebar · Ctrl+Alt+Shift+S" };
+/// Rail and hidden keep this row on top for the window controls and the sidebar button.
+pub(super) const TITLE_ROW: f32 = if cfg!(target_os = "macos") { 36. } else { 44. };
 const SEARCH_TIP: &str = if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" };
-const BUTTON: f32 = 40.;
+const BUTTON: f32 = 36.;
 const POPOVER_W: f32 = 248.;
 
 impl MainWindow {
@@ -13,11 +14,33 @@ impl MainWindow {
     pub(super) fn set_sidebar(&mut self, hidden: bool, rail: bool, cx: &mut Context<Self>) {
         self.finish_resize(cx);
         if (hidden, rail) == (self.panes.sidebar_hidden, self.panes.sidebar_rail) { return; }
+        // A slide to or from hidden stays a slide when reversed mid-way, so its content keeps sliding.
+        let hiding = hidden || self.panes.sidebar_hidden || self.sidebar_slide.is_some_and(|s| s.2);
         self.panes.sidebar_hidden = hidden;
         self.panes.sidebar_rail = rail;
-        self.sidebar_slide = (!crate::motion::reduced()).then(|| (Instant::now(), self.sidebar_shown_w));
+        self.sidebar_slide = (!crate::motion::reduced()).then(|| (Instant::now(), self.sidebar_shown_w, hiding));
         self.save_panes(cx);
         cx.notify();
+    }
+
+    /// The sidebar button: in the title-bar row after the traffic lights (macOS) or at the top left, in every state.
+    pub(super) fn sidebar_button(&self) -> Stateful<Div> {
+        let mac = cfg!(target_os = "macos");
+        let hidden = self.panes.sidebar_hidden;
+        let tip = match (hidden, self.panes.sidebar_rail, mac) {
+            (true, _, true) => "Show sidebar · ⌥⌘S",
+            (true, _, false) => "Show sidebar · Ctrl+Alt+S",
+            (false, false, true) => "Compact sidebar · ⇧⌥⌘S",
+            (false, false, false) => "Compact sidebar · Ctrl+Alt+Shift+S",
+            (false, true, true) => "Full sidebar · ⇧⌥⌘S",
+            (false, true, false) => "Full sidebar · Ctrl+Alt+Shift+S",
+        };
+        icon_button(&self.theme, "sidebar-toggle", "icons/sidebar.svg", tip)
+            .absolute()
+            // macOS: 8 px after the traffic lights, which span x 18..78, on their centre line.
+            .left(px(if mac { 86. } else { 12. }))
+            .top(px(if mac { 11. } else { 12. }))
+            .on_click(move |_, window, cx| if hidden { window.dispatch_action(Box::new(ToggleSidebar), cx) } else { window.dispatch_action(Box::new(ToggleRail), cx) })
     }
 
     pub(super) fn rail(&self, viewport_h: f32, cx: &mut Context<Self>) -> Div {
@@ -34,15 +57,12 @@ impl MainWindow {
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(4.))
-            .pb(px(14.))
-            // The title-bar row as in the full sidebar: the traffic lights on macOS, then Expand.
-            .pt(px(if cfg!(target_os = "macos") { 11. + 28. + 8. } else { 12. }))
-            .child(button("rail-expand", "icons/sidebar.svg", EXPAND_TIP, false)
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleRail), cx)))
+            .gap(px(2.))
+            .pt(px(10.))
+            .pb(px(10.))
             .child(button("rail-search", "icons/search.svg", SEARCH_TIP, false)
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx)))
-            .child(div().h(px(12.)).flex_shrink_0())
+            .child(div().h(px(8.)).flex_shrink_0())
             .children(SECTIONS.iter().enumerate().map(|(ix, &(_, path))| {
                 let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                 button(["rail-today", "rail-mail", "rail-calendar", "rail-todo"][ix], path, SECTION_TIPS[ix], active)
@@ -55,7 +75,7 @@ impl MainWindow {
                     .when(self.mailbox_popover, |d| d.bg(t.sel))
                     .on_click(cx.listener(|this, _, _, cx| { this.mailbox_popover = !this.mailbox_popover; cx.notify(); })))
                 .when(self.mailbox_popover, |d| d.child(gpui::deferred(
-                    gpui::anchored().position_mode(gpui::AnchoredPositionMode::Local).position(gpui::point(px((RAIL_W + BUTTON) / 2. + 6.), px(-8.)))
+                    gpui::anchored().position_mode(gpui::AnchoredPositionMode::Local).position(gpui::point(px((RAIL_W + BUTTON) / 2. + 6.), px(-6.)))
                         .snap_to_window_with_margin(px(8.))
                         .child(self.mailbox_popover_view(viewport_h, cx))).priority(1)))))
             .child(div().flex_1())
@@ -78,10 +98,14 @@ impl MainWindow {
     }
 }
 
-/// A square icon button with the section fill when active, as the full sidebar's rows have.
+/// A square icon button. Active, it is an accent square in the active window and the grey selection otherwise.
 fn rail_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str, active: bool, window_active: bool) -> Stateful<Div> {
     let theme = *t;
-    let ink = if active { if window_active { t.sel_icon } else { t.ink2 } } else { t.ink2 };
+    let (fill, ink) = match (active, window_active) {
+        (true, true) => (Some(t.accent), t.accent_ink),
+        (true, false) => (Some(t.sel), t.ink2),
+        (false, _) => (None, t.ink2),
+    };
     pressable(div().id(id).group(id), t, active)
         .debug_selector(move || format!("{id}-{}", if active { "filled" } else { "idle" }))
         .relative()
@@ -91,17 +115,20 @@ fn rail_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static st
         .items_center()
         .justify_center()
         .rounded(px(radius::CONTROL))
-        .when(active, |d| d.bg(t.sel))
+        .when_some(fill, |d, fill| d.bg(fill))
         .child(icon(path, ink, 18.).when(!active, |icon| icon.group_hover(id, { let ink = theme.ink; move |s| s.text_color(ink) })))
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
 }
 
 /// A count on an icon: the rail has no room for the full sidebar's quiet number beside a label.
+/// A ring in the sidebar's colour keeps it apart from an accent square.
 fn badge(t: &Theme, count: usize) -> Div {
     let text = if count > 99 { "99+".to_string() } else { count.to_string() };
-    div().absolute().top(px(3.)).right(px(1.)).h(px(15.)).min_w(px(15.)).px(px(4.)).rounded_full()
+    let ring = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
+    div().absolute().top(px(-3.)).right(px(-4.)).h(px(15.)).min_w(px(15.)).px(px(3.)).rounded_full()
+        .border_2().border_color(ring)
         .flex().items_center().justify_center().bg(t.accent)
-        .child(mono(text, t.accent_ink).text_size(px(10.)).font_weight(FontWeight::SEMIBOLD))
+        .child(mono(text, t.accent_ink).text_size(px(9.)).font_weight(FontWeight::SEMIBOLD))
 }
 
 #[cfg(test)]
@@ -110,7 +137,7 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
 
     fn settle(view: &Entity<MainWindow>, cx: &mut VisualTestContext) {
-        view.update(cx, |v, cx| { if let Some((_, from)) = v.sidebar_slide { v.sidebar_slide = Some((Instant::now() - SLIDE, from)); } cx.notify(); });
+        view.update(cx, |v, cx| { if let Some((_, from, hiding)) = v.sidebar_slide { v.sidebar_slide = Some((Instant::now() - SLIDE, from, hiding)); } cx.notify(); });
         cx.run_until_parked();
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
     }
@@ -123,7 +150,7 @@ mod tests {
         let full = view.read_with(cx, |v, _| (v.sidebar_w, v.list_w));
         cx.dispatch_action(ToggleRail);
         // Between full and rail the sidebar cross-fades in place, narrowing from the full width.
-        view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE / 4, full.0)); cx.notify(); });
+        view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE / 4, full.0, false)); cx.notify(); });
         cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
         let mid = view.read_with(cx, |v, _| v.sidebar_shown_w);
         assert!(mid > RAIL_W && mid < full.0, "{mid}");
@@ -141,20 +168,33 @@ mod tests {
             settle(&view, cx);
             view.read_with(cx, |v, _| assert_eq!((v.panes.sidebar_hidden, v.panes.sidebar_rail, v.sidebar_shown_w), (hidden, true, if hidden { 0. } else { RAIL_W })));
         }
-        // Hidden, the rail toggle shows the rail; the rail's Expand goes back to full.
+        // A hide reversed mid-slide keeps sliding the rail; it does not turn into a cross-fade.
+        cx.dispatch_action(ToggleSidebar);
+        view.update(cx, |v, cx| { v.sidebar_slide = Some((Instant::now() - SLIDE / 4, RAIL_W, true)); cx.notify(); });
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        cx.dispatch_action(ToggleSidebar);
+        assert!(view.read_with(cx, |v, _| v.sidebar_slide.is_some_and(|s| s.2)));
+        settle(&view, cx);
+        // Hidden, the rail toggle shows the rail.
         cx.dispatch_action(ToggleSidebar);
         cx.dispatch_action(ToggleRail);
         settle(&view, cx);
         view.read_with(cx, |v, _| assert_eq!((v.panes.sidebar_hidden, v.panes.sidebar_rail), (false, true)));
-        let at = cx.debug_bounds("rail-expand-idle").unwrap().center();
-        cx.simulate_click(at, Default::default());
-        settle(&view, cx);
+        // The sidebar button stays in one place: rail to full, full to rail, and hidden back to what it was.
+        let button = cx.debug_bounds("sidebar-toggle").unwrap();
+        let click = |cx: &mut VisualTestContext| {
+            assert_eq!(cx.debug_bounds("sidebar-toggle").unwrap(), button);
+            cx.simulate_click(button.center(), Default::default());
+            settle(&view, cx);
+        };
+        click(cx);
         view.read_with(cx, |v, _| assert_eq!((v.panes.full_sidebar(), v.sidebar_w, v.list_w), (true, full.0, full.1)));
-        // The full sidebar's header button collapses it.
-        let at = cx.debug_bounds("sidebar-collapse").unwrap().center();
-        cx.simulate_click(at, Default::default());
-        settle(&view, cx);
+        click(cx);
         assert!(view.read_with(cx, |v, _| v.panes.sidebar_rail));
+        cx.dispatch_action(ToggleSidebar);
+        settle(&view, cx);
+        click(cx);
+        view.read_with(cx, |v, _| assert_eq!((v.panes.sidebar_hidden, v.panes.sidebar_rail), (false, true)));
     }
 
     #[gpui::test]
@@ -184,6 +224,10 @@ mod tests {
         cx.simulate_click(outside, Default::default());
         view.read_with(cx, |v, _| assert!(!v.mailbox_popover && matches!(v.page, Page::Mail)));
         click(cx, "rail-mailboxes-idle");
+        // While it is open, mail keys do not reach the message behind it.
+        let rows = view.read_with(cx, |v, _| v.inbox.list().len());
+        cx.dispatch_action(DeleteMessage);
+        assert_eq!(view.read_with(cx, |v, _| v.inbox.list().len()), rows);
         cx.dispatch_action(Cancel);
         assert!(!view.read_with(cx, |v, _| v.mailbox_popover));
     }

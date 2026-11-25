@@ -66,8 +66,8 @@ pub(super) const SIDEBAR_MIN: f32 = 180.;
 const SIDEBAR_MAX: f32 = 320.;
 // Dragged narrower than this, the sidebar becomes the rail; narrower than half the rail, it hides.
 const COLLAPSE_AT: f32 = 120.;
-/// The compact sidebar: icons only. macOS also fits the traffic lights, which span x 18..78.
-pub(super) const RAIL_W: f32 = if cfg!(target_os = "macos") { 88. } else { 64. };
+/// The compact sidebar: icons only.
+pub(super) const RAIL_W: f32 = 56.;
 pub(super) const LIST_MIN: f32 = 280.;
 const LIST_MAX: f32 = 560.;
 pub(super) const READING_MIN: f32 = 440.;
