@@ -380,7 +380,7 @@ impl Client {
         }
         let mut stream = timeout(Duration::from_secs(5), async {
             #[cfg(unix)]
-            let mut stream = tokio::net::UnixStream::connect(crate::agent::socket_path(&self.dir)?)
+            let mut stream = crate::agent::connect(&crate::agent::socket_path(&self.dir)?)
                 .await
                 .map_err(|_| Code::AppUnreachable)?;
             #[cfg(unix)]

@@ -6,6 +6,7 @@ mod remote;
 #[cfg(unix)]
 pub(crate) use remote::{source_ranges, RemoteForm};
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -15,7 +16,7 @@ use lagom_core::agent::{audit::AuditEntry, policy::{Access, Level, Resource, Set
 use lagom_core::store::Store;
 
 use super::{plate, section, stop, toggle_row, REPOSITORY};
-use crate::main_window::{button, page_title, icon_button, mono, pressable, AgentChange, MainWindow, OneLine};
+use crate::main_window::{button, icon, page_title, icon_button, mono, pressable, AgentChange, MainWindow, OneLine};
 use crate::theme::{radius, size, Theme};
 
 /// `Page::Settings(Some(AGENTS))` opens this page. Account IDs are UUIDs, so it cannot clash.
@@ -40,9 +41,11 @@ pub struct Agents {
     pub sidebar: bool,
     /// Kind and name of each agent found on this computer when the page opened.
     pub detected: Vec<(String, &'static str)>,
-    /// This computer's name, for agents not connected yet.
+    /// This computer's name, stored with a local agent when it connects.
     pub host: String,
     pub agents: Vec<AgentRow>,
+    /// Each agent's own access rows, for what its list row says it may do.
+    pub matrices: HashMap<String, Vec<Access>>,
     pub global: Vec<Access>,
     /// The agent whose own matrix shows; `None` shows the global matrix.
     pub selected: Option<String>,
@@ -83,6 +86,7 @@ impl Agents {
             self.selected = None;
         }
         self.global = store.agent_access("")?;
+        self.matrices = self.agents.iter().map(|a| Ok((a.id.clone(), store.agent_access(&a.id)?))).collect::<Result<_, Code>>()?;
         self.own = match &self.selected {
             Some(id) => store.agent_access(id)?,
             None => Vec::new(),
@@ -91,7 +95,9 @@ impl Agents {
         Ok(())
     }
 
+    /// Agents that can work now: none while agent access is off, since every request then fails.
     pub fn active(&self) -> usize {
+        if !self.enabled { return 0; }
         self.agents.iter().filter(|a| a.active).count()
     }
 
@@ -100,18 +106,37 @@ impl Agents {
     }
 
     /// Detected agents with their store row, then connected agents that detection no longer finds.
-    fn list(&self) -> Vec<(String, String, String, Option<&AgentRow>)> {
+    fn list(&self) -> Vec<(String, String, Option<&AgentRow>)> {
         let local = |kind: &str| self.agents.iter().find(|a| a.kind == kind && !a.remote);
-        let mut rows: Vec<_> = self.detected.iter()
-            .map(|(kind, name)| {
-                let row = local(kind);
-                (kind.clone(), name.to_string(), row.map_or_else(|| self.host.clone(), |a| a.host.clone()), row)
-            })
-            .collect();
+        let mut rows: Vec<_> = self.detected.iter().map(|(kind, name)| (kind.clone(), name.to_string(), local(kind))).collect();
         rows.extend(self.agents.iter()
             .filter(|a| a.remote || (a.active && !self.detected.iter().any(|(k, _)| *k == a.kind)))
-            .map(|a| (a.kind.clone(), a.name.clone(), if a.remote { "Remote · SSH".into() } else { a.host.clone() }, Some(a))));
+            .map(|a| (a.kind.clone(), a.name.clone(), Some(a))));
         rows
+    }
+
+    /// The highest level an agent reaches on any account: the lower of its own row and the global one.
+    /// Without accounts it reaches nothing, as in the core.
+    fn reach(&self, id: &str, resource: Resource, accounts: &[Account]) -> Level {
+        let own = self.matrices.get(id).map_or(&[][..], Vec::as_slice);
+        accounts.iter().map(|a| stored(own, resource, &a.id).min(stored(&self.global, resource, &a.id))).max().unwrap_or(Level::None)
+    }
+
+    /// What a connected agent may do, for example "Triage mail · Read calendar".
+    fn may(&self, id: &str, accounts: &[Account]) -> String {
+        let mail = match self.reach(id, Resource::Mail, accounts) {
+            Level::None => None,
+            Level::Read => Some("Read mail"),
+            Level::Triage => Some("Triage mail"),
+            Level::Send => Some("Send mail"),
+        };
+        let calendar = match self.reach(id, Resource::Calendar, accounts) {
+            Level::None => None,
+            Level::Read => Some("Read calendar"),
+            Level::Triage | Level::Send => Some("Change calendar"),
+        };
+        let parts: Vec<_> = [mail, calendar].into_iter().flatten().collect();
+        if parts.is_empty() { "No access".into() } else { parts.join(" · ") }
     }
 
     /// The level on screen. An agent's own level never shows above the global one.
@@ -137,10 +162,18 @@ impl Agents {
     /// Fixed sample rows for `LAGOM_DEMO=1`; no store, no file system.
     pub fn demo() -> Self {
         let now = chrono::Utc::now().timestamp();
-        let agent = |id: &str, kind: &str, name: &str, active| AgentRow {
-            id: id.into(), kind: kind.into(), name: name.into(), host: "studio".into(), remote: false, active, expires: None,
-        };
         let access = |resource, account: &str, level| Access { resource, account: account.into(), level };
+        let own = vec![
+            access(Resource::Mail, "", Level::Read),
+            access(Resource::Calendar, "", Level::Read),
+            access(Resource::Mail, "personal", Level::Send),
+        ];
+        let remote = vec![
+            access(Resource::Mail, "", Level::None),
+            access(Resource::Calendar, "", Level::None),
+            access(Resource::Mail, "personal", Level::Read),
+            access(Resource::Calendar, "personal", Level::Read),
+        ];
         let entry = |ago: i64, agent: &str, account: &str, command: &str, result: &str| AuditEntry {
             at: now - ago, agent: Some(agent.into()), account: Some(account.into()), command: command.into(), result: result.into(),
         };
@@ -148,9 +181,18 @@ impl Agents {
             enabled: true,
             confirm: true,
             sidebar: true,
-            detected: vec![("ClaudeCode".into(), "Claude Code"), ("Codex".into(), "Codex"), ("Cursor".into(), "Cursor")],
+            detected: vec![
+                ("ClaudeCode".into(), "Claude Code"), ("Codex".into(), "Codex"), ("Cursor".into(), "Cursor"),
+                ("Hermes".into(), "Hermes"), ("OpenClaw".into(), "OpenClaw"), ("ClaudeDesktop".into(), "Claude Desktop"),
+            ],
             host: "studio".into(),
-            agents: vec![agent("3f9a1c0b77de", "ClaudeCode", "Claude Code", true), agent("8c21d0e4a913", "Codex", "Codex", true)],
+            agents: vec![
+                AgentRow { id: "3f9a1c0b77de".into(), kind: "ClaudeCode".into(), name: "Claude Code".into(), host: "studio".into(),
+                    remote: false, active: true, expires: None, last_used: Some(now - 120) },
+                AgentRow { id: "8c21d0e4a913".into(), kind: "remote".into(), name: "build-server".into(), host: "build-server".into(),
+                    remote: true, active: true, expires: Some(now + 30 * 86_400), last_used: Some(now - 3 * 3600) },
+            ],
+            matrices: HashMap::from([("3f9a1c0b77de".into(), own.clone()), ("8c21d0e4a913".into(), remote)]),
             global: vec![
                 access(Resource::Mail, "", Level::Read),
                 access(Resource::Calendar, "", Level::Read),
@@ -159,11 +201,7 @@ impl Agents {
                 access(Resource::Mail, "work", Level::None),
             ],
             // What a selected demo agent holds: Send on Personal mail shows as the global Triage.
-            own: vec![
-                access(Resource::Mail, "", Level::Read),
-                access(Resource::Calendar, "", Level::Read),
-                access(Resource::Mail, "personal", Level::Send),
-            ],
+            own,
             activity: vec![
                 entry(90, "3f9a1c0b77de", "personal", "action.archive", "ok"),
                 entry(240, "3f9a1c0b77de", "personal", "thread", "ok"),
@@ -193,6 +231,45 @@ fn word(level: Level) -> &'static str {
 
 fn note(t: &Theme, text: impl Into<SharedString>) -> Div {
     div().text_size(px(size::SNIPPET)).text_color(t.ink2).line_height(relative(1.4)).child(text.into())
+}
+
+/// The agent's own mark (sources in assets/logos/README.md), or its initial where none is vendored.
+/// Single-colour marks are drawn as a mask in their colour; the others as their own image.
+fn mark(t: &Theme, kind: &str, name: &str) -> Div {
+    let tile = div().size(px(32.)).flex_shrink_0().flex().items_center().justify_center()
+        .rounded(px(radius::CONTROL)).bg(t.bg).border_1().border_color(t.line);
+    let image = |path: &'static str, s: f32| gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded(path.into()))).size(px(s)).flex_shrink_0();
+    match kind {
+        // Claude Code's mascot in Claude's brand colour, as code.claude.com shows it.
+        "ClaudeCode" => tile.child(icon("logos/claude-code.svg", gpui::rgb(0xD97757), 22.)),
+        "ClaudeDesktop" => tile.child(image("logos/claude.svg", 22.)),
+        "Hermes" => tile.child(image(if t.dark { "logos/hermes-white.svg" } else { "logos/hermes-black.svg" }, 24.)),
+        // Cursor's flat cube is single-colour: black on light, white on dark.
+        "Cursor" => tile.child(icon("logos/cursor.svg", t.ink, 20.)),
+        // The file keeps OpenAI's clear space around the Blossom, so it draws larger than the others.
+        "Codex" => tile.child(image(if t.dark { "logos/openai-white.svg" } else { "logos/openai-black.svg" }, 38.)),
+        "OpenClaw" => tile.child(image("logos/openclaw.svg", 24.)),
+        _ => tile.text_size(px(size::BASE)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2)
+            .child(name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default()),
+    }
+}
+
+/// A small pill after an agent's name: a dot and a word, tinted with its colour.
+fn tag(text: &'static str, color: Rgba) -> Div {
+    div().flex_shrink_0().h(px(18.)).px(px(7.)).flex().items_center().gap(px(5.)).rounded(px(radius::KEY))
+        .bg(Rgba { a: 0.14, ..color }).text_color(color).text_size(px(size::SMALL)).font_weight(FontWeight::MEDIUM)
+        .child(div().size(px(6.)).rounded_full().bg(color))
+        .child(text)
+}
+
+/// "Used 5 min ago" while recent, then the activity log's date words.
+fn used(at: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    match now.timestamp() - at {
+        ..=59 => "Used just now".into(),
+        s @ ..=3599 => format!("Used {} min ago", s / 60),
+        s @ ..=86_399 => format!("Used {} h ago", s / 3600),
+        _ => format!("Used {}", crate::mail::when(at, now).replace("Yesterday", "yesterday")),
+    }
 }
 
 /// A row of segments, one per level. Segments above `cap` are dimmed and do nothing.
@@ -278,41 +355,58 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
     if rows.is_empty() {
         list = list.child(div().px(px(14.)).py(px(12.)).child(note(t, "No agents found. lagom looks for Claude Code, Codex, Cursor, Hermes and OpenClaw.")));
     }
-    for (ix, (kind, name, host, row)) in rows.into_iter().enumerate() {
-        let active = row.is_some_and(|r| r.active);
+    let now = chrono::Local::now();
+    for (ix, (kind, name, row)) in rows.into_iter().enumerate() {
+        // A remote token can expire while the page is open; its expiry note reads the clock too.
+        let active = row.is_some_and(|r| r.active && r.expires.is_none_or(|end| end > now.timestamp()));
         let pending = a.pending.as_ref().filter(|(k, _)| *k == kind && !active);
-        let mut line = div().flex().items_center().gap(px(10.)).px(px(14.)).min_h(px(52.)).py(px(8.))
-            .child(div().size(px(8.)).flex_shrink_0().rounded_full()
-                .when(active, |d| d.bg(t.accent))
-                .when(!active, |d| d.border_1().border_color(t.ink2)))
-            .child(div().flex_1().min_w(px(0.)).flex().flex_col()
-                .child(div().font_weight(FontWeight::MEDIUM).one_line().child(name))
-                .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).one_line().child(host)));
+        let used = row.and_then(|r| r.last_used).map(|at| used(at, now));
+        // Every request fails while agent access is off, so a connected agent is paused, not active.
+        let paused = active && !a.enabled;
+        let detail = match row {
+            Some(r) if r.remote => match (paused, used) {
+                (true, _) => "Remote over SSH · Agent access is off".into(),
+                (false, Some(used)) => format!("Remote over SSH · {used}"),
+                (false, None) => "Remote over SSH".into(),
+            },
+            Some(_) if paused => "Agent access is off".into(),
+            Some(r) if active => [a.may(&r.id, accounts)].into_iter().chain(used).collect::<Vec<_>>().join(" · "),
+            _ => "Installed".into(),
+        };
+        let status = active.then(|| if paused { tag("Paused", t.ink2) } else { tag("Active", t.swipe_done) });
+        let mut line = div().flex().items_center().gap(px(12.)).px(px(14.)).min_h(px(56.)).py(px(10.))
+            .child(mark(t, &kind, &name))
+            .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(1.))
+                .child(div().flex().items_center().gap(px(8.))
+                    .child(div().font_weight(FontWeight::MEDIUM).one_line().child(name))
+                    .children(status))
+                .child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).one_line().child(detail)));
         if let Some(remote) = row.filter(|r| r.remote) {
             let id = remote.id.clone();
             let expiry = remote.expires.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
             let status = expiry.map_or_else(|| "Revoked".into(), |end| format!("{} {}", if end > chrono::Utc::now() { "Expires" } else { "Expired" }, end.date_naive()));
-            line = line.child(note(t, status))
-                .child(stop(t, button(t, if expiry.is_some() { "Revoke" } else { "Remove" }, None).id(("remote-action", ix)))
+            line = line.child(note(t, status).flex_shrink_0())
+                .child(stop(t, button(t, if expiry.is_some() { "Revoke" } else { "Remove" }, None).id(("remote-action", ix)).text_color(t.ink2))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let change = if expiry.is_some() { AgentChange::Disconnect(id.clone()) } else { AgentChange::RemoveRemote(id.clone()) };
                         this.agent_change(change, cx)
                     })));
         } else if let Some(id) = row.filter(|_| active).map(|r| r.id.clone()) {
-            line = line.child(div().text_size(px(size::SNIPPET)).text_color(t.ink2).child("Active"))
-                .child(stop(t, button(t, "Disconnect", None).id(SharedString::from(format!("disconnect-{kind}")))
-                    .debug_selector({ let kind = kind.clone(); move || format!("disconnect-{kind}") }))
+            line = line.child(stop(t, button(t, "Disconnect", None).id(SharedString::from(format!("disconnect-{kind}")))
+                    .debug_selector({ let kind = kind.clone(); move || format!("disconnect-{kind}") })
+                    .text_color(t.ink2))
                     .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Disconnect(id.clone()), cx))));
         } else if pending.is_none() {
             let k = kind.clone();
             line = line.child(stop(t, button(t, "Connect", None).id(SharedString::from(format!("connect-{kind}")))
-                .debug_selector({ let kind = kind.clone(); move || format!("connect-{kind}") }))
+                .debug_selector({ let kind = kind.clone(); move || format!("connect-{kind}") })
+                .bg(t.bg).border_1().border_color(t.line))
                 .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Preview(k.clone()), cx))));
         }
         let mut block = div().flex().flex_col().when(ix > 0, |b| b.border_t_1().border_color(t.line)).child(line);
         if let Some((_, files)) = pending {
             let (yes, no, listed) = (kind.clone(), kind.clone(), files.clone());
-            block = block.child(div().flex().flex_col().gap(px(8.)).pl(px(32.)).pr(px(14.)).pb(px(12.))
+            block = block.child(div().flex().flex_col().gap(px(8.)).pl(px(58.)).pr(px(14.)).pb(px(12.))
                 .child(note(t, "Connect writes these files. Disconnect removes them again."))
                 .children(files.iter().map(|f| mono(f.clone(), t.ink).one_line()))
                 .child(div().flex().gap(px(8.)).pt(px(4.))
@@ -444,5 +538,29 @@ mod tests {
             settings.load(&store).unwrap();
             assert_eq!(settings.socket_error, enabled.then_some(Code::SocketPathTooLong));
         }
+    }
+
+    #[test]
+    fn a_connected_row_says_what_the_agent_may_do_under_both_matrices() {
+        let a = Agents::demo();
+        let accounts = crate::mail::demo_accounts();
+        // Its own Send on Personal mail stays at the global Triage; Work mail is None for everyone.
+        assert_eq!(a.may("3f9a1c0b77de", &accounts), "Triage mail · Read calendar");
+        assert_eq!(a.may("8c21d0e4a913", &accounts), "Read mail · Read calendar");
+        let none = Agents { global: Vec::new(), ..Agents::demo() };
+        assert_eq!(none.may("3f9a1c0b77de", &accounts), "No access");
+        assert_eq!(a.may("3f9a1c0b77de", &[]), "No access");
+        assert_eq!(a.active(), 2);
+        assert_eq!(Agents { enabled: false, ..Agents::demo() }.active(), 0);
+    }
+
+    #[test]
+    fn last_use_reads_as_minutes_then_hours_then_dates() {
+        let now = chrono::Local::now();
+        let at = |ago: i64| used(now.timestamp() - ago, now);
+        assert_eq!(at(-5), "Used just now");
+        assert_eq!(at(150), "Used 2 min ago");
+        assert_eq!(at(3 * 3600), "Used 3 h ago");
+        assert!(at(30 * 86_400).starts_with("Used ") && !at(30 * 86_400).contains("ago"));
     }
 }

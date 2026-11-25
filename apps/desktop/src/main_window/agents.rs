@@ -262,6 +262,10 @@ impl MainWindow {
         { self.agents.issued = None; }
         match change {
             AgentChange::Select(id) => {
+                // The demo has no store to reload the selected agent's own rows from.
+                if self.live.is_none() {
+                    self.agents.own = id.as_ref().and_then(|id| self.agents.matrices.get(id)).cloned().unwrap_or_default();
+                }
                 self.agents.selected = id;
                 self.agents.pending = None;
             }

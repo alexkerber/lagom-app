@@ -58,6 +58,7 @@ use tokio::{
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 32 * 1024 * 1024;
 const MAX_PER_TOKEN: usize = 4;
+const SETTINGS_POLL: Duration = Duration::from_millis(100);
 const ANSWER: Duration = Duration::from_secs(30);
 struct TokenLimit {
     times: VecDeque<(Instant, bool)>,
@@ -113,6 +114,21 @@ pub(crate) fn socket_path(dir: &Path) -> Result<PathBuf, Code> {
     let path = dir.join("agent.sock");
     std::os::unix::net::SocketAddr::from_pathname(&path).map_err(|_| Code::SocketPathTooLong)?;
     Ok(path)
+}
+
+#[cfg(unix)]
+pub(crate) async fn connect(path: &Path) -> io::Result<tokio::net::UnixStream> {
+    // Enabling access takes effect on the listener's next settings poll.
+    let mut retries = 5;
+    loop {
+        match tokio::net::UnixStream::connect(path).await {
+            Err(e) if retries > 0 && matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
+                retries -= 1;
+                tokio::time::sleep(SETTINGS_POLL).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -203,7 +219,7 @@ async fn serve(
             }
         }
     });
-    let mut tick = interval(Duration::from_millis(100));
+    let mut tick = interval(SETTINGS_POLL);
     let (mut enabled, _) = watch::channel(());
     let (policy, _) = watch::channel(settings.agent_policy_generation().ok());
     let mut bind_error = None;
