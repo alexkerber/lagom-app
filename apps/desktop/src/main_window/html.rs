@@ -85,6 +85,10 @@ pub(crate) fn document(html: &str, t: &Theme, remote: bool) -> String {
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub(crate) enum Msg {
     Loaded,
+    /// The document's height in CSS pixels, from the app's `fit.js`.
+    Height(f32),
+    /// A vertical wheel or scroll key over the page: the reading pane scrolls.
+    Wheel(Step),
     Open(String),
     Escape,
     CloseWindow,
@@ -101,6 +105,51 @@ fn hint_event(state: &str) -> Option<Msg> {
         }),
         _ => None,
     }
+}
+
+/// The body is as tall as its document, so the reading pane scrolls and the page does not.
+/// Mail taller than this scrolls inside the view: a native view several times the screen height
+/// costs memory, and Windows limits a child window to about 32,767 device pixels a side.
+pub(crate) const MAX_HEIGHT: f32 = 10_000.;
+/// Before the first document reports its height.
+const DEFAULT_HEIGHT: f32 = 480.;
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn height_event(height: &str) -> Option<Msg> {
+    let height: f32 = height.parse().ok().filter(|h: &f32| h.is_finite())?;
+    Some(Msg::Height(height.clamp(1., MAX_HEIGHT)))
+}
+
+/// How far the reading pane scrolls, in the DOM's sign: down is positive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Step {
+    Pixels(f32),
+    Lines(f32),
+    Pages(f32),
+}
+
+/// `<deltaY> <deltaMode>` from `fit.js`: the DOM's wheel delta and unit.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn wheel_event(wheel: &str) -> Option<Msg> {
+    let (dy, mode) = wheel.split_once(' ')?;
+    let dy: f32 = dy.parse().ok().filter(|dy: &f32| dy.is_finite())?;
+    Some(Msg::Wheel(match mode {
+        "0" => Step::Pixels(dy),
+        "1" => Step::Lines(dy),
+        "2" => Step::Pages(dy),
+        _ => return None,
+    }))
+}
+
+/// Scrolls `scroll` by `step`, within its range. A page is most of the visible height, as in a browser.
+pub(crate) fn scroll_by(scroll: &gpui::ScrollHandle, step: Step, window: &Window) {
+    let down = match step {
+        Step::Pixels(dy) => px(dy),
+        Step::Lines(dy) => window.line_height() * dy,
+        Step::Pages(dy) => scroll.bounds().size.height * (0.9 * dy),
+    };
+    let (offset, max) = (scroll.offset(), scroll.max_offset());
+    scroll.set_offset(gpui::point(offset.x, (offset.y - down).clamp(-max.height, px(0.))));
 }
 
 /// Runs in every document before the mail, as an app script: the CSP and the page-script switch
@@ -174,6 +223,13 @@ pub(crate) struct Web {
     drawable: Rc<std::cell::Cell<bool>>,
     /// The shown mail has remote images.
     pub(crate) has_remote: bool,
+    /// The last document's measured height; kept across loads, so switching mail does not jump
+    /// before the next one reports.
+    height: Option<f32>,
+    /// The reading view around the body, which scrolls instead of the page, and the message it
+    /// shows: another message starts at the top.
+    pub(crate) scroll: gpui::ScrollHandle,
+    scroll_for: Option<usize>,
     /// Bounds and scale factor last applied: a move to a display with another scale needs new
     /// device-pixel bounds on Windows.
     place: Rc<std::cell::Cell<Option<Placement>>>,
@@ -206,6 +262,10 @@ pub(crate) trait WebHost: 'static + Sized {
     fn new_task(&mut self, cx: &mut Context<Self>);
     fn mail_action(&mut self, action: Run, window: &mut Window, cx: &mut Context<Self>);
     fn hints(&mut self, over: bool, command: bool, shift: bool, cx: &mut Context<Self>);
+    /// A wheel over the page scrolls what holds the body: by default the reading view.
+    fn wheel(&mut self, step: Step, window: &mut Window, _cx: &mut Context<Self>) {
+        scroll_by(&self.web().scroll, step, window);
+    }
 }
 
 impl WebHost for MainWindow {
@@ -253,6 +313,11 @@ impl Web {
     /// `overlay`: something in GPUI covers the body, so the web view hides.
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
     pub(crate) fn frame<T: WebHost>(&mut self, want: Option<(usize, &Mail)>, theme: &Theme, overlay: bool, window: &mut Window, cx: &mut Context<T>) {
+        let id = want.map(|(id, _)| id);
+        if self.scroll_for != id {
+            self.scroll_for = id;
+            self.scroll.set_offset(gpui::Point::default());
+        }
         if !supported() {
             // GPUI draws the HTML (`rich`); only the "Load remote images" button needs this.
             self.has_remote = want.and_then(|(_, m)| m.rich.as_ref()).is_some_and(|rich| rich.has_remote);
@@ -344,13 +409,21 @@ impl Web {
         }
     }
 
-    /// The body area: the web view's slot, or its picture while an overlay hides it.
-    pub(crate) fn surface(&self) -> gpui::AnyElement {
+    /// The body area: the web view's slot, or its picture while an overlay hides it. `inset`:
+    /// room the web view leaves at the bottom of the visible area, for toasts.
+    pub(crate) fn surface(&self, inset: Pixels) -> gpui::AnyElement {
         match self.cover() {
             Some(Cover::Picture(picture)) => gpui::img(picture).size_full().into_any_element(),
             Some(Cover::Pending) => div().into_any_element(),
-            None => self.slot().into_any_element(),
+            None => self.slot(inset).into_any_element(),
         }
+    }
+
+    /// The reading body: the surface at the document's height, inside the reading pane's scroll.
+    pub(crate) fn body(&self, inset: Pixels) -> gpui::AnyElement {
+        div().w_full().flex_shrink_0().h(px(self.height.unwrap_or(DEFAULT_HEIGHT)))
+            .debug_selector(|| "html-body".into())
+            .child(self.surface(inset)).into_any_element()
     }
 
     /// What to draw in the web view's place while an overlay hides it; `None` means the text part.
@@ -381,7 +454,7 @@ impl Web {
     }
 
     /// The element that keeps the web view over the body area: its bounds every frame.
-    pub(crate) fn slot(&self) -> impl IntoElement {
+    pub(crate) fn slot(&self, inset: Pixels) -> impl IntoElement {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let view = self.view.clone();
         let place = self.place.clone();
@@ -391,7 +464,9 @@ impl Web {
         let visible = self.visible.clone();
         gpui::canvas(
             move |bounds, window, _| {
-                let (bounds, clip) = placement(bounds, window.content_mask().bounds);
+                let mut mask = window.content_mask().bounds;
+                mask.size.height -= inset;
+                let (bounds, clip) = placement(bounds, mask);
                 let now = Some((bounds, clip, window.scale_factor()));
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if let Some(view) = &view {
@@ -440,6 +515,8 @@ impl Web {
                 window.focus(&host.keys());
                 host.new_task(cx);
             }
+            Msg::Height(height) => host.web().height = Some(height),
+            Msg::Wheel(step) => host.wheel(step, window, cx),
             Msg::Loaded => {
                 host.web().ready = true;
                 host.web().settled = true;
@@ -505,6 +582,8 @@ impl Web {
                 let msg = match body.split_once(' ') {
                     Some(("open", url)) => Msg::Open(url.to_string()),
                     Some(("hints", state)) => match hint_event(state) { Some(msg) => msg, None => return },
+                    Some(("height", height)) => match height_event(height) { Some(msg) => msg, None => return },
+                    Some(("wheel", wheel)) => match wheel_event(wheel) { Some(msg) => msg, None => return },
                     _ if body == "escape" => Msg::Escape,
                     _ if body == "close-window" => Msg::CloseWindow,
                     _ if body == "task" => Msg::NewTask,
@@ -628,6 +707,72 @@ mod tests {
         assert!(matches!(hint_event("1 1 0"), Some(Msg::Hints { over: true, command: true, shift: false })));
         assert!(matches!(hint_event("0 0 0"), Some(Msg::Hints { over: false, command: false, shift: false })));
         for invalid in ["", "1 0", "1 1 1 0", "1 NaN 0", "2 0 0", "1 true false"] { assert!(hint_event(invalid).is_none()); }
+    }
+
+    #[test]
+    fn height_and_wheel_messages_are_bounded() {
+        assert!(matches!(height_event("1700"), Some(Msg::Height(h)) if h == 1700.));
+        assert!(matches!(height_event("0"), Some(Msg::Height(h)) if h == 1.));
+        assert!(matches!(height_event("1e9"), Some(Msg::Height(h)) if h == MAX_HEIGHT));
+        for invalid in ["", "NaN", "inf", "-inf", "12px", "1 2"] { assert!(height_event(invalid).is_none()); }
+        assert!(matches!(wheel_event("40 0"), Some(Msg::Wheel(Step::Pixels(40.)))));
+        assert!(matches!(wheel_event("-3 1"), Some(Msg::Wheel(Step::Lines(-3.)))));
+        assert!(matches!(wheel_event("1 2"), Some(Msg::Wheel(Step::Pages(1.)))));
+        for invalid in ["", "40", "40 3", "NaN 0", "inf 0", "40 0 1", "x 0"] { assert!(wheel_event(invalid).is_none()); }
+    }
+
+    fn wheel(dy: f32) -> Msg { Msg::Wheel(Step::Pixels(dy)) }
+
+    #[gpui::test]
+    fn html_body_takes_its_document_height_and_the_pane_scrolls(cx: &mut gpui::TestAppContext) {
+        if !supported() { return; }
+        let (view, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "html-tall", window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| Web::event(v, Msg::Height(3000.), window, cx));
+        cx.run_until_parked();
+        let body = cx.debug_bounds("html-body").unwrap();
+        assert_eq!(body.size.height, px(3000.));
+        assert!(cx.debug_bounds("reply-box").unwrap().top() > body.bottom(), "attachments and reply follow the whole body");
+        let (document, clip, _) = view.read_with(cx, |v, _| v.web.place.get().unwrap());
+        assert_eq!(document.size.height, px(3000.));
+        assert!(clip.size.height > px(0.) && clip.size.height < document.size.height, "the pane shows part and scrolls, not the page");
+        // A wheel over the page scrolls the pane under it, and stops at the end.
+        view.update_in(cx, |v, window, cx| Web::event(v, wheel(300.), window, cx));
+        cx.run_until_parked();
+        let moved = view.read_with(cx, |v, _| v.web.place.get().unwrap().0);
+        assert_eq!(moved.top(), document.top() - px(300.));
+        view.update_in(cx, |v, window, cx| Web::event(v, wheel(100_000.), window, cx));
+        cx.run_until_parked();
+        let (offset, max) = view.read_with(cx, |v, _| (v.web.scroll.offset().y, v.web.scroll.max_offset().height));
+        assert!(max > px(0.) && offset == -max);
+        view.update_in(cx, |v, window, cx| Web::event(v, Msg::Wheel(Step::Pages(-1.)), window, cx));
+        let page = view.read_with(cx, |v, _| v.web.scroll.bounds().size.height * 0.9);
+        assert_eq!(view.read_with(cx, |v, _| v.web.scroll.offset().y), -max + page);
+        // Another message opens at its top, not where the last one was left.
+        view.update(cx, |v, cx| { v.inbox.select(3); cx.notify(); });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.web.scroll.offset().y), px(0.));
+    }
+
+    #[gpui::test]
+    fn expanded_html_takes_its_document_height_and_the_conversation_scrolls(cx: &mut gpui::TestAppContext) {
+        if !supported() { return; }
+        let (main, cx) = cx.add_window_view(|window, cx| MainWindow::with_screen(true, "html-tall", window, cx));
+        cx.run_until_parked();
+        let id = main.read_with(cx, |m, _| m.inbox.single().unwrap());
+        main.update(cx, |m, cx| {
+            m.inbox.group = true;
+            m.reading_members = vec![0, id];
+            m.toggle_message(id, false, cx);
+        });
+        cx.run_until_parked();
+        let body = main.read_with(cx, |m, _| m.expanded[&id].clone());
+        body.update_in(cx, |b, window, cx| Web::event(b, Msg::Height(3000.), window, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("html-body").unwrap().size.height, px(3000.));
+        body.update_in(cx, |b, window, cx| Web::event(b, wheel(200.), window, cx));
+        cx.run_until_parked();
+        assert_eq!(main.read_with(cx, |m, _| m.reading_scroll.offset().y), px(-200.));
     }
 
     #[gpui::test]

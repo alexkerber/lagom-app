@@ -365,11 +365,8 @@ pub struct MainWindow {
     new_password: Option<crate::settings::NewPassword>,
     /// Settings > AI Agents, and the sidebar row it can add.
     pub(crate) agents: crate::settings::agents::Agents,
-    #[cfg(unix)]
     agent_sheets: crate::agent::confirm::Waiting,
-    #[cfg(unix)]
     agent_deny: FocusHandle,
-    #[cfg(unix)]
     agent_sends: Vec<String>,
     mailbox_expanded: [bool; 3],
     hints: polish::Hints,
@@ -520,11 +517,8 @@ impl MainWindow {
             default_mail: None,
             new_password: None,
             agents: crate::settings::agents::Agents::new(),
-            #[cfg(unix)]
             agent_sheets: Default::default(),
-            #[cfg(unix)]
             agent_deny: cx.focus_handle(),
-            #[cfg(unix)]
             agent_sends: Vec::new(),
             mailbox_expanded: [true, false, false],
             hints: polish::Hints::default(),
@@ -564,7 +558,6 @@ impl MainWindow {
             rich_shown: Vec::new(),
             _appearance: appearance,
             _activation: cx.observe_window_activation(window, |this, _, cx| {
-                #[cfg(unix)]
                 { this.agent_sheets.front_since = None; this.agent_sheets.pressed = None; }
                 cx.notify();
             }),
@@ -652,7 +645,6 @@ impl MainWindow {
                 this.agent_change(AgentChange::Select(first), cx);
                 this.settings_scroll.scroll_to_bottom();
             }
-            #[cfg(unix)]
             "agent-confirm-send" | "agent-confirm-event" | "agent-confirm-delete" if demo => {
                 this.agent_sheets.sheets.extend(crate::agent::confirm::demo(screen));
                 this.watch_agent_sheets(window, cx);
@@ -661,6 +653,11 @@ impl MainWindow {
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
+            // HTML mail that is one tall inline image, with attachments under it.
+            "html-tall" => {
+                mail::demo_tall(&mut this.inbox.mail[INBOX_LEN - 1]);
+                this.inbox.select(INBOX_LEN - 1);
+            }
             // A message window over the main window: plain text, or the HTML newsletter.
             "popout" | "popout-html" => {
                 if screen == "popout-html" {
@@ -704,7 +701,6 @@ impl MainWindow {
             _ => {}
         }
         this.retint();
-        #[cfg(unix)]
         if this.live.is_some() {
             this.agent_sheets=std::mem::take(cx.default_global::<crate::agent::confirm::Waiting>());
             this.watch_agent_sheets(window,cx);
@@ -2479,7 +2475,7 @@ impl MainWindow {
                     ),
             )
             .when(self.inbox.group && self.reading_members.len() > 1, |d| d.child(self.conversation(cx)))
-            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, self.web.surface(), toasts, self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
+            .when(!self.inbox.group || self.reading_members.len() <= 1, |d| d.child(reading_view(t, (id, m), text, &self.web, toast_room(toasts), self.reading_menu(id, cx), on_download, cx.listener(|this, _, window, cx| this.open_compose(true, window, cx)), self.unsubscribe_line(m, cx))))
     }
 
     /// Mail that left the screen drops its decoded images (up to 128 MiB each): checked only
@@ -2616,15 +2612,22 @@ fn attachment_size(bytes: u32) -> String {
     }
 }
 
+/// Room at the bottom of the reading pane that the web view leaves for `toasts`: the toast
+/// layer's offset (see `render`) and 40 px toasts 8 px apart.
+fn toast_room(toasts: usize) -> Pixels {
+    px(if toasts == 0 { 0. } else { 20. + 36. + 12. + 48. * toasts as f32 - 8. })
+}
+
 /// One message below its toolbar: the trusted header in GPUI, the body as text (`text`) or the
-/// web view's `slot`, the attachment and the reply field. The reading pane and message windows
-/// both show this. `toasts`: room the web view leaves for toasts above the reply field.
+/// web view at its document's height, the attachment and the reply field. The reading pane and
+/// message windows both show this; the whole view scrolls, never the body alone. `toasts`: room
+/// the web view leaves for toasts above the reply field.
 fn reading_view(
     t: &Theme,
     (id, m): (usize, &Mail),
     text: bool,
-    slot: impl IntoElement,
-    toasts: usize,
+    web_view: &html::Web,
+    toasts: Pixels,
     menu: impl IntoElement,
     on_download: impl Fn(Cmd, &mut Window, &mut App) + 'static,
     on_reply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -2658,15 +2661,14 @@ fn reading_view(
     }).collect::<Vec<_>>();
     // The text is still being read (the body then holds only `live::LOADING`).
     let loading = m.text.as_ref().is_some_and(|t| t.borrow().is_none());
-    div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().max_w(px(760.))
+    div().id(("reading", id)).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&web_view.scroll).max_w(px(760.))
         .flex().flex_col().gap(px(16.)).p(px(24.))
         .child(div().flex_shrink_0().font_family(font::DISPLAY).text_size(px(size::SUBJECT)).font_weight(FontWeight::BOLD)
             .debug_selector(|| "reading-subject".into()).child(m.subject.clone()))
         .child(div().flex().flex_col().gap(px(20.)).p(px(20.))
             .bg(t.raised).rounded(px(radius::CARD))
             .debug_selector(|| "message-card".into())
-            .when(web, |d| d.flex_1().min_h(px(180.)))
-            .when(!web, |d| d.flex_shrink_0())
+            .flex_shrink_0()
             .child(div().flex().items_center().gap(px(12.)).flex_shrink_0()
                 .child(div().size(px(32.)).flex_shrink_0().rounded_full().flex().items_center().justify_center()
                     .bg(t.subtle).border_1().border_color(t.line).text_size(px(size::SMALL))
@@ -2696,10 +2698,9 @@ fn reading_view(
                     Some(rich) => d.children(rich.view(m, t)),
                     None => d.children(m.body.iter().map(|p| div().child(p.clone()))),
                 })
-                .when(web, |d| d.flex_1().min_h(px(0.)).relative().child(
-                    div().absolute().top_0().left_0().right_0().bottom(px(48. * toasts as f32)).child(slot))))
+                .when(web && !text, |d| d.child(web_view.body(toasts))))
             .children(attachment()))
-        .when(!web, |d| d.child(div().flex_1()))
+        .child(div().flex_1())
         .child(pressable(div().id("reply-box"), t, false).debug_selector(|| "reply-box".into())
             .flex().flex_shrink_0().items_center().gap(px(8.)).w_full().h(px(36.)).px(px(12.))
             .rounded(px(radius::CONTROL)).bg(t.subtle).text_color(t.ink2)
@@ -2713,7 +2714,6 @@ fn reading_view(
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        #[cfg(unix)]
         {
             self.agent_sheets.prune(cx.default_global::<crate::agent::confirm::Denials>());
             if let Some(sheet) = self.agent_sheets.sheets.front() {
@@ -2882,7 +2882,6 @@ impl Render for MainWindow {
             // The guard hands ⌫ to the palette, where it edits the query.
             .on_action(cx.listener(|this, _: &DeleteMessage, _, cx| if !this.overlay_open(cx) { this.act(Move::Delete, cx) }))
             .on_action(cx.listener(|this, _: &Undo, window, cx| {
-                #[cfg(unix)]
                 if this.palette.is_none() && this.compose.is_none() {
                     if let Some(id)=this.agent_sends.pop() {this.edit_failed(&id,window,cx);return;}
                 }
@@ -3001,7 +3000,6 @@ impl MainWindow {
             // Nothing has left yet: it goes when the Undo window ends.
             out.push(scoped(i, crate::compose::toast(&t, "Sending", Some(undo().on_click(on_undo).into_any_element())).into_any_element()));
         }
-        #[cfg(unix)]
         for id in &self.agent_sends {
             let id=id.clone();
             out.push(crate::compose::toast(&t,"Sending",Some(undo().on_click(cx.listener(move |this,_,window,cx| {

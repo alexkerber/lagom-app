@@ -683,7 +683,7 @@ impl Compose {
         let frame = div().h(px(280.)).flex_shrink_0().mx(px(24.)).mb(px(12.)).rounded(px(radius::CONTROL))
             .border_1().border_color(t.line).overflow_hidden().debug_selector(|| "quote-preview".into());
         Some(if crate::main_window::html::supported() && !self.web.failed {
-            frame.child(self.web.surface()).into_any_element()
+            frame.child(self.web.surface(px(0.))).into_any_element()
         } else {
             let body = div().id("quote-text").size_full().overflow_y_scroll().p(px(12.)).flex().flex_col().gap(px(8.))
                 .text_size(px(size::SNIPPET)).text_color(t.ink2);

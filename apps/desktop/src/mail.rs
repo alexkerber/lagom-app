@@ -421,6 +421,17 @@ const NEWSLETTER: &str = r##"<!DOCTYPE html><html><head><meta charset="utf-8"><t
 <p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a877f;margin:16px 0 0">You get this because you use lagom. <a href="https://lagom.example/unsubscribe" style="color:#8a877f">Unsubscribe</a> · <a href="mailto:releases@lagom.example" style="color:#8a877f">Write to us</a></p>
 </td></tr></table></body></html>"##;
 
+/// A screenshot sent as HTML mail with attachments: the body is one tall inline (`cid:`) image
+/// with no size in the markup, so its height is known only once the image loads.
+pub fn demo_tall(m: &mut Mail) {
+    let rows: String = (0..12).map(|i| format!(r##"<rect x="40" y="{}" width="720" height="90" rx="12" fill="#fff"/><text x="80" y="{}" font-family="Helvetica" font-size="30" fill="#333">Row {} of 12</text>"##, 200 + i * 110, 255 + i * 110, i + 1)).collect();
+    let shot = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1600" viewBox="0 0 800 1600"><rect width="800" height="1600" fill="#f2efe9"/><rect x="40" y="40" width="720" height="120" rx="16" fill="#2f6f5e"/><text x="80" y="115" font-family="Helvetica" font-size="44" fill="#fff">New company</text>{rows}<text x="80" y="1540" font-family="Helvetica" font-size="32" fill="#2f6f5e">End of the screenshot</text></svg>"##);
+    m.html = Some(r#"<div dir="ltr"><div>The new company form, as it looks now:</div><div><img src="cid:shot@demo"></div><div>Two more screenshots and the logo are attached.</div></div>"#.into());
+    m.inline = std::sync::Arc::new(vec![lagom_core::inline::InlinePart { cid: "shot@demo".into(), mime_type: "image/svg+xml".into(), data: shot.into_bytes() }]);
+    m.attachments = [("Screenshot 1.png", 482_113), ("Screenshot 2.png", 391_870), ("logo.gif", 12_406)]
+        .map(|(name, size)| Attachment { filename: name.into(), size, ..Default::default() }).into();
+}
+
 /// Simple HTML, as a phone or webmail writes it: no colours of its own.
 const SIMPLE_HTML: &str = r#"<div dir="ltr"><div>Lunch on Thursday? Somewhere with a <b>lunch special</b>.</div><div><br></div><div>You choose, I will complain. It is <a href="https://en.wikipedia.org/wiki/Tradition">tradition</a>.</div><div><br></div><div>Maja</div></div>"#;
 
