@@ -505,8 +505,20 @@ fn remote_refusal_is_named_only_after_dispatch() {
     }
 }
 
-#[test]
-fn socket_ownership_framing_deadlines_and_limits() {
+#[tokio::test]
+async fn client_connects_when_agent_socket_appears() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("agent.sock");
+    let (stream, _listener) = tokio::join!(
+        biased;
+        crate::agent::connect(&path),
+        async { std::os::unix::net::UnixListener::bind(&path).unwrap() },
+    );
+    stream.unwrap();
+}
+
+#[tokio::test]
+async fn socket_ownership_framing_deadlines_and_limits() {
     let config = ServerConfig {
         host: "localhost".into(),
         port: 143,
@@ -585,6 +597,7 @@ fn socket_ownership_framing_deadlines_and_limits() {
     store.disable_agents().unwrap();
     let _replacement = store.provision_read_agent(&account.id).unwrap();
     assert_eq!(old.read(&mut [0]).unwrap(), 0);
+    drop(crate::agent::connect(&sock).await.unwrap());
     let req = request(1);
     let wrong_source = format!(
         "{}\n",

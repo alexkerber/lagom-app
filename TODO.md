@@ -246,6 +246,9 @@ Defaults in the code until the maintainer decides (Figma "Lagom · Folders", fra
     The developer CLI grants test access to one account. Disabling access closes open requests.
     macOS socket tests verified account isolation, read purity, limits, audit records and revocation.
     Linux, live providers and access from another OS user remain unverified.
+  - [x] On `fix/agent-socket-flaky`, clients retry a missing socket for five polling intervals before sending a request.
+    A regression test starts the client before the listener. The socket and CLI tests passed on macOS.
+    The ownership and framing test passed 50 consecutive runs. The fix has not been tested on Linux.
   - [x] The desktop CLI and MCP forward agent commands on `feat/agents-client`. The CLI also installs the bundled skill.
     A fake socket verified framing, identity, output, errors and MCP calls.
     The macOS release grew by 99,424 bytes to 18.87 MB, below the 30 MB budget.
