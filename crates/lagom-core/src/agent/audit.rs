@@ -72,7 +72,7 @@ pub use lettre::Address;
 
 pub struct AuditRow<'a> {
     pub identity: Option<&'a Identity>,
-    pub account: Option<uuid::Uuid>,
+    pub account: Option<&'a str>,
     pub command: &'a str,
     pub target: Option<&'a AuditTarget>,
     pub outcome: Result<(), Failure>,
@@ -180,7 +180,7 @@ impl Store {
         let tx = &self.db;
         if let Some(account) = row.account {
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
-                [account.to_string()], |r| r.get(0))?;
+                [account], |r| r.get(0))?;
             if !exists {
                 return if pending { Err(Code::NotFound) } else { Ok(None) };
             }
@@ -261,7 +261,7 @@ impl Store {
                 _ => None,
             };
             tx.execute("INSERT INTO agent_audit(at,agent,token,account,command,target,result,source_ip,detail,refusals,dispatched_write) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                params![if bucket {minute} else {now},agent,token,row.account.map(|id| id.to_string()),command,
+                params![if bucket {minute} else {now},agent,token,row.account,command,
                     target,if pending { "pending" } else { &result },row.source_ip.map(|ip|ip.to_string()),detail,bucket,pending])?;
             id = Some(tx.last_insert_rowid());
         }

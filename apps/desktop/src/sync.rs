@@ -210,6 +210,24 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+fn eml_cache(_store: &Store) -> lagom_core::Result<PathBuf> {
+    #[cfg(test)]
+    return Ok(_store.path().with_file_name("eml-cache"));
+    #[cfg(not(test))]
+    lagom_core::imap_sync::eml_cache_dir()
+}
+
+fn clear_eml_cache(dir: lagom_core::Result<PathBuf>) {
+    match dir {
+        Ok(dir) => {
+            if let Err(error) = lagom_core::imap_sync::clear_cached_emls(&dir) {
+                eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
+            }
+        }
+        Err(error) => eprintln!("lagom: cached mail not cleared: {}", error.log()),
+    }
+}
+
 async fn run(path: PathBuf, rx: UnboundedReceiver<Cmd>, me: UnboundedSender<Cmd>, events: UnboundedSender<Event>) {
     let store = match Store::open(&path) {
         Ok(store) => store,
@@ -664,14 +682,10 @@ impl Worker {
     }
 
     fn remove(&mut self, id: &str) {
-        #[cfg(not(test))]
-        let cache = lagom_core::imap_sync::eml_cache_dir().ok();
-        #[cfg(test)]
-        let cache = Some(self.store.path().with_file_name("eml-cache"));
-        self.remove_with(id, Account::delete_password, cache.as_deref());
+        self.remove_with(id, Account::delete_password, eml_cache(&self.store));
     }
 
-    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, eml_cache: Option<&std::path::Path>) {
+    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, cache: lagom_core::Result<PathBuf>) {
         self.cancel_calendar(id);
         if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         if self.reauth.as_deref() == Some(id) { self.cancel_sign_in(); }
@@ -687,9 +701,7 @@ impl Worker {
         }
         self.reauth_required.remove(id);
         // The account is already removed, so a failure here is logged and not shown.
-        if let Some(Err(error)) = eml_cache.map(lagom_core::imap_sync::clear_cached_emls) {
-            eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
-        }
+        clear_eml_cache(cache);
         self.emit(Event::Changed);
     }
 
@@ -1485,7 +1497,7 @@ mod tests {
         worker.start_calendar(account.clone(), 0, 3, std::future::ready(Ok(vec![])));
         let stale = worker.calendars.join_next_with_id().await.unwrap();
         worker.store.delete_account(&account.id).unwrap();
-        worker.remove_with(&account.id, Account::delete_password, None);
+        worker.remove(&account.id);
         worker.calendar_finished(stale);
         assert!(worker.store.accounts().unwrap().is_empty());
         drop(worker);

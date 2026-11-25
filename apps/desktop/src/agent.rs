@@ -252,7 +252,7 @@ impl Audit {
     ) -> Result<(), Code> {
         store.record_agent_audit(AuditRow {
             identity: who,
-            account: self.account.as_deref().map(str::parse).transpose().map_err(|_| Code::InvalidRequest)?,
+            account: self.account.as_deref(),
             command: req.filter(|_| self.dispatched).map_or("", |r| &r.cmd),
             target: self.target.as_ref(),
             outcome,
@@ -519,4 +519,20 @@ mod limit_tests {
         }
         assert!(matches!(admit(&rates, "one", false), Err(Code::Busy)));
     }
+}
+
+#[test]
+fn audit_checks_the_stored_non_uuid_account_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("mail.db")).unwrap();
+    let (imap, smtp) = lagom_core::presets::servers("fixture@gmail.com").unwrap();
+    let mut account = lagom_core::account::Account::new("fixture@gmail.com".into(), imap, smtp).unwrap();
+    account.id = "imported account".into();
+    store.save_account(&account).unwrap();
+    let audit = Audit { account: Some(account.id.clone()), ..Default::default() };
+    audit.record(&store, None, None, Ok(())).unwrap();
+    assert_eq!(store.agent_audit(1).unwrap()[0].account.as_deref(), Some(account.id.as_str()));
+    store.delete_account(&account.id).unwrap();
+    audit.record(&store, None, None, Ok(())).unwrap();
+    assert!(store.agent_audit(1).unwrap().is_empty());
 }
