@@ -162,6 +162,12 @@ impl AssetSource for Assets {
             "icons/list-numbers.svg" => include_bytes!("../assets/icons/list-numbers.svg"),
             "logos/google.svg" => include_bytes!("../assets/logos/google.svg"),
             "logos/microsoft.svg" => include_bytes!("../assets/logos/microsoft.svg"),
+            "logos/claude.svg" => include_bytes!("../assets/logos/claude.svg"),
+            "logos/claude-code.svg" => include_bytes!("../assets/logos/claude-code.svg"),
+            "logos/cursor.svg" => include_bytes!("../assets/logos/cursor.svg"),
+            "logos/openai-black.svg" => include_bytes!("../assets/logos/openai-black.svg"),
+            "logos/openai-white.svg" => include_bytes!("../assets/logos/openai-white.svg"),
+            "logos/openclaw.svg" => include_bytes!("../assets/logos/openclaw.svg"),
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(bytes)))
