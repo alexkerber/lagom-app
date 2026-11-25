@@ -125,8 +125,35 @@ impl gpui::Global for Mail {}
 
 impl Mail {
     fn start(store: Store, cx: &mut App) {
-        let (bridge, mut events) = crate::sync::start(store.path().to_path_buf());
+        let (ready, session) = tokio::sync::oneshot::channel();
+        let (bridge, mut events) = crate::sync::start(store.path().to_owned(), ready);
         let task = cx.spawn(async move |cx| {
+            let mut session = session.await.ok().flatten();
+            cx.update(|cx| {
+                let server = {
+                    let mail = cx.global::<Self>();
+                    crate::agent::Server::start(mail.store.path(), mail.bridge.clone())
+                };
+                #[cfg(windows)]
+                {
+                    let mut status = server.bind_failed.clone();
+                    cx.spawn(async move |cx| {
+                        while status.changed().await.is_ok() {
+                            let failed = *status.borrow_and_update();
+                            if cx.update(|cx| {
+                                cx.set_global(crate::settings::agents::PipeBindFailed(failed));
+                                cx.refresh_windows();
+                            }).is_err() { break; }
+                        }
+                    }).detach();
+                }
+                let mut server = Some(server);
+                cx.on_app_quit(move |_| {
+                    server.take();
+                    session.take();
+                    async {}
+                }).detach();
+            }).ok();
             while let Some(event) = events.recv().await {
                 let mut batch = vec![event];
                 while let Ok(more) = events.try_recv() { batch.push(more); }
@@ -138,24 +165,6 @@ impl Mail {
                 }
             }).ok();
         });
-        {
-            let server = crate::agent::Server::start(store.path(), bridge.clone());
-            #[cfg(windows)]
-            {
-                let mut status = server.bind_failed.clone();
-                cx.spawn(async move |cx| {
-                    while status.changed().await.is_ok() {
-                        let failed = *status.borrow_and_update();
-                        if cx.update(|cx| {
-                            cx.set_global(crate::settings::agents::PipeBindFailed(failed));
-                            cx.refresh_windows();
-                        }).is_err() { break; }
-                    }
-                }).detach();
-            }
-            let mut server = Some(server);
-            cx.on_app_quit(move |_| { server.take(); async {} }).detach();
-        }
         cx.set_global(Self { store: Rc::new(store), bridge, next_op: Rc::new(std::cell::Cell::new(0)), pending: Default::default(), _events: task });
     }
 
@@ -4563,6 +4572,9 @@ mod tests {
     fn reopening_reuses_worker_and_preserves_in_flight_outbox(cx: &mut TestAppContext) {
         let dir = std::env::temp_dir().join(format!("lagom-reopen-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
+        // Another process is cleaning the store while the first window opens.
+        let cleanup = std::fs::File::create(dir.join("desktop.lock")).unwrap();
+        cleanup.try_lock().unwrap();
         cx.update(|cx| {
             bind_keys(cx);
             crate::text_input::bind_keys(cx);
@@ -4590,6 +4602,8 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         assert!(bridge.send(Cmd::Pause(ready_tx, resume_rx)));
+        assert!(matches!(ready_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        drop(cleanup);
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: 3025, security: Security::Plain, username: "sender@example.com".into() };
         let account = Account::new("sender@example.com".into(), config.clone(), config).unwrap();

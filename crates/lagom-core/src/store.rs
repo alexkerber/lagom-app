@@ -2,8 +2,8 @@ use crate::{
     account::{Account, Auth, Security, ServerConfig},
     Error, Result,
 };
-use rusqlite::{params, Connection, OptionalExtension};
-use std::path::Path;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use std::{fs::File, io, path::Path};
 
 /// A safe FTS5 expression for what the user typed: every word quoted, the last one as a prefix.
 pub fn fts_query(q: &str) -> Option<String> {
@@ -14,6 +14,12 @@ pub fn fts_query(q: &str) -> Option<String> {
 
 pub struct Store {
     pub(crate) db: Connection,
+}
+
+pub(crate) fn open_connection(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    let db = Connection::open_with_flags(path, flags)?;
+    db.pragma_update(None, "secure_delete", true)?;
+    Ok(db)
 }
 
 #[cfg(unix)]
@@ -57,7 +63,7 @@ impl Store {
             std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
         }
         owner_only(path, 0o600)?;
-        let db = Connection::open(path)?;
+        let db = open_connection(path, OpenFlags::default())?;
         let busy_timeout = std::time::Duration::from_secs(5);
         db.busy_timeout(busy_timeout)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
@@ -70,7 +76,7 @@ impl Store {
         }
         db.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 24 {
+        if version > 25 {
             return Err(Error::Invalid("store was created by a newer lagom version"));
         }
         if version == 0 {
@@ -162,6 +168,17 @@ impl Store {
         if version < 24 {
             store.db.execute_batch(include_str!("schema_v24.sql"))?;
         }
+        if version < 25 {
+            let tx = store.write_transaction()?;
+            if tx.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))? < 25 {
+                tx.execute("CREATE TABLE IF NOT EXISTS pending_vacuum (id INTEGER PRIMARY KEY)", [])?;
+                if version != 0 {
+                    tx.execute("INSERT OR IGNORE INTO pending_vacuum VALUES (1)", [])?;
+                }
+                tx.pragma_update(None, "user_version", 25)?;
+            }
+            tx.commit()?;
+        }
         store.db.busy_timeout(std::time::Duration::ZERO)?;
         match store.prune_agent_audit(chrono::Utc::now().timestamp()) {
             Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
@@ -176,6 +193,57 @@ impl Store {
         store.db.busy_timeout(busy_timeout)?;
         Ok(store)
     }
+
+    /// Keep the shared lock for the desktop session, including when cleanup is deferred.
+    pub fn desktop_session(&self) -> Result<File> {
+        let open = |name| File::options().read(true).write(true).create(true).truncate(false).open(self.path().with_file_name(name));
+        let cleanup = open("vacuum.lock")?;
+        let session = open("desktop.lock")?;
+        // Keep the cleanup lock across the switch from exclusive to shared ownership.
+        match cleanup.try_lock().and_then(|_| session.try_lock()) {
+            Ok(()) => {
+                if let Err(error) = self.vacuum_if_pending() {
+                    eprintln!("lagom: store cleanup deferred until next start: {}", error.log());
+                }
+                session.unlock()?;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        session.lock_shared()?;
+        Ok(session)
+    }
+
+    fn vacuum_space_required(&self) -> Result<u64> {
+        let pages: u64 = self.db.pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let page_size: u64 = self.db.pragma_query_value(None, "page_size", |r| r.get(0))?;
+        let mut wal = self.path().as_os_str().to_owned();
+        wal.push("-wal");
+        let wal_size = match std::fs::metadata(wal) {
+            Ok(meta) => meta.len(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        Ok((pages * page_size).saturating_add(wal_size).saturating_mul(2).saturating_add(100 * 1024 * 1024))
+    }
+
+    fn vacuum_if_pending(&self) -> Result<()> {
+        if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_vacuum)", [], |r| r.get::<_, bool>(0))? {
+            return Ok(());
+        }
+        if fs2::available_space(self.path())? < self.vacuum_space_required()? {
+            return Err(Error::Invalid("not enough free disk space to clean up deleted mail"));
+        }
+        self.db.execute_batch("VACUUM")?;
+        self.with_short_lock_wait(|store| {
+            let busy: bool = store.db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            if busy { return Err(Error::Invalid("another connection is using the mail database")); }
+            Ok(())
+        })?;
+        self.db.execute("DELETE FROM pending_vacuum", [])?;
+        Ok(())
+    }
+
     pub fn signature(&self, account: &str) -> Result<String> {
         Ok(self.db.query_row("SELECT text FROM signatures WHERE account=?1", [account], |r| r.get(0)).optional()?.unwrap_or_default())
     }
@@ -360,7 +428,7 @@ impl Store {
 
     /// SQLite's write lock also covers keychain writes during replacement and removal.
     pub fn persist_rotated_token(path: &Path, account: &Account, token: &str) -> Result<()> {
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let db = open_connection(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let store = Self { db };
         let tx = store.write_transaction()?;
         let current = tx.query_row("SELECT credential_key FROM accounts WHERE id=?1", [&account.id],
@@ -551,8 +619,82 @@ mod tests {
             store.save_account(&account).unwrap();
             assert_eq!(store.accounts().unwrap(), [account.clone()]);
         }
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
     }
+    #[test]
+    fn fresh_store_enables_secure_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("mail.db")).unwrap();
+        assert_eq!(store.db.query_row("SELECT count(*) FROM pending_vacuum", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+        assert_eq!(store.db.pragma_query_value(None, "secure_delete", |r| r.get::<_, u32>(0)).unwrap(), 1);
+    }
+    #[test]
+    fn desktop_cleanup_defers_for_other_instances_and_counts_uncheckpointed_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mail.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint=0;
+            INSERT INTO pending_vacuum VALUES (1);
+            CREATE TABLE padding(data BLOB); INSERT INTO padding VALUES (zeroblob(131072))").unwrap();
+        let logical: u64 = store.db.query_row("SELECT page_count * page_size FROM pragma_page_count, pragma_page_size", [], |r| r.get(0)).unwrap();
+        assert!(logical > path.metadata().unwrap().len());
+        let wal = temp.path().join("mail.db-wal").metadata().unwrap().len();
+        assert_eq!(store.vacuum_space_required().unwrap(), 2 * (logical + wal) + 100 * 1024 * 1024);
+
+        let other_cleanup = File::create(temp.path().join("vacuum.lock")).unwrap();
+        other_cleanup.try_lock().unwrap();
+        let first = store.desktop_session().unwrap();
+        drop(other_cleanup);
+        let second = store.desktop_session().unwrap();
+        drop(first);
+        let third = store.desktop_session().unwrap();
+        let pending = || store.db.query_row("SELECT count(*) FROM pending_vacuum", [], |r| r.get::<_, u32>(0)).unwrap();
+        assert_eq!(pending(), 1);
+        drop((second, third));
+        let _only_session = store.desktop_session().unwrap();
+        assert_eq!(pending(), 0);
+    }
+
+    #[test]
+    fn startup_vacuum_removes_deleted_draft_from_partly_used_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mail.db");
+        let old = Store { db: Connection::open(&path).unwrap() };
+        for version in 1..=23 {
+            let schema = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("src/schema_v{version}.sql"));
+            old.db.execute_batch(&std::fs::read_to_string(schema).unwrap()).unwrap();
+        }
+        let (imap, smtp) = crate::presets::servers("a@gmail.com").unwrap();
+        let account = Account::new("a@gmail.com".into(), imap, smtp).unwrap();
+        old.save_account(&account).unwrap();
+        old.db.execute_batch("VACUUM; PRAGMA secure_delete=OFF").unwrap();
+        let secret = "private words from a discarded draft";
+        old.db.execute("INSERT INTO drafts(id,account,content) VALUES ('keep',?1,'saved'),('discard',?1,?2)",
+            params![account.id, secret]).unwrap();
+        old.db.execute("DELETE FROM drafts WHERE id='discard'", []).unwrap();
+        assert_eq!(old.db.pragma_query_value(None, "freelist_count", |r| r.get::<_, u32>(0)).unwrap(), 0);
+        drop(old);
+
+        let contains_secret = || std::fs::read(&path).unwrap().windows(secret.len()).any(|w| w == secret.as_bytes());
+        let pending = |s: &Store| s.db.query_row("SELECT count(*) FROM pending_vacuum", [], |r| r.get::<_, u32>(0)).unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(pending(&store), 1);
+        assert!(contains_secret());
+        let mut writer = Connection::open(&path).unwrap();
+        let lock = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        store.db.busy_timeout(std::time::Duration::ZERO).unwrap();
+        assert!(matches!(store.vacuum_if_pending(), Err(Error::Store(e))
+            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)));
+        drop(lock);
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(pending(&store), 1);
+        store.vacuum_if_pending().unwrap();
+        assert_eq!(pending(&store), 0);
+        assert!(!contains_secret());
+    }
+
     #[test]
     fn account_roundtrip_and_reopen() {
         let temp = tempfile::tempdir().unwrap();
@@ -1225,7 +1367,7 @@ pub(crate) mod mail_tests {
         let folders = [old.folder(inbox).unwrap(), old.folder(custom).unwrap()];
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
         for message in &messages {
             assert_eq!(store.message(message.summary.id).unwrap(), *message);
             assert!(!store.inline_loaded(message.summary.id).unwrap());
@@ -1269,7 +1411,7 @@ pub(crate) mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 12);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.account_scopes(&account.id).unwrap(), crate::oauth::GOOGLE_CALENDAR_SCOPES);
         assert_eq!(store.signature(&account.id).unwrap(), "Saved signature");
@@ -1353,7 +1495,7 @@ pub(crate) mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
         assert_eq!(store.accounts().unwrap(), [account.clone()]);
         assert_eq!(store.attachments(id).unwrap(), [attachment]);
         assert_eq!(store.cached_attachment(id, "2").unwrap(), if version == 11 { Some(vec![0, 255]) } else { None });
@@ -1510,7 +1652,7 @@ pub(crate) mod mail_tests {
         old.db.execute("UPDATE messages SET attachments_loaded=1", []).unwrap();
         drop(old);
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
         for (index, columns) in [
             ("messages_thread", vec!["account", "thread_id", "date", "id"]),
             ("messages_thread_folder", vec!["account", "thread_id", "folder", "date", "id"]),
@@ -1582,7 +1724,7 @@ pub(crate) mod mail_tests {
         assert_eq!(old.db.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0)).unwrap(), version);
         drop(old);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
         assert_eq!(store.accounts().unwrap(), std::slice::from_ref(&account));
         assert_eq!(store.folder(folder).unwrap(), saved_folder);
         let mut saved_message = saved_message;
@@ -1660,7 +1802,7 @@ pub(crate) mod mail_tests {
         assert_eq!(
             s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            24
+            25
         );
         s.db.pragma_update(None, "user_version", 99).unwrap();
         drop(s);
@@ -1689,7 +1831,7 @@ pub(crate) mod mail_tests {
         message.summary.thread_id = s.message(id).unwrap().summary.thread_id;
         assert_eq!(s.message(id).unwrap(), message);
         assert_eq!(s.search(&a.id, "sqlite", 100, 10, 0).unwrap(), [message.summary]);
-        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 24);
+        assert_eq!(s.db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 25);
         let lists = s.task_lists().unwrap();
         assert_eq!(lists.iter().map(|l| (l.name.as_str(), l.position, l.account.as_deref())).collect::<Vec<_>>(), [("Work", 0, None), ("Private", 1, None)]);
         assert!(lists.iter().all(|l| s.tasks(l.id, true).unwrap().is_empty()));

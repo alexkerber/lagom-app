@@ -11,7 +11,7 @@ mod tests;
 
 use crate::store::Store;
 use protocol::Code;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{OpenFlags, OptionalExtension};
 use std::path::Path;
 
 impl Store {
@@ -43,7 +43,7 @@ impl Store {
         path: &Path,
         cancelled: impl FnMut() -> bool + Send + 'static,
     ) -> Result<Self, Code> {
-        let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut db = crate::store::open_connection(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.execute_batch("PRAGMA query_only=ON; BEGIN")?;
         filter::register_casefold(&db)?;
         db.busy_timeout(std::time::Duration::ZERO)?;
@@ -53,7 +53,7 @@ impl Store {
 
     /// The app has already migrated the store. Auditing must never run startup recovery.
     pub fn agent_writer(path: &Path) -> Result<Self, Code> {
-        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let db = crate::store::open_connection(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         db.execute_batch("PRAGMA foreign_keys=ON")?;
         Ok(Self { db })
     }

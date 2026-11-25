@@ -27,7 +27,16 @@
 - [x] On `fix/tasks-cross-account`, history confirmed that the first syncing account could claim unassigned lists.
   Stored mappings cannot identify those claims. Existing lists keep their owners.
   A fake-server test verified that foreign mail alone leaves ownership intact. Historical user intent remains unknown.
-- [ ] SQLite deletes leave data in free pages. Review enabling `secure_delete`.
+- [x] On `fix/sqlite-secure-delete`, every mail store connection enables secure deletion.
+  Desktop cleans upgraded stores on the mail thread before starting sync or the agent server.
+  Other desktop instances defer cleanup. Mobile leaves cleanup pending.
+  Cleanup requires twice the combined logical database and WAL size, plus 100 MiB free.
+  Tests covered overlapping sessions and uncheckpointed pages. A headless window opened while the cleanup lock was held.
+  Failed cleanup stays pending. Tests confirmed successful cleanup removes deleted draft text from partly used pages.
+  On macOS, VACUUM took 2.34 seconds on a 251.6 MB synthetic store.
+  Full startup cleanup took 1.78 seconds in a separate run.
+  Window timing on real stores and other platforms remains unverified. Deleted search terms can remain in the FTS5 index.
+- [ ] Run pending mobile cleanup only while the app is in the foreground.
 - [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
 - [ ] Google Tasks with two Tasks accounts: no UI picks the account for a local list, so new lists stay local. Add a picker.
 - [x] On `fix/tasks-cross-account`, the upgrade removes the last matching cross-account mail link once, using the task’s ETag.
