@@ -87,6 +87,40 @@ async fn large_body_streams_to_eml() {
     server.await.unwrap();
 }
 
+#[test]
+fn eml_clear_reports_scan_errors_after_deleting_readable_entries() {
+    use std::io::{Error, ErrorKind};
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("message-abc123.eml");
+    std::fs::write(&original, b"cached mail").unwrap();
+    let unreadable = std::iter::once(Err(Error::from(ErrorKind::PermissionDenied)));
+    let entries = unreadable.chain(dir.path().read_dir().unwrap());
+    let result = super::prune_cached_emls(Ok(entries), None, |path| std::fs::remove_file(path));
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    assert!(!original.exists());
+}
+
+#[test]
+fn eml_clear_ignores_vanished_files_and_reports_the_first_real_error() {
+    use std::io::{Error, ErrorKind};
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["message-aaaaaa.eml", "message-bbbbbb.eml", "message-cccccc.eml"] {
+        std::fs::write(dir.path().join(name), b"cached mail").unwrap();
+    }
+    let mut visited = 0;
+    let result = super::prune_cached_emls(dir.path().read_dir(), None, |path| {
+        visited += 1;
+        match visited {
+            1 => { std::fs::remove_file(path)?; std::fs::remove_file(path) }
+            2 => Err(Error::from(ErrorKind::PermissionDenied)),
+            _ => std::fs::remove_file(path),
+        }
+    });
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    assert_eq!(visited, 3);
+    super::prune_cached_emls(dir.path().read_dir(), None, |_| Err(Error::from(ErrorKind::NotFound))).unwrap();
+}
+
 #[tokio::test]
 async fn eml_accepts_estimated_size() {
     for size in [2, 20] {

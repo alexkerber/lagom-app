@@ -427,7 +427,7 @@ fn removed_account_cannot_regain_audit_details_after_confirmation() {
     let writer = crate::store::Store::agent_writer(store.path()).unwrap();
     store.delete_account(&account.id).unwrap();
     let recipients = ["bcc@example.test".parse().unwrap()];
-    let row = || AuditRow { identity: Some(&who), account: Some(account.id.parse().unwrap()), command: "draft.send",
+    let row = || AuditRow { identity: Some(&who), account: Some(&account.id), command: "draft.send",
         target: Some(&target), outcome: Ok(()), source_ip: None, recipients: &recipients };
     assert_eq!(writer.begin_agent_write(row()), Err(Code::NotFound));
     writer.record_agent_audit(row()).unwrap();

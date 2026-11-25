@@ -21,6 +21,9 @@
 - [x] The planned update check in `docs/release.md:406` is on by default. Make it opt-in and list it on the privacy page in the same PR.
 - [x] PR #253 review fixes are on `wip/privacy-claims`. Core, CLI, desktop and FFI tests passed on macOS.
   Loopback Google Tasks and local GreenMail tests passed. Live Google and non-Unix token refusal remain unverified.
+- [x] On `fix/privacy-followup`, desktop startup retries cached mail cleanup. Cleanup ignores vanished files and reports scan or deletion errors.
+  The agent log checks stored account IDs, including imported IDs. Regression tests covered both changes on macOS.
+  GreenMail verified account removal. Live providers and non-Unix platforms remain unverified.
 - [ ] Older builds assigned some lists to the wrong account. Add recovery so new tasks stop uploading there.
 - [ ] SQLite deletes leave data in free pages. Review enabling `secure_delete`.
 - [ ] Check whether WebView2 contacts Microsoft independently. List any connections on the privacy page.
