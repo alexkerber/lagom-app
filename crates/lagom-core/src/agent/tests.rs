@@ -629,10 +629,27 @@ fn provisioning_cannot_raise_either_global_level() {
         .execute("INSERT INTO agent_access VALUES('','mail','',1)", [])
         .unwrap();
     assert_eq!(
-        store.provision_read_agent(&account.id),
+        store.provision_read_agent(&account.id, |_, _| Ok(())),
         Err(Code::Forbidden)
     );
     assert!(store.agents().unwrap().is_empty());
     assert_eq!(store.agent_access("").unwrap().len(), 1);
     assert!(!store.agent_enabled().unwrap());
+}
+
+#[test]
+fn provisioning_commits_nothing_when_the_token_cannot_be_saved() {
+    let (_dir, store, account, _) = setup();
+    store.db.execute("INSERT INTO agent_access VALUES('','mail','',1),('','calendar','',1)", []).unwrap();
+    let mut seen = None;
+    let failed = store.provision_read_agent(&account.id, |agent, token| {
+        seen = Some((agent.to_owned(), token.to_owned()));
+        Err(Code::Internal)
+    });
+    assert_eq!(failed, Err(Code::Internal));
+    let (agent, token) = seen.unwrap();
+    assert!(agent.len() == 12 && token.starts_with("lgm_"));
+    assert!(store.agents().unwrap().is_empty());
+    assert!(!store.agent_enabled().unwrap());
+    assert!(store.authenticate(Some(&token), None).is_err());
 }

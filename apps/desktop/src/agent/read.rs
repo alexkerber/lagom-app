@@ -538,7 +538,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let token = writer.provision_read_agent(&account.id).unwrap();
+        let token = writer.provision_read_agent(&account.id, |_, _| Ok(())).unwrap();
         let folder = writer
             .save_folder(&account.id, "Inbox", None, FolderRole::Inbox)
             .unwrap();

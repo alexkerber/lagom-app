@@ -282,7 +282,9 @@ impl Store {
         Ok(raw)
     }
 
-    pub fn provision_read_agent(&self, account: &str) -> Result<Zeroizing<String>, Code> {
+    /// `save` gets the agent ID and the token before the commit. If it fails, nothing is committed:
+    /// no agent, no token, and access that was off stays off.
+    pub fn provision_read_agent(&self, account: &str, save: impl FnOnce(&str, &str) -> Result<(), Code>) -> Result<Zeroizing<String>, Code> {
         let tx = self.write_transaction()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?)",
@@ -308,6 +310,7 @@ impl Store {
             "UPDATE agent_settings SET value='1' WHERE key='enabled'",
             [],
         )?;
+        save(&agent, &token)?;
         tx.commit()?;
         self.cleanup_revoked_queue();
         Ok(token)

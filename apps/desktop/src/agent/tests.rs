@@ -529,7 +529,7 @@ fn socket_ownership_framing_deadlines_and_limits() {
             )
             .unwrap();
     }
-    let token = store.provision_read_agent(&account.id).unwrap();
+    let token = store.provision_read_agent(&account.id, |_, _| Ok(())).unwrap();
     drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
     let (bridge, _) = Bridge::detached();
     let first = Server::start(&path, bridge.clone());
@@ -577,7 +577,7 @@ fn socket_ownership_framing_deadlines_and_limits() {
     old.write_all(b"{").unwrap();
     thread::sleep(Duration::from_millis(100));
     store.disable_agents().unwrap();
-    let _replacement = store.provision_read_agent(&account.id).unwrap();
+    let _replacement = store.provision_read_agent(&account.id, |_, _| Ok(())).unwrap();
     assert_eq!(old.read(&mut [0]).unwrap(), 0);
     let req = request(1);
     let wrong_source = format!(

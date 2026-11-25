@@ -315,14 +315,19 @@ async fn main() -> Result<()> {
                 store.disable_agents().map_err(|e| anyhow::anyhow!(e.message()))?;
             } else {
                 let account = selected(&store,args.account.as_deref())?;
-                let token = store.provision_read_agent(&account.id).map_err(|e| anyhow::anyhow!(e.message()))?;
-                let agent = store.authenticate(Some(token.as_str()), None)
-                    .map_err(|e| anyhow::anyhow!(lagom_core::agent::protocol::Code::from(e).message()))?;
+                let (mut path, mut failed) = (None, None);
                 // Printed, the token stays in scrollback and logs. The file is where the app keeps its own: `lagom --agent <id>` reads it.
-                let path = store.path().with_file_name("agents").join(format!("{}.token", agent.agent_id()));
-                // Without its file the token is of no use to the developer and must not stay valid.
-                write_owner_only(&path, token.as_str()).inspect_err(|_| { let _ = store.revoke_agent_tokens(agent.agent_id()); })?;
-                println!("{}", path.display());
+                // It is written before the commit, so a failed write leaves no agent and does not switch access on.
+                let saved = store.provision_read_agent(&account.id, |agent, token| {
+                    let file = path.insert(store.path().with_file_name("agents").join(format!("{agent}.token")));
+                    write_owner_only(file, token).map_err(|e| { failed = Some(e); lagom_core::agent::protocol::Code::Internal })
+                });
+                if let Err(code) = saved {
+                    // The token in a file whose commit failed is not valid.
+                    if let Some(path) = path { let _ = std::fs::remove_file(path); }
+                    return Err(failed.unwrap_or_else(|| anyhow::anyhow!(code.message())));
+                }
+                println!("{}", path.context("missing token file")?.display());
             }
         }
         Command::Tasks { command } => match command {

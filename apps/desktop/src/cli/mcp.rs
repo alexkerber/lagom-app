@@ -214,7 +214,7 @@ mod tests {
             resource, account: String::new(), level: lagom_core::agent::policy::Level::Read,
         }).unwrap();
     }
-        let token = store.provision_read_agent(&allowed.id).unwrap();
+        let token = store.provision_read_agent(&allowed.id, |_, _| Ok(())).unwrap();
         let client =
             Client { source_ip: None, dir: dir.path().into(), identity: Some(("token".into(), token.to_string())) };
         let (bridge, _) = Bridge::detached();
