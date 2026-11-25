@@ -202,7 +202,7 @@ impl Live {
         if !cx.has_global::<Mail>() {
             Mail::start(Store::open_default()?, cx);
             // Originals last one session: a clear that an account removal could not finish, or never reached, ends here.
-            crate::sync::clear_eml_cache(lagom_core::imap_sync::eml_cache_dir().ok().as_deref());
+            crate::sync::clear_eml_cache(lagom_core::imap_sync::eml_cache_dir());
         }
         let mail = cx.global::<Mail>();
         let store = mail.store.clone();

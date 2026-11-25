@@ -84,21 +84,32 @@ async fn large_body_streams_to_eml() {
     assert_eq!(dir.read_dir().unwrap().count(), 1);
     assert!(dir.join("personal.eml").exists());
     crate::imap_sync::clear_cached_emls(&dir.join("missing")).unwrap();
-    // A clear that cannot delete says so and keeps going; the next one, at the next start, finishes it.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let names = [format!("message-{}.eml", "a".repeat(64)), format!("message-{}.eml", "b".repeat(64))];
-        for name in &names { std::fs::write(dir.join(name), "Subject: Left").unwrap(); }
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let failed = crate::imap_sync::clear_cached_emls(&dir);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(failed.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(names.iter().all(|name| dir.join(name).exists()));
-        crate::imap_sync::clear_cached_emls(&dir).unwrap();
-        assert_eq!(dir.read_dir().unwrap().count(), 1);
-    }
     server.await.unwrap();
+}
+
+#[test]
+fn eml_clear_deletes_what_it_can_and_returns_the_error_that_matters() {
+    use std::io::{Error, ErrorKind};
+    let temp = tempfile::tempdir().unwrap();
+    let name = |c: &str| format!("message-{}.eml", c.repeat(64));
+    for c in ["a", "b", "c", "d"] { std::fs::write(temp.path().join(name(c)), "Subject: Cached").unwrap(); }
+    // One file cannot be deleted and one is already gone: in any directory order the other two are deleted,
+    // and the caller gets the error of the file that stays.
+    let cleared = super::prune_cached_emls(temp.path(), None, |path| match path.file_name().unwrap().to_str().unwrap() {
+        locked if locked == name("a") => Err(Error::from(ErrorKind::PermissionDenied)),
+        gone if gone == name("b") => Err(Error::from(ErrorKind::NotFound)),
+        _ => std::fs::remove_file(path),
+    });
+    assert_eq!(cleared.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    let mut left: Vec<_> = temp.path().read_dir().unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    left.sort();
+    assert_eq!(left, [name("a"), name("b")]);
+    // A vanished file alone is no error, and the weekly prune never fails the save it rides on.
+    super::prune_cached_emls(temp.path(), None, |_| Err(Error::from(ErrorKind::NotFound))).unwrap();
+    super::prune_cached_emls(temp.path(), Some(Duration::ZERO), |_| Err(Error::from(ErrorKind::PermissionDenied))).unwrap();
+    // The next clear, at the next start, finishes it.
+    crate::imap_sync::clear_cached_emls(temp.path()).unwrap();
+    assert_eq!(temp.path().read_dir().unwrap().count(), 0);
 }
 
 #[tokio::test]

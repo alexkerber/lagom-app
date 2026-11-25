@@ -202,9 +202,9 @@ pub fn start(path: PathBuf) -> (Bridge, UnboundedReceiver<Event>) {
 
 /// Deletes the cached originals. It never fails its caller: account removal and startup go on, the log has the
 /// error kind, and the next start tries again.
-pub(crate) fn clear_eml_cache(dir: Option<&std::path::Path>) {
-    if let Some(Err(error)) = dir.map(lagom_core::imap_sync::clear_cached_emls) {
-        eprintln!("lagom: cached mail not cleared: {:?}", error.kind());
+pub(crate) fn clear_eml_cache(dir: lagom_core::Result<PathBuf>) {
+    if let Err(error) = dir.and_then(|dir| Ok(lagom_core::imap_sync::clear_cached_emls(&dir)?)) {
+        eprintln!("lagom: cached mail not cleared: {}", error.log());
     }
 }
 
@@ -672,10 +672,10 @@ impl Worker {
     }
 
     fn remove(&mut self, id: &str) {
-        self.remove_with(id, Account::delete_password, lagom_core::imap_sync::eml_cache_dir().ok().as_deref());
+        self.remove_with(id, Account::delete_password, Some(lagom_core::imap_sync::eml_cache_dir()));
     }
 
-    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, eml_cache: Option<&std::path::Path>) {
+    fn remove_with(&mut self, id: &str, delete_password: impl FnOnce(&Account) -> lagom_core::Result<()>, eml_cache: Option<lagom_core::Result<PathBuf>>) {
         self.cancel_calendar(id);
         if let Some(tasks) = &self.task_sync { let _ = tasks.send(TaskCmd::Pause(id.into())); }
         if self.reauth.as_deref() == Some(id) { self.cancel_sign_in(); }
@@ -690,7 +690,7 @@ impl Worker {
             return;
         }
         self.reauth_required.remove(id);
-        clear_eml_cache(eml_cache);
+        if let Some(dir) = eml_cache { clear_eml_cache(dir); }
         self.emit(Event::Changed);
     }
 

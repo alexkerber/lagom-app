@@ -184,16 +184,20 @@ pub fn eml_cache_dir() -> Result<std::path::PathBuf> {
 /// The desktop also calls this at each start: that finishes a clear that failed or that a crash cut short.
 /// An original downloads again when it is opened. The first error is returned after every file was tried.
 pub fn clear_cached_emls(dir: &std::path::Path) -> std::io::Result<()> {
-    match prune_cached_emls(dir, None) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    }
+    prune_cached_emls(dir, None, |path| std::fs::remove_file(path))
 }
 
-fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>) -> std::io::Result<()> {
+fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>, mut remove: impl FnMut(&std::path::Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        // No cache directory is an empty cache.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
     let mut failed = None;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = match entry { Ok(entry) => entry, Err(error) => { failed.get_or_insert(error); continue } };
+    // A file that went away meanwhile needs no deletion, and must not hide an error that matters.
+    let mut keep = |error: std::io::Error| if error.kind() != std::io::ErrorKind::NotFound { failed.get_or_insert(error); };
+    for entry in entries {
+        let entry = match entry { Ok(entry) => entry, Err(error) => { keep(error); continue } };
         let filename = entry.file_name();
         let Some(name) = filename.to_str() else { continue };
         let random = |key: &str| key.len() == 6 && key.bytes().all(|b| b.is_ascii_alphanumeric());
@@ -202,10 +206,10 @@ fn prune_cached_emls(dir: &std::path::Path, max_age: Option<Duration>) -> std::i
             || name.strip_prefix("message-").and_then(|s| s.strip_suffix(".eml"))
                 .is_some_and(|key| random(key) || (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())));
         if !owned { continue; }
-        let meta = match entry.metadata() { Ok(meta) => meta, Err(error) => { failed.get_or_insert(error); continue } };
+        let meta = match entry.metadata() { Ok(meta) => meta, Err(error) => { keep(error); continue } };
         let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
         if meta.is_file() && max_age.is_none_or(|max| age.is_some_and(|age| age > max)) {
-            if let Err(error) = std::fs::remove_file(entry.path()) { failed.get_or_insert(error); }
+            if let Err(error) = remove(&entry.path()) { keep(error); }
         }
     }
     // Pruning rides on saving another original and must not fail it; a clear reports what it could not read or delete.
@@ -648,7 +652,7 @@ impl ImapSync {
             return Ok(path);
         }
         std::fs::create_dir_all(dir)?;
-        prune_cached_emls(dir, Some(Duration::from_secs(7 * 24 * 60 * 60)))?;
+        prune_cached_emls(dir, Some(Duration::from_secs(7 * 24 * 60 * 60)), |path| std::fs::remove_file(path))?;
         let mut file = tempfile::NamedTempFile::new_in(dir)?;
         let limit = u64::from(message.size) * 2 + 16 * 1024 * 1024;
         let mut offset = 0u32;

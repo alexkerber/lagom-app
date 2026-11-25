@@ -141,7 +141,7 @@ mod tests {
         worker.remove_with(&account.id, |removing| {
             assert_eq!(removing.id, account.id);
             Err(Error::Secret)
-        }, Some(cache.path()));
+        }, Some(Ok(cache.path().into())));
         assert!(eml.exists(), "failed removal must keep the cache");
         while !task_rx.is_empty() { assert!(tasks.step(&mut task_rx).await); }
         assert_eq!(worker.store.accounts().unwrap(), [account.clone()]);
@@ -150,7 +150,7 @@ mod tests {
         assert!(tasks.step(&mut task_rx).await);
         assert!(tasks.task_jobs.contains_key(&account.id), "failed removal must allow manual task sync to start again");
         tasks.pause(&account.id);
-        worker.remove_with(&account.id, |_| Ok(()), Some(cache.path()));
+        worker.remove_with(&account.id, |_| Ok(()), Some(Ok(cache.path().into())));
         while !task_rx.is_empty() { assert!(tasks.step(&mut task_rx).await); }
         assert!(worker.store.accounts().unwrap().is_empty());
         assert!(!eml.exists(), "removal must clear the cached originals");
