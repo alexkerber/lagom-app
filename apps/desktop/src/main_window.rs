@@ -641,6 +641,11 @@ impl MainWindow {
             // The HTML newsletter and a simple HTML message.
             "html" => this.inbox.select(INBOX_LEN - 1),
             "html-simple" => this.inbox.select(3),
+            // HTML mail that is one tall inline image, with attachments under it.
+            "html-tall" => {
+                mail::demo_tall(&mut this.inbox.mail[INBOX_LEN - 1]);
+                this.inbox.select(INBOX_LEN - 1);
+            }
             // A message window over the main window: plain text, or the HTML newsletter.
             "popout" | "popout-html" => {
                 if screen == "popout-html" {
