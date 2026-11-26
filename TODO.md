@@ -47,7 +47,7 @@
 - [x] Google Limited Use and AI agents: checked against the Workspace API User Data and Developer Policy (updated 2026-09-03). A transfer is allowed for a user-facing feature that is visible and prominent, with the user's consent. Agent access is a Settings page, off until the user turns it on, with the disclosure next to the switch. The privacy page now has the Workspace Limited Use statement (branch `docs/limited-use`).
 - [ ] Google verification: ask the review team to confirm that a user-connected local agent counts as a user-directed transfer. The policy does not name this case.
 - [ ] Google verification: the policy asks for prompt injection protection on restricted scopes ("Model Armor or other"). Document lagom's levels, confirmation sheet and untrusted-data rule as that protection in the verification answers.
-- [ ] Google verification: the policy says a disclosure must immediately precede the consent request. Consider a one-time sheet with the disclosure the first time agent access is turned on.
+- [x] Google verification: the policy says a disclosure must immediately precede the consent request. The disclosure now stands above the agent access switch, and each consent step (Connect for a local agent, Create agent for a remote one) repeats it right before its button. The Access levels repeat it above the matrix, since a higher level is consent too. No separate sheet. The developer `lagom-cli agent` command stays without a prompt; it is not shipped.
 
 ## Brand and site
 

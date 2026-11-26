@@ -214,7 +214,9 @@ pub(super) fn view(
             })),
         );
     }
-    panel.child(note(t, "Maximum access")).child(levels).child(
+    panel.child(note(t, "Maximum access")).child(levels)
+        .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4)).child(super::CONSENT))
+        .child(
         div()
             .flex()
             .gap(px(8.))
