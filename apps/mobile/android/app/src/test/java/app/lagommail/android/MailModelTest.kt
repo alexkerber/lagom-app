@@ -1339,6 +1339,7 @@ internal class FakeCore : LagomCoreInterface {
     override suspend fun nextSnooze() = due
     override suspend fun sendFailures() = emptyList<SendFailure>()
     override fun cancelBackgroundSync() {}
+    override suspend fun cleanUpStore() = true
     override suspend fun backgroundSync(): List<MailRow> { syncAll(); return emptyList() }
     var syncs = 0
     override suspend fun syncAll() { syncs++; syncGate?.await(); check(!rejectSync) { "Fixture sync refused" } }

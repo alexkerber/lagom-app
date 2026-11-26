@@ -13,6 +13,8 @@ struct LagomApp: App {
     @AppStorage(AppSection.storageKey) private var section: AppSection = .mail
     /// Whether the system still waits for the user's choice; nil until it has said.
     @State private var notificationsUndecided: Bool?
+    /// The one-time store cleanup after an upgrade is done (or was never needed) in this run.
+    @State private var storeClean = false
 
     private var stage: LaunchStage {
         LaunchStage(storeOpen: model.core != nil, hasAccount: !model.accounts.isEmpty,
@@ -58,6 +60,7 @@ struct LagomApp: App {
                 async let settings: Void = readNotifications()
                 await model.start()
                 await settings
+                await cleanUpStore()
             }
             // Local tasks and events load as soon as the store opens, not after the first sync.
             .task(id: model.core == nil) {
@@ -73,6 +76,16 @@ struct LagomApp: App {
                 }
             }
         }
+    }
+
+    /// The one-time store cleanup after an upgrade, started only while the app is active; it tries again at the next
+    /// activation when a sync owns the store. The background task gives a cleanup time to finish if the app leaves.
+    private func cleanUpStore() async {
+        guard !storeClean, let core = model.core, UIApplication.shared.applicationState == .active else { return }
+        let task = BackgroundTask()
+        guard task.begin() else { return }
+        storeClean = (try? await core.cleanUpStore()) ?? false
+        task.end()
     }
 
     /// DEBUG `-LagomTheme dark|light` forces an appearance for screenshots without touching the device's setting,
@@ -676,5 +689,19 @@ private struct SwipeBack: UIViewControllerRepresentable {
             guard let stack = navigationController else { return false }
             return stack.viewControllers.count > 1 && stack.transitionCoordinator == nil
         }
+    }
+}
+
+/// One background task assertion that ends exactly once: when the work is done or when its time runs out.
+@MainActor private final class BackgroundTask {
+    private var id = UIBackgroundTaskIdentifier.invalid
+    func begin() -> Bool {
+        id = UIApplication.shared.beginBackgroundTask(withName: "Store cleanup") { [weak self] in self?.end() }
+        return id != .invalid
+    }
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
     }
 }

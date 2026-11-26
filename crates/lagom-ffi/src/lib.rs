@@ -578,6 +578,18 @@ impl LagomCore {
         }).await
     }
     // UniFFI's Swift async bridge does not forward Task cancellation; the flag stops before the next account.
+    /// The one-time cleanup of deleted mail after an upgrade. Call it only in the foreground: it can take seconds.
+    /// False: try again at the next foreground start, because a sync owns the store or the cleanup failed.
+    pub async fn clean_up_store(&self) -> Result<bool> {
+        self.run_stores(|stores| {
+            // A writer stuck behind VACUUM's write lock could time out: a sync could skip an account, a draft save fail.
+            // Holding every writer's lock makes them wait instead; taking none of them blocking keeps the start immediate.
+            // shortcut: local reads also wait for the cleanup once, for seconds on a large store; a separate read lane would avoid it.
+            let (Ok(_sync), Ok(_removal), Ok(_network), Ok(_calendar), Ok(_local)) = (stores.sync.try_lock(), stores.removal.try_read(),
+                stores.network.try_lock(), stores.calendar.try_lock(), stores.local.try_lock()) else { return Ok(false) };
+            Ok(Store::open(&stores.path)?.vacuum_if_pending().is_ok())
+        }).await
+    }
     pub fn cancel_background_sync(&self) { self.background_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
     /// Syncs only each Inbox and never sends: a cancel can never strand a claimed outbox row.
     // shortcut: a process kill after an Inbox sync drops its notifications; persist a notified-UID marker if that matters.
