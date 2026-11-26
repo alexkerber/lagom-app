@@ -645,6 +645,11 @@ impl MainWindow {
                 this.agent_change(AgentChange::Select(first), cx);
                 this.settings_scroll.scroll_to_bottom();
             }
+            // The second Connect step: the files it writes and the consent line.
+            "settings-agents-connect" if demo => {
+                this.open_agents(window, cx);
+                this.agents.pending = Some(("Codex".into(), vec!["~/Library/Application Support/lagom/agents/<agent>.token".into(), "~/.codex/config.toml".into(), "~/.agents/skills/lagom/SKILL.md".into()]));
+            }
             "agent-confirm-send" | "agent-confirm-event" | "agent-confirm-delete" if demo => {
                 this.agent_sheets.sheets.extend(crate::agent::confirm::demo(screen));
                 this.watch_agent_sheets(window, cx);

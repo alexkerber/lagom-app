@@ -327,6 +327,9 @@ fn matrix(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut
     rows
 }
 
+/// Right before each Connect or Create: what the agent gets and where it can send it.
+pub(super) const CONSENT: &str = "This agent can read and act on your mail and calendar within its access levels. It can send what it reads to the AI service it uses.";
+
 /// Every Settings page for AI Agents.
 pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &mut Context<MainWindow>) -> Div {
     let (enabled, confirm, sidebar) = (a.enabled, a.confirm, a.sidebar);
@@ -340,15 +343,17 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
             .on_click(cx.listener(|_, _, _, cx| cx.open_url(&format!("{REPOSITORY}/blob/main/docs/ai-agents.md")))))
         .child(stop(t, button(t, "Disconnect all", None)).text_color(t.danger)
             .on_click(cx.listener(|this, _, _, cx| this.agent_change(AgentChange::DisconnectAll, cx))));
+    // The disclosure comes before the switch: Google's user data policy wants it to precede the consent.
     let access = div().flex().flex_col().gap(px(12.))
         .child(plate(t).px(px(14.)).py(px(6.))
-            .child(stop(t, toggle_row(t, "Enable agent access", a.enabled))
-                .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx))))
-            .child(div().flex().flex_col().gap(px(6.)).pb(px(8.))
-                .when_some(socket_error, |row, message| row.child(div().text_color(t.danger).child(message)))
+            .child(div().flex().flex_col().gap(px(6.)).pt(px(8.))
                 .child(note(t, "Connected agents can read and act on your mail and calendar, within the levels below. lagom never gives them your password. An agent can send what it reads to the AI service it uses."))
                 .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4))
-                    .child("Connect only agents you trust, on a computer you control. A mail can hold instructions written for the agent."))));
+                    .child("Connect only agents you trust, on a computer you control. A mail can hold instructions written for the agent.")))
+            .child(div().mt(px(10.)).border_t_1().border_color(t.line).pt(px(2.))
+                .child(stop(t, toggle_row(t, "Enable agent access", a.enabled))
+                    .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Toggle(Setting::Enabled, !enabled), cx)))))
+            .when_some(socket_error, |plate, message| plate.child(div().pb(px(8.)).text_color(t.danger).child(message))));
 
     let mut list = plate(t);
     let rows = a.list();
@@ -409,6 +414,7 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
             block = block.child(div().flex().flex_col().gap(px(8.)).pl(px(58.)).pr(px(14.)).pb(px(12.))
                 .child(note(t, "Connect writes these files. Disconnect removes them again."))
                 .children(files.iter().map(|f| mono(f.clone(), t.ink).one_line()))
+                .child(div().text_size(px(size::SNIPPET)).text_color(t.ink).line_height(relative(1.4)).child(CONSENT))
                 .child(div().flex().gap(px(8.)).pt(px(4.))
                     .child(stop(t, button(t, "Connect", Some(t.accent)).id(SharedString::from(format!("confirm-connect-{yes}")))
                         .debug_selector(move || format!("confirm-connect-{no}")))
@@ -438,7 +444,8 @@ pub fn view(t: &Theme, a: &Agents, accounts: &[Account], colors: &[Rgba], cx: &m
         scope = scope.child(stop(t, pressable(segment, t, on)).cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| this.agent_change(AgentChange::Select(id.clone()), cx))));
     }
-    let levels_note = "Read: search and read. Triage: also archive, move and mark. Send: also send mail and change events.";
+    // A higher level is consent too, so the transfer disclosure stands right above these controls.
+    let levels_note = "Read: search and read. Triage: also archive, move and mark. Send: also send mail and change events. An agent can send what it reads to the AI service it uses.";
     let narrowing = match selected {
         Some(agent) => format!("Only for {}. It never gets more than All agents allows; higher levels are dimmed.", agent.name),
         None => "For every agent. Select an agent to give it less.".into(),
