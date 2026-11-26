@@ -109,12 +109,7 @@ async fn serve_input(
         writeln!(out, "{reply}").and_then(|_| out.flush()).map_err(|_| Code::Internal)
     };
     let mut line = Vec::new();
-    // At end of input, stop reading but still answer the calls already running.
-    let mut eof = false;
     loop {
-        if eof && calls.is_empty() {
-            return Ok(());
-        }
         let mut frame = (&mut input).take((MAX_REQUEST + 1 - line.len()) as u64);
         tokio::select! {
             biased;
@@ -127,16 +122,16 @@ async fn serve_input(
                 }
                 continue;
             }
-            count = frame.read_until(b'\n', &mut line), if !eof => {
-                if count.map_err(|_| Code::Internal)? == 0 { eof = true; continue; }
+            count = frame.read_until(b'\n', &mut line) => {
+                // EOF is the MCP stdio shutdown signal: drop pending calls so approval waits end too.
+                if count.map_err(|_| Code::Internal)? == 0 { return Ok(()); }
             }
         }
         if line.len() > MAX_REQUEST {
             return Err(Code::TooLarge);
         }
         if line.last() != Some(&b'\n') {
-            eof = true;
-            continue;
+            return Ok(());
         }
         let parsed = serde_json::from_slice::<Value>(&line);
         line.clear();
@@ -290,17 +285,6 @@ mod tests {
                 .unwrap()["code"],
             "not_found"
         );
-        let piped = Client { source_ip: None, dir: client.dir.clone(), identity: client.identity.clone() };
-        let input = [json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_accounts","arguments":{}}})]
-            .map(|r| format!("{r}\n")).concat();
-        let mut out = Vec::new();
-        serve_input(piped, input.as_bytes(), &mut out).await.unwrap();
-        let mut ids: Vec<i64> = String::from_utf8(out).unwrap().lines()
-            .map(|l| serde_json::from_str::<Value>(l).unwrap()["id"].as_i64().unwrap()).collect();
-        ids.sort();
-        assert_eq!(ids, [1, 2, 3], "every request before end of input gets a reply");
         store.disable_agents().unwrap();
         wait(false).await;
         assert!(matches!(client.request("accounts", Args::new()).await, Err(Code::AppUnreachable)));
