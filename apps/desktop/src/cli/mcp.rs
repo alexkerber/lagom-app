@@ -123,6 +123,7 @@ async fn serve_input(
                 continue;
             }
             count = frame.read_until(b'\n', &mut line) => {
+                // EOF is the MCP stdio shutdown signal: drop pending calls so approval waits end too.
                 if count.map_err(|_| Code::Internal)? == 0 { return Ok(()); }
             }
         }
