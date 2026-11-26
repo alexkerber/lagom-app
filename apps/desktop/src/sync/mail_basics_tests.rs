@@ -7,7 +7,8 @@ async fn forward_downloads_once_and_read_flags_reach_the_server() {
     // SQLite migrations must not consume the protocol hang guard on slow disks.
     let path = std::env::temp_dir().join(format!("lagom-mail-basics-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let mut store = Store::open(&path).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // A guard against a hung fake server, not a speed check: the SQLite writes inside took over 5 s on a Windows CI runner.
+    tokio::time::timeout(Duration::from_secs(30), async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let config = ServerConfig { host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), security: Security::Plain, username: "fixture".into() };
         let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
@@ -89,7 +90,8 @@ async fn review_two_rejected_toggles_keep_last_confirmed_flags() {
     let account = Account::new("fixture@example.com".into(), config.clone(), config).unwrap();
     let path = std::env::temp_dir().join(format!("lagom-queued-read-{}.db", account.id));
     let mut store = Store::open(&path).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // A guard against a hung fake server, not a speed check: the SQLite writes inside took over 5 s on a Windows CI runner.
+    tokio::time::timeout(Duration::from_secs(30), async {
         let server = tokio::spawn(async move {
             for (seen, status) in [(false, "NO"), (true, "BAD")] {
                 let (socket, _) = listener.accept().await.unwrap();
