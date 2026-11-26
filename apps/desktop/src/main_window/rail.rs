@@ -100,11 +100,11 @@ impl MainWindow {
     }
 }
 
-/// A square icon button. Active, it is an accent square in the active window and the grey selection otherwise.
+/// A square icon button. Active, it matches the full sidebar's selected row: the grey selection under the selection icon colour.
 fn rail_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static str, active: bool, window_active: bool) -> Stateful<Div> {
     let theme = *t;
     let (fill, ink) = match (active, window_active) {
-        (true, true) => (Some(t.accent), t.accent_ink),
+        (true, true) => (Some(t.sel), t.sel_icon),
         (true, false) => (Some(t.sel), t.ink2),
         (false, _) => (None, t.ink2),
     };
@@ -123,7 +123,7 @@ fn rail_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static st
 }
 
 /// A count on an icon: the rail has no room for the full sidebar's quiet number beside a label.
-/// A ring in the sidebar's colour keeps it apart from an accent square.
+/// A ring in the sidebar's colour cuts it out of the selected square.
 fn badge(t: &Theme, count: usize) -> Div {
     let text = if count > 99 { "99+".to_string() } else { count.to_string() };
     let ring = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
