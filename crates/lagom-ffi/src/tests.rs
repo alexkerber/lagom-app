@@ -2045,3 +2045,27 @@ async fn planner_sync_reports_a_failed_granted_service() {
     };
     assert!(core.sync_google(id).await.is_err());
 }
+
+#[tokio::test]
+async fn foreground_cleanup_clears_the_pending_vacuum_once() {
+    let (dir, core) = fixture();
+    let db = rusqlite::Connection::open(dir.path().join("lagom.sqlite3")).unwrap();
+    db.execute("INSERT INTO pending_vacuum VALUES (1)", []).unwrap();
+    let pending = || db.query_row("SELECT count(*) FROM pending_vacuum", [], |r| r.get::<_, u32>(0)).unwrap();
+    assert_eq!(pending(), 1);
+    // A running sync owns the store: the cleanup waits for the next foreground start.
+    {
+        let _sync = core.stores.sync.lock().unwrap();
+        assert!(!core.clean_up_store().await.unwrap());
+    }
+    {
+        // A draft save on the local lane likewise.
+        let _local = core.stores.local.lock().unwrap();
+        assert!(!core.clean_up_store().await.unwrap());
+    }
+    assert_eq!(pending(), 1);
+    assert!(core.clean_up_store().await.unwrap());
+    assert_eq!(pending(), 0);
+    // Nothing pending: a no-op that reports done.
+    assert!(core.clean_up_store().await.unwrap());
+}

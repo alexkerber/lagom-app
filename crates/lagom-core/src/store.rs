@@ -227,7 +227,8 @@ impl Store {
         Ok((pages * page_size).saturating_add(wal_size).saturating_mul(2).saturating_add(100 * 1024 * 1024))
     }
 
-    fn vacuum_if_pending(&self) -> Result<()> {
+    /// The one-time cleanup after an upgrade. A failed run stays pending for the next try.
+    pub fn vacuum_if_pending(&self) -> Result<()> {
         if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM pending_vacuum)", [], |r| r.get::<_, bool>(0))? {
             return Ok(());
         }

@@ -213,6 +213,7 @@ internal class MailModel(
     private var selectionRevision = 0
     private var syncAgain = false
     private var foreground = false
+    private var storeClean = false
     private var wake: Job? = null
 
     /** The Add account form a provider sign-in started from; its redirect closes that form only, not one opened since. */
@@ -284,6 +285,9 @@ internal class MailModel(
             start(); reload()
             // Returning from consent starts mail sync after the planner refresh.
             if (!redirectPending && !signingIn) sync()
+            // The one-time store cleanup after an upgrade, started only while visible; false tries again next start.
+            if (foreground && !storeClean) storeClean = try { core?.cleanUpStore() ?: false }
+                catch (e: CancellationException) { throw e } catch (e: Exception) { false }
         }
         else if (!sending) draft?.let { persist(it) }
         // Background refresh never sends, so mail inside the Undo window needs its own job.
