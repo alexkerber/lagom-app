@@ -2783,7 +2783,16 @@ impl Render for MainWindow {
         self.sidebar_shown_w = if welcome { 0. } else { drawn };
         // macOS: with the sidebar gone, the panel clears the traffic lights.
         let panel_top = if welcome { 36. } else { 8. + (rail::TITLE_ROW - 8.) * (1. - full_part) };
-        let list_height = (f32::from(window.viewport_size().height) - panel_top - 8. - 2. - self.list_header_height()).max(0.);
+        // How much the rail frame shows, 0 to 1: title row and rail in the sidebar colour, the content an inset panel
+        // with a rounded corner. The full sidebar keeps its straight edge.
+        let frame = if welcome { 0. } else { rail_part * if hiding { drawn / content_w } else { 1. } };
+        let edge = 8. * (1. - frame);
+        let chrome = {
+            let side = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
+            let mix = |a: f32, b: f32| a + (b - a) * frame;
+            gpui::Rgba { r: mix(t.bg.r, side.r), g: mix(t.bg.g, side.g), b: mix(t.bg.b, side.b), a: 1. }
+        };
+        let list_height = (f32::from(window.viewport_size().height) - panel_top - edge - 2. - self.list_header_height()).max(0.);
         let title = match &self.page {
             Page::Mail => self.list_title(),
             Page::Drafts => "Drafts".into(),
@@ -2955,20 +2964,21 @@ impl Render for MainWindow {
                         .when(rail_part > 0., |d| d.child(div().absolute().top_0().left_0().h_full().opacity(rail_part).child(self.rail(viewport_h, cx))))
                 };
                 d.child(div().w(px(drawn)).h_full().flex_shrink_0().flex().flex_col()
-                    // The title row above the rail is window background, as beside it; the window itself is transparent.
-                    .child(div().h(px(rail::TITLE_ROW * rail_part)).flex_shrink_0().bg(t.bg)).child(clip))
+                    // The title row above the rail is the frame colour, as beside it; the window itself is transparent.
+                    .child(div().h(px(rail::TITLE_ROW * rail_part)).flex_shrink_0().bg(chrome)).child(clip))
             })
             .child(
-                // The content meets the sidebar at a straight edge: no inset panel, so no stray corner.
-                div().flex_1().min_w(px(0.)).h_full().flex().bg(t.bg).child(div()
+                // The content meets the full sidebar at a straight edge; beside the rail it is an inset panel in the frame.
+                div().flex_1().min_w(px(0.)).h_full().flex().bg(chrome).child(div()
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
                     .mt(px(panel_top))
-                    .mb(px(8.))
-                    .mr(px(8.))
+                    .mb(px(edge))
+                    .mr(px(edge))
                     .when(welcome, |d| d.ml(px(8.)))
                     .bg(t.bg)
+                    .rounded_tl(px(radius::PANEL * frame))
                     .overflow_hidden()
                     .relative()
                     .child(panel)
