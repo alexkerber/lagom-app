@@ -26,6 +26,13 @@ Local source changes:
   error. Lagom stores passwords with lagom-core's `keyring` and never calls
   GPUI's credentials API.
 
+- `src/elements/text.rs`: each measure of a text element truncates a fresh
+  copy of its runs. Layout measures one element more than once at different
+  widths; the shared runs kept the first truncation's lengths, so a later,
+  wider truncation could end a run inside a character and abort the app in
+  Core Text (seen with an emoji in a clamped mail preview). Headless tests
+  use a no-op text system and cannot reach that slice.
+
 Both keep the Linux release binary in its 30 MB budget
 (`docs/performance.md`).
 
