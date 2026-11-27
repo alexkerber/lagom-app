@@ -4,7 +4,8 @@
 use super::*;
 
 /// Rail and hidden keep this row on top for the window controls and the sidebar button.
-pub(super) const TITLE_ROW: f32 = if cfg!(target_os = "macos") { 36. } else { 44. };
+/// macOS: twice the traffic lights' centre (y 25), so they sit mid-row as in a toolbar.
+pub(super) const TITLE_ROW: f32 = if cfg!(target_os = "macos") { 50. } else { 44. };
 const SEARCH_TIP: &str = if cfg!(target_os = "macos") { "Search · ⌘K" } else { "Search · Ctrl+K" };
 const BUTTON: f32 = 36.;
 const POPOVER_W: f32 = 248.;
