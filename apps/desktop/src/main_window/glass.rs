@@ -33,7 +33,8 @@ impl Glass {
         if let Some(view) = &self.view { view.hide(); }
     }
 
-    pub(super) fn background(&self, frost: Rgba) -> impl IntoElement {
+    /// `solid` 0..1 fades the glass to an opaque fill: the rail is too narrow for a see-through strip to read well.
+    pub(super) fn background(&self, frost: Rgba, solid: f32) -> impl IntoElement {
         let glass = self.clone();
         gpui::canvas(move |_bounds, _, _| {
             #[cfg(target_os = "macos")]
@@ -42,7 +43,8 @@ impl Glass {
             // shortcut: Windows stays opaque, add Mica/Acrylic when a native backdrop is available.
             backend(cfg!(target_os = "macos"), false, false)
         }, move |bounds, backend, window, _| {
-            window.paint_quad(gpui::fill(bounds, Rgba { a: backend.alpha(), ..frost }));
+            let a = backend.alpha();
+            window.paint_quad(gpui::fill(bounds, Rgba { a: a + (1. - a) * solid, ..frost }));
         }).absolute().inset_0()
     }
 }

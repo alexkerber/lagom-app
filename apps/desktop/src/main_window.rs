@@ -2946,7 +2946,7 @@ impl Render for MainWindow {
                 // The sidebar keeps its width and slides under a clip, so no row reflows.
                 let frost = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
                 // The rail starts below the title row, as the panel does.
-                let clip = div().relative().flex_1().min_h(px(0.)).flex().overflow_hidden().child(self.glass.background(frost));
+                let clip = div().relative().flex_1().min_h(px(0.)).flex().overflow_hidden().child(self.glass.background(frost, rail_part));
                 let clip = if hiding {
                     let content = if wide { self.sidebar(cx) } else { self.rail(viewport_h, cx) };
                     clip.child(content.ml(px(drawn - content_w)))
