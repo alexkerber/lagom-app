@@ -68,7 +68,7 @@ impl MainWindow {
             .children(SECTIONS.iter().enumerate().map(|(ix, &(_, path))| {
                 let active = matches!((&self.page, ix), (Page::Home, 0) | (Page::Mail | Page::Drafts, 1) | (Page::Calendar, 2) | (Page::Todo, 3));
                 button(["rail-today", "rail-mail", "rail-calendar", "rail-todo"][ix], path, SECTION_TIPS[ix], active)
-                    .when(ix == 1 && unread > 0, |d| d.child(badge(t, unread).debug_selector(|| "rail-mail-badge".into())))
+                    .when(ix == 1 && unread > 0, |d| d.child(dot(t).debug_selector(|| "rail-mail-badge".into())))
                     .on_click(cx.listener(move |this, _, window, cx| this.show_section(ix, window, cx)))
             }))
             // The full sidebar's mailboxes, folders and accounts, one click away on the Mail pages.
@@ -82,7 +82,7 @@ impl MainWindow {
                         .child(self.mailbox_popover_view(viewport_h, cx))).priority(1)))))
             .child(div().flex_1())
             .when(self.agents.sidebar, |d| d.child(button("rail-agents", "icons/connect.svg", "AI Agents", in_agents)
-                .when(self.agents.active() > 0, |d| d.child(badge(t, self.agents.active())))
+                .when(self.agents.active() > 0, |d| d.child(dot(t)))
                 .on_click(cx.listener(|this, _, window, cx| this.open_agents(window, cx)))))
             .child(button("rail-settings", "icons/settings.svg", if cfg!(target_os = "macos") { "Settings · ⌘," } else { "Settings · Ctrl+," }, in_settings)
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))))
@@ -122,15 +122,9 @@ fn rail_button(t: &Theme, id: &'static str, path: &'static str, tip: &'static st
         .tooltip(move |_, cx| cx.new(|_| Tip(theme, tip.into())).into())
 }
 
-/// A count on an icon: the rail has no room for the full sidebar's quiet number beside a label.
-/// A ring in the sidebar's colour cuts it out of the selected square.
-fn badge(t: &Theme, count: usize) -> Div {
-    let text = if count > 99 { "99+".to_string() } else { count.to_string() };
-    let ring = if t.dark { gpui::rgb(crate::theme::SIDEBAR_DARK) } else { gpui::rgb(crate::theme::SIDEBAR_LIGHT) };
-    div().absolute().top(px(-3.)).right(px(-4.)).h(px(15.)).min_w(px(15.)).px(px(3.)).rounded_full()
-        .border_2().border_color(ring)
-        .flex().items_center().justify_center().bg(t.accent)
-        .child(mono(text, t.accent_ink).text_size(px(9.)).font_weight(FontWeight::SEMIBOLD))
+/// An unread dot in the button's corner, clear of the icon: a count pill crossed into the next button. The list header has the count.
+fn dot(t: &Theme) -> Div {
+    div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(t.accent)
 }
 
 #[cfg(test)]
