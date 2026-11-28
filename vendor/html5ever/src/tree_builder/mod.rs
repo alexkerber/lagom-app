@@ -81,6 +81,27 @@ impl Default for TreeBuilderOpts {
 }
 
 /// The HTML tree builder.
+/// lagom: work units a tree builder may spend on one document. See `README.lagom.md`.
+pub const WORK_LIMIT: usize = 1 << 24;
+
+/// lagom: the parse error a tree builder reports when it stops at `WORK_LIMIT`.
+pub const WORK_LIMIT_ERROR: &str = "lagom: tree builder work limit";
+
+thread_local! {
+    static LIMIT: Cell<usize> = const { Cell::new(WORK_LIMIT) };
+}
+
+/// lagom: the work limit of tree builders created on this thread from now on, at most `WORK_LIMIT`.
+/// A caller that knows the input sets a limit in proportion to its size.
+pub fn set_work_limit(units: usize) {
+    LIMIT.with(|limit| limit.set(units.min(WORK_LIMIT)));
+}
+
+/// lagom: the cost of copying, sorting or comparing a tag's attributes.
+fn attr_units(attrs: &[Attribute]) -> usize {
+    attrs.iter().map(|a| 16 + a.name.local.len() + a.value.len()).sum()
+}
+
 pub struct TreeBuilder<Handle, Sink> {
     /// Options controlling the behavior of the tree builder.
     opts: TreeBuilderOpts,
@@ -134,6 +155,16 @@ pub struct TreeBuilder<Handle, Sink> {
 
     /// Track current line
     current_line: Cell<u64>,
+
+    /// lagom: work units spent, see `charge`, and the limit from `set_work_limit`.
+    work: Cell<usize>,
+    limit: usize,
+
+    /// lagom: the work limit was reached; the rest of the input is ignored.
+    stopped: Cell<bool>,
+
+    /// lagom: attributes merged into `html` and `body` so far.
+    merged_attrs: Cell<usize>,
     // WARNING: If you add new fields that contain Handles, you
     // must add them to trace_handles() below to preserve memory
     // safety!
@@ -169,6 +200,10 @@ where
             foster_parenting: Default::default(),
             context_elem: Default::default(),
             current_line: Cell::new(1),
+            work: Cell::new(0),
+            limit: LIMIT.with(Cell::get),
+            stopped: Cell::new(false),
+            merged_attrs: Cell::new(0),
         }
     }
 
@@ -209,6 +244,10 @@ where
             foster_parenting: Default::default(),
             context_elem: RefCell::new(Some(context_elem)),
             current_line: Cell::new(1),
+            work: Cell::new(0),
+            limit: LIMIT.with(Cell::get),
+            stopped: Cell::new(false),
+            merged_attrs: Cell::new(0),
         };
 
         // https://html.spec.whatwg.org/multipage/#parsing-html-fragments
@@ -352,8 +391,7 @@ where
             match result {
                 ProcessResult::Done => {
                     if should_have_acknowledged_self_closing_flag {
-                        self.sink
-                            .parse_error(Borrowed("Unacknowledged self-closing tag"));
+                        self.parse_error(Borrowed("Unacknowledged self-closing tag"));
                     }
                     let Some(new_token) = more_tokens.pop_front() else {
                         return tokenizer::TokenSinkResult::Continue;
@@ -475,6 +513,11 @@ where
     type Handle = Handle;
 
     fn process_token(&self, token: tokenizer::Token, line_number: u64) -> TokenSinkResult<Handle> {
+        // lagom: each token can scan the stack of open elements and the active formatting list.
+        let scan = self.open_elems.borrow().len() + self.active_formatting.borrow().len();
+        if self.stopped.get() || self.charge(1 + scan) {
+            return tokenizer::TokenSinkResult::Continue;
+        }
         if line_number != self.current_line.get() {
             self.sink.set_current_line(line_number);
         }
@@ -483,7 +526,7 @@ where
         // Handle `ParseError` and `DoctypeToken`; convert everything else to the local `Token` type.
         let token = match token {
             tokenizer::ParseError(e) => {
-                self.sink.parse_error(e);
+                self.parse_error(e);
                 return tokenizer::TokenSinkResult::Continue;
             },
 
@@ -491,7 +534,7 @@ where
                 if self.mode.get() == InsertionMode::Initial {
                     let (err, quirk) = data::doctype_error_and_quirks(&dt, self.opts.iframe_srcdoc);
                     if err {
-                        self.sink.parse_error(if self.opts.exact_errors {
+                        self.parse_error(if self.opts.exact_errors {
                             Cow::from(format!("Bad DOCTYPE: {dt:?}"))
                         } else {
                             Cow::from("Bad DOCTYPE")
@@ -515,7 +558,7 @@ where
                     self.mode.set(InsertionMode::BeforeHtml);
                     return tokenizer::TokenSinkResult::Continue;
                 } else {
-                    self.sink.parse_error(if self.opts.exact_errors {
+                    self.parse_error(if self.opts.exact_errors {
                         Cow::from(format!("DOCTYPE in insertion mode {:?}", self.mode.get()))
                     } else {
                         Cow::from("DOCTYPE in body")
@@ -619,7 +662,7 @@ where
     Sink: TreeSink<Handle = Handle>,
 {
     fn unexpected<T: fmt::Debug>(&self, _thing: &T) -> ProcessResult<Handle> {
-        self.sink.parse_error(if self.opts.exact_errors {
+        self.parse_error(if self.opts.exact_errors {
             Cow::from(format!(
                 "Unexpected token {} in insertion mode {:?}",
                 to_escaped_string(_thing),
@@ -643,7 +686,42 @@ where
         }
     }
 
+    /// lagom: add work units and report whether the limit is reached. Mail HTML is untrusted, and
+    /// scans of the open elements and active formatting list make some inputs quadratic. Past the
+    /// limit the builder ignores every later token and reports `WORK_LIMIT_ERROR` once.
+    fn charge(&self, units: usize) -> bool {
+        let work = self.work.get().saturating_add(units);
+        self.work.set(work);
+        if work > self.limit && !self.stopped.replace(true) {
+            self.sink.parse_error(Borrowed(WORK_LIMIT_ERROR));
+        }
+        self.stopped.get()
+    }
+
+    /// lagom: parse errors are counted, not passed on: a sink that keeps each one grows with the
+    /// input, and the tokenizer reports one per stray NUL or `/`.
+    fn parse_error(&self, _msg: Cow<'static, str>) {
+        self.charge(8);
+    }
+
+    /// lagom: a new element costs more than a scan step, and its attributes are copied.
+    fn charge_element(&self, attrs: &[Attribute]) {
+        self.charge(160 + attr_units(attrs));
+    }
+
+    /// lagom: a repeated `html` or `body` tag copies the names already merged and checks each new
+    /// attribute against them. Returns whether to merge: an empty list changes nothing.
+    fn charge_merge(&self, attrs: usize) -> bool {
+        if attrs == 0 {
+            return false;
+        }
+        self.charge((attrs + 1).saturating_mul(self.merged_attrs.get() + 256));
+        self.merged_attrs.set(self.merged_attrs.get() + attrs);
+        true
+    }
+
     fn position_in_active_formatting(&self, element: &Handle) -> Option<usize> {
+        self.charge(self.active_formatting.borrow().len());
         self.active_formatting
             .borrow()
             .iter()
@@ -723,6 +801,9 @@ where
 
         // 2. 3. 4.
         for _ in 0..8 {
+            if self.charge(self.open_elems.borrow().len() + self.active_formatting.borrow().len()) {
+                return;
+            }
             // 5.
             // We clone the Handle and Tag so they don't cause an immutable borrow of self.
             let maybe_fmt_entry = self
@@ -731,6 +812,10 @@ where
                 .find(|&(_, _, tag)| tag.name == subject)
                 .map(|(i, h, t)| (i, h.clone(), t.clone()));
 
+            // lagom: the tag and its attributes were cloned above.
+            if let Some((_, _, tag)) = &maybe_fmt_entry {
+                self.charge(attr_units(&tag.attrs));
+            }
             let Some((fmt_elem_index, fmt_elem, fmt_elem_tag)) = maybe_fmt_entry else {
                 return self.process_end_tag_in_body(Tag {
                     kind: EndTag,
@@ -747,23 +832,20 @@ where
                 .iter()
                 .rposition(|n| self.sink.same_node(n, &fmt_elem))
             else {
-                self.sink
-                    .parse_error(Borrowed("Formatting element not open"));
+                self.parse_error(Borrowed("Formatting element not open"));
                 self.active_formatting.borrow_mut().remove(fmt_elem_index);
                 return;
             };
 
             // 7.
             if !self.in_scope(default_scope, |n| self.sink.same_node(&n, &fmt_elem)) {
-                self.sink
-                    .parse_error(Borrowed("Formatting element not in scope"));
+                self.parse_error(Borrowed("Formatting element not in scope"));
                 return;
             }
 
             // 8.
             if !self.sink.same_node(&self.current_node(), &fmt_elem) {
-                self.sink
-                    .parse_error(Borrowed("Formatting element not current node"));
+                self.parse_error(Borrowed("Formatting element not current node"));
             }
 
             // 9.
@@ -797,6 +879,10 @@ where
             // 13.1.
             let mut inner_counter = 0;
             loop {
+                // lagom: removing from the stack below shifts it.
+                if self.charge(self.open_elems.borrow().len()) {
+                    return;
+                }
                 // 13.2.
                 inner_counter += 1;
 
@@ -833,6 +919,7 @@ where
                 };
                 // FIXME: Is there a way to avoid cloning the attributes twice here (once on their
                 // own, once as part of t.clone() above)?
+                self.charge_element(&tag.attrs);
                 let new_element = create_element_with_flags(
                     &self.sink,
                     QualName::new(None, ns!(html), tag.name.clone()),
@@ -866,6 +953,7 @@ where
             // 15.
             // FIXME: Is there a way to avoid cloning the attributes twice here (once on their own,
             // once as part of t.clone() above)?
+            self.charge_element(&fmt_elem_tag.attrs);
             let new_element = create_element_with_flags(
                 &self.sink,
                 QualName::new(None, ns!(html), fmt_elem_tag.name.clone()),
@@ -936,6 +1024,7 @@ where
     }
 
     fn remove_from_stack(&self, elem: &Handle) {
+        self.charge(self.open_elems.borrow().len());
         let position = self
             .open_elems
             .borrow()
@@ -948,6 +1037,7 @@ where
     }
 
     fn is_marker_or_open(&self, entry: &FormatEntry<Handle>) -> bool {
+        self.charge(self.open_elems.borrow().len());
         match *entry {
             FormatEntry::Marker => true,
             FormatEntry::Element(ref node, _) => self
@@ -982,6 +1072,9 @@ where
         // NOTE: We track the index of the element instead
         let mut entry_index = self.active_formatting.borrow().len() - 1;
         loop {
+            if self.stopped.get() {
+                return;
+            }
             // Step 4. Rewind: If there are no entries before entry in the list of active formatting elements,
             // then jump to the step labeled create.
             if entry_index == 0 {
@@ -1002,6 +1095,9 @@ where
         }
 
         loop {
+            if self.stopped.get() {
+                return;
+            }
             // Step 8. Create: Insert an HTML element for the token for which the element entry was created,
             // to obtain new element.
             let tag = match self.active_formatting.borrow()[entry_index] {
@@ -1074,7 +1170,7 @@ where
                     Cow::from("Unexpected open tag at end of body")
                 }
             };
-            self.sink.parse_error(error);
+            self.parse_error(error);
             // FIXME: Do we keep checking after finding one bad tag?
             // The spec suggests not.
             return;
@@ -1201,7 +1297,7 @@ where
     /// Signal an error if it was not the first one.
     fn expect_to_close(&self, name: LocalName) {
         if self.pop_until_named(name.clone()) != 1 {
-            self.sink.parse_error(if self.opts.exact_errors {
+            self.parse_error(if self.opts.exact_errors {
                 Cow::from(format!("Unexpected open element while closing {name:?}"))
             } else {
                 Cow::from("Unexpected open element")
@@ -1249,7 +1345,7 @@ where
             self.orig_mode.set(Some(self.mode.get()));
             ProcessResult::Reprocess(InsertionMode::InTableText, token)
         } else {
-            self.sink.parse_error(if self.opts.exact_errors {
+            self.parse_error(if self.opts.exact_errors {
                 Cow::from(format!(
                     "Unexpected characters {} in table",
                     to_escaped_string(&token)
@@ -1313,8 +1409,7 @@ where
     fn close_the_cell(&self) {
         self.generate_implied_end_tags(cursory_implied_end);
         if self.pop_until(td_th) != 1 {
-            self.sink
-                .parse_error(Borrowed("expected to close <td> or <th> with cell"));
+            self.parse_error(Borrowed("expected to close <td> or <th> with cell"));
         }
         self.clear_active_formatting_to_marker();
     }
@@ -1325,12 +1420,16 @@ where
     }
 
     fn append_comment(&self, text: StrTendril) -> ProcessResult<Handle> {
+        // lagom: a comment node and the text node after it cost about two elements.
+        self.charge(320);
         let comment = self.sink.create_comment(text);
         self.insert_appropriately(AppendNode(comment), None);
         ProcessResult::Done
     }
 
     fn append_comment_to_doc(&self, text: StrTendril) -> ProcessResult<Handle> {
+        // lagom: a comment node and the text node after it cost about two elements.
+        self.charge(320);
         let comment = self.sink.create_comment(text);
         self.sink.append(&self.doc_handle, AppendNode(comment));
         ProcessResult::Done
@@ -1339,6 +1438,8 @@ where
     fn append_comment_to_html(&self, text: StrTendril) -> ProcessResult<Handle> {
         let open_elems = self.open_elems.borrow();
         let target = html_elem(&open_elems);
+        // lagom: a comment node and the text node after it cost about two elements.
+        self.charge(320);
         let comment = self.sink.create_comment(text);
         self.sink.append(target, AppendNode(comment));
         ProcessResult::Done
@@ -1373,6 +1474,7 @@ where
 
         // Step 7.
         let qname = QualName::new(None, ns, name);
+        self.charge_element(&attrs);
         let elem = create_element_with_flags(
             &self.sink,
             qname.clone(),
@@ -1448,6 +1550,7 @@ where
     ) -> Handle {
         let adjusted_insertion_location = self.appropriate_place_for_insertion(None);
         let qname = QualName::new(None, ns, tag.name.clone());
+        self.charge_element(&tag.attrs);
         let elem = create_element_with_flags(
             &self.sink,
             qname.clone(),
@@ -1526,6 +1629,10 @@ where
         let mut first_match = None;
         let mut matches = 0usize;
         for (i, _, old_tag) in self.active_formatting_end_to_marker().iter() {
+            // lagom: the comparison copies and sorts both attribute lists.
+            if old_tag.name == tag.name {
+                self.charge(2 * (attr_units(&tag.attrs) + attr_units(&old_tag.attrs)));
+            }
             if tag.equiv_modulo_attr_order(old_tag) {
                 first_match = Some(i);
                 matches += 1;
@@ -1570,8 +1677,7 @@ where
             }
 
             if self.elem_in(elem, special_tag) {
-                self.sink
-                    .parse_error(Borrowed("Found special tag while closing generic tag"));
+                self.parse_error(Borrowed("Found special tag while closing generic tag"));
                 return;
             }
         }

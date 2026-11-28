@@ -1,8 +1,16 @@
 # HTML to text: known hidden-text cases
 
-Lagom builds a DOM for preview and search text when the estimated tree-building cost fits 262,144 work units. The estimate counts input bytes, potential stack scans, and formatting elements and attributes that later blocks could recreate. Larger estimates use the streaming converter.
+Preview and search text (`mime::html_to_text`) come from a full DOM for every mail. The vendored html5ever tree builder stops at a work limit (`vendor/html5ever/README.lagom.md`). A mail over that limit gets no preview or search text. A sender cannot choose a cheaper, less exact path.
 
-All 14 inputs below produce empty text on the DOM path. **All 14 can still expose `Secret` above budget.** The table describes the streaming fallback.
+`html_to_text` parses the mail inside the same document start the reader uses (`<!DOCTYPE html><html><head></head>`), after `inert_tags`. A review measured the tree shape against Chrome and WebKit on random tag soup; they matched, except for WebKit's dropped `script` elements.
+
+Still open in previews and search:
+
+- Rules in `<style>` sheets: a class rule can hide text in the reader. lagom reads inline styles only.
+- Inline styles with escapes, comments, at-rules or brackets count as hidden, so their text is missing from the preview.
+- `body_text` takes a mail's `text/plain` alternative when it has one. The reader never shows that part, so search can find text the reader does not show.
+
+The streaming converter remains for one use: `mime::html_to_blocks`, the native reader on Linux. The inputs below show hidden text there. Previews and search show none of them, with or without padding (`documented_html_leaks`).
 
 | Class | Cause | Inputs |
 |---|---|---|

@@ -542,9 +542,9 @@ impl<Sink: TokenSink> Tokenizer<Sink> {
 
         // lagom: the duplicate check below scans every earlier attribute, so one tag with k
         // attributes costs k² steps. Attributes past the first 256 are dropped to stay linear,
-        // except `hidden` and `style`: mail text conversion reads them to skip hidden elements.
+        // except those mail text conversion reads to skip hidden elements.
         if self.current_tag_attrs.borrow().len() >= 256
-            && !matches!(&**self.current_attr_name.borrow(), "hidden" | "style")
+            && !matches!(&**self.current_attr_name.borrow(), "hidden" | "style" | "open" | "name" | "popover" | "shadowrootmode")
         {
             self.current_attr_name.borrow_mut().clear();
             self.current_attr_value.borrow_mut().clear();
