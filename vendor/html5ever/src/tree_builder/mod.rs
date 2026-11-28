@@ -87,6 +87,11 @@ pub const WORK_LIMIT: usize = 1 << 25;
 /// lagom: the parse error a tree builder reports when it stops at `WORK_LIMIT`.
 pub const WORK_LIMIT_ERROR: &str = "lagom: tree builder work limit";
 
+/// lagom: the cost of copying, sorting or comparing a tag's attributes.
+fn attr_units(attrs: &[Attribute]) -> usize {
+    attrs.iter().map(|a| 16 + a.name.local.len() + a.value.len()).sum()
+}
+
 pub struct TreeBuilder<Handle, Sink> {
     /// Options controlling the behavior of the tree builder.
     opts: TreeBuilderOpts,
@@ -683,13 +688,18 @@ where
 
     /// lagom: a new element costs more than a scan step, and its attributes are copied.
     fn charge_element(&self, attrs: &[Attribute]) {
-        self.charge(160 + attrs.iter().map(|a| 16 + a.name.local.len() + a.value.len()).sum::<usize>());
+        self.charge(160 + attr_units(attrs));
     }
 
-    /// lagom: a repeated `html` or `body` tag checks each attribute against those already merged.
-    fn charge_merge(&self, attrs: usize) {
-        self.charge(attrs.saturating_mul(self.merged_attrs.get() + 256));
+    /// lagom: a repeated `html` or `body` tag copies the names already merged and checks each new
+    /// attribute against them. Returns whether to merge: an empty list changes nothing.
+    fn charge_merge(&self, attrs: usize) -> bool {
+        if attrs == 0 {
+            return false;
+        }
+        self.charge((attrs + 1).saturating_mul(self.merged_attrs.get() + 256));
         self.merged_attrs.set(self.merged_attrs.get() + attrs);
+        true
     }
 
     fn position_in_active_formatting(&self, element: &Handle) -> Option<usize> {
@@ -1595,6 +1605,10 @@ where
         let mut first_match = None;
         let mut matches = 0usize;
         for (i, _, old_tag) in self.active_formatting_end_to_marker().iter() {
+            // lagom: the comparison copies and sorts both attribute lists.
+            if old_tag.name == tag.name {
+                self.charge(2 * (attr_units(&tag.attrs) + attr_units(&old_tag.attrs)));
+            }
             if tag.equiv_modulo_attr_order(old_tag) {
                 first_match = Some(i);
                 matches += 1;

@@ -44,15 +44,20 @@ pub fn html_to_text(html: &str) -> String {
     if document.errors.borrow().iter().any(|e| e == html5ever::tree_builder::WORK_LIMIT_ERROR) {
         return String::new();
     }
-    // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
-    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden], dialog:not([open])").remove();
-    // A closed `details` draws only its first `summary`.
-    for details in document.select("details:not([open])").nodes() {
+    // A closed `details` draws only its first `summary`, chosen before hidden children go. Of
+    // open `details` that share a `name`, the first stays open.
+    let mut groups = std::collections::HashSet::new();
+    for details in document.select("details").nodes() {
+        let name = details.attr("name").filter(|n| !n.is_empty());
+        let open = details.has_attr("open") && name.is_none_or(|n| groups.insert(n.to_string()));
+        if open { continue; }
         let summary = details.children_it(false).find(|c| c.has_name("summary")).map(|c| c.id);
         for child in details.children() {
             if Some(child.id) != summary { child.remove_from_parent(); }
         }
     }
+    // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
+    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden], dialog:not([open])").remove();
     for node in document.select("[style]").iter() {
         if style_hides(&node.attr_or("style", "")) { node.remove(); }
     }
@@ -789,27 +794,28 @@ fn hides(tag: &Tag) -> bool {
 // shortcut: only simple inline declarations are supported; add a CSS parser/cascade for complex styles or class-based preheaders.
 fn style_hides(style: &str) -> bool {
     let (mut display, mut visibility) = ((false, false), (false, false));
-    for declaration in declarations(style) {
-        let Some((name, value)) = declaration.split_once(':') else { continue; };
+    declarations(style, |declaration| {
+        let Some((name, value)) = declaration.split_once(':') else { return };
         let (property, keywords, hidden): (_, &[&str], &[&str]) = if name.trim().eq_ignore_ascii_case("display") {
             (&mut display, DISPLAY, &["none"])
         } else if name.trim().eq_ignore_ascii_case("visibility") {
             (&mut visibility, &["visible", "hidden", "collapse"], &["hidden", "collapse"])
-        } else { continue; };
-        let (value, important) = match value.split_once('!') {
+        } else { return };
+        let (value, important) = match value.rsplit_once('!') {
             Some((value, priority)) if priority.trim().eq_ignore_ascii_case("important") => (value, true),
-            Some(_) => continue,
+            Some(_) => return,
             None => (value, false),
         };
         let value = value.trim().to_ascii_lowercase();
         // A browser drops an invalid value, so it cannot undo an earlier `none`. Escapes and
         // functions (`var()` can resolve to `none`) count as hidden: lagom does not resolve them.
+        // Multi-keyword values (`block flow`) are not checked and so never unhide.
         let opaque = value.contains(['\\', '(']);
-        let valid = opaque || (!value.is_empty() && value.split_whitespace().all(|k| keywords.contains(&k) || GLOBAL.contains(&k)));
+        let valid = opaque || keywords.contains(&value.as_str()) || GLOBAL.contains(&value.as_str());
         if valid && (!property.1 || important) {
             *property = (opaque || hidden.contains(&value.as_str()), important);
         }
-    }
+    });
     display.0 || visibility.0
 }
 
@@ -821,9 +827,10 @@ const DISPLAY: &[&str] = &[
     "ruby-base-container", "ruby-text-container", "-webkit-box", "-webkit-inline-box", "-moz-box", "-moz-inline-box",
 ];
 
-/// An inline style's declarations: split at `;` outside quotes, with comments removed, as CSS reads them.
-fn declarations(style: &str) -> Vec<String> {
-    let (mut out, mut current, mut quote) = (Vec::new(), String::new(), None);
+/// Calls `each` with an inline style's declarations, as CSS reads them: split at `;` outside
+/// quotes and brackets (`url(a;b)`), with comments removed.
+fn declarations(style: &str, mut each: impl FnMut(&str)) {
+    let (mut current, mut quote, mut depth) = (String::new(), None, 0usize);
     let mut chars = style.chars().peekable();
     while let Some(c) = chars.next() {
         match (quote, c) {
@@ -837,12 +844,13 @@ fn declarations(style: &str) -> Vec<String> {
                 for n in chars.by_ref() { if last == '*' && n == '/' { break; } last = n; }
                 current.push(' ');
             }
-            (None, ';') => out.push(std::mem::take(&mut current)),
+            (None, '(' | '[' | '{') => { depth += 1; current.push(c); }
+            (None, ')' | ']' | '}') => { depth = depth.saturating_sub(1); current.push(c); }
+            (None, ';') if depth == 0 => { each(&current); current.clear(); }
             (None, _) => current.push(c),
         }
     }
-    out.push(current);
-    out
+    each(&current);
 }
 
 /// Repair an older HTML fallback without replacing a sender's plain-text alternative.
@@ -1182,9 +1190,15 @@ mod tests {
         // collect, at most 256.
         let blocks = "<p>Shown</p><div hidden>".to_string() + &"<span>".repeat(255) + &"<div>".repeat(200_000);
         let closed = "<p>Shown</p><div hidden>".to_string() + &"<span><b><i><u></span>".repeat(50_000);
+        // An empty repeated `body` merged nothing but copied every attribute name merged before.
+        let names: String = (0..256).map(|i| format!(" a{i}")).collect();
+        let merges = (0..20).map(|k| format!("<body{}>", names.replace(" a", &format!(" a{k}x")))).collect::<String>() + &"<body>".repeat(200_000) + "Tail";
+        // Same-name formatting elements compare their sorted attributes.
+        let long = format!("<b{}>", (0..256).map(|i| format!(" a{i}={}", "v".repeat(40))).collect::<String>());
+        let noah = format!("{long}x").repeat(300);
         // Past the tree builder's work limit the text is empty: a partial tree can show text the
         // whole document hides.
-        for (html, text) in [(formatting, ""), ("<div>".repeat(30_000) + "Deep", ""), (attributes, "Tail"), (spaces, "Spaces"), (stray, ""), (blocks, ""), (closed, "")] {
+        for (html, text) in [(formatting, ""), ("<div>".repeat(30_000) + "Deep", ""), (attributes, "Tail"), (spaces, "Spaces"), (stray, ""), (blocks, ""), (closed, ""), (merges, "Tail"), (noah, "")] {
             let start = std::time::Instant::now();
             let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
             // About 1 s each in a debug build on a MacBook; Windows runners are several times slower.
@@ -1252,6 +1266,12 @@ mod tests {
             ("<p style='visibility:collapse'>Secret</p>Shown", "Shown"),
             ("<p style='display:none;display:block'>Shown</p>", "Shown"),
             ("<p style='display:none!important;display:block'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none;display:block flow'>Secret</p>Shown", "Shown"),
+            ("<p style='visibility:hidden;visibility:visible visible'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none;background:url(a;display:block)'>Secret</p>Shown", "Shown"),
+            ("<details><summary hidden>Secret</summary><summary>Secret</summary></details>Shown", "Shown"),
+            ("<details name=g open>Shown</details><details name=g open>Secret</details>", "Shown"),
+            ("<body>Shown<body>", "Shown"),
         ] {
             assert_eq!(html_to_text(html), text, "{html}");
         }
