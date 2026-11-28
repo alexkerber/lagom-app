@@ -39,10 +39,25 @@ const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{20
 /// Empty when the tree builder stops at its work limit: a partial tree can show text that the
 /// whole document hides, so an input that costly gets no preview or search text.
 pub fn html_to_text(html: &str) -> String {
-    // The reader parses the same renamed tags: an `iframe`'s text is markup there, not raw text.
-    let document = dom_query::Document::from(&*crate::html::inert_tags(html));
+    // The document the reader parses: renamed tags (an `iframe`'s text is markup there), no quirks
+    // mode, and the mail after `head`.
+    let html = crate::html::inert_tags(html);
+    // Four times the most work per byte measured on real mail, so a mail of many costly HTML
+    // parts stays linear in its size.
+    html5ever::tree_builder::set_work_limit(32 * html.len() + (1 << 16));
+    let document = dom_query::Document::from(format!("<!DOCTYPE html><html><head></head>{html}"));
     if document.errors.borrow().iter().any(|e| e == html5ever::tree_builder::WORK_LIMIT_ERROR) {
         return String::new();
+    }
+    // A declarative shadow root replaces its host's children; lagom does not render it.
+    for template in document.select("template[shadowrootmode]").nodes() {
+        if let Some(host) = template.parent() { host.remove_from_parent(); }
+    }
+    // A `select` draws only its options.
+    for select in document.select("select").nodes() {
+        for child in select.children() {
+            if !(child.has_name("option") || child.has_name("optgroup")) { child.remove_from_parent(); }
+        }
     }
     // A closed `details` draws only its first `summary`, chosen before hidden children go. Of
     // open `details` that share a `name`, the first stays open.
@@ -57,7 +72,8 @@ pub fn html_to_text(html: &str) -> String {
         }
     }
     // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
-    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden], dialog:not([open])").remove();
+    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden], dialog:not([open]), \
+        [popover], datalist, video, audio, noembed, rp, meter, progress, canvas").remove();
     for node in document.select("[style]").iter() {
         if style_hides(&node.attr_or("style", "")) { node.remove(); }
     }
@@ -793,38 +809,47 @@ fn hides(tag: &Tag) -> bool {
 /// an earlier one is `!important`.
 // shortcut: only simple inline declarations are supported; add a CSS parser/cascade for complex styles or class-based preheaders.
 fn style_hides(style: &str) -> bool {
-    let (mut display, mut visibility) = ((false, false), (false, false));
+    // Escapes, at-rules, blocks and comments change how CSS reads the declarations; lagom does
+    // not model them and treats the element as hidden.
+    if style.contains(['\\', '@', '{', '}', '[', ']']) || style.contains("/*") { return true; }
+    let (mut display, mut visibility, mut content) = ((false, false), (false, false), (false, false));
     declarations(style, |declaration| {
         let Some((name, value)) = declaration.split_once(':') else { return };
-        let (property, keywords, hidden): (_, &[&str], &[&str]) = if name.trim().eq_ignore_ascii_case("display") {
-            (&mut display, DISPLAY, &["none"])
-        } else if name.trim().eq_ignore_ascii_case("visibility") {
+        let name = name.trim_matches(css_space);
+        let (property, keywords, hidden): (_, &[&str], &[&str]) = if name.eq_ignore_ascii_case("display") {
+            (&mut display, DISPLAY, &["none", "table-column", "table-column-group"])
+        } else if name.eq_ignore_ascii_case("visibility") {
             (&mut visibility, &["visible", "hidden", "collapse"], &["hidden", "collapse"])
+        } else if name.eq_ignore_ascii_case("content-visibility") {
+            (&mut content, &["visible", "auto", "hidden"], &["hidden"])
         } else { return };
         let (value, important) = match value.rsplit_once('!') {
-            Some((value, priority)) if priority.trim().eq_ignore_ascii_case("important") => (value, true),
+            Some((value, priority)) if priority.trim_matches(css_space).eq_ignore_ascii_case("important") => (value, true),
             Some(_) => return,
             None => (value, false),
         };
-        let value = value.trim().to_ascii_lowercase();
-        // A browser drops an invalid value, so it cannot undo an earlier `none`. Escapes and
-        // functions (`var()` can resolve to `none`) count as hidden: lagom does not resolve them.
-        // Multi-keyword values (`block flow`) are not checked and so never unhide.
-        let opaque = value.contains(['\\', '(']);
+        let value = value.trim_matches(css_space).to_ascii_lowercase();
+        // A browser drops an invalid value, so it cannot undo an earlier `none`. Functions
+        // (`var()` can resolve to `none`) count as hidden: lagom does not resolve them. Only
+        // single, widely supported keywords undo a hidden value.
+        let opaque = value.contains('(');
         let valid = opaque || keywords.contains(&value.as_str()) || GLOBAL.contains(&value.as_str());
         if valid && (!property.1 || important) {
             *property = (opaque || hidden.contains(&value.as_str()), important);
         }
     });
-    display.0 || visibility.0
+    display.0 || visibility.0 || content.0
+}
+
+fn css_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
 }
 
 const GLOBAL: &[&str] = &["inherit", "initial", "unset", "revert", "revert-layer"];
 const DISPLAY: &[&str] = &[
-    "none", "contents", "block", "inline", "run-in", "flow", "flow-root", "table", "flex", "grid", "ruby", "math", "list-item",
-    "inline-block", "inline-table", "inline-flex", "inline-grid", "table-row-group", "table-header-group", "table-footer-group",
-    "table-row", "table-cell", "table-column-group", "table-column", "table-caption", "ruby-base", "ruby-text",
-    "ruby-base-container", "ruby-text-container", "-webkit-box", "-webkit-inline-box", "-moz-box", "-moz-inline-box",
+    "none", "contents", "block", "inline", "flow-root", "table", "flex", "grid", "list-item", "inline-block",
+    "inline-table", "inline-flex", "inline-grid", "table-row-group", "table-header-group", "table-footer-group",
+    "table-row", "table-cell", "table-column-group", "table-column", "table-caption", "-webkit-box", "-webkit-inline-box",
 ];
 
 /// Calls `each` with an inline style's declarations, as CSS reads them: split at `;` outside
@@ -835,6 +860,8 @@ fn declarations(style: &str, mut each: impl FnMut(&str)) {
     while let Some(c) = chars.next() {
         match (quote, c) {
             (Some(q), _) if c == q => { quote = None; current.push(c); }
+            // A newline ends an unclosed string in CSS.
+            (Some(_), '\n' | '\r' | '\x0c') => { quote = None; current.push(c); }
             (Some(_), '\\') => { current.push(c); if let Some(n) = chars.next() { current.push(n); } }
             (Some(_), _) => current.push(c),
             (None, '"' | '\'') => { quote = Some(c); current.push(c); }
@@ -1196,9 +1223,13 @@ mod tests {
         // Same-name formatting elements compare their sorted attributes.
         let long = format!("<b{}>", (0..256).map(|i| format!(" a{i}={}", "v".repeat(40))).collect::<String>());
         let noah = format!("{long}x").repeat(300);
+        // Comments and parse errors were nearly free, and the DOM kept every one.
+        let comments = "a<!>".repeat(900_000);
+        let nul = "\0".repeat(3_500_000) + "Tail";
+        let slashes = "<a".to_string() + &"/".repeat(3_500_000) + ">Tail";
         // Past the tree builder's work limit the text is empty: a partial tree can show text the
         // whole document hides.
-        for (html, text) in [(formatting, ""), ("<div>".repeat(30_000) + "Deep", ""), (attributes, "Tail"), (spaces, "Spaces"), (stray, ""), (blocks, ""), (closed, ""), (merges, "Tail"), (noah, "")] {
+        for (html, text) in [(formatting, ""), ("<div>".repeat(30_000) + "Deep", ""), (attributes, "Tail"), (spaces, "Spaces"), (stray, ""), (blocks, ""), (closed, ""), (merges, "Tail"), (noah, ""), (comments, ""), (nul, ""), (slashes, "")] {
             let start = std::time::Instant::now();
             let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
             // About 1 s each in a debug build on a MacBook; Windows runners are several times slower.
@@ -1252,6 +1283,20 @@ mod tests {
     }
 
     #[test]
+    fn many_costly_html_parts_stay_linear() {
+        // Each part reached the tree builder's limit on its own: 830 of them took 13 to 18 s.
+        let part = "<p>".to_string() + &(0..300).map(|i| format!("<i a={i}>")).collect::<String>() + "</p>" + &"<p>x".repeat(600);
+        let mut mail = String::from("Content-Type: multipart/mixed; boundary=b\r\n\r\n");
+        while mail.len() < MAX_MIME_BYTES - 2 * part.len() {
+            mail.push_str(&format!("--b\r\nContent-Type: text/html\r\n\r\n{part}\r\n"));
+        }
+        mail.push_str("--b--\r\n");
+        let start = std::time::Instant::now();
+        parse(mail.as_bytes()).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
+    }
+
+    #[test]
     fn closed_details_dialog_frames_and_invalid_styles_stay_hidden() {
         for (html, text) in [
             ("<details><summary>Shown</summary>Secret<p>Secret</p></details>", "Shown"),
@@ -1272,6 +1317,22 @@ mod tests {
             ("<details><summary hidden>Secret</summary><summary>Secret</summary></details>Shown", "Shown"),
             ("<details name=g open>Shown</details><details name=g open>Secret</details>", "Shown"),
             ("<body>Shown<body>", "Shown"),
+            // Measured hidden in WebKit and Chrome with the reader's document around the mail.
+            ("<p><table></table><span hidden></p>Secret", ""),
+            ("<noscript hidden>Secret</noscript>Shown", "Shown"),
+            ("<div><template shadowrootmode=open></template>Secret</div>Shown", "Shown"),
+            ("<div popover>Secret</div>Shown", "Shown"),
+            ("<datalist>Secret</datalist><video>Secret</video>Shown", "Shown"),
+            ("<select>Secret<option>Shown</select>", "Shown"),
+            ("<p style='d\\isplay:none'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none!imp\\ortant'>Secret</p>Shown", "Shown"),
+            ("<p style=\"font-family:'a\n;display:none\">Secret</p>Shown", "Shown"),
+            ("<p style='background:url(/*);display:none;x:url(*/)'>Secret</p>Shown", "Shown"),
+            ("<p style='@x{;}display:none'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none;display:block\u{a0}'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none;display:run-in'>Secret</p>Shown", "Shown"),
+            ("<p style='display:table-column'>Secret</p>Shown", "Shown"),
+            ("<p style='content-visibility:hidden'>Secret</p>Shown", "Shown"),
         ] {
             assert_eq!(html_to_text(html), text, "{html}");
         }
@@ -1339,7 +1400,6 @@ mod tests {
         }
         // The streaming fallback can lose visible text on these inputs.
         for (html, dom) in [
-            ("<noscript hidden><div></noscript>Secret", "Secret"),
             // A heading start may close a hidden heading, unless reopened formatting is in it.
             ("<h1 hidden>Hidden<h2>Shown</h2>", "Shown"),
             // HTML tags in `svg` end it; `svg` text is hidden.

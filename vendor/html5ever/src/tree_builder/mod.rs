@@ -82,10 +82,20 @@ impl Default for TreeBuilderOpts {
 
 /// The HTML tree builder.
 /// lagom: work units a tree builder may spend on one document. See `README.lagom.md`.
-pub const WORK_LIMIT: usize = 1 << 25;
+pub const WORK_LIMIT: usize = 1 << 24;
 
 /// lagom: the parse error a tree builder reports when it stops at `WORK_LIMIT`.
 pub const WORK_LIMIT_ERROR: &str = "lagom: tree builder work limit";
+
+thread_local! {
+    static LIMIT: Cell<usize> = const { Cell::new(WORK_LIMIT) };
+}
+
+/// lagom: the work limit of tree builders created on this thread from now on, at most `WORK_LIMIT`.
+/// A caller that knows the input sets a limit in proportion to its size.
+pub fn set_work_limit(units: usize) {
+    LIMIT.with(|limit| limit.set(units.min(WORK_LIMIT)));
+}
 
 /// lagom: the cost of copying, sorting or comparing a tag's attributes.
 fn attr_units(attrs: &[Attribute]) -> usize {
@@ -146,8 +156,9 @@ pub struct TreeBuilder<Handle, Sink> {
     /// Track current line
     current_line: Cell<u64>,
 
-    /// lagom: work units spent, see `charge`.
+    /// lagom: work units spent, see `charge`, and the limit from `set_work_limit`.
     work: Cell<usize>,
+    limit: usize,
 
     /// lagom: the work limit was reached; the rest of the input is ignored.
     stopped: Cell<bool>,
@@ -190,6 +201,7 @@ where
             context_elem: Default::default(),
             current_line: Cell::new(1),
             work: Cell::new(0),
+            limit: LIMIT.with(Cell::get),
             stopped: Cell::new(false),
             merged_attrs: Cell::new(0),
         }
@@ -233,6 +245,7 @@ where
             context_elem: RefCell::new(Some(context_elem)),
             current_line: Cell::new(1),
             work: Cell::new(0),
+            limit: LIMIT.with(Cell::get),
             stopped: Cell::new(false),
             merged_attrs: Cell::new(0),
         };
@@ -514,7 +527,7 @@ where
         // Handle `ParseError` and `DoctypeToken`; convert everything else to the local `Token` type.
         let token = match token {
             tokenizer::ParseError(e) => {
-                self.sink.parse_error(e);
+                self.parse_error(e);
                 return tokenizer::TokenSinkResult::Continue;
             },
 
@@ -522,7 +535,7 @@ where
                 if self.mode.get() == InsertionMode::Initial {
                     let (err, quirk) = data::doctype_error_and_quirks(&dt, self.opts.iframe_srcdoc);
                     if err {
-                        self.sink.parse_error(if self.opts.exact_errors {
+                        self.parse_error(if self.opts.exact_errors {
                             Cow::from(format!("Bad DOCTYPE: {dt:?}"))
                         } else {
                             Cow::from("Bad DOCTYPE")
@@ -546,7 +559,7 @@ where
                     self.mode.set(InsertionMode::BeforeHtml);
                     return tokenizer::TokenSinkResult::Continue;
                 } else {
-                    self.sink.parse_error(if self.opts.exact_errors {
+                    self.parse_error(if self.opts.exact_errors {
                         Cow::from(format!("DOCTYPE in insertion mode {:?}", self.mode.get()))
                     } else {
                         Cow::from("DOCTYPE in body")
@@ -650,7 +663,7 @@ where
     Sink: TreeSink<Handle = Handle>,
 {
     fn unexpected<T: fmt::Debug>(&self, _thing: &T) -> ProcessResult<Handle> {
-        self.sink.parse_error(if self.opts.exact_errors {
+        self.parse_error(if self.opts.exact_errors {
             Cow::from(format!(
                 "Unexpected token {} in insertion mode {:?}",
                 to_escaped_string(_thing),
@@ -680,10 +693,16 @@ where
     fn charge(&self, units: usize) -> bool {
         let work = self.work.get().saturating_add(units);
         self.work.set(work);
-        if work > WORK_LIMIT && !self.stopped.replace(true) {
+        if work > self.limit && !self.stopped.replace(true) {
             self.sink.parse_error(Borrowed(WORK_LIMIT_ERROR));
         }
         self.stopped.get()
+    }
+
+    /// lagom: parse errors are counted, not passed on: a sink that keeps each one grows with the
+    /// input, and the tokenizer reports one per stray NUL or `/`.
+    fn parse_error(&self, _msg: Cow<'static, str>) {
+        self.charge(8);
     }
 
     /// lagom: a new element costs more than a scan step, and its attributes are copied.
@@ -794,6 +813,10 @@ where
                 .find(|&(_, _, tag)| tag.name == subject)
                 .map(|(i, h, t)| (i, h.clone(), t.clone()));
 
+            // lagom: the tag and its attributes were cloned above.
+            if let Some((_, _, tag)) = &maybe_fmt_entry {
+                self.charge(attr_units(&tag.attrs));
+            }
             let Some((fmt_elem_index, fmt_elem, fmt_elem_tag)) = maybe_fmt_entry else {
                 return self.process_end_tag_in_body(Tag {
                     kind: EndTag,
@@ -1151,7 +1174,7 @@ where
                     Cow::from("Unexpected open tag at end of body")
                 }
             };
-            self.sink.parse_error(error);
+            self.parse_error(error);
             // FIXME: Do we keep checking after finding one bad tag?
             // The spec suggests not.
             return;
@@ -1278,7 +1301,7 @@ where
     /// Signal an error if it was not the first one.
     fn expect_to_close(&self, name: LocalName) {
         if self.pop_until_named(name.clone()) != 1 {
-            self.sink.parse_error(if self.opts.exact_errors {
+            self.parse_error(if self.opts.exact_errors {
                 Cow::from(format!("Unexpected open element while closing {name:?}"))
             } else {
                 Cow::from("Unexpected open element")
@@ -1326,7 +1349,7 @@ where
             self.orig_mode.set(Some(self.mode.get()));
             ProcessResult::Reprocess(InsertionMode::InTableText, token)
         } else {
-            self.sink.parse_error(if self.opts.exact_errors {
+            self.parse_error(if self.opts.exact_errors {
                 Cow::from(format!(
                     "Unexpected characters {} in table",
                     to_escaped_string(&token)
@@ -1402,12 +1425,16 @@ where
     }
 
     fn append_comment(&self, text: StrTendril) -> ProcessResult<Handle> {
+        // lagom: a comment node and the text node after it cost about two elements.
+        self.charge(320);
         let comment = self.sink.create_comment(text);
         self.insert_appropriately(AppendNode(comment), None);
         ProcessResult::Done
     }
 
     fn append_comment_to_doc(&self, text: StrTendril) -> ProcessResult<Handle> {
+        // lagom: a comment node and the text node after it cost about two elements.
+        self.charge(320);
         let comment = self.sink.create_comment(text);
         self.sink.append(&self.doc_handle, AppendNode(comment));
         ProcessResult::Done
@@ -1416,6 +1443,8 @@ where
     fn append_comment_to_html(&self, text: StrTendril) -> ProcessResult<Handle> {
         let open_elems = self.open_elems.borrow();
         let target = html_elem(&open_elems);
+        // lagom: a comment node and the text node after it cost about two elements.
+        self.charge(320);
         let comment = self.sink.create_comment(text);
         self.sink.append(target, AppendNode(comment));
         ProcessResult::Done
