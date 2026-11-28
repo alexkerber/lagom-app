@@ -471,6 +471,18 @@ async fn calendar_consent_requests_full_scopes_and_existing_identity_hint() {
 }
 
 #[test]
+fn a_later_sign_in_replaces_the_full_calendar_scope() {
+    let requested = Provider::Google.config().scope;
+    let held = "https://mail.google.com/ https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.readonly https://example.test/extra";
+    let scope = keep_held_scopes(&requested, held);
+    assert!(!has_scope(&scope, "https://www.googleapis.com/auth/calendar"));
+    assert!(!has_scope(&scope, "https://www.googleapis.com/auth/calendar.readonly"));
+    assert!(has_scope(&scope, "https://example.test/extra"));
+    for s in GOOGLE_CALENDAR_SCOPES.split_whitespace() { assert!(has_scope(&scope, s)); }
+    assert!(calendar_allowed(&scope));
+}
+
+#[test]
 fn mobile_redirects_follow_each_provider() {
     assert_eq!(
         mobile_redirect(Provider::Google, "123-abc.apps.googleusercontent.com", "com.example.app").unwrap(),
