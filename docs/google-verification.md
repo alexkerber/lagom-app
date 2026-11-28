@@ -90,10 +90,11 @@ features stay off (`crates/lagom-core/src/oauth.rs:127-140`,
 
 ### The full Calendar scope
 
-A new sign-in does not request `https://www.googleapis.com/auth/calendar`. A later sign-in asks
-again for every scope the account already holds (`crates/lagom-core/src/oauth.rs:182-188`,
-`apps/desktop/src/sync.rs:424-431`). So an account that holds the full Calendar scope from an older
-grant keeps asking for it. `calendar_allowed` accepts it (`crates/lagom-core/src/oauth.rs:129-135`).
+No sign-in requests `https://www.googleapis.com/auth/calendar`. On desktop, a later sign-in keeps
+the other scopes the account holds, but drops every older Calendar scope and asks for the two narrow
+ones above (`keep_held_scopes` in `crates/lagom-core/src/oauth.rs`). Mobile asks for the default scopes only. An account that holds the full
+Calendar scope from an older grant keeps working until that later sign-in:
+`calendar_allowed` still accepts it (`crates/lagom-core/src/oauth.rs:129-135`).
 
 Not verified: whether Google classes the Calendar and Tasks scopes above as sensitive. The
 restricted scope list (support.google.com/cloud/answer/13464325) names Gmail scopes but not these.

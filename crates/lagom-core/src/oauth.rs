@@ -180,12 +180,17 @@ pub async fn reauthenticate(account: &Account, scopes: &str, calendar_consent: b
         _ => return Err(Error::Invalid("not an OAuth account")),
     };
     let mut config = provider.config();
-    if provider == Provider::Google {
-        for scope in scopes.split_whitespace() {
-            if !has_scope(&config.scope, scope) { config.scope.push_str(&format!(" {scope}")); }
-        }
-    }
+    if provider == Provider::Google { config.scope = keep_held_scopes(&config.scope, scopes); }
     sign_in_with(provider, config, Some(account), open_url).await
+}
+/// Keeps scopes from an older grant, except Calendar ones: the request already names the narrow
+/// Calendar scopes, so an older full `auth/calendar` grant is replaced instead of asked for again.
+fn keep_held_scopes(requested: &str, held: &str) -> String {
+    let mut scope = requested.to_string();
+    for s in held.split_whitespace() {
+        if !s.starts_with("https://www.googleapis.com/auth/calendar") && !has_scope(&scope, s) { scope.push_str(&format!(" {s}")); }
+    }
+    scope
 }
 async fn sign_in_with(
     provider: Provider,
