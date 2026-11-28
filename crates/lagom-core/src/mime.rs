@@ -36,59 +36,29 @@ pub fn metadata_only(header: &[u8]) -> Result<Message> {
 const INVISIBLE: &[char] = &['\u{34F}', '\u{AD}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
 
 /// The visible text of mail HTML: hidden elements dropped, block structure kept as line breaks.
+/// Empty when the tree builder stops at its work limit: a partial tree can show text that the
+/// whole document hides, so an input that costly gets no preview or search text.
 pub fn html_to_text(html: &str) -> String {
-    if !within_dom_budget(html) {
-        return clean_lines(read(html, None).text.trim_end());
+    // The reader parses the same renamed tags: an `iframe`'s text is markup there, not raw text.
+    let document = dom_query::Document::from(&*crate::html::inert_tags(html));
+    if document.errors.borrow().iter().any(|e| e == html5ever::tree_builder::WORK_LIMIT_ERROR) {
+        return String::new();
     }
-    let document = dom_query::Document::from(html);
     // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
-    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden]").remove();
+    document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden], dialog:not([open])").remove();
+    // A closed `details` draws only its first `summary`.
+    for details in document.select("details:not([open])").nodes() {
+        let summary = details.children_it(false).find(|c| c.has_name("summary")).map(|c| c.id);
+        for child in details.children() {
+            if Some(child.id) != summary { child.remove_from_parent(); }
+        }
+    }
     for node in document.select("[style]").iter() {
         if style_hides(&node.attr_or("style", "")) { node.remove(); }
     }
     // Document::formatted_text trims by byte and panics on trailing multibyte whitespace in `pre`
     // (dom_query 0.28); the selection form skips that trim and clean_lines trims instead.
     clean_lines(&document.select("html").formatted_text())
-}
-
-/// Work units for input bytes, stack scans and reconstructed formatting nodes.
-const DOM_BUDGET: usize = 256 * 1024;
-
-#[derive(Default)]
-struct DomCost {
-    markup: std::cell::Cell<usize>,
-    formatting: std::cell::Cell<usize>,
-}
-
-impl TokenSink for DomCost {
-    type Handle = ();
-    fn process_token(&self, token: Token, _: u64) -> TokenSinkResult<()> {
-        match token {
-            Token::TagToken(tag) => {
-                // A later block can reconstruct every formatting element, including its attributes. A repeated
-                // `html` or `body` merges its attributes into the first by a scan of all of them, so it costs the same.
-                if tag.kind == TagKind::StartTag && (formatting(&tag.name) || matches!(tag.name, local_name!("html") | local_name!("body"))) {
-                    let attrs: usize = tag.attrs.iter().map(|a| 64 + a.name.local.len() + a.value.len()).sum();
-                    self.formatting.set(self.formatting.get() + 128 + attrs);
-                }
-            }
-            Token::CommentToken(_) | Token::DoctypeToken(_) => {}
-            _ => return TokenSinkResult::Continue,
-        }
-        self.markup.set(self.markup.get() + 1);
-        TokenSinkResult::Continue
-    }
-}
-
-fn within_dom_budget(html: &str) -> bool {
-    if html.len() > DOM_BUDGET { return false; }
-    let opens = html.bytes().filter(|&b| b == b'<').count();
-    // Each tag can scan the entire stack of open elements.
-    if opens.saturating_mul(opens) > DOM_BUDGET { return false; }
-    let cost = tokenize(html, DomCost::default());
-    // A raw-text or foreign-content boundary can hide markup from a standalone tokenizer.
-    let copies = if cost.markup.get() == opens { cost.formatting.get() } else { html.len().max(cost.formatting.get()) };
-    opens.saturating_mul(opens + copies) <= DOM_BUDGET - html.len()
 }
 
 fn read(html: &str, marks: Option<Vec<Mark>>) -> TextState {
@@ -819,23 +789,60 @@ fn hides(tag: &Tag) -> bool {
 // shortcut: only simple inline declarations are supported; add a CSS parser/cascade for complex styles or class-based preheaders.
 fn style_hides(style: &str) -> bool {
     let (mut display, mut visibility) = ((false, false), (false, false));
-    for declaration in style.split(';') {
+    for declaration in declarations(style) {
         let Some((name, value)) = declaration.split_once(':') else { continue; };
-        let (property, hidden) = if name.trim().eq_ignore_ascii_case("display") {
-            (&mut display, "none")
+        let (property, keywords, hidden): (_, &[&str], &[&str]) = if name.trim().eq_ignore_ascii_case("display") {
+            (&mut display, DISPLAY, &["none"])
         } else if name.trim().eq_ignore_ascii_case("visibility") {
-            (&mut visibility, "hidden")
+            (&mut visibility, &["visible", "hidden", "collapse"], &["hidden", "collapse"])
         } else { continue; };
         let (value, important) = match value.split_once('!') {
             Some((value, priority)) if priority.trim().eq_ignore_ascii_case("important") => (value, true),
             Some(_) => continue,
             None => (value, false),
         };
-        if !value.trim().is_empty() && (!property.1 || important) {
-            *property = (value.trim().eq_ignore_ascii_case(hidden), important);
+        let value = value.trim().to_ascii_lowercase();
+        // A browser drops an invalid value, so it cannot undo an earlier `none`. Escapes and
+        // functions (`var()` can resolve to `none`) count as hidden: lagom does not resolve them.
+        let opaque = value.contains(['\\', '(']);
+        let valid = opaque || (!value.is_empty() && value.split_whitespace().all(|k| keywords.contains(&k) || GLOBAL.contains(&k)));
+        if valid && (!property.1 || important) {
+            *property = (opaque || hidden.contains(&value.as_str()), important);
         }
     }
     display.0 || visibility.0
+}
+
+const GLOBAL: &[&str] = &["inherit", "initial", "unset", "revert", "revert-layer"];
+const DISPLAY: &[&str] = &[
+    "none", "contents", "block", "inline", "run-in", "flow", "flow-root", "table", "flex", "grid", "ruby", "math", "list-item",
+    "inline-block", "inline-table", "inline-flex", "inline-grid", "table-row-group", "table-header-group", "table-footer-group",
+    "table-row", "table-cell", "table-column-group", "table-column", "table-caption", "ruby-base", "ruby-text",
+    "ruby-base-container", "ruby-text-container", "-webkit-box", "-webkit-inline-box", "-moz-box", "-moz-inline-box",
+];
+
+/// An inline style's declarations: split at `;` outside quotes, with comments removed, as CSS reads them.
+fn declarations(style: &str) -> Vec<String> {
+    let (mut out, mut current, mut quote) = (Vec::new(), String::new(), None);
+    let mut chars = style.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), _) if c == q => { quote = None; current.push(c); }
+            (Some(_), '\\') => { current.push(c); if let Some(n) = chars.next() { current.push(n); } }
+            (Some(_), _) => current.push(c),
+            (None, '"' | '\'') => { quote = Some(c); current.push(c); }
+            (None, '/') if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                for n in chars.by_ref() { if last == '*' && n == '/' { break; } last = n; }
+                current.push(' ');
+            }
+            (None, ';') => out.push(std::mem::take(&mut current)),
+            (None, _) => current.push(c),
+        }
+    }
+    out.push(current);
+    out
 }
 
 /// Repair an older HTML fallback without replacing a sender's plain-text alternative.
@@ -1175,26 +1182,18 @@ mod tests {
         // collect, at most 256.
         let blocks = "<p>Shown</p><div hidden>".to_string() + &"<span>".repeat(255) + &"<div>".repeat(200_000);
         let closed = "<p>Shown</p><div hidden>".to_string() + &"<span><b><i><u></span>".repeat(50_000);
-        for (html, text) in [(formatting, "x\n\nx"), ("<div>".repeat(30_000) + "Deep", "Deep"), (attributes, "Tail"), (spaces, "Spaces"), (stray, "Shown"), (blocks, "Shown"), (closed, "Shown")] {
-            assert!(!within_dom_budget(&html));
+        // Past the tree builder's work limit the text is empty: a partial tree can show text the
+        // whole document hides.
+        for (html, text) in [(formatting, ""), ("<div>".repeat(30_000) + "Deep", ""), (attributes, "Tail"), (spaces, "Spaces"), (stray, ""), (blocks, ""), (closed, "")] {
             let start = std::time::Instant::now();
             let m = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
-            assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?} for {} bytes", start.elapsed(), html.len());
-            assert!(m.body_text.trim_start().starts_with(text), "{:?}", &m.body_text.trim_start()[..20.min(m.body_text.trim_start().len())]);
+            // About 1 s each in a debug build on a MacBook; Windows runners are several times slower.
+            assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?} for {} bytes", start.elapsed(), html.len());
+            assert_eq!(m.body_text.trim_start().chars().take(12).collect::<String>(), text, "{} bytes", html.len());
             let start = std::time::Instant::now();
             html_to_blocks(&html);
             assert!(start.elapsed() < std::time::Duration::from_secs(10), "blocks: {:?} for {} bytes", start.elapsed(), html.len());
         }
-    }
-
-    #[test]
-    fn dom_budget_charges_for_formatting_reconstruction() {
-        assert!(within_dom_budget(&"<q>text</q>".repeat(40)));
-        assert!(!within_dom_budget(&"<b>text</b>".repeat(40)));
-        // Attribute merging on repeated `body` took seconds at 200 copies.
-        let attrs: String = (1..=256).map(|n| format!(" a{n}")).collect();
-        assert!(!within_dom_budget(&format!("<body{attrs}>").repeat(200)));
-        assert!(within_dom_budget("<html lang=en><body style=\"margin:0\"><p>Hi</p></body></html>"));
     }
 
     #[test]
@@ -1232,6 +1231,29 @@ mod tests {
             let message = parse(format!("Content-Type: text/html\r\n\r\n{html}").as_bytes()).unwrap();
             assert_eq!(message.body_text, "", "{html}");
             assert_eq!(message.summary.snippet, "", "{html}");
+            // Padding once moved a mail past the DOM budget onto the streaming converter.
+            let padded = format!("{}{html}", "<p hidden>x</p>".repeat(20_000));
+            assert_eq!(html_to_text(&padded), "", "padded {html}");
+        }
+    }
+
+    #[test]
+    fn closed_details_dialog_frames_and_invalid_styles_stay_hidden() {
+        for (html, text) in [
+            ("<details><summary>Shown</summary>Secret<p>Secret</p></details>", "Shown"),
+            ("<details open><summary>Shown</summary> Also</details>", "Shown Also"),
+            ("<dialog>Secret</dialog><dialog open>Shown</dialog>", "Shown"),
+            // The reader renames `iframe`, so its content is markup there, not raw text.
+            ("<iframe><span hidden>Secret</span>Shown</iframe>", "Shown"),
+            ("<p style='display:none;display:bogus'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none;font-family:\"a;display:block\"'>Secret</p>Shown", "Shown"),
+            ("<p style='display:/**/none'>Secret</p>Shown", "Shown"),
+            ("<p style='--x:none;display:var(--x)'>Secret</p>Shown", "Shown"),
+            ("<p style='visibility:collapse'>Secret</p>Shown", "Shown"),
+            ("<p style='display:none;display:block'>Shown</p>", "Shown"),
+            ("<p style='display:none!important;display:block'>Secret</p>Shown", "Shown"),
+        ] {
+            assert_eq!(html_to_text(html), text, "{html}");
         }
     }
 

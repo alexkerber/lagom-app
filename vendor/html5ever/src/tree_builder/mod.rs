@@ -81,6 +81,12 @@ impl Default for TreeBuilderOpts {
 }
 
 /// The HTML tree builder.
+/// lagom: work units a tree builder may spend on one document. See `README.lagom.md`.
+pub const WORK_LIMIT: usize = 1 << 25;
+
+/// lagom: the parse error a tree builder reports when it stops at `WORK_LIMIT`.
+pub const WORK_LIMIT_ERROR: &str = "lagom: tree builder work limit";
+
 pub struct TreeBuilder<Handle, Sink> {
     /// Options controlling the behavior of the tree builder.
     opts: TreeBuilderOpts,
@@ -134,6 +140,15 @@ pub struct TreeBuilder<Handle, Sink> {
 
     /// Track current line
     current_line: Cell<u64>,
+
+    /// lagom: work units spent, see `charge`.
+    work: Cell<usize>,
+
+    /// lagom: the work limit was reached; the rest of the input is ignored.
+    stopped: Cell<bool>,
+
+    /// lagom: attributes merged into `html` and `body` so far.
+    merged_attrs: Cell<usize>,
     // WARNING: If you add new fields that contain Handles, you
     // must add them to trace_handles() below to preserve memory
     // safety!
@@ -169,6 +184,9 @@ where
             foster_parenting: Default::default(),
             context_elem: Default::default(),
             current_line: Cell::new(1),
+            work: Cell::new(0),
+            stopped: Cell::new(false),
+            merged_attrs: Cell::new(0),
         }
     }
 
@@ -209,6 +227,9 @@ where
             foster_parenting: Default::default(),
             context_elem: RefCell::new(Some(context_elem)),
             current_line: Cell::new(1),
+            work: Cell::new(0),
+            stopped: Cell::new(false),
+            merged_attrs: Cell::new(0),
         };
 
         // https://html.spec.whatwg.org/multipage/#parsing-html-fragments
@@ -475,6 +496,11 @@ where
     type Handle = Handle;
 
     fn process_token(&self, token: tokenizer::Token, line_number: u64) -> TokenSinkResult<Handle> {
+        // lagom: each token can scan the stack of open elements and the active formatting list.
+        let scan = self.open_elems.borrow().len() + self.active_formatting.borrow().len();
+        if self.stopped.get() || self.charge(1 + scan) {
+            return tokenizer::TokenSinkResult::Continue;
+        }
         if line_number != self.current_line.get() {
             self.sink.set_current_line(line_number);
         }
@@ -643,7 +669,31 @@ where
         }
     }
 
+    /// lagom: add work units and report whether the limit is reached. Mail HTML is untrusted, and
+    /// scans of the open elements and active formatting list make some inputs quadratic. Past the
+    /// limit the builder ignores every later token and reports `WORK_LIMIT_ERROR` once.
+    fn charge(&self, units: usize) -> bool {
+        let work = self.work.get().saturating_add(units);
+        self.work.set(work);
+        if work > WORK_LIMIT && !self.stopped.replace(true) {
+            self.sink.parse_error(Borrowed(WORK_LIMIT_ERROR));
+        }
+        self.stopped.get()
+    }
+
+    /// lagom: a new element costs more than a scan step, and its attributes are copied.
+    fn charge_element(&self, attrs: &[Attribute]) {
+        self.charge(160 + attrs.iter().map(|a| 16 + a.name.local.len() + a.value.len()).sum::<usize>());
+    }
+
+    /// lagom: a repeated `html` or `body` tag checks each attribute against those already merged.
+    fn charge_merge(&self, attrs: usize) {
+        self.charge(attrs.saturating_mul(self.merged_attrs.get() + 256));
+        self.merged_attrs.set(self.merged_attrs.get() + attrs);
+    }
+
     fn position_in_active_formatting(&self, element: &Handle) -> Option<usize> {
+        self.charge(self.active_formatting.borrow().len());
         self.active_formatting
             .borrow()
             .iter()
@@ -723,6 +773,9 @@ where
 
         // 2. 3. 4.
         for _ in 0..8 {
+            if self.charge(self.open_elems.borrow().len() + self.active_formatting.borrow().len()) {
+                return;
+            }
             // 5.
             // We clone the Handle and Tag so they don't cause an immutable borrow of self.
             let maybe_fmt_entry = self
@@ -797,6 +850,10 @@ where
             // 13.1.
             let mut inner_counter = 0;
             loop {
+                // lagom: removing from the stack below shifts it.
+                if self.charge(self.open_elems.borrow().len()) {
+                    return;
+                }
                 // 13.2.
                 inner_counter += 1;
 
@@ -833,6 +890,7 @@ where
                 };
                 // FIXME: Is there a way to avoid cloning the attributes twice here (once on their
                 // own, once as part of t.clone() above)?
+                self.charge_element(&tag.attrs);
                 let new_element = create_element_with_flags(
                     &self.sink,
                     QualName::new(None, ns!(html), tag.name.clone()),
@@ -866,6 +924,7 @@ where
             // 15.
             // FIXME: Is there a way to avoid cloning the attributes twice here (once on their own,
             // once as part of t.clone() above)?
+            self.charge_element(&fmt_elem_tag.attrs);
             let new_element = create_element_with_flags(
                 &self.sink,
                 QualName::new(None, ns!(html), fmt_elem_tag.name.clone()),
@@ -936,6 +995,7 @@ where
     }
 
     fn remove_from_stack(&self, elem: &Handle) {
+        self.charge(self.open_elems.borrow().len());
         let position = self
             .open_elems
             .borrow()
@@ -948,6 +1008,7 @@ where
     }
 
     fn is_marker_or_open(&self, entry: &FormatEntry<Handle>) -> bool {
+        self.charge(self.open_elems.borrow().len());
         match *entry {
             FormatEntry::Marker => true,
             FormatEntry::Element(ref node, _) => self
@@ -982,6 +1043,9 @@ where
         // NOTE: We track the index of the element instead
         let mut entry_index = self.active_formatting.borrow().len() - 1;
         loop {
+            if self.stopped.get() {
+                return;
+            }
             // Step 4. Rewind: If there are no entries before entry in the list of active formatting elements,
             // then jump to the step labeled create.
             if entry_index == 0 {
@@ -1002,6 +1066,9 @@ where
         }
 
         loop {
+            if self.stopped.get() {
+                return;
+            }
             // Step 8. Create: Insert an HTML element for the token for which the element entry was created,
             // to obtain new element.
             let tag = match self.active_formatting.borrow()[entry_index] {
@@ -1373,6 +1440,7 @@ where
 
         // Step 7.
         let qname = QualName::new(None, ns, name);
+        self.charge_element(&attrs);
         let elem = create_element_with_flags(
             &self.sink,
             qname.clone(),
@@ -1448,6 +1516,7 @@ where
     ) -> Handle {
         let adjusted_insertion_location = self.appropriate_place_for_insertion(None);
         let qname = QualName::new(None, ns, tag.name.clone());
+        self.charge_element(&tag.attrs);
         let elem = create_element_with_flags(
             &self.sink,
             qname.clone(),

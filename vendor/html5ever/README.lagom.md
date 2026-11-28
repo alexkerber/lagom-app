@@ -5,7 +5,7 @@ Source: html5ever 0.39.0 from crates.io, archive SHA-256
 The original sources and licenses are retained. The manifest drops the
 examples, tests and benches, which are not copied.
 
-Only `Tokenizer::finish_attribute` in `src/tokenizer/mod.rs` is modified: a tag
+Two changes. First, `Tokenizer::finish_attribute` in `src/tokenizer/mod.rs`: a tag
 keeps its first 256 attributes and drops the rest, except `hidden` and `style`.
 lagom-core reads those two to skip hidden text, so a tag keeps at most 258
 attributes. Upstream checks each new
@@ -17,9 +17,24 @@ A pre-scan in lagom-core is not enough: it would have to track quotes, comments
 and raw text exactly as the tokenizer does, or an attacker hides a large tag in a
 region the scan reads differently.
 
+Second, the tree builder (`src/tree_builder/mod.rs`, two calls in `rules.rs`) counts work
+and stops at `WORK_LIMIT` (2^25 units). Each token costs one unit plus the depth of the
+stack of open elements plus the length of the active formatting list. Lookups in either
+list, removals from the stack, new elements (160 units plus their attribute bytes) and
+attribute merges into a repeated `html` or `body` add their own cost. Past the limit,
+the builder ignores every later token and reports the parse error `WORK_LIMIT_ERROR`
+once. lagom-core then gives the mail no text: a partial tree can show text that the whole
+document hides. Upstream, deep nesting, unclosed formatting elements and the adoption
+agency make some inputs quadratic in time and in nodes.
+
+Measured (release, MacBook): 2,520 real HTML mails need at most 1.9 M units, and
+at most 8.5 units per input byte. The slowest took 13 ms. Every bomb in
+`html_bombs_parse_in_linear_time` stops within about 0.1 s and 75 MB peak RSS.
+
 The crate is excluded from the workspace, so its optional features stay out of
 `Cargo.lock`. `mime::tests::html_bombs_parse_in_linear_time` in lagom-core
 and `html_text_matches_the_dom_converter` cover the patch.
 
-Remove this patch when the upstream tokenizer checks duplicates in constant time
-or bounds attributes per tag.
+Remove the tokenizer change when upstream checks duplicates in constant time or
+bounds attributes per tag. Remove the tree builder change when upstream bounds its
+work per document.

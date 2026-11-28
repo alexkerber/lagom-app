@@ -232,6 +232,7 @@ where
                     },
 
                     Token::Tag(tag @ tag!(<script>)) => {
+                        self.charge_element(&tag.attrs);
                         let elem = create_element_with_flags(
                             &self.sink,
                             QualName::new(None, ns!(html), local_name!("script")),
@@ -429,6 +430,7 @@ where
                     if !self.in_html_elem_named(local_name!("template")) {
                         let open_elems = self.open_elems.borrow();
                         let top = html_elem(&open_elems);
+                        self.charge_merge(tag.attrs.len());
                         self.sink.add_attrs_if_missing(top, tag.attrs);
                     }
                     ProcessResult::Done
@@ -448,6 +450,7 @@ where
                                 && !self.in_html_elem_named(local_name!("template")) =>
                         {
                             self.frameset_ok.set(false);
+                            self.charge_merge(tag.attrs.len());
                             self.sink.add_attrs_if_missing(node, tag.attrs)
                         },
                         _ => {},

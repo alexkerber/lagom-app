@@ -25,6 +25,21 @@ opt-level = "s"
 [profile.release.package.ashpd]
 opt-level = "s"
 
+# Mail HTML parsing in debug builds and tests: the tree builder's work limit and its bomb tests
+# take seconds unoptimised.
+[profile.dev.package.html5ever]
+opt-level = 2
+[profile.dev.package.markup5ever]
+opt-level = 2
+[profile.dev.package.dom_query]
+opt-level = 2
+[profile.dev.package.tendril]
+opt-level = 2
+[profile.dev.package.string_cache]
+opt-level = 2
+[profile.dev.package.selectors]
+opt-level = 2
+
 [workspace.package]
 edition = "2021"
 license = "MIT"
