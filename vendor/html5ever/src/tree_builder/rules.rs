@@ -493,8 +493,7 @@ where
                         self.check_body_end();
                         self.mode.set(InsertionMode::AfterBody);
                     } else {
-                        self.sink
-                            .parse_error(Borrowed("</body> with no <body> in scope"));
+                        self.parse_error(Borrowed("</body> with no <body> in scope"));
                     }
                     ProcessResult::Done
                 },
@@ -504,8 +503,7 @@ where
                         self.check_body_end();
                         ProcessResult::Reprocess(InsertionMode::AfterBody, token)
                     } else {
-                        self.sink
-                            .parse_error(Borrowed("</html> with no <body> in scope"));
+                        self.parse_error(Borrowed("</html> with no <body> in scope"));
                         ProcessResult::Done
                     }
                 },
@@ -637,32 +635,27 @@ where
                 Token::Tag(tag!(</form>)) => {
                     if !self.in_html_elem_named(local_name!("template")) {
                         let Some(node) = self.form_elem.take() else {
-                            self.sink
-                                .parse_error(Borrowed("Null form element pointer on </form>"));
+                            self.parse_error(Borrowed("Null form element pointer on </form>"));
                             return ProcessResult::Done;
                         };
                         if !self.in_scope(default_scope, |n| self.sink.same_node(&node, &n)) {
-                            self.sink
-                                .parse_error(Borrowed("Form element not in scope on </form>"));
+                            self.parse_error(Borrowed("Form element not in scope on </form>"));
                             return ProcessResult::Done;
                         }
                         self.generate_implied_end_tags(cursory_implied_end);
                         let current = self.current_node().clone();
                         self.remove_from_stack(&node);
                         if !self.sink.same_node(&current, &node) {
-                            self.sink
-                                .parse_error(Borrowed("Bad open element on </form>"));
+                            self.parse_error(Borrowed("Bad open element on </form>"));
                         }
                     } else {
                         if !self.in_scope_named(default_scope, local_name!("form")) {
-                            self.sink
-                                .parse_error(Borrowed("Form element not in scope on </form>"));
+                            self.parse_error(Borrowed("Form element not in scope on </form>"));
                             return ProcessResult::Done;
                         }
                         self.generate_implied_end_tags(cursory_implied_end);
                         if !self.current_node_named(local_name!("form")) {
-                            self.sink
-                                .parse_error(Borrowed("Bad open element on </form>"));
+                            self.parse_error(Borrowed("Bad open element on </form>"));
                         }
                         self.pop_until_named(local_name!("form"));
                     }

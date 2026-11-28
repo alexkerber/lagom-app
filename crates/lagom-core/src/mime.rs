@@ -49,16 +49,6 @@ pub fn html_to_text(html: &str) -> String {
     if document.errors.borrow().iter().any(|e| e == html5ever::tree_builder::WORK_LIMIT_ERROR) {
         return String::new();
     }
-    // A declarative shadow root replaces its host's children; lagom does not render it.
-    for template in document.select("template[shadowrootmode]").nodes() {
-        if let Some(host) = template.parent() { host.remove_from_parent(); }
-    }
-    // A `select` draws only its options.
-    for select in document.select("select").nodes() {
-        for child in select.children() {
-            if !(child.has_name("option") || child.has_name("optgroup")) { child.remove_from_parent(); }
-        }
-    }
     // A closed `details` draws only its first `summary`, chosen before hidden children go. Of
     // open `details` that share a `name`, the first stays open.
     let mut groups = std::collections::HashSet::new();
@@ -71,9 +61,13 @@ pub fn html_to_text(html: &str) -> String {
             if Some(child.id) != summary { child.remove_from_parent(); }
         }
     }
+    // A declarative shadow root replaces its host's children; lagom does not render it.
+    for template in document.select("template[shadowrootmode]").nodes() {
+        if let Some(host) = template.parent() { host.remove_from_parent(); }
+    }
     // `svg` and `math` as the streaming path hides them: their desc, metadata and CDATA text is not drawn.
     document.select("head, style, script, title, template, noframes, frameset, svg, math, [hidden], dialog:not([open]), \
-        [popover], datalist, video, audio, noembed, rp, meter, progress, canvas").remove();
+        [popover], datalist, video, audio, noembed, rp, meter, progress, canvas, select").remove();
     for node in document.select("[style]").iter() {
         if style_hides(&node.attr_or("style", "")) { node.remove(); }
     }
@@ -812,7 +806,7 @@ fn style_hides(style: &str) -> bool {
     // Escapes, at-rules, blocks and comments change how CSS reads the declarations; lagom does
     // not model them and treats the element as hidden.
     if style.contains(['\\', '@', '{', '}', '[', ']']) || style.contains("/*") { return true; }
-    let (mut display, mut visibility, mut content) = ((false, false), (false, false), (false, false));
+    let (mut display, mut visibility, mut content, mut opaque) = ((false, false), (false, false), (false, false), false);
     declarations(style, |declaration| {
         let Some((name, value)) = declaration.split_once(':') else { return };
         let name = name.trim_matches(css_space);
@@ -823,22 +817,23 @@ fn style_hides(style: &str) -> bool {
         } else if name.eq_ignore_ascii_case("content-visibility") {
             (&mut content, &["visible", "auto", "hidden"], &["hidden"])
         } else { return };
+        // Functions (`var()` can resolve to `none`, and may hold a `!`) count as hidden: lagom
+        // does not resolve them.
+        if value.contains('(') { opaque = true; return; }
         let (value, important) = match value.rsplit_once('!') {
             Some((value, priority)) if priority.trim_matches(css_space).eq_ignore_ascii_case("important") => (value, true),
             Some(_) => return,
             None => (value, false),
         };
         let value = value.trim_matches(css_space).to_ascii_lowercase();
-        // A browser drops an invalid value, so it cannot undo an earlier `none`. Functions
-        // (`var()` can resolve to `none`) count as hidden: lagom does not resolve them. Only
-        // single, widely supported keywords undo a hidden value.
-        let opaque = value.contains('(');
-        let valid = opaque || keywords.contains(&value.as_str()) || GLOBAL.contains(&value.as_str());
+        // A browser drops an invalid value, so it cannot undo an earlier `none`. Only single,
+        // widely supported keywords undo a hidden value.
+        let valid = keywords.contains(&value.as_str()) || GLOBAL.contains(&value.as_str());
         if valid && (!property.1 || important) {
-            *property = (opaque || hidden.contains(&value.as_str()), important);
+            *property = (hidden.contains(&value.as_str()), important);
         }
     });
-    display.0 || visibility.0 || content.0
+    opaque || display.0 || visibility.0 || content.0
 }
 
 fn css_space(c: char) -> bool {
@@ -1294,6 +1289,11 @@ mod tests {
         let start = std::time::Instant::now();
         parse(mail.as_bytes()).unwrap();
         assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
+        // The limit follows the input: this part needs about 2 M units, far below the fixed
+        // limit, but above 32 per byte.
+        let small = "<p>".to_string() + &(0..100).map(|i| format!("<i a={i}>")).collect::<String>() + "</p>" + &"<p>x".repeat(100);
+        assert_eq!(html_to_text(&small), "");
+        assert_eq!(html_to_text(&"<p>x".repeat(100)), "x\n\n".repeat(100).trim_end());
     }
 
     #[test]
@@ -1323,7 +1323,11 @@ mod tests {
             ("<div><template shadowrootmode=open></template>Secret</div>Shown", "Shown"),
             ("<div popover>Secret</div>Shown", "Shown"),
             ("<datalist>Secret</datalist><video>Secret</video>Shown", "Shown"),
-            ("<select>Secret<option>Shown</select>", "Shown"),
+            // A `select` draws one option, maybe by its `label`: none of its text counts.
+            ("<select>Secret<option label=Shown>Secret</select>", ""),
+            ("<select><option hidden>Hidden<option>Visible</select>Shown", "Shown"),
+            ("<details><summary><template shadowrootmode=open></template>A</summary><summary>Secret</summary></details>Shown", "Shown"),
+            ("<p style=\"content-visibility:var(--x, '!')\">Secret</p>Shown", "Shown"),
             ("<p style='d\\isplay:none'>Secret</p>Shown", "Shown"),
             ("<p style='display:none!imp\\ortant'>Secret</p>Shown", "Shown"),
             ("<p style=\"font-family:'a\n;display:none\">Secret</p>Shown", "Shown"),
@@ -1359,7 +1363,6 @@ mod tests {
             ("<p hidden><button><div>Hidden</div></button>Still hidden</p><p>Visible</p>", "Visible"),
             ("<ul><li hidden><blockquote><li>Hidden</blockquote>Still hidden<li>Visible</ul>", "Visible"),
             ("<table><tbody hidden><tr><td>Hidden</td></tr></table><p>Visible</p>", "Visible"),
-            ("<select><option hidden>Hidden<option>Visible</select>", "Visible"),
             ("<svg><g hidden><g/><text>Hidden</text></g></svg><p>Visible</p>", "Visible"),
             ("<p>Visible</p><template>Hidden", "Visible"),
             ("<span style='display:none'>Pre<div>Body", ""),

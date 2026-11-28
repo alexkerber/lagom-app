@@ -391,8 +391,7 @@ where
             match result {
                 ProcessResult::Done => {
                     if should_have_acknowledged_self_closing_flag {
-                        self.sink
-                            .parse_error(Borrowed("Unacknowledged self-closing tag"));
+                        self.parse_error(Borrowed("Unacknowledged self-closing tag"));
                     }
                     let Some(new_token) = more_tokens.pop_front() else {
                         return tokenizer::TokenSinkResult::Continue;
@@ -833,23 +832,20 @@ where
                 .iter()
                 .rposition(|n| self.sink.same_node(n, &fmt_elem))
             else {
-                self.sink
-                    .parse_error(Borrowed("Formatting element not open"));
+                self.parse_error(Borrowed("Formatting element not open"));
                 self.active_formatting.borrow_mut().remove(fmt_elem_index);
                 return;
             };
 
             // 7.
             if !self.in_scope(default_scope, |n| self.sink.same_node(&n, &fmt_elem)) {
-                self.sink
-                    .parse_error(Borrowed("Formatting element not in scope"));
+                self.parse_error(Borrowed("Formatting element not in scope"));
                 return;
             }
 
             // 8.
             if !self.sink.same_node(&self.current_node(), &fmt_elem) {
-                self.sink
-                    .parse_error(Borrowed("Formatting element not current node"));
+                self.parse_error(Borrowed("Formatting element not current node"));
             }
 
             // 9.
@@ -1413,8 +1409,7 @@ where
     fn close_the_cell(&self) {
         self.generate_implied_end_tags(cursory_implied_end);
         if self.pop_until(td_th) != 1 {
-            self.sink
-                .parse_error(Borrowed("expected to close <td> or <th> with cell"));
+            self.parse_error(Borrowed("expected to close <td> or <th> with cell"));
         }
         self.clear_active_formatting_to_marker();
     }
@@ -1682,8 +1677,7 @@ where
             }
 
             if self.elem_in(elem, special_tag) {
-                self.sink
-                    .parse_error(Borrowed("Found special tag while closing generic tag"));
+                self.parse_error(Borrowed("Found special tag while closing generic tag"));
                 return;
             }
         }
